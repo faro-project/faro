@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Faro Agent.app: the per-session agent wrapped in a bundle so macOS shows
+     "Faro Agent" for the Screen Recording permission and in Login Items, and
+     so its code-signing identifier is org.faro.agent (the service's
+     ipc.agent_requirement). It has no UI of its own (LSUIElement). -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>faro-agent</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.faro.agent</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Faro Agent</string>
+	<key>CFBundleDisplayName</key>
+	<string>Faro Agent</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Faro is free software under the Apache License 2.0.</string>
+</dict>
+</plist>

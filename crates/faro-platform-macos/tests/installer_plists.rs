@@ -1,0 +1,52 @@
+//! The launchd plists the `.pkg` installs are checked in under
+//! `installers/macos/payload` so the package build needs no Rust tool to
+//! produce them. This test keeps them identical to what the generator
+//! (`pkg_daemon_job`, `pkg_agent_job`) produces. After changing either:
+//!
+//! ```text
+//! FARO_BLESS=1 cargo test -p faro-platform-macos --test installer_plists
+//! ```
+#![cfg(target_os = "macos")]
+
+use faro_platform_macos::{pkg_agent_job, pkg_daemon_job, pkg_layout, LaunchdJob};
+use std::path::PathBuf;
+
+fn payload(installed: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../installers/macos/payload")
+        .join(installed.trim_start_matches('/'))
+}
+
+fn check(job: LaunchdJob, installed: &str) {
+    let want = job.to_plist_xml().expect("valid job");
+    let path = payload(installed);
+    if std::env::var_os("FARO_BLESS").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &want).unwrap();
+        return;
+    }
+    let have = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{}: {e} (run with FARO_BLESS=1)", path.display()));
+    assert_eq!(
+        have,
+        want,
+        "{} is out of date; run with FARO_BLESS=1",
+        path.display()
+    );
+}
+
+#[test]
+fn checked_in_plists_match_the_generator() {
+    check(pkg_daemon_job(), pkg_layout::DAEMON_PLIST);
+    check(pkg_agent_job(), pkg_layout::AGENT_PLIST);
+}
+
+#[test]
+fn the_agent_runs_in_every_gui_session() {
+    let xml = pkg_agent_job().to_plist_xml().unwrap();
+    // A global LaunchAgent limited to Aqua: one copy per account's GUI
+    // session, kept alive by launchd.
+    assert!(xml.contains("<key>LimitLoadToSessionType</key>\n\t<string>Aqua</string>"));
+    assert!(xml.contains(pkg_layout::AGENT_PROGRAM));
+    assert!(pkg_layout::AGENT_PLIST.starts_with("/Library/LaunchAgents/"));
+}

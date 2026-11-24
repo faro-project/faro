@@ -1,0 +1,17 @@
+#!/bin/bash
+# Before installing (or upgrading): stop a running Faro so its files can be
+# replaced. The service stops first, so it records an orderly shutdown
+# instead of seeing its agents disappear.
+set -u
+. "$(dirname "$0")/lib.sh"
+
+if launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1; then
+    log "stopping the service for the upgrade"
+    launchctl bootout "system/$DAEMON_LABEL" || true
+fi
+for uid in $(gui_uids); do
+    if launchctl print "gui/$uid/$AGENT_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "gui/$uid/$AGENT_LABEL" || true
+    fi
+done
+exit 0

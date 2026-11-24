@@ -62,8 +62,8 @@ pub use capture::{
 pub use foreground::{accessibility_trusted, MacForeground};
 #[cfg(target_os = "macos")]
 pub use service::{
-    agent_plist, daemon_plist, LaunchdJob, MacServiceHost, PlistError, ProgramLocation,
-    AGENT_LABEL, DAEMON_LABEL,
+    agent_plist, daemon_plist, pkg_agent_job, pkg_daemon_job, pkg_layout, LaunchdJob,
+    MacServiceHost, PlistError, ProgramLocation, AGENT_LABEL, DAEMON_LABEL,
 };
 #[cfg(target_os = "macos")]
 pub use session::MacSession;
