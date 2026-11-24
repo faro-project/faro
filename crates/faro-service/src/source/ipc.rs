@@ -49,7 +49,10 @@
 //!   `Frames` that do not answer an outstanding `CaptureNow` are dropped
 //!   (and zeroized) unread, so a misbehaving agent cannot make the
 //!   privileged service classify frames at its own rate. Repeated
-//!   unsolicited frames end the connection as a protocol violation.
+//!   unsolicited frames end the connection as a protocol violation. A
+//!   *late* answer (to a request whose answer window closed, or that was
+//!   withdrawn when the screen changed hands) is dropped too, but not held
+//!   against the agent: a slow agent is not a misbehaving one.
 //! * **Liveness.** Every agent is pinged every `ping_every`; a missed pong
 //!   drops the connection (a hung agent counts as a disconnect, §3.7).
 //!   The session list, with whether each session has an agent, is reported
@@ -80,6 +83,8 @@ use tokio::time::Instant;
 const CAPTURE_ANSWER_WINDOW: Duration = Duration::from_secs(30);
 /// Unsolicited `Frames` tolerated per connection before disconnecting.
 const MAX_UNSOLICITED: u32 = 3;
+/// Late answers an agent can be owed at once (see [`Agent::late`]).
+const MAX_LATE: u32 = 4;
 /// How often the session list is re-read.
 const SESSION_RECHECK: Duration = Duration::from_secs(5);
 /// How long after an agent leaves the service waits to see its session end
@@ -412,6 +417,13 @@ struct Agent {
     /// first answering batch (later batches of the same capture share it).
     capture: Option<(Instant, Option<u64>)>,
     unsolicited: u32,
+    /// Requests that closed before any frames came (window passed, or
+    /// withdrawn): the agent may still answer each once, late. Capped, so
+    /// this cannot excuse a flood.
+    late: u32,
+    /// The capture time of the late answer being dropped, so its later
+    /// batches are excused too.
+    late_ts: Option<u64>,
     ping: Option<(u64, Instant)>,
     goodbye: bool,
     cached: Cached,
@@ -581,9 +593,12 @@ impl Run {
         }
         tracing::info!(from = ?self.target.as_ref().map(|t| &t.account), to = ?desired.as_ref().map(|t| &t.account), "capture target changed");
         self.target = desired.clone();
-        // An answer to a capture sent to the old target no longer counts.
+        // An answer to a capture sent to the old target no longer counts
+        // (and arrives late, which is not the agent's fault).
         for a in self.agents.values_mut() {
-            a.capture = None;
+            if let Some((_, None)) = a.capture.take() {
+                a.late = (a.late + 1).min(MAX_LATE);
+            }
         }
         self.emit(SourceEvent::CaptureTarget(desired.clone()))
             .await?;
@@ -761,6 +776,8 @@ impl Run {
                 account: account.clone(),
                 capture: None,
                 unsolicited: 0,
+                late: 0,
+                late_ts: None,
                 ping: None,
                 goodbye: false,
                 cached: Cached::default(),
@@ -884,6 +901,9 @@ impl Run {
                     // stops accepting continuation batches.
                     a.capture = None;
                     unanswered = first.is_none();
+                    if unanswered {
+                        a.late = (a.late + 1).min(MAX_LATE);
+                    }
                 }
             }
             let ping = if a.ping.is_none() {
@@ -1029,8 +1049,26 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
                 _ => false,
             };
             if !answers {
+                // A late answer: to a request still open but past its window
+                // (the ping tick has not closed it yet), to one that closed
+                // unanswered, or more batches of such an answer.
+                let open_but_late =
+                    matches!(a.capture, Some((sent, None)) if sent.elapsed() > window);
+                let excused = if open_but_late || a.late_ts == Some(captured_at_mono_ms) {
+                    true
+                } else if a.late > 0 {
+                    a.late -= 1;
+                    true
+                } else {
+                    false
+                };
                 // `frames` drops here, zeroizing the pixels unread.
                 drop(frames);
+                if excused {
+                    a.late_ts = Some(captured_at_mono_ms);
+                    tracing::debug!("late capture answer dropped");
+                    return Handled::Nothing;
+                }
                 a.unsolicited += 1;
                 tracing::warn!(count = a.unsolicited, "agent sent frames nobody asked for");
                 return if a.unsolicited > MAX_UNSOLICITED {
@@ -1404,6 +1442,82 @@ mod tests {
         match ev {
             SourceEvent::CaptureFailed { reason } => assert!(reason.contains("did not answer")),
             other => panic!("unexpected {other:?}"),
+        }
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// Regression: a slow agent answering after the answer window was
+    /// counted as sending unsolicited frames, and dropped for a protocol
+    /// violation after a few slow captures (told `Shutdown`, so it exited
+    /// for good). Late answers are dropped without counting; frames nobody
+    /// ever asked for still end the connection.
+    #[tokio::test]
+    async fn late_answers_are_excused_but_floods_are_not() {
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_millis(100)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+        for i in 0..(MAX_UNSOLICITED + 3) {
+            h.cmd
+                .send(SourceCommand::CaptureNow(
+                    faro_ipc::CaptureReason::Scheduled,
+                ))
+                .await
+                .unwrap();
+            serve_until(&mut agent, |m| matches!(m, ServiceMsg::CaptureNow { .. })).await;
+            // Too slow: the window closes first.
+            let failed = tokio::select! {
+                _ = serve_for(&mut agent, Duration::from_secs(10)) => panic!("no capture failure"),
+                ev = h.until(|e| matches!(e, SourceEvent::CaptureFailed { .. })) => ev,
+            };
+            assert!(matches!(failed, SourceEvent::CaptureFailed { .. }));
+            // Two batches of the same late capture.
+            for _ in 0..2 {
+                agent
+                    .send(&AgentMsg::Frames {
+                        captured_at_mono_ms: 100 + u64::from(i),
+                        frames: vec![wire_frame()],
+                    })
+                    .await
+                    .unwrap();
+            }
+            // Let the source read them before the next request: answers
+            // carry no request id, so a late answer arriving after the next
+            // `CaptureNow` simply answers that one.
+            serve_for(&mut agent, Duration::from_millis(150)).await;
+        }
+        serve_for(&mut agent, Duration::from_millis(300)).await;
+        while let Ok(ev) = h.ev.try_recv() {
+            assert!(
+                !matches!(
+                    ev,
+                    SourceEvent::AgentDisconnected { .. } | SourceEvent::Frames(_)
+                ),
+                "late answers are neither forwarded nor held against the agent: {ev:?}"
+            );
+        }
+
+        // Frames for requests that were never made: a flood ends it.
+        for i in 0..=(MAX_UNSOLICITED + MAX_LATE) {
+            agent
+                .send(&AgentMsg::Frames {
+                    captured_at_mono_ms: 1_000 + u64::from(i),
+                    frames: vec![wire_frame()],
+                })
+                .await
+                .unwrap();
+        }
+        match h
+            .until(|e| matches!(e, SourceEvent::AgentDisconnected { .. }))
+            .await
+        {
+            SourceEvent::AgentDisconnected {
+                reason, expected, ..
+            } => {
+                assert!(!expected && reason.contains("unsolicited"), "{reason}")
+            }
+            _ => unreachable!(),
         }
         drop(agent);
         h.stop().await;

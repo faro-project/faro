@@ -74,6 +74,9 @@ impl Logins {
     }
 }
 
+/// The capture-answer window of the test source.
+const CAPTURE_WINDOW: Duration = Duration::from_secs(2);
+
 fn session_of(account: &str) -> String {
     format!("session-{account}")
 }
@@ -83,10 +86,11 @@ fn ipc_source(socket: &Path, logins: &Logins) -> IpcFrameSource {
     IpcFrameSource::new(socket, [])
         .with_ping(Duration::from_millis(100), Duration::from_secs(10))
         .with_sessions(Arc::new(move || Some(l.lock().unwrap().clone())))
-        // A short capture-answer window so the test waits past it; the
+        // A short capture-answer window so the test can wait past it, but
+        // long enough for a loaded CI machine to answer within it; the
         // session-end grace and session re-check as in production, scaled.
         .with_timings(
-            Duration::from_millis(400),
+            CAPTURE_WINDOW,
             Duration::from_millis(500),
             Duration::from_millis(20),
         )
@@ -255,7 +259,7 @@ async fn real_agent_capture_impostor_and_silent_stop() {
 
     // A capture through the real agent, then well past the answer window.
     dev.drive_until("a capture", |s| s.captures >= 1).await;
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    tokio::time::sleep(CAPTURE_WINDOW + Duration::from_millis(800)).await;
     let st = dev.status();
     assert_eq!(
         st.capture_failures, 0,
