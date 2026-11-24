@@ -2,7 +2,7 @@
 //! §3.1: "peer-credential checks and verification of the connecting
 //! binary's code signature").
 //!
-//! A uid check alone is not enough: every process the console user runs has
+//! A uid check alone is not enough: every process the session user runs has
 //! that uid, so without this check about twenty lines of user code can
 //! connect, say `Hello`, and feed the service forged session state ("the
 //! system is asleep") while the real agent is locked out. With it, only a

@@ -7,8 +7,9 @@
 //! | tick | clock check, report rollover, scheduler → `CaptureNow` |
 //! | `Frames` | detector (frames consumed and zeroized) → report; `medium`+ → `flag` event |
 //! | tamper signal | [`route_signal`]: `tamper` event (urgent), or report context |
-//! | agent drop / reconnect | `agent_restarted`, `agent_killed_repeatedly` past the threshold |
-//! | no agent while someone is logged in | `capture_failing` tamper after [`AGENT_ABSENT_MS`] |
+//! | agent drop / reconnect (any session) | `agent_restarted`, `agent_killed_repeatedly` past the threshold |
+//! | a session (any account) without an agent | `unmonitored_user_session` tamper after [`AGENT_ABSENT_MS`] |
+//! | an agent connects | the login notice in its session (§12) |
 //! | member pause / resume | `paused` / `resumed` events |
 //! | settings change | `settings_change` event |
 //! | start / orderly stop | `boot` / `shutdown` events, partial report |
@@ -17,20 +18,30 @@
 //! digests on every screen lock); they appear on the report timeline, and
 //! the heartbeat state explains silence to the instance.
 //!
-//! **A missing agent is tamper.** Stopping the agent (`launchctl bootout`,
-//! `pkill`, turning off its login item) must not quietly end monitoring:
-//! once someone is logged in at the console and no agent has been connected
-//! for [`AGENT_ABSENT_MS`] of awake time, the core raises `capture_failing`
-//! (urgent), and heartbeats stop saying `active` while no agent is
-//! connected. Session state the agent reported (sleeping, locked) is
-//! forgotten when it disconnects, so a departing agent can't leave the
-//! service believing the machine sleeps.
+//! **Every account is monitored (§3.1).** The source reports every
+//! interactive session and whether its agent is connected. A session of
+//! any account, at the screen or switched away from, whose agent has not
+//! been connected for [`AGENT_ABSENT_MS`] of awake time raises
+//! `unmonitored_user_session` for that account (urgent). Stopping the agent
+//! (`launchctl bootout`, `pkill`, turning off its login item), or switching
+//! to or creating an account without one, must not quietly end monitoring.
+//!
+//! **Capture follows the screen.** Captures go to the *capture target*, the
+//! agent of the session at the screen. Heartbeats stop saying `active`
+//! while there is none. Session state the target reported (sleeping,
+//! locked, permissions, foreground) is forgotten when the target changes,
+//! so a departing agent can't leave the service believing the machine
+//! sleeps, and one account's state is never attributed to another.
+//!
+//! **Accounts in events.** Flags and per-session tamper signals carry the
+//! account's short name inside the encrypted body (§3.6), and the report
+//! timeline records which account was at the screen.
 
 use super::journal::{ReportJournal, DAY_MS};
 use super::net::OutboxHandle;
 use super::status::StatusTx;
 use super::supervisor::Supervisor;
-use crate::source::{SourceCommand, SourceEvent};
+use crate::source::{CaptureTarget, SessionStatus, SourceCommand, SourceEvent};
 use crate::state::{Enrollment, StateDir, PERMISSIONS_FILE, SETTINGS_FILE};
 use faro_core::clock::{Clock, ClockGuard, SystemClock};
 use faro_core::{
@@ -46,7 +57,7 @@ use faro_proto::report::ActivityState;
 use faro_proto::Urgency;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
@@ -64,11 +75,15 @@ const SIGNAL_DEDUPE_MS: u64 = 60_000;
 /// Idle seconds after which the heartbeat says `idle` (the scheduler's
 /// default idle threshold).
 const IDLE_SECS: u64 = 300;
-/// Awake time with someone at the console and no agent connected after
-/// which the service raises `capture_failing`: two missed pings of the
-/// slowest allowed ping interval plus launchd's relaunch throttle, with
+/// Awake time a session can go without a connected agent before the
+/// service raises `unmonitored_user_session` (§3.7): two missed pings of
+/// the slowest allowed ping interval plus launchd's relaunch throttle, with
 /// margin. A real agent restart reconnects within seconds.
 pub const AGENT_ABSENT_MS: u64 = 90_000;
+/// The session key used when the source does not list sessions (the
+/// in-process platform): one implicit session, monitored while the source
+/// has a capture target.
+const IMPLICIT_SESSION: &str = "";
 /// Longest gap between ticks counted as awake time. A longer gap is the
 /// machine sleeping (the tick loop does not run), so it must not count
 /// towards "no agent for two minutes".
@@ -83,10 +98,61 @@ const REPORT_RETRY_MS: u64 = 60_000;
 const MAX_UNSEALED_REPORTS: usize = 8;
 
 /// Persisted in [`PERMISSIONS_FILE`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct SeenPermissions {
-    /// Screen recording has been granted at some point on this enrollment.
+    /// Assume screen recording was granted for every account: written by
+    /// earlier versions, and set (not persisted) when the file is
+    /// unreadable, so a denied permission is reported rather than missed.
+    #[serde(default)]
     screen_granted: bool,
+    /// Accounts that granted screen recording at some point on this
+    /// enrollment (the permission is per account on macOS).
+    #[serde(default)]
+    screen_granted_accounts: BTreeSet<String>,
+}
+
+impl SeenPermissions {
+    fn granted_before(&self, account: &str) -> bool {
+        self.screen_granted || self.screen_granted_accounts.contains(account)
+    }
+}
+
+/// How long one session has been without an agent.
+#[derive(Debug, Default)]
+struct Absence {
+    ms: u64,
+    reported: bool,
+}
+
+/// The login notice shown in every account's session (§12). The device
+/// knows the instance and its own name, and how many allies the member's
+/// manifest lists, but not their names (the manifest carries ids and keys
+/// only), so it says what it can say truthfully.
+pub fn login_notice(
+    instance_name: &str,
+    device_name: &str,
+    allies: Option<usize>,
+) -> (String, String) {
+    let shared = match allies {
+        Some(0) => "the member (no allies yet)".to_owned(),
+        Some(1) => "the member and their 1 ally".to_owned(),
+        Some(n) => format!("the member and their {n} allies"),
+        None => "the member and their allies".to_owned(),
+    };
+    (
+        "This computer is monitored by Faro".to_owned(),
+        format!(
+            "Every account on this computer (\"{device_name}\") is monitored by Faro for a \
+             member of {instance_name}. Screenshots are blurred on this computer and shared, \
+             encrypted, only with {shared}. Switching to or creating another account does \
+             not turn monitoring off."
+        ),
+    )
+}
+
+/// An account name as an event label: `None` if unknown.
+fn label(account: &str) -> Option<String> {
+    Some(faro_proto::body::account_label(account)).filter(|a| !a.is_empty())
 }
 
 /// A member's request to pause monitoring (allies are told, §5.4).
@@ -156,12 +222,23 @@ pub struct Core {
     member_pause: Option<MemberPause>,
     sleeping: bool,
     context: ContextSignals,
-    agent_connected: bool,
+    /// The agent captures go to (the session at the screen).
+    target: Option<CaptureTarget>,
+    /// Connected agents: session id → account.
+    agents: BTreeMap<String, String>,
+    /// The sessions the source listed (`None`: it does not list them).
+    sessions: Option<Vec<SessionStatus>>,
+    /// Sessions currently without an agent.
+    absence: BTreeMap<String, Absence>,
+    /// Sessions shown the login notice since they began.
+    noticed: BTreeSet<String>,
     capture_in_flight: Option<(u64, CaptureInfo)>,
     /// The capture whose first batch was just answered: `(mono, info)`.
     last_answered: Option<(u64, CaptureInfo)>,
     journal: ReportJournal,
     activity: ActivityState,
+    /// The account recorded with `activity` on the timeline.
+    activity_account: Option<String>,
     utc_offset_minutes: i32,
     guard: ClockGuard,
     supervisor: Supervisor,
@@ -172,11 +249,6 @@ pub struct Core {
     accessibility: Option<bool>,
     seen_permissions: SeenPermissions,
     recent_signals: HashMap<String, u64>,
-    /// Someone is logged in at the console (as far as the source knows).
-    console_present: bool,
-    /// Awake time without an agent while someone is logged in.
-    agent_absent_ms: u64,
-    agent_missing_reported: bool,
     /// Awake time since the agent said the system sleeps.
     asleep_awake_ms: u64,
     last_tick_mono: Option<u64>,
@@ -222,6 +294,7 @@ impl Core {
                 tracing::warn!(error = %e, "stored permission state unreadable");
                 SeenPermissions {
                     screen_granted: true,
+                    ..SeenPermissions::default()
                 }
             }
         };
@@ -239,11 +312,16 @@ impl Core {
             member_pause: None,
             sleeping: false,
             context: ContextSignals::default(),
-            agent_connected: false,
+            target: None,
+            agents: BTreeMap::new(),
+            sessions: None,
+            absence: BTreeMap::new(),
+            noticed: BTreeSet::new(),
             capture_in_flight: None,
             last_answered: None,
             journal,
             activity: ActivityState::Off,
+            activity_account: None,
             utc_offset_minutes: p.utc_offset_minutes,
             guard: ClockGuard::default(),
             supervisor: p.supervisor,
@@ -254,9 +332,6 @@ impl Core {
             accessibility: None,
             seen_permissions,
             recent_signals: HashMap::new(),
-            console_present: true,
-            agent_absent_ms: 0,
-            agent_missing_reported: false,
             asleep_awake_ms: 0,
             last_tick_mono: None,
             unsealed: Vec::new(),
@@ -350,29 +425,36 @@ impl Core {
         None
     }
 
-    /// Route a tamper or context signal (§3.7, PROTOCOL.md §3.3).
+    /// Route a tamper or context signal that concerns the whole computer
+    /// (§3.7, PROTOCOL.md §3.3).
     pub async fn signal(&mut self, sig: TamperSignal) {
+        self.signal_for(sig, None).await;
+    }
+
+    /// Route a signal from `account`'s session.
+    async fn signal_for(&mut self, sig: TamperSignal, account: Option<String>) {
         let wall = self.clock.wall_ms();
         match route_signal(&sig) {
-            SignalRoute::ReportContext => self.journal.signal(None, wall, sig),
+            SignalRoute::ReportContext => self.journal.signal(None, wall, sig, account),
             SignalRoute::TamperEvent => {
                 let now = self.clock.mono_ms();
                 self.recent_signals
                     .retain(|_, t| now.saturating_sub(*t) < SIGNAL_DEDUPE_MS);
-                let key = format!("{sig:?}");
+                let key = format!("{sig:?}/{account:?}");
                 if self.recent_signals.contains_key(&key) {
                     tracing::debug!(signal = %key, "duplicate tamper signal suppressed");
                     return;
                 }
                 self.recent_signals.insert(key, now);
-                tracing::warn!(signal = ?sig, "tamper signal");
+                tracing::warn!(signal = ?sig, account = ?account, "tamper signal");
                 let r = self
                     .emit(EventBody::Tamper {
                         signal: sig.clone(),
+                        account: account.clone(),
                     })
                     .await;
                 let ts = r.map_or(wall, |(_, ts)| ts);
-                self.journal.signal(r.map(|(s, _)| s), ts, sig);
+                self.journal.signal(r.map(|(s, _)| s), ts, sig, account);
                 self.status.update(|s| s.tamper_events += 1);
             }
         }
@@ -515,8 +597,18 @@ impl Core {
             )
         };
         let done = std::mem::replace(&mut self.journal, next);
+        self.reopen_activity();
         if !self.seal(&done, end).await {
             self.keep_unsealed(done, end);
+        }
+    }
+
+    /// A new journal opens in the current state; record its account too.
+    fn reopen_activity(&mut self) {
+        if self.activity_account.is_some() {
+            let start = self.journal.start_ms();
+            self.journal
+                .state(start, self.activity, self.activity_account.clone());
         }
     }
 
@@ -570,14 +662,135 @@ impl Core {
             self.settings.report_options(),
         );
         let done = std::mem::replace(&mut self.journal, next);
+        self.reopen_activity();
         self.seal(&done, end).await
     }
 
+    /// Record what the device is doing, and which account is at the screen
+    /// while that matters.
     fn set_activity(&mut self, state: ActivityState) {
-        if state != self.activity {
-            self.journal.state(self.clock.wall_ms(), state);
+        let account = match state {
+            ActivityState::Active | ActivityState::Idle | ActivityState::Locked => {
+                self.target_account()
+            }
+            ActivityState::Unmonitored => self
+                .target_account()
+                .or_else(|| self.active_session().and_then(|s| label(&s.account))),
+            ActivityState::Asleep | ActivityState::Paused | ActivityState::Off => None,
+        };
+        if state != self.activity || account != self.activity_account {
+            self.journal
+                .state(self.clock.wall_ms(), state, account.clone());
             self.activity = state;
+            self.activity_account = account;
         }
+    }
+
+    // ---- sessions -----------------------------------------------------
+
+    fn capturing(&self) -> bool {
+        self.target.is_some()
+    }
+
+    fn target_account(&self) -> Option<String> {
+        self.target.as_ref().and_then(|t| label(&t.account))
+    }
+
+    fn active_session(&self) -> Option<&SessionStatus> {
+        self.sessions.as_ref()?.iter().find(|s| s.active)
+    }
+
+    /// Someone is at the screen (always assumed when the source does not
+    /// list sessions).
+    fn someone_active(&self) -> bool {
+        self.sessions
+            .as_ref()
+            .is_none_or(|l| l.iter().any(|s| s.active))
+    }
+
+    /// Point captures at another agent (or none). Everything the previous
+    /// target reported is forgotten.
+    fn set_target(&mut self, target: Option<CaptureTarget>) {
+        if target == self.target {
+            return;
+        }
+        tracing::info!(
+            account = ?target.as_ref().map(|t| &t.account),
+            "capture target"
+        );
+        self.target = target;
+        self.capture_in_flight = None;
+        self.last_answered = None;
+        self.sleeping = false;
+        self.asleep_awake_ms = 0;
+        self.session = Session::default();
+        self.context = ContextSignals::default();
+        self.screen_permission = None;
+        self.accessibility = None;
+        let connected = self.capturing();
+        let account = self.target_account();
+        self.status.update(|s| {
+            s.agent_connected = connected;
+            s.capture_account = account;
+        });
+        match &self.target {
+            // Same state, another account: a new span on the timeline.
+            Some(_) => self.set_activity(self.activity),
+            None if !self.someone_active() => self.set_activity(ActivityState::Off),
+            None => {}
+        }
+        self.publish_state();
+    }
+
+    /// Show the login notice (§12) once per session.
+    async fn login_notice(&mut self, session: &str) {
+        if !self.noticed.insert(session.to_owned()) {
+            return;
+        }
+        let allies = self.recipients().await.map(|s| s.allies().len());
+        let (title, body) = login_notice(
+            &self.enrollment.instance_name,
+            &self.enrollment.device_name,
+            allies,
+        );
+        if self
+            .source_tx
+            .try_send(SourceCommand::ShowNotice {
+                session: Some(session.to_owned()),
+                title,
+                body,
+            })
+            .is_err()
+        {
+            tracing::warn!("cannot queue the login notice");
+            self.noticed.remove(session);
+        }
+    }
+
+    fn update_session_status(&self) {
+        let missing: Vec<String> = self
+            .absence
+            .iter()
+            .filter(|(_, a)| a.reported)
+            .map(|(id, _)| self.account_of(id))
+            .collect();
+        let sessions = self.sessions.as_ref().map_or(1, Vec::len);
+        let agents = self.agents.len();
+        self.status.update(|s| {
+            s.agent_missing = !missing.is_empty();
+            s.unmonitored_accounts = missing;
+            s.sessions = sessions;
+            s.agents = agents;
+        });
+    }
+
+    fn account_of(&self, session: &str) -> String {
+        self.sessions
+            .as_ref()
+            .and_then(|l| l.iter().find(|s| s.id == session))
+            .map(|s| s.account.clone())
+            .or_else(|| self.agents.get(session).cloned())
+            .unwrap_or_default()
     }
 
     // ---- scheduling ---------------------------------------------------
@@ -596,7 +809,7 @@ impl Core {
             DeviceState::Sleeping
         } else if self.member_pause.is_some() {
             DeviceState::Paused
-        } else if !self.agent_connected {
+        } else if !self.capturing() {
             // Nothing is being captured. `idle` is the closest state the
             // protocol has (an `unmonitored` state is a faro-proto request);
             // never `active`, and the missing agent itself is a tamper event.
@@ -666,7 +879,7 @@ impl Core {
             self.capture_in_flight = None;
             self.capture_failed("capture request timed out").await;
         }
-        if !self.agent_connected {
+        if !self.capturing() {
             self.publish_state();
             return;
         }
@@ -702,33 +915,59 @@ impl Core {
         }
     }
 
-    /// Count awake time without an agent while someone is logged in, and
-    /// raise `capture_failing` once it passes [`AGENT_ABSENT_MS`].
+    /// Count awake time each session has been without an agent, and raise
+    /// `unmonitored_user_session` for its account once that passes
+    /// [`AGENT_ABSENT_MS`].
     async fn check_agent_absence(&mut self, awake_ms: u64) {
         // A member pause is announced to allies, so a missing agent during
         // it hides nothing; the count resumes when the pause ends.
-        if self.agent_connected || !self.console_present || self.member_pause.is_some() {
+        if self.member_pause.is_some() {
             return;
         }
-        self.agent_absent_ms = self.agent_absent_ms.saturating_add(awake_ms);
-        if self.agent_absent_ms < AGENT_ABSENT_MS || self.agent_missing_reported {
+        let missing: Vec<(String, String, bool)> = match &self.sessions {
+            Some(list) => list
+                .iter()
+                .filter(|s| !s.agent)
+                .map(|s| (s.id.clone(), s.account.clone(), s.active))
+                .collect(),
+            None if !self.capturing() => vec![(
+                IMPLICIT_SESSION.to_owned(),
+                self.agents.values().next().cloned().unwrap_or_default(),
+                true,
+            )],
+            None => Vec::new(),
+        };
+        self.absence
+            .retain(|id, _| missing.iter().any(|(m, _, _)| m == id));
+        let mut newly = Vec::new();
+        for (id, account, active) in missing {
+            let a = self.absence.entry(id).or_default();
+            a.ms = a.ms.saturating_add(awake_ms);
+            if a.ms >= AGENT_ABSENT_MS && !a.reported {
+                a.reported = true;
+                newly.push((account, active, a.ms));
+            }
+        }
+        if newly.is_empty() {
             return;
         }
-        self.agent_missing_reported = true;
-        tracing::warn!(
-            absent_ms = self.agent_absent_ms,
-            "no capture agent is connected although someone is logged in"
-        );
-        self.status.update(|s| s.agent_missing = true);
-        // No capture can happen without an agent. A dedicated
-        // `agent_missing` signal is a faro-proto request; `capture_failing`
-        // is the accurate existing one (urgent, immediate alert).
-        let missed = self.failures_in_row.max(1);
-        self.capture_failing_reported = true;
-        self.signal(TamperSignal::CaptureFailing {
-            consecutive_failures: missed,
-        })
-        .await;
+        for (account, active, absent_ms) in newly {
+            tracing::warn!(
+                %account,
+                absent_ms,
+                "a session has had no Faro agent connected"
+            );
+            let user = label(&account).unwrap_or_else(|| "unknown".to_owned());
+            self.signal_for(
+                TamperSignal::UnmonitoredUserSession { user },
+                label(&account),
+            )
+            .await;
+            if active && !self.capturing() {
+                self.set_activity(ActivityState::Unmonitored);
+            }
+        }
+        self.update_session_status();
     }
 
     async fn capture_failed(&mut self, reason: &str) {
@@ -739,9 +978,13 @@ impl Core {
         if self.failures_in_row >= self.capture_failure_threshold && !self.capture_failing_reported
         {
             self.capture_failing_reported = true;
-            self.signal(TamperSignal::CaptureFailing {
-                consecutive_failures: self.failures_in_row,
-            })
+            let account = self.target_account();
+            self.signal_for(
+                TamperSignal::CaptureFailing {
+                    consecutive_failures: self.failures_in_row,
+                },
+                account,
+            )
             .await;
         }
     }
@@ -836,6 +1079,7 @@ impl Core {
                 browser: self.context.browser.clone(),
                 thumbnail: best.thumbnail,
                 burst: info.burst,
+                account: self.target_account(),
             };
             if let Some((seq, ts)) = self.emit(EventBody::Flag(flag.clone())).await {
                 self.journal.flag(seq, ts, &flag);
@@ -849,20 +1093,16 @@ impl Core {
     pub async fn on_source(&mut self, ev: SourceEvent) {
         let mono = self.clock.mono_ms();
         match ev {
-            SourceEvent::Connected { agent_version, .. } => {
-                tracing::info!(%agent_version, "capture side connected");
-                self.agent_connected = true;
-                self.agent_absent_ms = 0;
-                self.agent_missing_reported = false;
-                // A new agent reports its own state; the machine is evidently
-                // awake if it connects.
-                self.sleeping = false;
-                self.asleep_awake_ms = 0;
-                self.status.update(|s| {
-                    s.agent_connected = true;
-                    s.agent_missing = false;
-                });
-                if let Some(r) = self.supervisor.on_connect(mono) {
+            SourceEvent::AgentConnected {
+                session,
+                account,
+                agent_version,
+            } => {
+                tracing::info!(%agent_version, %account, "agent connected");
+                self.agents.insert(session.clone(), account);
+                self.absence.remove(&session);
+                self.update_session_status();
+                if let Some(r) = self.supervisor.on_connect(mono, &session) {
                     self.journal.agent_restart();
                     if let Some((seq, _)) = self
                         .emit(EventBody::AgentRestarted {
@@ -873,35 +1113,46 @@ impl Core {
                         self.journal.seq(seq);
                     }
                 }
+                self.login_notice(&session).await;
             }
-            SourceEvent::Disconnected { reason, expected } => {
-                tracing::info!(%reason, expected, "capture side disconnected");
-                self.agent_connected = false;
-                self.capture_in_flight = None;
-                // Whatever the departed agent claimed about sleep no longer
-                // stands; it must not keep explaining silence.
-                self.sleeping = false;
-                self.asleep_awake_ms = 0;
-                self.status.update(|s| s.agent_connected = false);
-                self.set_activity(if expected {
-                    ActivityState::Off
-                } else {
-                    ActivityState::Unmonitored
-                });
-                if let Some(sig) = self.supervisor.on_disconnect(mono, expected) {
-                    self.signal(sig).await;
+            SourceEvent::AgentDisconnected {
+                session,
+                account,
+                reason,
+                expected,
+            } => {
+                tracing::info!(%reason, %account, expected, "agent disconnected");
+                self.agents.remove(&session);
+                if self.target.as_ref().is_some_and(|t| t.session == session) {
+                    self.set_target(None);
+                    self.set_activity(if expected || !self.someone_active() {
+                        ActivityState::Off
+                    } else {
+                        ActivityState::Unmonitored
+                    });
                 }
+                if let Some(sig) = self.supervisor.on_disconnect(mono, &session, expected) {
+                    self.signal_for(sig, label(&account)).await;
+                }
+                self.update_session_status();
                 self.publish_state();
             }
-            SourceEvent::ConsoleSession { present } => {
-                tracing::info!(present, "console session");
-                self.console_present = present;
-                if !present {
-                    // Nobody to monitor: the absence clock starts over at
-                    // the next login.
-                    self.agent_absent_ms = 0;
+            SourceEvent::Sessions(list) => {
+                if let Some(old) = &self.sessions {
+                    for ended in old.iter().filter(|o| !list.iter().any(|n| n.id == o.id)) {
+                        tracing::info!(account = %ended.account, "session ended");
+                        self.supervisor.forget(&ended.id);
+                        self.noticed.remove(&ended.id);
+                    }
                 }
+                self.sessions = Some(list);
+                if !self.capturing() && !self.someone_active() {
+                    // Nobody to monitor (the login window).
+                    self.set_activity(ActivityState::Off);
+                }
+                self.update_session_status();
             }
+            SourceEvent::CaptureTarget(t) => self.set_target(t),
             SourceEvent::Frames(frames) => self.on_frames(frames).await,
             SourceEvent::CaptureFailed { reason } => {
                 self.capture_in_flight = None;
@@ -912,7 +1163,7 @@ impl Core {
                     self.context.app.as_ref().map(|a| &a.id) != app.as_ref().map(|a| &a.id);
                 self.context.app = app;
                 self.context.window_title = title;
-                if changed && self.agent_connected {
+                if changed && self.capturing() {
                     self.scheduler
                         .on_trigger(mono, Trigger::ForegroundAppChanged);
                 }
@@ -921,7 +1172,7 @@ impl Core {
                 let changed = b.url.is_some()
                     && self.context.browser.as_ref().and_then(|c| c.url.as_ref()) != b.url.as_ref();
                 self.context.browser = Some(b);
-                if changed && self.agent_connected {
+                if changed && self.capturing() {
                     self.scheduler.on_trigger(mono, Trigger::NewUrl);
                 }
             }
@@ -966,23 +1217,28 @@ impl Core {
                 screen,
                 accessibility,
             } => {
+                let account = self.target_account();
+                let key = account.clone().unwrap_or_default();
                 let was = self.screen_permission.replace(screen);
                 let granted = screen == PermissionState::Granted;
                 // Revoked while we watched, or revoked while the service was
-                // stopped (granted before, on this enrollment, but not now).
+                // stopped (granted before by this account, on this
+                // enrollment, but not now).
                 let revoked = !granted
                     && match was {
                         Some(prev) => prev == PermissionState::Granted,
-                        None => self.seen_permissions.screen_granted,
+                        None => self.seen_permissions.granted_before(&key),
                     };
                 if revoked {
-                    self.signal(TamperSignal::PermissionRevoked {
-                        permission: "screen_recording".into(),
-                    })
+                    self.signal_for(
+                        TamperSignal::PermissionRevoked {
+                            permission: "screen_recording".into(),
+                        },
+                        account.clone(),
+                    )
                     .await;
                 }
-                if granted && !self.seen_permissions.screen_granted {
-                    self.seen_permissions.screen_granted = true;
+                if granted && self.seen_permissions.screen_granted_accounts.insert(key) {
                     if let Err(e) = self
                         .state_dir
                         .write_json(PERMISSIONS_FILE, &self.seen_permissions)
@@ -993,27 +1249,38 @@ impl Core {
                 if let Some(now) = accessibility {
                     let was = self.accessibility.replace(now);
                     if was == Some(true) && !now {
-                        self.signal(TamperSignal::PermissionRevoked {
-                            permission: "accessibility".into(),
-                        })
+                        self.signal_for(
+                            TamperSignal::PermissionRevoked {
+                                permission: "accessibility".into(),
+                            },
+                            account,
+                        )
                         .await;
                     }
                 }
             }
-            SourceEvent::Tamper(sig) => self.signal(sig).await,
+            SourceEvent::Tamper { signal, account } => {
+                let account = account.as_deref().and_then(label);
+                self.signal_for(signal, account).await
+            }
         }
     }
 
     /// The capture side ended (its task returned). Treated as an
-    /// unexpected disconnect.
+    /// unexpected disconnect of every agent.
     pub async fn source_gone(&mut self) {
-        if self.agent_connected {
-            self.on_source(SourceEvent::Disconnected {
+        let agents: Vec<(String, String)> = std::mem::take(&mut self.agents).into_iter().collect();
+        for (session, account) in agents {
+            self.agents.insert(session.clone(), account.clone());
+            self.on_source(SourceEvent::AgentDisconnected {
+                session,
+                account,
                 reason: "capture driver stopped".into(),
                 expected: false,
             })
             .await;
         }
+        self.set_target(None);
     }
 
     async fn set_pause(&mut self, req: Option<PauseRequest>) {

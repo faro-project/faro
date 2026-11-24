@@ -204,7 +204,7 @@ async fn removed_ally_gets_nothing_sealed_after_the_device_accepts_v3() {
     .expect("EventBody");
     assert!(matches!(
         body,
-        EventBody::Tamper { signal: TamperSignal::IntegrityFailure { ref component } }
+        EventBody::Tamper { signal: TamperSignal::IntegrityFailure { ref component }, .. }
             if component == "e2e-after-removal"
     ));
 
@@ -252,7 +252,8 @@ async fn revoked_permission_is_an_urgent_tamper_alert_for_the_ally() {
         EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
                 permission: "screen_recording".into()
-            }
+            },
+            account: None,
         }
     );
     let alerts = w.alerts().await;
@@ -326,6 +327,7 @@ async fn events_recorded_offline_arrive_in_order_without_a_gap() {
         .expect("EventBody");
         if let EventBody::Tamper {
             signal: TamperSignal::IntegrityFailure { component },
+            ..
         } = body
         {
             seen.push(component);
@@ -548,7 +550,8 @@ async fn permission_revoked_while_stopped_is_tamper_at_next_start() {
         EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
                 permission: "screen_recording".into()
-            }
+            },
+            account: None,
         }
     );
     dev.shutdown().await;

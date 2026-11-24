@@ -53,8 +53,8 @@ pub use codec::{
 pub use connection::{AgentConnection, Connection, ServiceConnection};
 pub use error::{IpcError, Result, WireFrameError};
 pub use handshake::{
-    accept_agent, accept_agent_with_version, hello, ping, AgentHello, ServiceWelcome,
-    DEFAULT_PING_TIMEOUT, HELLO_TIMEOUT,
+    accept_agent, accept_agent_with_version, hello, ping, read_agent_hello, welcome_agent,
+    AgentHello, ServiceWelcome, DEFAULT_PING_TIMEOUT, HELLO_TIMEOUT,
 };
 pub use messages::{
     AgentMsg, CaptureReason, ServiceMsg, ShutdownReason, WireMessage, WirePermissionState,
@@ -64,5 +64,5 @@ pub use messages::{
 pub use peer::AllowSameUid;
 pub use peer::{AllowUids, PeerInfo, PeerVerifier};
 #[cfg(unix)]
-pub use transport::{BindOptions, IpcClient, IpcServer};
+pub use transport::{resolve_agent_socket, session_socket_path, BindOptions, IpcClient, IpcServer};
 pub use wire_frame::{WireFrame, WirePixelFormat, MAX_FRAME_BYTES};

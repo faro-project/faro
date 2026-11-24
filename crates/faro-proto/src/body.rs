@@ -104,10 +104,32 @@ pub struct FlagBody {
     /// True if this capture was taken during burst mode.
     #[serde(default)]
     pub burst: bool,
+    /// The OS account whose session was captured (§3.6), as a short local
+    /// label (see [`account_label`]). Only inside the encrypted body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
-/// Tamper signals (§3.7). Context-only signals are listed here too; their
-/// urgency is decided by the policy engine, not by the variant.
+/// Longest OS-account label carried in an event body or report.
+pub const MAX_ACCOUNT_LABEL: usize = 64;
+
+/// The short local label for an OS account (ARCHITECTURE.md §3.6): the
+/// account's short name with control characters removed, trimmed and cut
+/// to [`MAX_ACCOUNT_LABEL`] characters. It travels only inside encrypted
+/// bodies, so the instance never sees it.
+pub fn account_label(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_ACCOUNT_LABEL)
+        .collect()
+}
+
+/// Tamper signals (§3.7). Context-only signals are listed here too
+/// ([`TamperSignal::is_context_only`]); they go to the daily report instead
+/// of becoming `tamper` events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "signal", rename_all = "snake_case")]
 pub enum TamperSignal {
@@ -129,16 +151,20 @@ pub enum TamperSignal {
     CaptureFailing {
         consecutive_failures: u32,
     },
-    // Context-only (urgency `none` by default):
+    /// An interactive session of the OS account `user` has had no connected
+    /// agent for 90 s (§3.1, §3.7). Every account on the computer is
+    /// monitored, so this is active tamper, not context: switching to or
+    /// creating another account must not be a way around Faro.
+    UnmonitoredUserSession {
+        user: String,
+    },
+    // Context-only (reported in the daily report, never paged):
     BrowserWithoutExtension {
         browser: String,
     },
     VpnActive,
     VirtualMachine,
     RemoteDesktop,
-    UnmonitoredUserSession {
-        user: String,
-    },
 }
 
 impl TamperSignal {
@@ -151,7 +177,6 @@ impl TamperSignal {
                 | TamperSignal::VpnActive
                 | TamperSignal::VirtualMachine
                 | TamperSignal::RemoteDesktop
-                | TamperSignal::UnmonitoredUserSession { .. }
         )
     }
 }
@@ -186,6 +211,11 @@ pub enum EventBody {
     Flag(FlagBody),
     Tamper {
         signal: TamperSignal,
+        /// The OS account the signal came from, when it concerns one
+        /// session rather than the whole computer (§3.6). See
+        /// [`account_label`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
     },
     SettingsChange {
         changes: Vec<SettingChange>,
@@ -211,6 +241,14 @@ pub enum EventBody {
 }
 
 impl EventBody {
+    /// A `tamper` body that concerns the whole computer.
+    pub fn tamper(signal: TamperSignal) -> Self {
+        EventBody::Tamper {
+            signal,
+            account: None,
+        }
+    }
+
     pub fn kind(&self) -> crate::event::EventKind {
         use crate::event::EventKind as K;
         match self {
@@ -254,13 +292,44 @@ mod tests {
             signal: TamperSignal::PermissionRevoked {
                 permission: "screen_recording".into(),
             },
+            account: Some("alex".into()),
         };
         let j = serde_json::to_value(&b).unwrap();
         assert_eq!(j["type"], "tamper");
         assert_eq!(j["signal"]["signal"], "permission_revoked");
+        assert_eq!(j["account"], "alex");
         let back: EventBody = serde_json::from_value(j).unwrap();
         assert_eq!(back, b);
         assert_eq!(back.kind(), crate::event::EventKind::Tamper);
+    }
+
+    #[test]
+    fn account_is_optional_on_the_wire() {
+        // Bodies written before the field existed still parse, and a body
+        // without an account does not carry the key.
+        let old = r#"{"type":"tamper","signal":{"signal":"vpn_active"}}"#;
+        let b: EventBody = serde_json::from_str(old).unwrap();
+        assert_eq!(b, EventBody::tamper(TamperSignal::VpnActive));
+        assert!(!serde_json::to_string(&b).unwrap().contains("account"));
+    }
+
+    #[test]
+    fn unmonitored_session_is_active_tamper() {
+        let s = TamperSignal::UnmonitoredUserSession {
+            user: "guest".into(),
+        };
+        assert!(!s.is_context_only());
+        assert!(TamperSignal::VpnActive.is_context_only());
+    }
+
+    #[test]
+    fn account_labels_are_short_and_clean() {
+        assert_eq!(account_label("  alex \n"), "alex");
+        assert_eq!(account_label("a\u{7}b"), "ab");
+        assert_eq!(
+            account_label(&"x".repeat(200)).chars().count(),
+            MAX_ACCOUNT_LABEL
+        );
     }
 
     #[test]

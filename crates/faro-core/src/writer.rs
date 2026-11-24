@@ -299,6 +299,7 @@ mod tests {
             browser: None,
             thumbnail: None,
             burst: true,
+            account: None,
         })
     }
 
@@ -316,6 +317,7 @@ mod tests {
             flag(),
             EventBody::Tamper {
                 signal: TamperSignal::WaylandTokenLost,
+                account: None,
             },
             EventBody::Resumed,
         ];
@@ -362,6 +364,7 @@ mod tests {
             .prepare(
                 &EventBody::Tamper {
                     signal: TamperSignal::WaylandTokenLost,
+                    account: None,
                 },
                 Urgency::None,
                 &set,

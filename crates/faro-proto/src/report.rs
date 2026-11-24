@@ -32,6 +32,11 @@ pub struct TimelineSpan {
     pub start_ms: i64,
     pub end_ms: i64,
     pub state: ActivityState,
+    /// The OS account at the screen during this span (§3.6), so reports can
+    /// group the timeline by account. `None` while nobody is (asleep, off,
+    /// at the login window) or when the source does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +76,9 @@ pub struct FlaggedMoment {
     /// The member's own "false positive" note, visible to allies (§3.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_note: Option<String>,
+    /// The OS account whose session was captured (§3.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +96,9 @@ pub struct TamperRecord {
     pub seq: Option<u64>,
     pub ts_ms: i64,
     pub signal: TamperSignal,
+    /// The OS account the signal came from, if it concerns one session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

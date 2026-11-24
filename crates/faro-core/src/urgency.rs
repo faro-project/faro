@@ -171,7 +171,7 @@ pub enum SignalRoute {
 }
 
 /// Route a signal: context-only signals (browser without the extension, VPN,
-/// VM, RDP, another OS user) are informational and must not page allies, so
+/// VM, RDP) are informational and must not page allies, so
 /// they never become `tamper` events, whose urgency is floored to urgent.
 pub fn route_signal(signal: &TamperSignal) -> SignalRoute {
     if signal.is_context_only() {
@@ -196,6 +196,7 @@ mod tests {
             browser: None,
             thumbnail: None,
             burst: false,
+            account: None,
         })
     }
 
@@ -211,9 +212,11 @@ mod tests {
             flag(Rating::High),
             EventBody::Tamper {
                 signal: TamperSignal::VpnActive,
+                account: None,
             },
             EventBody::Tamper {
                 signal: TamperSignal::WaylandTokenLost,
+                account: None,
             },
             EventBody::SettingsChange { changes: vec![] },
             EventBody::AgentRestarted { count_last_hour: 9 },
@@ -263,7 +266,8 @@ mod tests {
                     // Tamper (even with a context-only signal smuggled in) is urgent.
                     assert_eq!(
                         p.urgency_for(&EventBody::Tamper {
-                            signal: TamperSignal::VpnActive
+                            signal: TamperSignal::VpnActive,
+                            account: None,
                         }),
                         Urgency::Urgent
                     );
@@ -328,14 +332,16 @@ mod tests {
             TamperSignal::VpnActive,
             TamperSignal::VirtualMachine,
             TamperSignal::RemoteDesktop,
-            TamperSignal::UnmonitoredUserSession {
-                user: "guest".into(),
-            },
         ];
         for s in &context {
             assert_eq!(route_signal(s), SignalRoute::ReportContext, "{s:?}");
         }
         let tamper = [
+            // Every OS account is monitored (§3.1): a session without an
+            // agent is tamper, not context.
+            TamperSignal::UnmonitoredUserSession {
+                user: "guest".into(),
+            },
             TamperSignal::PermissionRevoked {
                 permission: "screen".into(),
             },

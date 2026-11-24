@@ -280,8 +280,11 @@ impl Runtime {
     // `Runtime: Sync` (the notice sink is only `Send`).
     async fn connect(&mut self) -> Result<AgentConnection<UnixStream>, Fail> {
         let timeout = self.config.hello_timeout;
-        let connecting =
-            IpcClient::connect_verified(&self.config.socket_path, self.verifier.as_ref());
+        // A root service binds one socket per account (every account is
+        // monitored, §3.1); re-resolved on every attempt because it appears
+        // only once the service has seen this session.
+        let socket = resolve_socket(&self.config.socket_path);
+        let connecting = IpcClient::connect_verified(&socket, self.verifier.as_ref());
         let mut conn = match tokio::time::timeout(timeout, connecting).await {
             Ok(r) => r?,
             Err(_) => {
@@ -545,6 +548,14 @@ async fn goodbye(conn: &mut AgentConnection<UnixStream>) {
     if let Err(e) = send(conn, GOODBYE_TIMEOUT, &AgentMsg::Goodbye).await {
         tracing::debug!(error = %e, "could not say Goodbye");
     }
+}
+
+/// The socket to connect to: this account's own socket next to the
+/// configured path if the service bound one, else the configured path.
+fn resolve_socket(base: &std::path::Path) -> std::path::PathBuf {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    faro_ipc::resolve_agent_socket(base, uid)
 }
 
 #[cfg(test)]

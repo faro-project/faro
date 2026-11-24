@@ -10,6 +10,17 @@
 //! now, show a notice, shut down) and receives [`SourceEvent`]s. The service
 //! owns the schedule (§3.4); a source never captures on its own initiative.
 //!
+//! **Sessions.** Every OS account is monitored (§3.1), so a source can have
+//! one agent per interactive session. It reports each agent's arrival and
+//! departure ([`SourceEvent::AgentConnected`] / [`SourceEvent::AgentDisconnected`],
+//! for supervision), the list of sessions and whether each has an agent
+//! ([`SourceEvent::Sessions`], so the core can raise tamper for a session
+//! nobody monitors), and which agent captures ([`SourceEvent::CaptureTarget`]:
+//! the agent of the session at the screen). Capture-side events (frames,
+//! foreground, idle and lock state, permissions) come from the capture
+//! target only; tamper signals come from every agent, labelled with its
+//! account.
+//!
 //! **Privacy.** [`SourceEvent::Frames`] carries unblurred
 //! [`Frame`](faro_platform::Frame)s. They are moved, never copied, and are
 //! zeroized when dropped (including if a channel is closed with frames still
@@ -20,6 +31,8 @@ pub mod codesign;
 mod in_process;
 #[cfg(unix)]
 pub mod ipc;
+#[cfg(unix)]
+pub mod sessions;
 
 pub use in_process::InProcessFrameSource;
 
@@ -34,30 +47,68 @@ use tokio::sync::mpsc;
 /// Commands from the service to the capture side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceCommand {
-    /// Capture every display now and answer with `Frames` or `CaptureFailed`.
+    /// Capture every display of the capture target's session now and answer
+    /// with `Frames` or `CaptureFailed`.
     CaptureNow(CaptureReason),
-    /// Show a user-visible notice (e.g. the monthly consent notice, §12).
-    ShowNotice { title: String, body: String },
-    /// Stop: tell the agent the service is stopping and return.
+    /// Show a user-visible notice (the login notice and the monthly consent
+    /// notice, §12) in one session, or in every session if `session` is
+    /// `None`.
+    ShowNotice {
+        session: Option<String>,
+        title: String,
+        body: String,
+    },
+    /// Stop: tell the agents the service is stopping and return.
     Shutdown,
+}
+
+/// One interactive session, as a source sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatus {
+    /// The session id agents send in `Hello` (`uid:<uid>`).
+    pub id: String,
+    /// The account's short name (the label in events, §3.6).
+    pub account: String,
+    /// At the screen right now.
+    pub active: bool,
+    /// Its agent is connected.
+    pub agent: bool,
+}
+
+/// The agent captures go to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureTarget {
+    pub session: String,
+    /// Empty if the source does not know the account.
+    pub account: String,
 }
 
 /// Events from the capture side.
 pub enum SourceEvent {
-    /// An agent (or the in-process platform) is ready to capture.
-    Connected {
-        agent_version: String,
+    /// A session's agent completed the handshake.
+    AgentConnected {
         session: String,
-        user: String,
+        account: String,
+        agent_version: String,
     },
-    /// The agent went away. `expected` is true only when the source itself
-    /// saw the agent's session end (logout, user switch); an agent saying
-    /// goodbye while its session continues, a dropped connection, a protocol
-    /// failure and a missed ping are all unexpected (§3.7).
-    Disconnected {
+    /// A session's agent went away. `expected` is true only when the source
+    /// itself saw the agent's session end (logout); an agent saying goodbye
+    /// while its session continues, a dropped connection, a protocol failure
+    /// and a missed ping are all unexpected (§3.7).
+    AgentDisconnected {
+        session: String,
+        account: String,
         reason: String,
         expected: bool,
     },
+    /// The interactive sessions right now, sent whenever the list or an
+    /// agent's presence changes. Sources that cannot list sessions (the
+    /// in-process platform, which is always connected) never send it.
+    Sessions(Vec<SessionStatus>),
+    /// Captures now go to (and capture-side events come from) this agent;
+    /// `None`: no agent can capture (nobody at the screen, or the agent of
+    /// the session at the screen is not connected).
+    CaptureTarget(Option<CaptureTarget>),
     /// The answer to a `CaptureNow`: one frame per display.
     Frames(Vec<Frame>),
     /// A requested capture failed. Never contains screen content.
@@ -79,34 +130,41 @@ pub enum SourceEvent {
         screen: PermissionState,
         accessibility: Option<bool>,
     },
-    Tamper(TamperSignal),
-    /// Whether anyone is logged in at the console. While nobody is, a
-    /// missing agent is explained (the login window has no agent); while
-    /// someone is, it is not. Sources that always have a session (the
-    /// in-process platform) never send this.
-    ConsoleSession {
-        present: bool,
+    /// A tamper or context signal from an agent, with its session's account
+    /// (`None` if unknown).
+    Tamper {
+        signal: TamperSignal,
+        account: Option<String>,
     },
 }
 
 impl fmt::Debug for SourceEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SourceEvent::Connected {
-                agent_version,
+            SourceEvent::AgentConnected {
                 session,
-                user,
+                account,
+                agent_version,
             } => f
-                .debug_struct("Connected")
-                .field("agent_version", agent_version)
+                .debug_struct("AgentConnected")
                 .field("session", session)
-                .field("user", user)
+                .field("account", account)
+                .field("agent_version", agent_version)
                 .finish(),
-            SourceEvent::Disconnected { reason, expected } => f
-                .debug_struct("Disconnected")
+            SourceEvent::AgentDisconnected {
+                session,
+                account,
+                reason,
+                expected,
+            } => f
+                .debug_struct("AgentDisconnected")
+                .field("session", session)
+                .field("account", account)
                 .field("reason", reason)
                 .field("expected", expected)
                 .finish(),
+            SourceEvent::Sessions(s) => f.debug_tuple("Sessions").field(s).finish(),
+            SourceEvent::CaptureTarget(t) => f.debug_tuple("CaptureTarget").field(t).finish(),
             SourceEvent::Frames(frames) => write!(f, "Frames({} frames)", frames.len()),
             SourceEvent::CaptureFailed { reason } => f
                 .debug_struct("CaptureFailed")
@@ -137,10 +195,10 @@ impl fmt::Debug for SourceEvent {
                 .field("screen", screen)
                 .field("accessibility", accessibility)
                 .finish(),
-            SourceEvent::Tamper(t) => f.debug_tuple("Tamper").field(t).finish(),
-            SourceEvent::ConsoleSession { present } => f
-                .debug_struct("ConsoleSession")
-                .field("present", present)
+            SourceEvent::Tamper { signal, account } => f
+                .debug_struct("Tamper")
+                .field("signal", signal)
+                .field("account", account)
                 .finish(),
         }
     }
