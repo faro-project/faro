@@ -1,0 +1,89 @@
+[package]
+name = "faro-platform-macos"
+description = "Faro macOS platform layer (ScreenCaptureKit, NSWorkspace, LaunchDaemon/LaunchAgent)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Everything is macOS-only; on other targets this crate is an empty lib.
+[target.'cfg(target_os = "macos")'.dependencies]
+faro-platform.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+libc = "0.2"
+plist = "1.8"
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
+objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSError",
+    "NSString",
+    "NSURL",
+    "NSEnumerator",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "libc",
+    "NSRunningApplication",
+    "NSWorkspace",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFBase",
+    "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "libc",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDirectDisplay",
+    "CGDisplayConfiguration",
+    "CGEventSource",
+    "CGEventTypes",
+    "CGError",
+    "CGImage",
+    "CGSession",
+    "CGWindow",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "SCError",
+    "SCScreenshotManager",
+    "SCShareableContent",
+    "SCStream",
+] }
+objc2-application-services = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "libc",
+    "HIServices",
+    "AXError",
+    "AXUIElement",
+] }
+objc2-system-configuration = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "libc",
+    "SCDynamicStore",
+    "SCDynamicStoreCopySpecific",
+] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-foundation",
+    "SMAppService",
+] }
+

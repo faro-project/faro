@@ -3,7 +3,12 @@ resolver = "2"
 members = [
     "crates/faro-proto",
     "crates/faro-crypto",
+    "crates/faro-core",
+    "crates/faro-detect",
+    "crates/faro-ipc",
     "crates/faro-platform",
+    "crates/faro-platform-macos",
+    "crates/faro-update",
 ]
 
 [workspace.package]
@@ -16,7 +21,12 @@ rust-version = "1.80"
 # Internal crates
 faro-proto = { path = "crates/faro-proto", version = "0.1.0" }
 faro-crypto = { path = "crates/faro-crypto", version = "0.1.0" }
+faro-core = { path = "crates/faro-core", version = "0.1.0" }
+faro-detect = { path = "crates/faro-detect", version = "0.1.0" }
+faro-ipc = { path = "crates/faro-ipc", version = "0.1.0" }
 faro-platform = { path = "crates/faro-platform", version = "0.1.0" }
+faro-platform-macos = { path = "crates/faro-platform-macos", version = "0.1.0" }
+faro-update = { path = "crates/faro-update", version = "0.1.0" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -27,7 +37,7 @@ base64 = "0.22"
 hex = "0.4"
 
 # Crypto (pinned to the rand_core 0.6 generation so every primitive shares one RNG trait set;
-# upgrade them together, never one at a time)
+# see docs/DEVELOPMENT.md "Dependency notes" before upgrading)
 ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
 crypto_box = { version = "0.9", features = ["seal", "std"] }
 chacha20poly1305 = { version = "0.10", features = ["std"] }
