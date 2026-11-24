@@ -86,10 +86,14 @@ Every OS runs the same three processes.
 | Process | Privilege | Lifetime | Responsibilities |
 |---|---|---|---|
 | **Faro Service** | root / SYSTEM | Boot to shutdown | Owns state, keys, the classifier, the event log, the outbox, uploads and updates. Watches over the agent. Sends heartbeats. |
-| **Session Agent** | Logged-in user | One per interactive session | Screen capture, active window and app info, idle and lock state, browser-extension bridge. Holds as little state as possible. |
+| **Session Agent** | Logged-in user | One per interactive session, for **every** OS account | Screen capture, active window and app info, idle and lock state, browser-extension bridge. Holds as little state as possible. |
 | **Tray UI** (Tauri) | Logged-in user | Optional | Status, pausing (which allies are told about), ally management, viewing your own reports. |
 
 **Why split it:** screen capture *has* to happen inside the user's graphical session. Keys, the queue of unsent events and the classifier live in the privileged service, which a standard user cannot touch. If the agent is killed, the service relaunches it and logs `agent_restarted`. If the service is killed, the instance sees heartbeats stop.
+
+**Every OS account is monitored.** An installation covers the whole computer, not one account. The agent runs in every interactive session of every OS account: existing accounts, accounts created later, guest sessions and remote sessions. Otherwise, switching to (or creating) another account would be a way around Faro. The service supervises one agent per session and follows session changes (fast user switching, Windows multi-session, Linux logind seats). There is no per-account opt-out, because an exemption is itself a way around monitoring. Everyone who uses the computer is told (§12). *Status: specified, not yet implemented ([#9](https://github.com/faro-project/faro/issues/9)). Today the service follows the console user only.*
+
+**Who decides that an agent left on purpose:** the service, by watching the OS session, never the agent. An agent's `Goodbye` counts as expected only when its session actually ends (logout or user switch). If someone is logged in and no agent is connected for that session for 90 s, the service raises an urgent tamper event (§3.7).
 
 **Recommendation:** members run as a standard (non-admin) user day to day and an ally keeps the admin password. Onboarding should suggest this.
 
@@ -149,7 +153,7 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | Capture | **ScreenCaptureKit** (`SCScreenshotManager` on 14+, an `SCStream` single frame on 13), all displays. |
 | Permission | Needs Screen Recording (TCC). The agent checks `CGPreflightScreenCaptureAccess()` on every tick, and revocation sends an urgent `permission_revoked` event. |
 | ⚠ Risk | Recent macOS versions periodically ask users to re-confirm screen-capture access. A Phase 0 spike needs to confirm the current behavior. Worst case: the re-prompt is a normal step, and declining it reports as tamper. |
-| Service | A **LaunchDaemon** (`SMAppService.daemon`) plus a per-user **LaunchAgent** (`SMAppService.agent`), with `KeepAlive` on both. |
+| Service | A **LaunchDaemon** (`SMAppService.daemon`) plus a **global LaunchAgent** in `/Library/LaunchAgents`, so the agent starts in every account's session, including accounts created after install. `KeepAlive` on both. |
 | Active window | `NSWorkspace` for the frontmost app. Window titles go through `AXUIElement` (Accessibility permission, optional; revoking it is reported). |
 | Browser URL | Extension first. Fallback: AppleScript or Accessibility for Safari and Chrome. |
 | Network signals (Phase 2) | A Network Extension DNS proxy as a System Extension. |
@@ -160,7 +164,7 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | Concern | Approach |
 |---|---|
 | Capture | **DXGI Desktop Duplication** (no capture border, multiple monitors), falling back to `Windows.Graphics.Capture` or GDI. DRM content shows up black. |
-| Service | A **LocalSystem** service with recovery actions. It launches the agent into each interactive session (`WTSQueryUserToken` + `CreateProcessAsUser`) and follows session changes. |
+| Service | A **LocalSystem** service with recovery actions. It launches the agent into every interactive session of every account, console and remote (`WTSQueryUserToken` + `CreateProcessAsUser`), and follows session changes. |
 | Self-protection | The service DACL denies stop and delete to non-admins. State lives in `%ProgramData%\Faro` with a SYSTEM-only ACL. |
 | Active window | `GetForegroundWindow`, `GetWindowText` and `QueryFullProcessImageName`. |
 | Browser URL | Extension first. Fallback: UI Automation. |
@@ -174,7 +178,7 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | Capture (X11) | `xcb` + MIT-SHM. |
 | Capture (Wayland) | **xdg-desktop-portal ScreenCast** + PipeWire with `persist_mode=2` and a restore token, so the user consents once. `wlr-screencopy` on wlroots compositors. Losing the token is reported as tamper. |
 | ⚠ Risk | Wayland differs between GNOME, KDE and wlroots, so Linux ships in Phase 2, after a spike. |
-| Service | A systemd system unit (the service) and a user unit bound to `graphical-session.target` (the agent). Sessions are found through `logind`. |
+| Service | A systemd system unit (the service) and a **global** user unit (`systemctl --global enable`) bound to `graphical-session.target` (the agent), so it starts for every account. Sessions are found through `logind`. |
 | Active window | X11 `_NET_ACTIVE_WINDOW`. On Wayland: the extension plus desktop-specific D-Bus where available. |
 | Distribution | `.deb` and `.rpm` from a project-signed apt/dnf repo. |
 
@@ -238,6 +242,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 - **Device signing**: Ed25519 over every header (so `urgency` can't be forged or downgraded in transit). Keys live in the Keychain / Secure Enclave on macOS, TPM via CNG on Windows, and a root-only file or TPM2 on Linux.
 - **Outbox**: SQLite in the service's protected directory. It only holds encrypted bodies, keeps about 30 days of data while offline and prunes oldest-clean-first.
 - **Clock tampering**: wall-clock and monotonic deltas are compared with each other and with the server's `Date` header.
+- **Which OS account**: flag and tamper bodies record the OS account the event came from, as a short local label (the account's short name). It lives inside the encrypted body only, so the instance never sees it, while allies and the member can tell accounts apart. Reports group the timeline by account.
 
 ### 3.7 Tamper detection
 
@@ -246,13 +251,14 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | No heartbeat for longer than the grace period | Instance liveness monitor | urgent (after the grace period) | "Laptop-X hasn't checked in for 3h" plus the last known state (asleep or shut down) |
 | Screen-recording / portal permission revoked | Agent | urgent | Immediate alert |
 | Agent repeatedly killed | Service | urgent | Alert with a count |
+| An interactive session (any OS account) with no connected agent for 90 s | Service | urgent | "Faro isn't running in the account *alex* on Laptop-X" |
 | Chain gap or invalid signature | Instance | urgent | Alert |
 | Uninstall (`goodbye`) | Uninstaller | urgent | "Faro was uninstalled from Laptop-X" |
 | Binary or model integrity failure | Service | urgent | Alert |
 | Clock manipulation | Service | urgent | Alert |
 | Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
-| Browser without extension, VPN, VM, RDP, a new OS user without an agent | Agent / service | none (context) | Listed in the report |
+| Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
 
 **Instance downtime vs. device tamper.** On a self-hosted instance, the server itself can go down (a power cut, a Pi reboot). The liveness monitor records its own uptime. After an instance restart it waits for the grace period before judging any device, and it never treats a gap that overlaps its own downtime as device silence. Devices queue events offline and upload them later, and the hash chain shows whether anything is missing.
 
@@ -428,7 +434,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 **Member**
 1. Accepts the invite, creates an account and a member key (passphrase + recovery code).
-2. Downloads the official installer (linked from the instance), installs it and grants OS permissions with guided screens.
+2. Downloads the official installer (linked from the instance), installs it and grants OS permissions with guided screens. The installer says plainly that **every account on this computer will be monitored**, lists the existing accounts, and suggests disabling the guest account.
 3. Enrolls the device using the instance link or QR code, confirms the instance name, and the member key signs the device key.
 4. Invites allies, who might be on the same instance or people who only ever use that instance's ally login.
 5. Optional: browser extension, a standard user account, and an ally who holds the admin password.
@@ -483,6 +489,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 Institutions running instances (churches, colleges) make consent even more important. The architecture enforces it:
 
 - **Never invisible**: a persistent tray icon that can't be hidden, plus a monthly on-device notice listing the current allies and the instance name and operator.
+- **Everyone who uses the computer is told.** Monitoring covers every OS account (§3.1), so the tray icon and a login notice appear in every account's session: "This computer is monitored by Faro for *member*. Screenshots are blurred and shared with *allies*." Faro is meant for a computer the member controls. On a shared computer, everyone is monitored and everyone is told; the installer warns about this up front.
 - **The monitored person holds the account and keys.** Instance admins **cannot** enroll devices for someone else, become someone's ally on their own, or read content. A college or church can host the service but can't use it to monitor people who haven't opted in themselves.
 - **Full transparency**: the member sees everything allies see.
 - **Members can always leave**: uninstalling is allowed but never silent. Members can also delete their account. Their data is then removed after allies are told.

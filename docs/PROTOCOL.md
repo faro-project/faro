@@ -93,7 +93,9 @@ The member controls the device, so a modified client could sign a tamper event a
 | `settings_change`, `paused`, `resumed` | `normal` |
 | everything else | `none` |
 
-Context-only signals (VPN, VM, remote desktop, browser without the extension, an unmonitored user session) are **not** sent as `tamper` events. They appear in the daily report's `health.context`.
+Context-only signals (VPN, VM, remote desktop, browser without the extension) are **not** sent as `tamper` events. They appear in the daily report's `health.context`.
+
+An interactive session of any OS account with no connected agent for 90 s **is** a `tamper` event (urgent floor): every account on the computer is monitored (ARCHITECTURE §3.1). *Status: specified, not yet implemented ([#9](https://github.com/faro-project/faro/issues/9)). `TamperSignal::UnmonitoredUserSession` is still context-only in `faro-proto` and moves out of `is_context_only` with that change.*
 
 ## 4. Encryption
 
