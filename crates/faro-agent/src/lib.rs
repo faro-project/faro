@@ -37,7 +37,9 @@
 //! ## Platforms
 //!
 //! * **macOS**: `faro_platform_macos::MacPlatform::agent_platform()`, plus
-//!   the Accessibility trust check for the `Permission` message.
+//!   the Accessibility trust check for the `Permission` message. The binary
+//!   also shows the menu-bar icon and the service's notices
+//!   (`faro_platform_macos::ui`, §12), which take the main thread.
 //! * **Windows, Linux**: no platform layer exists yet (ARCHITECTURE.md §3.3
 //!   puts Linux in Phase 2; the Windows named-pipe transport is not written,
 //!   see `faro_ipc`). The binary refuses to start there rather than pretend.

@@ -21,6 +21,7 @@ objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSArray",
+    "NSNotification",
     "NSBundle",
     "NSError",
     "NSString",
@@ -30,9 +31,25 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "libc",
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
     "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+    "NSWindow",
     "NSWorkspace",
+    "objc2-core-foundation",
 ] }
+# Hands notices from the agent's worker thread to AppKit on the main queue.
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "CFArray",

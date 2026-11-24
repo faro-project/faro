@@ -1119,6 +1119,7 @@ name = "faro-platform-macos"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "dispatch2",
  "faro-platform",
  "libc",
  "objc2",
@@ -2217,6 +2218,7 @@ dependencies = [
  "bitflags",
  "libc",
  "objc2",
+ "objc2-core-foundation",
  "objc2-foundation",
 ]
 
