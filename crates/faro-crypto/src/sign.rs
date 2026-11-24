@@ -3,7 +3,9 @@
 use crate::CryptoError;
 use ed25519_dalek::Signer;
 use faro_proto::api::{Heartbeat, SignedHeartbeat};
-use faro_proto::keys::{AllyEndorsement, DeviceEndorsement, MemberEncKeyBinding, Signed};
+use faro_proto::keys::{
+    AllyEndorsement, DeviceEndorsement, MemberEncKeyBinding, RecipientManifest, Signed,
+};
 use faro_proto::report::ReportHeader;
 use faro_proto::{EventHeader, SignPublicKey, Signature};
 use zeroize::Zeroizing;
@@ -25,6 +27,7 @@ impl_signed_bytes!(
     AllyEndorsement,
     DeviceEndorsement,
     MemberEncKeyBinding,
+    RecipientManifest,
     ReportHeader,
     Heartbeat
 );

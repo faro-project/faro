@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 const TAG_REPORT_HEADER: &str = "faro/report-header/v1";
 
+/// Current [`ReportHeader::v`].
+pub const REPORT_HEADER_VERSION: u16 = 1;
+
 /// What the device was doing during a stretch of the timeline. Gaps in
 /// monitoring are always explained by one of these states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

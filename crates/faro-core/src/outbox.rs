@@ -24,18 +24,55 @@
 //! high-water mark, setting it back 40 days before a flagged capture would
 //! make that fresh event look 40 days old and prunable the moment the clock
 //! is restored.
+//!
+//! **Recipient-manifest checkpoint.** The outbox also holds the highest
+//! [`ManifestRef`] the device has accepted (PROTOCOL.md §5.1), **together
+//! with the signed manifest itself**. It lives here, not in a side file,
+//! because it is security state with the same needs as the chain head:
+//!
+//! * It must survive crashes and only ever move forward, which a single
+//!   `IMMEDIATE` transaction guarantees even when two components race.
+//! * The ref and the document must never disagree. §5.1 says the device keeps
+//!   using its last accepted manifest when a fetch is rejected or fails; after
+//!   a restart while offline (or while the instance withholds or rolls back
+//!   the manifest) that document has to come from disk, or the device could
+//!   not seal anything, tamper events included. A cache kept elsewhere could
+//!   lag the checkpoint after a crash and then be refused as a rollback.
+//!   [`Outbox::current_recipients`] re-verifies the stored document on load.
+//! * There is no public way to move the checkpoint except by presenting a
+//!   manifest that passes every device rule, so a bogus ref from
+//!   instance-supplied data cannot freeze the device on an old list.
+//! * [`Outbox::commit`] and [`Outbox::add_report`] refuse anything sealed to
+//!   a manifest other than the current checkpoint, in the same transaction
+//!   that stores it. A `RecipientSet` held by a long-running task therefore
+//!   cannot keep encrypting to an ally removed in the meantime.
+//!
+//! A fresh database has no checkpoint and must be seeded explicitly with
+//! [`Outbox::bootstrap_manifest`] (see [`ManifestAnchor`] for why).
+//!
+//! **Schema versions.** `meta.schema_version` records the layout. Opening an
+//! older database applies the missing steps from `MIGRATIONS` in the same
+//! transaction that reads the version, so an upgrade is all-or-nothing and
+//! existing rows are kept.
 
+use crate::recipients::{ManifestDecision, RecipientError, RecipientSet};
+use crate::report::SealedReport;
 use crate::writer::PreparedEvent;
 use faro_crypto::ChainHead;
+use faro_proto::api::SignedRecipientManifest;
+use faro_proto::keys::ManifestRef;
 use faro_proto::report::ReportUpload;
-use faro_proto::{DeviceId, Hash32, InstanceId, SignedEvent, Urgency};
+use faro_proto::{DeviceId, Hash32, InstanceId, SignPublicKey, SignedEvent, Urgency, UserId};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
 
 /// File name of the outbox database inside the caller's directory.
 pub const OUTBOX_FILE: &str = "outbox.sqlite3";
 /// Schema version written to `meta`.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// * 1: events, reports, pruned ranges, chain head, age clock.
+/// * 2: adds `manifest_checkpoint` (the accepted ref and its signed manifest).
+pub const SCHEMA_VERSION: u32 = 2;
 /// Default maximum age of unsent data: 30 days.
 pub const DEFAULT_MAX_AGE_MS: i64 = 30 * 24 * 3600 * 1000;
 
@@ -72,6 +109,55 @@ pub enum OutboxError {
     Corrupt(String),
     #[error("value out of range for storage: {0}")]
     Range(&'static str),
+    /// A recipient manifest was refused. The stored checkpoint is unchanged;
+    /// keep using [`Outbox::current_recipients`] and warn the member.
+    #[error(transparent)]
+    Manifest(#[from] RecipientError),
+    /// No recipient manifest has been accepted on this device yet, so there
+    /// is no checkpoint to judge a fetched one against. Seed it with
+    /// [`Outbox::bootstrap_manifest`].
+    #[error("no recipient manifest accepted yet; bootstrap the outbox first")]
+    NotBootstrapped,
+    /// [`Outbox::bootstrap_manifest`] on a device that already has a
+    /// checkpoint. Bootstrapping again would let a caller re-run trust on
+    /// first use, so later manifests go through [`Outbox::accept_manifest`].
+    #[error("recipient manifest already bootstrapped at version {}", checkpoint.version)]
+    AlreadyBootstrapped { checkpoint: ManifestRef },
+    /// The event or report was sealed to a recipient set that is not the
+    /// stored checkpoint, typically because a newer manifest (perhaps one
+    /// that removes an ally) was accepted after the set was obtained. Nothing
+    /// was stored; reload the set with [`Outbox::current_recipients`] and seal
+    /// again.
+    #[error("sealed to recipient manifest version {}, but the checkpoint is {}", used.version,
+        current.map_or_else(|| "unset".to_string(), |c| format!("version {}", c.version)))]
+    StaleRecipients {
+        used: ManifestRef,
+        current: Option<ManifestRef>,
+    },
+}
+
+/// How the very first recipient manifest on a device is judged
+/// ([`Outbox::bootstrap_manifest`]).
+///
+/// With no checkpoint, the §5.1 rules accept any genuinely signed version,
+/// including one from before an ally was removed or a key was rotated. A
+/// newly enrolled or reinstalled device fetching from a hostile instance
+/// would then seal everything to the removed ally. The outbox therefore
+/// refuses to make that choice implicitly ([`OutboxError::NotBootstrapped`]):
+/// the caller has to say where freshness comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestAnchor {
+    /// A ref obtained from the member's own client, out of band from the
+    /// instance (e.g. carried in the enrollment link or handed over
+    /// locally). The first manifest must be exactly this one or newer.
+    /// Only the accepted manifest is stored, never the anchor alone, so a
+    /// wrong anchor cannot freeze the device: bootstrapping simply fails.
+    AtLeast(ManifestRef),
+    /// Trust on first use: accept whatever genuinely signed manifest arrives
+    /// first. Rollback protection starts from that manifest. Use only when
+    /// no anchor is available, and surface the accepted ally list to the
+    /// member so a stale one is noticed.
+    TrustOnFirstUse,
 }
 
 /// A contiguous range of events dropped without being uploaded.
@@ -270,6 +356,92 @@ CREATE TABLE IF NOT EXISTS pruned (
 ) STRICT;
 ";
 
+/// Steps from schema version `n - 1` to `n`, as `(n, sql)`, in order.
+///
+/// [`SCHEMA`] is frozen at version 1: changing it would make fresh and
+/// upgraded databases diverge. New tables and columns go here, and every
+/// database (fresh or old) runs exactly the steps it lacks.
+const MIGRATIONS: &[(u32, &str)] = &[(
+    2,
+    "
+CREATE TABLE manifest_checkpoint (
+    id            INTEGER PRIMARY KEY CHECK (id = 0),
+    version       INTEGER NOT NULL CHECK (version >= 1),
+    hash          TEXT NOT NULL,
+    -- the SignedRecipientManifest whose reference is (version, hash)
+    manifest_json TEXT NOT NULL
+) STRICT;
+",
+)];
+
+/// Read the manifest checkpoint through `conn` (a plain connection or an
+/// open transaction).
+fn read_checkpoint(conn: &Connection) -> Result<Option<ManifestRef>, OutboxError> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT version, hash FROM manifest_checkpoint WHERE id = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    row.map(|(v, h)| {
+        Ok(ManifestRef {
+            version: to_u64(v, "manifest version")?,
+            hash: Hash32::from_prefixed_hex(&h)
+                .ok_or_else(|| OutboxError::Corrupt("manifest checkpoint hash".into()))?,
+        })
+    })
+    .transpose()
+}
+
+/// Write `manifest` (whose reference is `r`) as the checkpoint. Must run
+/// inside the caller's `IMMEDIATE` transaction, after the caller compared it
+/// with the checkpoint read in that same transaction, so no other writer can
+/// slip in between the comparison and the write.
+fn store_checkpoint_in(
+    tx: &rusqlite::Transaction<'_>,
+    manifest: &SignedRecipientManifest,
+    r: ManifestRef,
+) -> Result<(), OutboxError> {
+    let version = to_i64(r.version, "manifest version")?;
+    let json = serde_json::to_string(manifest)?;
+    tx.execute(
+        "INSERT INTO manifest_checkpoint (id, version, hash, manifest_json) VALUES (0, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET version = excluded.version, hash = excluded.hash,
+             manifest_json = excluded.manifest_json",
+        params![version, r.hash.to_prefixed_hex(), json],
+    )?;
+    tracing::info!(version = r.version, hash = %r.hash, "recipient manifest checkpoint advanced");
+    Ok(())
+}
+
+/// Refuse ciphertext sealed to any manifest but the stored checkpoint. Runs
+/// inside the transaction that would store it, so a checkpoint advanced by
+/// another connection a moment earlier is seen.
+fn require_current_manifest(
+    tx: &rusqlite::Transaction<'_>,
+    used: ManifestRef,
+) -> Result<(), OutboxError> {
+    let current = read_checkpoint(tx)?;
+    if current != Some(used) {
+        return Err(OutboxError::StaleRecipients { used, current });
+    }
+    Ok(())
+}
+
+/// Bring a database at schema `from` up to [`SCHEMA_VERSION`] inside `tx`.
+fn migrate(tx: &rusqlite::Transaction<'_>, from: u32) -> Result<(), OutboxError> {
+    for &(to, sql) in MIGRATIONS.iter().filter(|(to, _)| *to > from) {
+        tx.execute_batch(sql)?;
+        tx.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            [to.to_string()],
+        )?;
+        tracing::info!(from, to, "migrated outbox schema");
+    }
+    Ok(())
+}
+
 impl Outbox {
     /// Open (or create) the outbox in `dir` for this device.
     ///
@@ -315,15 +487,18 @@ impl Outbox {
             .optional()?;
         match version {
             None => {
+                // A fresh database starts at the frozen version-1 layout
+                // and then takes the same migration path as an old one.
                 tx.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?1), ('instance_id', ?2), ('device_id', ?3)",
-                    params![SCHEMA_VERSION.to_string(), instance_id.as_str(), device_id.as_str()],
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', '1'), ('instance_id', ?1), ('device_id', ?2)",
+                    params![instance_id.as_str(), device_id.as_str()],
                 )?;
                 let g = ChainHead::genesis(instance_id, device_id);
                 tx.execute(
                     "INSERT INTO chain_state (id, next_seq, prev_hash) VALUES (0, 0, ?1)",
                     params![g.prev_hash.to_prefixed_hex()],
                 )?;
+                migrate(&tx, 1)?;
             }
             Some(v) => {
                 let found: u32 = v
@@ -331,6 +506,9 @@ impl Outbox {
                     .map_err(|_| OutboxError::Corrupt(format!("schema_version {v:?}")))?;
                 if found > SCHEMA_VERSION {
                     return Err(OutboxError::UnsupportedSchema { found });
+                }
+                if found == 0 {
+                    return Err(OutboxError::Corrupt("schema_version 0".into()));
                 }
                 let get = |k: &str| -> Result<String, OutboxError> {
                     tx.query_row("SELECT value FROM meta WHERE key = ?1", [k], |r| r.get(0))
@@ -347,6 +525,7 @@ impl Outbox {
                         device: device_id.clone(),
                     });
                 }
+                migrate(&tx, found)?;
             }
         }
         tx.commit()?;
@@ -394,8 +573,10 @@ impl Outbox {
     /// Durably store `prepared` and advance the stored head, atomically.
     ///
     /// Rejected unless the event is for this outbox's instance/device, its
-    /// body commitments hold, it carries exactly the stored head's `seq` and
-    /// `prev_hash`, and its `new_head` is the true successor.
+    /// body commitments hold, its body was sealed to the manifest that is the
+    /// stored checkpoint ([`OutboxError::StaleRecipients`]), it carries
+    /// exactly the stored head's `seq` and `prev_hash`, and its `new_head` is
+    /// the true successor.
     pub fn commit(&mut self, prepared: &PreparedEvent) -> Result<ChainHead, OutboxError> {
         let ev = prepared.event();
         let h = &ev.header;
@@ -407,6 +588,7 @@ impl Outbox {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_current_manifest(&tx, prepared.manifest_ref())?;
         let (next, prev): (i64, String) = tx.query_row(
             "SELECT next_seq, prev_hash FROM chain_state WHERE id = 0",
             [],
@@ -500,11 +682,16 @@ impl Outbox {
     }
 
     /// Queue a sealed report for upload. Returns its local id.
-    pub fn add_report(&mut self, upload: &ReportUpload) -> Result<i64, OutboxError> {
+    ///
+    /// Refused with [`OutboxError::StaleRecipients`] unless it was sealed to
+    /// the manifest that is the stored checkpoint.
+    pub fn add_report(&mut self, sealed: &SealedReport) -> Result<i64, OutboxError> {
+        let upload = sealed.upload();
         let json = serde_json::to_string(upload)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_current_manifest(&tx, sealed.manifest_ref())?;
         let age_ms = bump_age_clock(&tx, upload.header.period_end_ms)?;
         tx.execute(
             "INSERT INTO reports (period_start, period_end, age_ms, size, json) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -699,9 +886,154 @@ impl Outbox {
         })
     }
 
+    /// The highest recipient manifest this device has accepted, if any.
+    pub fn manifest_checkpoint(&self) -> Result<Option<ManifestRef>, OutboxError> {
+        read_checkpoint(&self.conn)
+    }
+
+    /// Accept the first recipient manifest on this device and make it the
+    /// checkpoint, judged by `anchor` (see [`ManifestAnchor`]). Runs every
+    /// other §5.1 rule as [`Outbox::accept_manifest`] does.
+    ///
+    /// Refused with [`OutboxError::AlreadyBootstrapped`] once a checkpoint
+    /// exists. With [`ManifestAnchor::AtLeast`], a manifest older than the
+    /// anchor is [`RecipientError::Rollback`] and a different one at the
+    /// anchor's version is [`RecipientError::Equivocation`]; nothing is
+    /// stored in either case.
+    pub fn bootstrap_manifest(
+        &mut self,
+        manifest: &SignedRecipientManifest,
+        pinned_member_sign_pubkey: &SignPublicKey,
+        member_id: &UserId,
+        anchor: ManifestAnchor,
+    ) -> Result<RecipientSet, OutboxError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(checkpoint) = read_checkpoint(&tx)? {
+            return Err(OutboxError::AlreadyBootstrapped { checkpoint });
+        }
+        let floor = match anchor {
+            ManifestAnchor::AtLeast(r) => Some(r),
+            ManifestAnchor::TrustOnFirstUse => None,
+        };
+        // Unchanged (exactly the anchor) and Advanced both mean "acceptable";
+        // either way nothing is on disk yet, so store it.
+        let (set, _) = RecipientSet::from_manifest(
+            manifest,
+            pinned_member_sign_pubkey,
+            &self.instance_id,
+            member_id,
+            floor,
+        )?;
+        store_checkpoint_in(&tx, manifest, set.manifest_ref())?;
+        tx.commit()?;
+        Ok(set)
+    }
+
+    /// Verify a fetched `manifest` for this outbox's instance and `member_id`
+    /// against the stored checkpoint and, if it is newer, make it the
+    /// checkpoint, all in one `IMMEDIATE` transaction (PROTOCOL.md §5.1):
+    ///
+    /// * a higher version: stored, [`ManifestDecision::Advanced`];
+    /// * exactly the stored manifest: nothing written,
+    ///   [`ManifestDecision::Unchanged`] (so retries are harmless);
+    /// * a lower version: [`RecipientError::Rollback`];
+    /// * the same version with another hash: [`RecipientError::Equivocation`];
+    /// * a version above `i64::MAX`: [`OutboxError::Range`] (SQLite cannot
+    ///   store it, and handing out a set whose checkpoint is not on disk
+    ///   would let a restart accept a rollback).
+    ///
+    /// The comparison is made against the row **on disk** inside the write
+    /// transaction, so a stale caller or a racing connection can never move
+    /// the checkpoint backwards. The set is only returned once its checkpoint
+    /// is committed. On error nothing is written; keep using
+    /// [`Outbox::current_recipients`].
+    pub fn accept_manifest(
+        &mut self,
+        manifest: &SignedRecipientManifest,
+        pinned_member_sign_pubkey: &SignPublicKey,
+        member_id: &UserId,
+    ) -> Result<(RecipientSet, ManifestDecision), OutboxError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let checkpoint = read_checkpoint(&tx)?.ok_or(OutboxError::NotBootstrapped)?;
+        let (set, decision) = RecipientSet::from_manifest(
+            manifest,
+            pinned_member_sign_pubkey,
+            &self.instance_id,
+            member_id,
+            Some(checkpoint),
+        )?;
+        if let ManifestDecision::Advanced(r) = decision {
+            store_checkpoint_in(&tx, manifest, r)?;
+        }
+        tx.commit()?;
+        Ok((set, decision))
+    }
+
+    /// The recipient set of the stored checkpoint, rebuilt from disk without
+    /// any network access: what the device keeps sealing to when a fetch
+    /// fails or is rejected (§5.1), and what it starts with after a restart.
+    /// `None` before [`Outbox::bootstrap_manifest`].
+    ///
+    /// The stored document is re-verified with every §5.1 rule against the
+    /// stored ref, using the caller's pinned key and member id. Anything but
+    /// an exact match (edited row, swapped document, different pinned key)
+    /// is [`OutboxError::Corrupt`]: this state is only ever written after
+    /// passing those rules, so a failure means the database was tampered
+    /// with or belongs to another enrollment.
+    pub fn current_recipients(
+        &self,
+        pinned_member_sign_pubkey: &SignPublicKey,
+        member_id: &UserId,
+    ) -> Result<Option<RecipientSet>, OutboxError> {
+        let row: Option<(i64, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT version, hash, manifest_json FROM manifest_checkpoint WHERE id = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((version, hash, json)) = row else {
+            return Ok(None);
+        };
+        let stored = ManifestRef {
+            version: to_u64(version, "manifest version")?,
+            hash: Hash32::from_prefixed_hex(&hash)
+                .ok_or_else(|| OutboxError::Corrupt("manifest checkpoint hash".into()))?,
+        };
+        let manifest: SignedRecipientManifest = serde_json::from_str(&json)
+            .map_err(|e| OutboxError::Corrupt(format!("stored recipient manifest: {e}")))?;
+        let (set, decision) = RecipientSet::from_manifest(
+            &manifest,
+            pinned_member_sign_pubkey,
+            &self.instance_id,
+            member_id,
+            Some(stored),
+        )
+        .map_err(|e| OutboxError::Corrupt(format!("stored recipient manifest: {e}")))?;
+        if decision != ManifestDecision::Unchanged {
+            return Err(OutboxError::Corrupt(format!(
+                "stored recipient manifest is version {}, checkpoint is version {}",
+                set.manifest_ref().version,
+                stored.version
+            )));
+        }
+        Ok(Some(set))
+    }
+
     #[cfg(test)]
     pub(crate) fn raw(&self) -> &Connection {
         &self.conn
+    }
+
+    /// rusqlite 0.41 takes `&mut Connection` for hooks such as `busy_handler`.
+    #[cfg(test)]
+    pub(crate) fn raw_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 }
 
@@ -722,7 +1054,7 @@ mod tests {
     use super::*;
     use crate::clock::{Clock, ManualClock};
     use crate::recipients::tests::Fixture;
-    use crate::writer::EventWriter;
+    use crate::writer::{open_event_body, EventWriter};
     use faro_crypto::{verify_chain, SigningKey};
     use faro_proto::body::{EventBody, FlagBody, Rating, TamperSignal};
 
@@ -733,14 +1065,26 @@ mod tests {
         clock: ManualClock,
         w: EventWriter<ManualClock>,
         ob: Outbox,
+        /// The set of the bootstrapped version-1 manifest (the checkpoint).
+        set: RecipientSet,
     }
 
+    /// An outbox bootstrapped (trust on first use) with the fixture's
+    /// version-1 manifest.
     fn env() -> Env {
         let td = tempfile::tempdir().unwrap();
         let dir = td.path().join("state");
         let f = Fixture::new(1);
         let dev = DeviceId::new("dev_test");
-        let ob = Outbox::open(&dir, &f.inst, &dev).unwrap();
+        let mut ob = Outbox::open(&dir, &f.inst, &dev).unwrap();
+        let set = ob
+            .bootstrap_manifest(
+                &f.manifest(1),
+                &f.member_sign.public(),
+                &f.member,
+                ManifestAnchor::TrustOnFirstUse,
+            )
+            .unwrap();
         let clock = ManualClock::new(1_800_000_000_000, 0);
         let w = EventWriter::new(
             SigningKey::generate(),
@@ -756,6 +1100,7 @@ mod tests {
             clock,
             w,
             ob,
+            set,
         }
     }
 
@@ -773,8 +1118,17 @@ mod tests {
 
     impl Env {
         fn write(&mut self, body: EventBody, u: Urgency) -> SignedEvent {
-            let set = self.f.set();
-            self.w.write(&mut self.ob, &body, u, &set).unwrap()
+            self.w.write(&mut self.ob, &body, u, &self.set).unwrap()
+        }
+        fn pinned(&self) -> SignPublicKey {
+            self.f.member_sign.public()
+        }
+        fn accept(
+            &mut self,
+            m: &SignedRecipientManifest,
+        ) -> Result<(RecipientSet, ManifestDecision), OutboxError> {
+            let pinned = self.pinned();
+            self.ob.accept_manifest(m, &pinned, &self.f.member)
         }
         fn reopen(&mut self) {
             self.ob = Outbox::open(&self.dir, &self.f.inst, self.w.device_id()).unwrap();
@@ -845,7 +1199,7 @@ mod tests {
     #[test]
     fn rejects_non_successor() {
         let mut e = env();
-        let set = e.f.set();
+        let set = e.set.clone();
         let p =
             e.w.prepare(&EventBody::Shutdown, Urgency::None, &set)
                 .unwrap();
@@ -880,7 +1234,7 @@ mod tests {
         let mut e = env();
         e.write(EventBody::Shutdown, Urgency::None);
         // Writer pointed at a forged head with the right seq but wrong hash.
-        let set = e.f.set();
+        let set = e.set.clone();
         e.w.set_head(ChainHead {
             next_seq: 1,
             prev_hash: Hash32::of(b"forged"),
@@ -907,7 +1261,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let set = e.f.set();
+        let set = e.set.clone();
         let p =
             e.w.prepare(&EventBody::Shutdown, Urgency::None, &set)
                 .unwrap();
@@ -939,7 +1293,15 @@ mod tests {
         let mut e = env();
         let td = tempfile::tempdir().unwrap();
         let mut other = Outbox::open(td.path(), &e.f.inst, &DeviceId::new("dev_other")).unwrap();
-        let set = e.f.set();
+        other
+            .bootstrap_manifest(
+                &e.f.manifest(1),
+                &e.pinned(),
+                &e.f.member,
+                ManifestAnchor::TrustOnFirstUse,
+            )
+            .unwrap();
+        let set = e.set.clone();
         let p =
             e.w.prepare(&EventBody::Shutdown, Urgency::None, &set)
                 .unwrap();
@@ -1182,7 +1544,7 @@ mod tests {
                 "CREATE TRIGGER boom BEFORE UPDATE ON chain_state BEGIN SELECT RAISE(ABORT, 'boom'); END;",
             )
             .unwrap();
-        let set = e.f.set();
+        let set = e.set.clone();
         let p =
             e.w.prepare(&EventBody::Shutdown, Urgency::None, &set)
                 .unwrap();
@@ -1195,7 +1557,7 @@ mod tests {
         assert_eq!(e.ob.head().unwrap(), head);
     }
 
-    fn report(e: &Env, start: i64, end: i64) -> ReportUpload {
+    fn report(e: &Env, start: i64, end: i64) -> SealedReport {
         let b = crate::report::ReportBuilder::new(
             e.w.device_id().clone(),
             "Laptop-X",
@@ -1208,7 +1570,7 @@ mod tests {
             &b.finish(),
             &e.f.inst,
             &e.f.member,
-            &e.f.set(),
+            &e.set,
             e.w.signing_key(),
         )
         .unwrap()
@@ -1229,7 +1591,7 @@ mod tests {
         let c = e.ob.add_report(&backdated).unwrap();
         let p = e.ob.pending_reports().unwrap();
         assert_eq!(p.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b, c]);
-        assert_eq!(p[1].upload, fresh);
+        assert_eq!(&p[1].upload, fresh.upload());
 
         let out = e.ob.prune(now, PrunePolicy::default()).unwrap();
         assert_eq!(out.reports_deleted, 1, "only the genuinely old report");
@@ -1256,6 +1618,757 @@ mod tests {
             contiguous_ranges(&[u64::MAX - 1, u64::MAX]),
             vec![(u64::MAX - 1, u64::MAX)]
         );
+    }
+
+    fn schema_version(ob: &Outbox) -> String {
+        ob.raw()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The fixture's manifest at `version` with every ally removed.
+    fn without_allies(f: &Fixture, version: u64) -> SignedRecipientManifest {
+        let mut body = f.body(version);
+        body.allies.clear();
+        f.sign(body)
+    }
+
+    fn envelope_ids(ev: &SignedEvent) -> Vec<UserId> {
+        ev.body
+            .as_ref()
+            .unwrap()
+            .envelopes
+            .iter()
+            .map(|e| e.recipient.clone())
+            .collect()
+    }
+
+    #[test]
+    fn checkpoint_and_manifest_persist_across_reopen() {
+        let mut e = env();
+        let v1 = e.f.manifest(1).body.reference();
+        assert_eq!(e.ob.manifest_checkpoint().unwrap(), Some(v1));
+        let v3 = e.f.manifest(3);
+        let (set3, d) = e.accept(&v3).unwrap();
+        assert_eq!(d, ManifestDecision::Advanced(v3.body.reference()));
+        e.reopen();
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v3.body.reference())
+        );
+        // Rebuilt from disk alone, no fetch.
+        assert_eq!(
+            e.ob.current_recipients(&e.pinned(), &e.f.member).unwrap(),
+            Some(set3)
+        );
+        assert_eq!(schema_version(&e.ob), SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn checkpoint_cannot_regress() {
+        let mut e = env();
+        let v2 = e.f.manifest(2);
+        e.accept(&v2).unwrap();
+        // Idempotent for the identical manifest.
+        assert_eq!(e.accept(&v2).unwrap().1, ManifestDecision::Unchanged);
+        assert!(matches!(
+            e.accept(&e.f.manifest(1)),
+            Err(OutboxError::Manifest(RecipientError::Rollback { have, got }))
+                if have == v2.body.reference() && got.version == 1
+        ));
+        let mut fork = e.f.body(2);
+        fork.issued_at_ms += 1;
+        let fork = e.f.sign(fork);
+        assert!(matches!(
+            e.accept(&fork),
+            Err(OutboxError::Manifest(RecipientError::Equivocation {
+                version: 2,
+                ..
+            }))
+        ));
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v2.body.reference())
+        );
+        let v9 = e.f.manifest(9);
+        assert_eq!(
+            e.accept(&v9).unwrap().1,
+            ManifestDecision::Advanced(v9.body.reference())
+        );
+        // A stale caller on a second connection cannot undo it: the check
+        // runs against the row on disk, not a cached value.
+        let mut other = Outbox::open(&e.dir, &e.f.inst, e.w.device_id()).unwrap();
+        assert!(matches!(
+            other.accept_manifest(&e.f.manifest(5), &e.pinned(), &e.f.member),
+            Err(OutboxError::Manifest(RecipientError::Rollback { .. }))
+        ));
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v9.body.reference())
+        );
+        // A genuinely signed version SQLite cannot store is refused, not
+        // truncated, and no set is handed out for it.
+        for huge in [1u64 << 63, u64::MAX] {
+            assert!(matches!(
+                e.accept(&e.f.manifest(huge)),
+                Err(OutboxError::Range(_))
+            ));
+        }
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v9.body.reference())
+        );
+        assert_eq!(
+            e.ob.current_recipients(&e.pinned(), &e.f.member)
+                .unwrap()
+                .unwrap()
+                .manifest_ref(),
+            v9.body.reference()
+        );
+    }
+
+    #[test]
+    fn racing_checkpoint_updates_never_move_backwards() {
+        let e = env();
+        const VERSIONS: u64 = 40;
+        let manifests: std::sync::Arc<Vec<SignedRecipientManifest>> =
+            std::sync::Arc::new((1..=VERSIONS).map(|v| e.f.manifest(v)).collect());
+        let threads: Vec<_> = (0..6u64)
+            .map(|t| {
+                let dir = e.dir.clone();
+                let inst = e.f.inst.clone();
+                let dev = e.w.device_id().clone();
+                let pinned = e.pinned();
+                let member = e.f.member.clone();
+                let manifests = manifests.clone();
+                std::thread::spawn(move || {
+                    let mut ob = Outbox::open(&dir, &inst, &dev).unwrap();
+                    // Each thread walks the versions in a different order.
+                    for i in 0..VERSIONS {
+                        let v = (i * (2 * t + 1) + t) % VERSIONS + 1;
+                        let m = &manifests[(v - 1) as usize];
+                        match ob.accept_manifest(m, &pinned, &member) {
+                            Ok(_) => {}
+                            Err(OutboxError::Manifest(RecipientError::Rollback { .. })) => {}
+                            Err(other) => panic!("unexpected {other:?}"),
+                        }
+                        let now = ob.manifest_checkpoint().unwrap().unwrap();
+                        assert!(now.version >= v, "checkpoint went below {v}: {now:?}");
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let last = manifests.last().unwrap().body.reference();
+        assert_eq!(e.ob.manifest_checkpoint().unwrap(), Some(last));
+        // The stored document moved with the ref.
+        assert_eq!(
+            e.ob.current_recipients(&e.pinned(), &e.f.member)
+                .unwrap()
+                .unwrap()
+                .manifest_ref(),
+            last
+        );
+    }
+
+    /// Sends once on the first contended lock, then keeps waiting (up to
+    /// about ten seconds). Used by `checkpoint_compare_runs_under_the_write_lock`.
+    static ON_FIRST_BUSY: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
+        std::sync::Mutex::new(None);
+
+    fn signal_then_wait(count: i32) -> bool {
+        if let Some(tx) = ON_FIRST_BUSY.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        count < 2_000
+    }
+
+    /// Deterministic check that the checkpoint is read *under* the write
+    /// lock. Another connection holds the lock with an uncommitted move to
+    /// v3. The busy handler lets it commit only once `accept_manifest` is
+    /// waiting for the lock. An implementation that read the checkpoint
+    /// before taking the lock would have seen v1 and written v2 over v3.
+    #[test]
+    fn checkpoint_compare_runs_under_the_write_lock() {
+        let e = env();
+        let v2 = e.f.manifest(2);
+        let v3 = e.f.manifest(3);
+        let mut ob = Outbox::open(&e.dir, &e.f.inst, e.w.device_id()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *ON_FIRST_BUSY.lock().unwrap() = Some(tx);
+        ob.raw_mut().busy_handler(Some(signal_then_wait)).unwrap();
+
+        let other = Connection::open(e.ob.path()).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        other
+            .execute(
+                "UPDATE manifest_checkpoint SET version = 3, hash = ?1, manifest_json = ?2",
+                params![
+                    v3.body.hash().to_prefixed_hex(),
+                    serde_json::to_string(&v3).unwrap()
+                ],
+            )
+            .unwrap();
+
+        let pinned = e.pinned();
+        let member = e.f.member.clone();
+        let t = std::thread::spawn(move || ob.accept_manifest(&v2, &pinned, &member).map(|_| ()));
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("accept_manifest never waited for the write lock");
+        other.execute_batch("COMMIT").unwrap();
+        let got = t.join().unwrap();
+        assert!(
+            matches!(
+                got,
+                Err(OutboxError::Manifest(RecipientError::Rollback { have, .. }))
+                    if have == v3.body.reference()
+            ),
+            "{got:?}"
+        );
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v3.body.reference())
+        );
+    }
+
+    /// End to end: ally removed in v2, device restarts, instance re-serves v1.
+    #[test]
+    fn accept_manifest_blocks_reinstating_removed_ally_after_restart() {
+        let mut e = env();
+        let removed = e.f.allies[0].0.clone();
+        let v1 = e.f.manifest(1);
+        let v2 = without_allies(&e.f, 2);
+
+        assert_eq!(e.accept(&v1).unwrap().1, ManifestDecision::Unchanged);
+        let (set2, d) = e.accept(&v2).unwrap();
+        assert_eq!(d, ManifestDecision::Advanced(v2.body.reference()));
+        assert_eq!(set2.recipients().len(), 1);
+
+        e.reopen();
+        assert!(matches!(
+            e.accept(&v1),
+            Err(OutboxError::Manifest(RecipientError::Rollback { .. }))
+        ));
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v2.body.reference())
+        );
+        let (again, d) = e.accept(&v2).unwrap();
+        assert_eq!(d, ManifestDecision::Unchanged);
+        let ev =
+            e.w.write(&mut e.ob, &EventBody::Resumed, Urgency::None, &again)
+                .unwrap();
+        assert!(!envelope_ids(&ev).contains(&removed));
+    }
+
+    #[test]
+    fn rejected_manifest_does_not_touch_checkpoint() {
+        let mut e = env();
+        let cp = e.ob.manifest_checkpoint().unwrap();
+        // Signed by an attacker at a much higher version: the checkpoint can
+        // only move by presenting a manifest the pinned key signed.
+        let forged = SigningKey::generate().endorse(e.f.body(50));
+        assert!(matches!(
+            e.accept(&forged),
+            Err(OutboxError::Manifest(RecipientError::BadSignature))
+        ));
+        // Genuine, but for another member.
+        assert!(matches!(
+            e.ob.accept_manifest(&e.f.manifest(2), &e.pinned(), &UserId::new("usr_other")),
+            Err(OutboxError::Manifest(RecipientError::WrongMember { .. }))
+        ));
+        assert_eq!(e.ob.manifest_checkpoint().unwrap(), cp);
+        // The genuine v2 is still accepted afterwards: nothing was frozen.
+        assert!(matches!(
+            e.accept(&e.f.manifest(2)).unwrap().1,
+            ManifestDecision::Advanced(_)
+        ));
+    }
+
+    /// Regression (critical): a fresh device had no checkpoint, so it took
+    /// whatever genuinely signed manifest the instance served first, even one
+    /// from before an ally's removal. Now the first manifest needs an
+    /// explicit anchor.
+    #[test]
+    fn fresh_outbox_requires_an_explicit_bootstrap() {
+        let f = Fixture::new(1);
+        let pinned = f.member_sign.public();
+        let removed = f.allies[0].0.clone();
+        let v1 = f.manifest(1); // still lists the ally
+        let v2 = without_allies(&f, 2); // the ally was removed
+        let dev = DeviceId::new("dev_new_laptop");
+        let td = tempfile::tempdir().unwrap();
+        let mut ob = Outbox::open(td.path(), &f.inst, &dev).unwrap();
+        assert_eq!(ob.manifest_checkpoint().unwrap(), None);
+        assert_eq!(ob.current_recipients(&pinned, &f.member).unwrap(), None);
+
+        // The instance serves the pre-removal v1 to the new device.
+        assert!(matches!(
+            ob.accept_manifest(&v1, &pinned, &f.member),
+            Err(OutboxError::NotBootstrapped)
+        ));
+        // Nothing can be stored without a checkpoint, even sealed to a set
+        // built inside the crate.
+        let mut w = EventWriter::new(
+            SigningKey::generate(),
+            f.inst.clone(),
+            dev.clone(),
+            ob.head().unwrap(),
+            ManualClock::new(1_800_000_000_000, 0),
+        );
+        assert!(matches!(
+            w.write(&mut ob, &EventBody::Resumed, Urgency::None, &f.set()),
+            Err(crate::writer::WriterError::Outbox(
+                OutboxError::StaleRecipients { current: None, .. }
+            ))
+        ));
+
+        // The member's client handed the device v2's ref at enrollment.
+        let anchor = ManifestAnchor::AtLeast(v2.body.reference());
+        assert!(matches!(
+            ob.bootstrap_manifest(&v1, &pinned, &f.member, anchor),
+            Err(OutboxError::Manifest(RecipientError::Rollback { .. }))
+        ));
+        let mut fork = f.body(2);
+        fork.issued_at_ms += 7;
+        assert!(matches!(
+            ob.bootstrap_manifest(&f.sign(fork), &pinned, &f.member, anchor),
+            Err(OutboxError::Manifest(RecipientError::Equivocation { .. }))
+        ));
+        assert_eq!(
+            ob.manifest_checkpoint().unwrap(),
+            None,
+            "rejections store nothing"
+        );
+        let set = ob
+            .bootstrap_manifest(&v2, &pinned, &f.member, anchor)
+            .unwrap();
+        assert_eq!(set.manifest_ref(), v2.body.reference());
+        let ev = w
+            .write(&mut ob, &EventBody::Resumed, Urgency::None, &set)
+            .unwrap();
+        assert_eq!(envelope_ids(&ev), vec![f.member.clone()]);
+        assert!(!envelope_ids(&ev).contains(&removed));
+        // Bootstrapping is one-time: it cannot be used to re-run TOFU.
+        assert!(matches!(
+            ob.bootstrap_manifest(&v1, &pinned, &f.member, ManifestAnchor::TrustOnFirstUse),
+            Err(OutboxError::AlreadyBootstrapped { checkpoint }) if checkpoint == v2.body.reference()
+        ));
+        assert!(matches!(
+            ob.accept_manifest(&v1, &pinned, &f.member),
+            Err(OutboxError::Manifest(RecipientError::Rollback { .. }))
+        ));
+
+        // A manifest newer than the anchor is fine; a bogus anchor (one no
+        // signed manifest reaches) just fails and leaves nothing behind.
+        let td2 = tempfile::tempdir().unwrap();
+        let mut ob2 = Outbox::open(td2.path(), &f.inst, &dev).unwrap();
+        let bogus = ManifestAnchor::AtLeast(ManifestRef {
+            version: 1 << 40,
+            hash: Hash32::of(b"bogus"),
+        });
+        assert!(matches!(
+            ob2.bootstrap_manifest(&v2, &pinned, &f.member, bogus),
+            Err(OutboxError::Manifest(RecipientError::Rollback { .. }))
+        ));
+        assert_eq!(ob2.manifest_checkpoint().unwrap(), None);
+        let v3 = f.manifest(3);
+        ob2.bootstrap_manifest(&v3, &pinned, &f.member, anchor)
+            .unwrap();
+        assert_eq!(
+            ob2.manifest_checkpoint().unwrap(),
+            Some(v3.body.reference())
+        );
+    }
+
+    /// Regression: a set obtained before another component accepted a
+    /// manifest removing an ally could still be committed, so the removed
+    /// ally kept receiving new items.
+    #[test]
+    fn stale_set_cannot_be_committed_after_checkpoint_advanced() {
+        let mut e = env();
+        let removed = e.f.allies[0].0.clone();
+        let set1 = e.set.clone();
+        assert!(set1.recipients().iter().any(|r| r.user_id == removed));
+        let head = e.ob.head().unwrap();
+
+        // Another connection (say, the sync task) accepts v2.
+        let v2 = without_allies(&e.f, 2);
+        let mut sync = Outbox::open(&e.dir, &e.f.inst, e.w.device_id()).unwrap();
+        sync.accept_manifest(&v2, &e.pinned(), &e.f.member).unwrap();
+
+        let used = set1.manifest_ref();
+        let stale = |r: Result<SignedEvent, crate::writer::WriterError>| {
+            matches!(
+                r,
+                Err(crate::writer::WriterError::Outbox(OutboxError::StaleRecipients {
+                    used: u,
+                    current: Some(c),
+                })) if u == used && c == v2.body.reference()
+            )
+        };
+        assert!(stale(e.w.write(
+            &mut e.ob,
+            &EventBody::Resumed,
+            Urgency::None,
+            &set1
+        )));
+        assert_eq!(e.ob.head().unwrap(), head, "nothing stored");
+        assert_eq!(e.w.head(), head, "writer did not adopt");
+        assert_eq!(e.ob.stats().unwrap().events, 0);
+        // Same for reports.
+        let r = report(&e, 1_000, 2_000);
+        assert!(matches!(
+            e.ob.add_report(&r),
+            Err(OutboxError::StaleRecipients { .. })
+        ));
+        assert!(e.ob.pending_reports().unwrap().is_empty());
+
+        // A set built against the wrong checkpoint inside the crate (the
+        // misuse the public API no longer allows) is refused too, and so is
+        // one newer than the checkpoint that was never persisted.
+        let (unchecked, _) = e.f.accept(&e.f.manifest(1), None).unwrap();
+        let (ahead, _) = e.f.accept(&e.f.manifest(7), None).unwrap();
+        for s in [&unchecked, &ahead] {
+            let p = e.w.prepare(&EventBody::Resumed, Urgency::None, s).unwrap();
+            assert!(matches!(
+                e.ob.commit(&p),
+                Err(OutboxError::StaleRecipients { .. })
+            ));
+        }
+
+        // Reloading the current set works and never reaches the removed ally.
+        let current =
+            e.ob.current_recipients(&e.pinned(), &e.f.member)
+                .unwrap()
+                .unwrap();
+        let ev =
+            e.w.write(&mut e.ob, &EventBody::Resumed, Urgency::None, &current)
+                .unwrap();
+        assert!(open_event_body(&ev, &removed, &e.f.allies[0].1).is_err());
+        assert!(open_event_body(&ev, &e.f.member, &e.f.member_enc).is_ok());
+        let r = crate::report::seal_report(
+            &crate::report::ReportBuilder::new(
+                e.w.device_id().clone(),
+                "Laptop-X",
+                1_000,
+                2_000,
+                crate::report::ReportOptions::default(),
+            )
+            .unwrap()
+            .finish(),
+            &e.f.inst,
+            &e.f.member,
+            &current,
+            e.w.signing_key(),
+        )
+        .unwrap();
+        e.ob.add_report(&r).unwrap();
+    }
+
+    /// Regression: only the ref was stored, so a device restarting with no
+    /// network (or facing a withheld or rolled-back manifest) had no set and
+    /// could not record anything, tamper events included.
+    #[test]
+    fn restart_offline_keeps_sealing_to_last_accepted_manifest() {
+        let mut e = env();
+        let removed = e.f.allies[0].0.clone();
+        let v2 = without_allies(&e.f, 2);
+        e.accept(&v2).unwrap();
+
+        e.reopen(); // restart; the instance is unreachable
+        let set =
+            e.ob.current_recipients(&e.pinned(), &e.f.member)
+                .unwrap()
+                .expect("set rebuilt from disk");
+        assert_eq!(set.manifest_ref(), v2.body.reference());
+        let ev =
+            e.w.write(
+                &mut e.ob,
+                &EventBody::Tamper {
+                    signal: TamperSignal::WaylandTokenLost,
+                },
+                Urgency::Urgent,
+                &set,
+            )
+            .unwrap();
+        assert!(open_event_body(&ev, &removed, &e.f.allies[0].1).is_err());
+
+        // A hostile instance re-serves v1: rejected, and the stored v2 is
+        // still what the device seals to.
+        assert!(matches!(
+            e.accept(&e.f.manifest(1)),
+            Err(OutboxError::Manifest(RecipientError::Rollback { .. }))
+        ));
+        assert_eq!(
+            e.ob.current_recipients(&e.pinned(), &e.f.member).unwrap(),
+            Some(set.clone())
+        );
+
+        // A failure while storing v3 (standing in for a crash) leaves both
+        // the old ref and the old document, never one without the other.
+        e.ob.raw()
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE UPDATE ON manifest_checkpoint
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            e.accept(&e.f.manifest(3)),
+            Err(OutboxError::Sql(_))
+        ));
+        e.reopen();
+        assert_eq!(
+            e.ob.manifest_checkpoint().unwrap(),
+            Some(v2.body.reference())
+        );
+        assert_eq!(
+            e.ob.current_recipients(&e.pinned(), &e.f.member).unwrap(),
+            Some(set)
+        );
+    }
+
+    #[test]
+    fn tampered_checkpoint_row_is_corrupt_not_trusted() {
+        let mut e = env();
+        let v2 = e.f.manifest(2);
+        e.accept(&v2).unwrap();
+        let pinned = e.pinned();
+        let member = e.f.member.clone();
+        let corrupt = |ob: &Outbox, pinned: &SignPublicKey| {
+            matches!(
+                ob.current_recipients(pinned, &member),
+                Err(OutboxError::Corrupt(_))
+            )
+        };
+        // The wrong pinned key (another enrollment) does not verify.
+        assert!(corrupt(&e.ob, &SigningKey::generate().public()));
+
+        // A genuine older document swapped in under the v2 ref.
+        e.ob.raw()
+            .execute(
+                "UPDATE manifest_checkpoint SET manifest_json = ?1",
+                [serde_json::to_string(&e.f.manifest(1)).unwrap()],
+            )
+            .unwrap();
+        assert!(corrupt(&e.ob, &pinned));
+        // The ref lowered to match an older document.
+        let v1 = e.f.manifest(1);
+        e.ob.raw()
+            .execute(
+                "UPDATE manifest_checkpoint SET version = 1, hash = ?1",
+                [v1.body.hash().to_prefixed_hex()],
+            )
+            .unwrap();
+        assert!(
+            e.ob.current_recipients(&pinned, &member).unwrap().is_some(),
+            "consistent v1 row verifies (rollback by editing the file is out of scope)"
+        );
+        // A newer genuine document under an older ref.
+        e.ob.raw()
+            .execute(
+                "UPDATE manifest_checkpoint SET manifest_json = ?1",
+                [serde_json::to_string(&e.f.manifest(5)).unwrap()],
+            )
+            .unwrap();
+        assert!(corrupt(&e.ob, &pinned));
+        // Garbage JSON and a bad hash.
+        e.ob.raw()
+            .execute("UPDATE manifest_checkpoint SET manifest_json = 'nope'", [])
+            .unwrap();
+        assert!(corrupt(&e.ob, &pinned));
+        e.ob.raw()
+            .execute("UPDATE manifest_checkpoint SET hash = 'nope'", [])
+            .unwrap();
+        assert!(corrupt(&e.ob, &pinned));
+        assert!(matches!(
+            e.ob.manifest_checkpoint(),
+            Err(OutboxError::Corrupt(_))
+        ));
+        assert!(matches!(e.accept(&v2), Err(OutboxError::Corrupt(_))));
+        let p =
+            e.w.prepare(&EventBody::Resumed, Urgency::None, &e.set)
+                .unwrap();
+        assert!(matches!(e.ob.commit(&p), Err(OutboxError::Corrupt(_))));
+    }
+
+    /// The version-1 layout exactly as shipped, before the checkpoint table.
+    const SCHEMA_V1_AS_SHIPPED: &str = "
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+        CREATE TABLE chain_state (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            next_seq INTEGER NOT NULL CHECK (next_seq >= 0),
+            prev_hash TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE events (
+            seq INTEGER PRIMARY KEY CHECK (seq >= 0),
+            kind TEXT NOT NULL,
+            urgency TEXT NOT NULL CHECK (urgency IN ('none', 'normal', 'urgent')),
+            ts_ms INTEGER NOT NULL,
+            size INTEGER NOT NULL CHECK (size >= 0),
+            json TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_start INTEGER NOT NULL,
+            period_end INTEGER NOT NULL,
+            age_ms INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            json TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE pruned (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_seq INTEGER NOT NULL,
+            to_seq INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            at INTEGER NOT NULL
+        ) STRICT;
+    ";
+
+    #[test]
+    fn migrates_v1_database_and_keeps_data() {
+        let td = tempfile::tempdir().unwrap();
+        let f = Fixture::new(1);
+        let dev = DeviceId::new("dev_old");
+        let clock = ManualClock::new(1_800_000_000_000, 0);
+        let mut w = EventWriter::new(
+            SigningKey::generate(),
+            f.inst.clone(),
+            dev.clone(),
+            ChainHead::genesis(&f.inst, &dev),
+            clock,
+        );
+        let p = w
+            .prepare(&EventBody::Resumed, Urgency::Normal, &f.set())
+            .unwrap();
+        w.adopt_committed(&p).unwrap();
+        let json = serde_json::to_string(p.event()).unwrap();
+        {
+            let c = Connection::open(td.path().join(OUTBOX_FILE)).unwrap();
+            c.execute_batch(SCHEMA_V1_AS_SHIPPED).unwrap();
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '1'),
+                 ('instance_id', ?1), ('device_id', ?2), ('age_hw_ms', '1800000000000')",
+                params![f.inst.as_str(), dev.as_str()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO chain_state (id, next_seq, prev_hash) VALUES (0, 1, ?1)",
+                [w.head().prev_hash.to_prefixed_hex()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO events (seq, kind, urgency, ts_ms, size, json)
+                 VALUES (0, 'resumed', 'normal', 1800000000000, ?1, ?2)",
+                params![json.len() as i64, json],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO pruned (from_seq, to_seq, reason, at) VALUES (0, 0, 'age', 7)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut ob = Outbox::open(td.path(), &f.inst, &dev).unwrap();
+        assert_eq!(schema_version(&ob), "2");
+        assert_eq!(ob.head().unwrap(), w.head());
+        assert_eq!(ob.pending(10).unwrap(), vec![p.event().clone()]);
+        assert_eq!(ob.pruned_ranges().unwrap().len(), 1);
+        assert_eq!(ob.manifest_checkpoint().unwrap(), None);
+        // An upgraded device has no checkpoint either and must bootstrap.
+        let v4 = f.manifest(4);
+        let pinned = f.member_sign.public();
+        assert!(matches!(
+            ob.accept_manifest(&v4, &pinned, &f.member),
+            Err(OutboxError::NotBootstrapped)
+        ));
+        let set = ob
+            .bootstrap_manifest(&v4, &pinned, &f.member, ManifestAnchor::TrustOnFirstUse)
+            .unwrap();
+        // The chain continues from the migrated head.
+        w.write(&mut ob, &EventBody::Shutdown, Urgency::None, &set)
+            .unwrap();
+        drop(ob);
+        let ob = Outbox::open(td.path(), &f.inst, &dev).unwrap();
+        assert_eq!(ob.manifest_checkpoint().unwrap(), Some(v4.body.reference()));
+        assert_eq!(
+            ob.current_recipients(&pinned, &f.member).unwrap(),
+            Some(set)
+        );
+        assert_eq!(ob.pending(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn failed_migration_leaves_v1_database_intact() {
+        let td = tempfile::tempdir().unwrap();
+        let f = Fixture::new(0);
+        let dev = DeviceId::new("dev_old");
+        {
+            let c = Connection::open(td.path().join(OUTBOX_FILE)).unwrap();
+            c.execute_batch(SCHEMA_V1_AS_SHIPPED).unwrap();
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '1'),
+                 ('instance_id', ?1), ('device_id', ?2)",
+                params![f.inst.as_str(), dev.as_str()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO chain_state (id, next_seq, prev_hash) VALUES (0, 0, ?1)",
+                [ChainHead::genesis(&f.inst, &dev)
+                    .prev_hash
+                    .to_prefixed_hex()],
+            )
+            .unwrap();
+            // Make the v2 step fail halfway: its table name is taken.
+            c.execute_batch("CREATE TABLE manifest_checkpoint (x INTEGER)")
+                .unwrap();
+        }
+        assert!(matches!(
+            Outbox::open(td.path(), &f.inst, &dev),
+            Err(OutboxError::Sql(_))
+        ));
+        let c = Connection::open(td.path().join(OUTBOX_FILE)).unwrap();
+        let v: String = c
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "1", "version is not bumped when a step fails");
+    }
+
+    #[test]
+    fn rejects_newer_or_zero_schema() {
+        let e = env();
+        e.ob.raw()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                [(SCHEMA_VERSION + 1).to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            Outbox::open(&e.dir, &e.f.inst, e.w.device_id()),
+            Err(OutboxError::UnsupportedSchema { found }) if found == SCHEMA_VERSION + 1
+        ));
+        e.ob.raw()
+            .execute(
+                "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            Outbox::open(&e.dir, &e.f.inst, e.w.device_id()),
+            Err(OutboxError::Corrupt(_))
+        ));
     }
 
     #[test]
