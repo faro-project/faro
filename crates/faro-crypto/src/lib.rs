@@ -15,11 +15,13 @@
 //! ally web app can use `libsodium.js` to open what devices produce.
 
 pub mod chain;
+mod keycheck;
 mod passphrase;
 mod seal;
 mod sign;
 
 pub use chain::{verify_chain, verify_next, ChainError, ChainHead, Link};
+pub use keycheck::{is_weak_x25519, validate_enc_pubkey, validate_sign_pubkey};
 pub use passphrase::{
     generate_recovery_code, unwrap_secret, wrap_secret, KdfParams, WrappedSecret,
 };

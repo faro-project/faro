@@ -37,8 +37,9 @@ Tags in use:
 | `faro/heartbeat/v1` | Heartbeat |
 | `faro/request/v1` | Device request signature |
 | `faro/ally-endorsement/v1` | Member-signed ally key |
-| `faro/device-endorsement/v1` | Member-signed device key |
+| `faro/device-endorsement/v2` | Member-signed device key, with the `min_manifest` anchor |
 | `faro/member-enc-key/v1` | Member's own encryption key binding |
+| `faro/recipient-manifest/v1` | Member-signed, versioned recipient list (§5.1) |
 | `faro/key-id/v1` | Key identifier |
 | `faro/safety-code/v1` | Safety code |
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
@@ -151,7 +152,54 @@ The member's Ed25519 signing key is the root of trust for their key directory. T
 
 On the wire, each one is the struct's JSON fields flattened together with `"sig"`.
 
-A device **pins the member's signing key at enrollment**. It only encrypts to ally keys whose endorsements verify against that pinned key and name the same `instance_id` and `member_id`. Endorsements that fail are ignored, so a curious or compromised instance cannot add an eavesdropping key.
+A device **pins the member's signing key at enrollment**, and everything it trusts must be signed by that key. Endorsements record individual approvals, but they **cannot express removal**: a removed ally's old endorsement still verifies. So devices do not pick recipients from endorsements. They use the recipient manifest (§5.1).
+
+### 5.1 Recipient manifest
+
+`RecipientManifest` is a single member-signed, versioned list of everyone a device may encrypt to:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `member_id` | string | |
+| `version` | u64 | Starts at 1 and goes up by exactly 1 with every change |
+| `issued_at_ms` | i64 | |
+| `member_enc_pubkey` | 32 bytes | The member's own X25519 key |
+| `allies` | list | `{ally_id, enc_pubkey}` entries, at most 32, sorted strictly ascending by `ally_id` |
+
+- **Encoding:** `signing_bytes = Canonical("faro/recipient-manifest/v1").str(instance_id).str(member_id).u64(version).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, followed by `.str(ally_id).fixed(enc_pubkey)` for each ally in order.
+- **Identity:** a manifest's identity is `hash = BLAKE3(signing_bytes)`. A `ManifestRef` is `{version, hash}`.
+- **Uploads:** the member signs a new version whenever they approve or remove an ally, an ally's key rotates, or their own encryption key rotates. The instance stores the latest version and serves it at `GET /v1/members/{id}/recipient-manifest`.
+
+**Device rules.** The device keeps a persisted checkpoint: the highest `ManifestRef` it has accepted, **together with that signed manifest itself**. Both are stored atomically in the outbox database. Storing the document, not just its ref, is what lets a device that restarts while offline, or whose instance withholds manifests, keep using its last accepted manifest.
+
+**Bootstrapping (first manifest).** Version checks only protect a device that already has a checkpoint. A freshly enrolled or reinstalled device must not trust whatever the instance serves first, which could be a pre-removal manifest. So the member-signed `DeviceEndorsement` carries `min_manifest: ManifestRef`, the manifest current when the member approved the device. A device accepts its first manifest only if it is at or above that version, and, at exactly that version, has that hash. The device stays `pending` (it seals nothing) until it holds its endorsement. A client that has no anchor must opt into trust-on-first-use explicitly; it never falls into it by default.
+
+A fetched manifest is accepted only if all of the following hold:
+
+1. It passes `validate()`: version ≥ 1, at most 32 allies, ids well formed, sorted and unique, and the member not listed as their own ally. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
+2. Its signature verifies against the **pinned** member signing key.
+3. `instance_id` and `member_id` match the enrollment.
+4. No key in it is a small-order X25519 point.
+5. Against the checkpoint (or, for the first manifest, against the `min_manifest` anchor):
+   - a lower `version` is **rollback**: reject it;
+   - the same `version` with a different `hash` is **equivocation**: reject it;
+   - the same `version` and `hash` means nothing changed;
+   - a higher `version` is accepted, and the checkpoint advances.
+
+On any rejection the device keeps using its last accepted manifest and surfaces a warning to the member. It **never** falls back to endorsements.
+
+**Recipients:** for every new item, the recipients are the member plus exactly the allies in the accepted manifest. The device refuses to queue anything sealed to a manifest other than its current checkpoint, so a stale recipient set held in memory can't keep encrypting to a removed ally.
+
+**Fetch limits:** clients cap the response body of `GET /v1/members/{id}/recipient-manifest` at 64 KiB before JSON parsing. A maximal manifest (32 allies, bounded ids) is a few KiB.
+
+**Limits** (documented, not solved by v1):
+
+- **Removal is forward-only.** A removed ally can still decrypt items sealed to them before the device accepted the new manifest. No scheme can take back a key that was already shared. The instance limits the damage: it serves an ally a blob only if the item was received while that ally held an active link. Being approved again later never opens items from the gap.
+- **Withholding.** A malicious instance can delay delivering a newer manifest, though it can't forge one or roll one back. The planned mitigations:
+  - the tray UI and the monthly consent notice show the ally list the device is actually using;
+  - the member's own client can hand a newly signed manifest to the device locally;
+  - reports will carry the `ManifestRef` used, so the ally web app can flag a device still encrypting to an outdated list.
 
 ## 6. Device request authentication
 
@@ -173,6 +221,13 @@ The instance rejects requests whose timestamp is more than 5 minutes off its own
 Heartbeats are **not** chain events, so 288 pings a day don't grow the chain. A `Heartbeat` carries `{instance_id, device_id, ts_ms, mono_ms, boot_id, state, last_seq?, last_hash?}` and is signed under `faro/heartbeat/v1`. `state` is one of `active`, `idle`, `locked`, `paused`, `sleeping` or `shutting_down`.
 
 The instance uses these fields for liveness and to tell the device which `seq` it holds (`acked_through`). It also returns `server_time_ms`, which the device compares with its own clock to detect clock tampering.
+
+`last_seq` and `last_hash` are checked against what the instance holds:
+
+- **Upload stall.** If `last_seq` stays ahead of the highest event the instance has verified for longer than the liveness grace period, the device is alive but not uploading what it records. The instance raises one urgent `upload_stalled` alert per stall.
+- **Fork.** If `last_seq` names an event the instance holds but `last_hash` differs from that event's chain hash, the device's history differs from what it uploaded. The instance raises an urgent `chain_gap` alert. So `last_hash` must be the `chain_hash` of the event at `last_seq`.
+
+Both alerts are tamper-class: allies can move them to the digest but not turn them off.
 
 ## 8. Deviations from ARCHITECTURE.md v0.2
 

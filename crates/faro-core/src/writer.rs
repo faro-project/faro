@@ -16,6 +16,10 @@
 //! ([`EventWriter::write`] / [`EventWriter::adopt_committed`]), so a crash
 //! between signing and storing can never cause the same `seq` to be signed
 //! twice with different content (which the instance would see as a fork).
+//!
+//! A [`PreparedEvent`] also remembers which recipient manifest its body was
+//! sealed to, so the outbox can refuse it if that manifest is no longer the
+//! device's checkpoint (an ally was removed while the set was held).
 
 use crate::clock::Clock;
 use crate::outbox::{Outbox, OutboxError};
@@ -23,6 +27,7 @@ use crate::recipients::RecipientSet;
 use faro_crypto::Zeroizing;
 use faro_crypto::{open_item, seal_item, ChainHead, CryptoError, EncryptionKeypair, SigningKey};
 use faro_proto::body::EventBody;
+use faro_proto::keys::ManifestRef;
 use faro_proto::{
     DeviceId, EventHeader, Hash32, InstanceId, SignedEvent, Urgency, UserId, EVENT_HEADER_VERSION,
 };
@@ -55,6 +60,7 @@ pub struct PreparedEvent {
     event: SignedEvent,
     prev_head: ChainHead,
     new_head: ChainHead,
+    manifest: ManifestRef,
 }
 
 impl PreparedEvent {
@@ -71,6 +77,12 @@ impl PreparedEvent {
     }
     pub fn into_event(self) -> SignedEvent {
         self.event
+    }
+    /// The recipient manifest the body was sealed to.
+    /// [`Outbox::commit`] refuses the event unless this is still the stored
+    /// checkpoint.
+    pub fn manifest_ref(&self) -> ManifestRef {
+        self.manifest
     }
 
     /// Test-only escape hatch to construct inconsistent values.
@@ -191,6 +203,7 @@ impl<C: Clock> EventWriter<C> {
             },
             prev_head: self.head,
             new_head,
+            manifest: recipients.manifest_ref(),
         })
     }
 

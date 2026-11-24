@@ -14,6 +14,7 @@ use crate::urgency::{route_signal, SignalRoute};
 use faro_crypto::Zeroizing;
 use faro_crypto::{open_item, seal_item, verify_item, CryptoError, EncryptionKeypair, SigningKey};
 use faro_proto::body::{AppInfo, FlagBody, Rating, TamperSignal};
+use faro_proto::keys::ManifestRef;
 use faro_proto::report::{
     ActivityState, CountedItem, DailyReport, FlaggedMoment, HealthSummary, RatingCounts,
     ReportHeader, ReportUpload, TamperRecord, TimelineSpan,
@@ -367,6 +368,31 @@ fn build_timeline(
     out
 }
 
+/// A report sealed by [`seal_report`], waiting to be queued with
+/// [`Outbox::add_report`](crate::outbox::Outbox::add_report).
+///
+/// It carries the recipient manifest the body was sealed to, so the outbox
+/// can refuse a report sealed to a set that is no longer the device's
+/// checkpoint (for example one that still includes a removed ally). The
+/// wire `ReportHeader` does not carry that ref yet, which is why it travels
+/// alongside rather than inside the upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedReport {
+    upload: ReportUpload,
+    manifest: ManifestRef,
+}
+
+impl SealedReport {
+    /// The signed, encrypted upload.
+    pub fn upload(&self) -> &ReportUpload {
+        &self.upload
+    }
+    /// The recipient manifest the body was sealed to.
+    pub fn manifest_ref(&self) -> ManifestRef {
+        self.manifest
+    }
+}
+
 /// Encrypt `report` to the member and their verified allies and sign the
 /// header with the device key.
 ///
@@ -378,7 +404,7 @@ pub fn seal_report(
     member_id: &UserId,
     recipients: &RecipientSet,
     device_key: &SigningKey,
-) -> Result<ReportUpload, ReportError> {
+) -> Result<SealedReport, ReportError> {
     if recipients.instance_id() != instance_id || recipients.member_id() != member_id {
         return Err(ReportError::RecipientMismatch {
             instance: instance_id.clone(),
@@ -404,7 +430,10 @@ pub fn seal_report(
     header.body_hash = body.body_hash();
     header.body_len = body.ciphertext.len() as u64;
     let sig = device_key.sign(&header);
-    Ok(ReportUpload { header, sig, body })
+    Ok(SealedReport {
+        upload: ReportUpload { header, sig, body },
+        manifest: recipients.manifest_ref(),
+    })
 }
 
 /// Verify and decrypt a report as recipient `me` (member tray view, tests;
@@ -667,7 +696,9 @@ mod tests {
         b.record_capture(T0 + 5, Rating::Medium);
         b.record_flag(1, T0 + 5, &flag(Rating::Medium, true));
         let report = b.finish();
-        let up = seal_report(&report, &f.inst, &f.member, &set, &dev_key).unwrap();
+        let sealed = seal_report(&report, &f.inst, &f.member, &set, &dev_key).unwrap();
+        assert_eq!(sealed.manifest_ref(), set.manifest_ref());
+        let up = sealed.upload().clone();
         assert_eq!(up.body.envelopes.len(), 3);
         // The instance-visible JSON carries no plaintext.
         let wire = serde_json::to_string(&up).unwrap();
@@ -701,7 +732,7 @@ mod tests {
         // Swapping in another report's body is caught by the commitment.
         let other = seal_report(&report, &f.inst, &f.member, &set, &dev_key).unwrap();
         let mut t = up.clone();
-        t.body = other.body;
+        t.body = other.upload().body.clone();
         assert!(matches!(
             open_report(&t, &dev_key.public(), &f.member, &f.member_enc),
             Err(ReportError::BodyMismatch)

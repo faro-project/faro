@@ -3,7 +3,9 @@
 use crate::encoding::{Canonical, EncPublicKey, Hash32, SignPublicKey, Signature};
 use crate::event::{EventKind, SignedEvent, Urgency};
 use crate::ids::{DeviceId, InstanceId, UserId};
-use crate::keys::{AllyEndorsement, DeviceEndorsement, MemberEncKeyBinding, Signed};
+use crate::keys::{
+    AllyEndorsement, DeviceEndorsement, MemberEncKeyBinding, RecipientManifest, Signed,
+};
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version advertised in `/.well-known/faro`.
@@ -88,6 +90,21 @@ pub struct MemberKeysResponse {
     /// pinned member key and ignore entries that fail.
     pub allies: Vec<Signed<AllyEndorsement>>,
 }
+
+/// A member-signed [`RecipientManifest`]: the only thing devices use to pick
+/// recipients.
+///
+/// * `GET /v1/members/{id}/recipient-manifest` (that member's device, or the
+///   member): the **latest** manifest the instance holds.
+/// * `PUT /v1/me/recipient-manifest` (member session): upload a new version.
+///   The instance verifies the signature with the member's signing key and
+///   requires `version` to be exactly one more than the stored version, and
+///   every listed ally to have an active or just-approved link whose stored
+///   key matches. Approving or removing an ally, and any key rotation, must
+///   come with a new manifest.
+///
+/// See `docs/PROTOCOL.md` §5.1 for the device-side rules.
+pub type SignedRecipientManifest = Signed<RecipientManifest>;
 
 /// Header names for device request authentication.
 pub mod auth_headers {
@@ -233,6 +250,15 @@ pub enum ServerAlertKind {
     ClockSkew,
     DeviceRemoved,
     AllyRemoved,
+    /// The member approved a new ally (§5.4: "ally added or removed").
+    AllyAdded,
+    /// The member changed a setting held on the server (for example shorter
+    /// retention), so allies are told just as for device settings changes.
+    MemberSettingsChanged,
+    /// The device's signed heartbeats claim events (`last_seq`) the instance
+    /// has not received, for longer than the liveness grace period: it is
+    /// alive but not uploading what it records. Tamper-class.
+    UploadStalled,
 }
 
 impl ServerAlertKind {
@@ -244,7 +270,27 @@ impl ServerAlertKind {
             ServerAlertKind::ClockSkew => "clock_skew",
             ServerAlertKind::DeviceRemoved => "device_removed",
             ServerAlertKind::AllyRemoved => "ally_removed",
+            ServerAlertKind::AllyAdded => "ally_added",
+            ServerAlertKind::MemberSettingsChanged => "member_settings_changed",
+            ServerAlertKind::UploadStalled => "upload_stalled",
         }
+    }
+
+    pub const ALL: [ServerAlertKind; 9] = [
+        ServerAlertKind::MissedCheckin,
+        ServerAlertKind::ChainGap,
+        ServerAlertKind::InvalidSignature,
+        ServerAlertKind::ClockSkew,
+        ServerAlertKind::DeviceRemoved,
+        ServerAlertKind::AllyRemoved,
+        ServerAlertKind::AllyAdded,
+        ServerAlertKind::MemberSettingsChanged,
+        ServerAlertKind::UploadStalled,
+    ];
+
+    /// Inverse of [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
 
     pub fn urgency(self) -> Urgency {
@@ -253,8 +299,11 @@ impl ServerAlertKind {
             | ServerAlertKind::ChainGap
             | ServerAlertKind::InvalidSignature
             | ServerAlertKind::ClockSkew
-            | ServerAlertKind::DeviceRemoved => Urgency::Urgent,
-            ServerAlertKind::AllyRemoved => Urgency::Normal,
+            | ServerAlertKind::DeviceRemoved
+            | ServerAlertKind::UploadStalled => Urgency::Urgent,
+            ServerAlertKind::AllyRemoved
+            | ServerAlertKind::AllyAdded
+            | ServerAlertKind::MemberSettingsChanged => Urgency::Normal,
         }
     }
 }
@@ -332,6 +381,18 @@ mod tests {
             a,
             request_signing_bytes("POST", "/v1/events:batch", &d, 1, b"{}")
         );
+    }
+
+    #[test]
+    fn server_alert_kinds_roundtrip() {
+        for k in ServerAlertKind::ALL {
+            assert_eq!(ServerAlertKind::parse(k.as_str()), Some(k));
+            assert_eq!(
+                serde_json::to_string(&k).unwrap(),
+                format!("\"{}\"", k.as_str())
+            );
+        }
+        assert_eq!(ServerAlertKind::parse("nope"), None);
     }
 
     #[test]

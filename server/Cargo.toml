@@ -1,0 +1,61 @@
+[package]
+name = "faro-server"
+description = "Faro self-hosted instance server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "faro_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "faro-server"
+path = "src/main.rs"
+
+[dependencies]
+faro-proto.workspace = true
+faro-crypto.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+base64.workspace = true
+hex.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+tokio-util = { version = "0.7.20", features = ["rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Mail, TLS, backups.
+lettre = { workspace = true, features = ["tokio1-rustls-tls"] }
+# Built-in HTTPS (§4.2). ring everywhere: sqlx and lettre already use the ring
+# provider, so the build never needs aws-lc's C toolchain.
+rustls-acme = { version = "0.15.4", default-features = false, features = ["ring", "tls12", "webpki-roots"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.9", features = ["std"] }
+tar = "0.4.46"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }
+proptest.workspace = true
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
