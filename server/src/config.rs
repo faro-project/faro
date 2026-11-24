@@ -647,7 +647,14 @@ pub fn public_url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
-/// Build a `sqlite://` URL that creates the file if missing.
+/// Build a SQLite URL that creates the file if missing.
+///
+/// sqlx's `Any` driver runs the URL through `Url::parse` before SQLite sees
+/// it, so the form matters. An absolute Unix path uses `sqlite:///abs`. A
+/// Windows path must not: `sqlite://C:\\…` parses `C` as a host and the rest
+/// as a port, and connecting fails with `InvalidPort`. Every other path
+/// (drive letters, UNC, relative) uses the authority-less `sqlite:<path>`.
+/// sqlx's SQLite parser strips either prefix, so both forms name the same file.
 pub fn sqlite_url_for(path: &Path) -> String {
     let mut encoded = String::new();
     for ch in path.to_string_lossy().chars() {
@@ -659,7 +666,11 @@ pub fn sqlite_url_for(path: &Path) -> String {
             c => encoded.push(c),
         }
     }
-    format!("sqlite://{encoded}?mode=rwc")
+    if encoded.starts_with('/') {
+        format!("sqlite://{encoded}?mode=rwc")
+    } else {
+        format!("sqlite:{encoded}?mode=rwc")
+    }
 }
 
 #[cfg(test)]
@@ -823,6 +834,32 @@ mod tests {
     #[test]
     fn unknown_toml_keys_are_rejected() {
         assert!(Config::from_toml_str("pubilc_url = \"x\"", Path::new("x")).is_err());
+    }
+
+    /// Parse `url` exactly as `db::Db::connect` does (`Any`, then SQLite).
+    fn sqlite_filename_via_any(url: &str) -> PathBuf {
+        use sqlx::ConnectOptions;
+        use std::str::FromStr;
+        let any = sqlx::any::AnyConnectOptions::from_str(url).expect("Any parses the URL");
+        sqlx::sqlite::SqliteConnectOptions::from_url(&any.database_url)
+            .expect("SQLite parses the URL")
+            .get_filename()
+            .to_path_buf()
+    }
+
+    #[test]
+    fn sqlite_url_round_trips_through_the_any_driver() {
+        // A Windows drive path, a UNC path, and a Unix path with characters
+        // that need escaping. On Unix the first two are just odd relative
+        // filenames, so this checks the Windows URL form on every platform.
+        for p in [
+            r"C:\Users\runneradmin\AppData\Local\Temp\.tmpX\faro.db",
+            r"\\server\share\faro\faro.db",
+            "/tmp/my dir/faro?#%.db",
+        ] {
+            let url = sqlite_url_for(Path::new(p));
+            assert_eq!(sqlite_filename_via_any(&url), Path::new(p), "{url}");
+        }
     }
 
     #[test]
