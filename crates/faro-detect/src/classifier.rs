@@ -595,7 +595,7 @@ mod tests {
         i.std = [1.0; 3];
         i.input_scale = 1.0;
         let t = preprocess(&solid(3, 3, PixelFormat::Rgba8, [10, 20, 30, 40]), &i);
-        for px in t.chunks_exact(3) {
+        for px in t.as_chunks::<3>().0 {
             assert!((px[0] - 30.0).abs() < 1e-4);
             assert!((px[1] - 20.0).abs() < 1e-4);
             assert!((px[2] - 10.0).abs() < 1e-4);

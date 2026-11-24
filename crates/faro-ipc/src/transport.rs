@@ -241,6 +241,11 @@ fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// The sticky bit. Its value is fixed by POSIX, so it is spelled out here
+/// rather than taken from `libc`, whose `S_ISVTX` is `u16` on macOS but
+/// `u32` on Linux (which makes any conversion lint-clean on only one of them).
+const S_ISVTX: u32 = 0o1000;
+
 /// See the module docs, point 1.
 fn check_secure_dir(dir: &Path) -> Result<()> {
     let me = euid();
@@ -275,7 +280,7 @@ fn check_secure_dir(dir: &Path) -> Result<()> {
                 format!("ancestor owned by uid {}, expected root or {me}", md.uid()),
             ));
         }
-        let sticky = md.mode() & u32::from(libc::S_ISVTX) != 0;
+        let sticky = md.mode() & S_ISVTX != 0;
         if md.mode() & 0o022 != 0 && !sticky {
             return Err(insecure(
                 anc,

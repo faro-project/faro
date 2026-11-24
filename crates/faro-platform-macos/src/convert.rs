@@ -239,7 +239,7 @@ pub(crate) mod tests {
         let f = cgimage_to_frame(&img, 1, MAX_FRAME_SIDE).unwrap();
         assert_eq!((f.width(), f.height()), (768, 384));
         // A solid colour stays (almost exactly) that colour after filtering.
-        for px in f.pixels().chunks_exact(4) {
+        for px in f.pixels().as_chunks::<4>().0 {
             for (got, want) in px.iter().zip([30u8, 60, 90, 255]) {
                 assert!(got.abs_diff(want) <= 1, "{px:?}");
             }

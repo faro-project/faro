@@ -130,7 +130,7 @@ impl Frame {
     /// Convert to RGBA in place (swizzle), no extra allocation.
     pub fn into_rgba8(mut self) -> Frame {
         if self.format == PixelFormat::Bgra8 {
-            for px in self.pixels.chunks_exact_mut(4) {
+            for px in self.pixels.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
             self.format = PixelFormat::Rgba8;
@@ -161,7 +161,7 @@ impl Frame {
                 let mut acc = [0u32; 4];
                 for sy in y0..y1 {
                     let row = &self.pixels[(sy * sw + x0) * 4..(sy * sw + x1) * 4];
-                    for px in row.chunks_exact(4) {
+                    for px in row.as_chunks::<4>().0 {
                         for c in 0..4 {
                             acc[c] += px[c] as u32;
                         }
@@ -217,7 +217,12 @@ mod tests {
     fn downscale_keeps_aspect_and_color() {
         let f = solid(1920, 1080, [10, 20, 30, 255]).downscale_to_max(MAX_FRAME_SIDE);
         assert_eq!((f.width(), f.height()), (768, 432));
-        assert!(f.pixels().chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
+        assert!(f
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p == &[10, 20, 30, 255]));
     }
 
     #[test]

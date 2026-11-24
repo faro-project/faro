@@ -315,14 +315,18 @@ fn no_unblurred_frames_survive_a_high_rated_capture() {
         .expect("high rating has a thumbnail");
     let rgba = pattern_bytes();
     let rgb_in: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[2], p[1], p[0]]) // BGRA → RGB
         .collect();
     let mut needles = windows(&rgba);
     needles.extend(windows(&rgb_in));
     needles.extend(windows(
         &rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect::<Vec<_>>(),
     ));

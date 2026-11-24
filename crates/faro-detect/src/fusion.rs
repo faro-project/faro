@@ -589,7 +589,7 @@ mod tests {
             }
             // Every context finding is recorded.
             prop_assert!(r.reasons.iter().filter(|x| x.source != ReasonSource::Image).count() == findings.len());
-            let in_unit = |x: &Reason| x.score.map_or(true, |v| (0.0..=1.0).contains(&v));
+            let in_unit = |x: &Reason| x.score.is_none_or(|v| (0.0..=1.0).contains(&v));
             prop_assert!(r.reasons.iter().all(in_unit));
             prop_assert!(!r.reasons.iter().any(|x| x.label == "neutral"));
             // Incognito / no-extension never change the rating by default.

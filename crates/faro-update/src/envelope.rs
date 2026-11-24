@@ -314,7 +314,7 @@ mod tests {
         let mut env = Envelope::sign_raw(Role::Timestamp.payload_type(), b"{}", &[&a]);
         let extra = env.signatures[0].clone();
         env.signatures
-            .extend(std::iter::repeat(extra).take(MAX_SIGNATURES));
+            .extend(std::iter::repeat_n(extra, MAX_SIGNATURES));
         let rk = RoleKeys::new(ids(&[&a]), 1);
         assert!(matches!(
             env.verify_role(Role::Timestamp, &keyset(&[&a]), &rk),

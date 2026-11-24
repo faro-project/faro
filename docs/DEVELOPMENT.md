@@ -4,7 +4,7 @@
 
 ## Toolchain
 
-- Rust stable, 1.80 or newer (`rust-version` in the root `Cargo.toml`). CI uses the latest stable.
+- Rust stable, 1.89 or newer (`rust-version` in the root `Cargo.toml`; set by `rusqlite` 0.41). CI uses the latest stable.
 - No nightly is needed, except for the optional `cargo fuzz` targets.
 - `cargo-deny` is used for license, ban and advisory checks: `cargo deny check`.
 

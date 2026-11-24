@@ -52,7 +52,7 @@ pub fn dhash(frame: &Frame) -> u64 {
             let row = &px[y * w * 4..(y + 1) * w * 4];
             for (cx, &(x0, x1)) in xr.iter().enumerate() {
                 let mut acc = 0u64;
-                for p in row[x0 * 4..x1 * 4].chunks_exact(4) {
+                for p in row[x0 * 4..x1 * 4].as_chunks::<4>().0 {
                     // BT.601 luma, 8-bit fixed point.
                     acc += (77 * u64::from(p[ro]) + 150 * u64::from(p[go]) + 29 * u64::from(p[bo]))
                         >> 8;
