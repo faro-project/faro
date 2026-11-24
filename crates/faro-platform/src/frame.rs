@@ -107,10 +107,30 @@ impl Frame {
         &self.pixels
     }
 
+    /// Move the pixel buffer out without copying it, for handing a frame to
+    /// the IPC layer. The buffer stays zeroize-on-drop via [`Zeroizing`], so
+    /// the unblurred pixels are still wiped wherever they end up being dropped.
+    ///
+    /// Returns `(width, height, format, display_id, pixels)`.
+    ///
+    /// [`Zeroizing`]: zeroize::Zeroizing
+    pub fn into_parts(mut self) -> (u32, u32, PixelFormat, u32, zeroize::Zeroizing<Vec<u8>>) {
+        // `self` is ZeroizeOnDrop; taking the Vec leaves an empty one behind,
+        // so the drop of `self` at the end of this function has nothing to wipe.
+        let pixels = zeroize::Zeroizing::new(std::mem::take(&mut self.pixels));
+        (
+            self.width,
+            self.height,
+            self.format,
+            self.display_id,
+            pixels,
+        )
+    }
+
     /// Convert to RGBA in place (swizzle), no extra allocation.
     pub fn into_rgba8(mut self) -> Frame {
         if self.format == PixelFormat::Bgra8 {
-            for px in self.pixels.chunks_exact_mut(4) {
+            for px in self.pixels.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
             self.format = PixelFormat::Rgba8;
@@ -141,7 +161,7 @@ impl Frame {
                 let mut acc = [0u32; 4];
                 for sy in y0..y1 {
                     let row = &self.pixels[(sy * sw + x0) * 4..(sy * sw + x1) * 4];
-                    for px in row.chunks_exact(4) {
+                    for px in row.as_chunks::<4>().0 {
                         for c in 0..4 {
                             acc[c] += px[c] as u32;
                         }
@@ -197,7 +217,12 @@ mod tests {
     fn downscale_keeps_aspect_and_color() {
         let f = solid(1920, 1080, [10, 20, 30, 255]).downscale_to_max(MAX_FRAME_SIDE);
         assert_eq!((f.width(), f.height()), (768, 432));
-        assert!(f.pixels().chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
+        assert!(f
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p == &[10, 20, 30, 255]));
     }
 
     #[test]
@@ -220,6 +245,16 @@ mod tests {
         let mut f = solid(4, 4, [9, 9, 9, 9]);
         f.zeroize();
         assert!(f.pixels().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn into_parts_moves_without_copy() {
+        let f = solid(2, 2, [7, 8, 9, 10]);
+        let ptr = f.pixels().as_ptr();
+        let (w, h, fmt, d, px) = f.into_parts();
+        assert_eq!((w, h, fmt, d), (2, 2, PixelFormat::Rgba8, 0));
+        assert_eq!(px.as_ptr(), ptr, "buffer must be moved, not copied");
+        assert_eq!(&px[..4], &[7, 8, 9, 10]);
     }
 
     #[test]

@@ -1,0 +1,29 @@
+[package]
+name = "faro-update"
+description = "Faro TUF-style signed update verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+faro-proto.workspace = true
+faro-crypto.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+semver = { version = "1.0.28", features = ["serde"] }
+
+[dev-dependencies]
+clap.workspace = true
+anyhow.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+
+[[example]]
+name = "faro-release"
+path = "examples/faro-release.rs"
