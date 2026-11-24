@@ -116,6 +116,7 @@ fn termination() -> std::io::Result<impl std::future::Future<Output = ()>> {
     })
 }
 
+#[cfg(unix)]
 type Platform = (
     faro_platform::AgentPlatform,
     Option<faro_agent::AccessibilityProbe>,
