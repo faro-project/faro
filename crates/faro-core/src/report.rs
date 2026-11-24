@@ -67,6 +67,9 @@ pub struct ReportOptions {
     pub share_top_apps: bool,
 }
 
+/// One recorded state change: `(ts, record index, state, account)`.
+type Transition = (i64, u64, ActivityState, Option<String>);
+
 /// Accumulates one period's observations. See module docs.
 #[derive(Debug, Clone)]
 pub struct ReportBuilder {
@@ -75,9 +78,9 @@ pub struct ReportBuilder {
     start_ms: i64,
     end_ms: i64,
     opts: ReportOptions,
-    /// `(ts, seq-of-record, state)`; the record index breaks ties so the
-    /// latest call wins for equal timestamps.
-    transitions: Vec<(i64, u64, ActivityState)>,
+    /// The record index breaks ties so the latest call wins for equal
+    /// timestamps.
+    transitions: Vec<Transition>,
     counts: RatingCounts,
     flagged: Vec<FlaggedMoment>,
     first_seq: Option<u64>,
@@ -165,6 +168,7 @@ impl ReportBuilder {
             app: flag.app.clone(),
             thumbnail: flag.thumbnail.clone(),
             member_note: None,
+            account: flag.account.clone(),
         });
         true
     }
@@ -173,11 +177,23 @@ impl ReportBuilder {
     /// order; for equal timestamps the later call wins. A transition before
     /// the period start sets the state the period opens with.
     pub fn record_state(&mut self, ts_ms: i64, state: ActivityState) {
+        self.record_account_state(ts_ms, state, None);
+    }
+
+    /// Like [`record_state`](Self::record_state), with the OS account at the
+    /// screen (§3.6). The same state under another account starts a new
+    /// span, so the timeline can be grouped by account.
+    pub fn record_account_state(
+        &mut self,
+        ts_ms: i64,
+        state: ActivityState,
+        account: Option<String>,
+    ) {
         if ts_ms >= self.end_ms {
             return;
         }
         let ord = self.transitions.len() as u64;
-        self.transitions.push((ts_ms, ord, state));
+        self.transitions.push((ts_ms, ord, state, account));
     }
 
     /// Record an active tamper signal (also sent as an urgent event).
@@ -201,7 +217,12 @@ impl ReportBuilder {
     /// conditions, and allies need to know *that* it happened, not how often
     /// the poller saw it.
     pub fn record_context(&mut self, rec: TamperRecord) -> bool {
-        if !self.in_period(rec.ts_ms) || self.context.iter().any(|c| c.signal == rec.signal) {
+        if !self.in_period(rec.ts_ms)
+            || self
+                .context
+                .iter()
+                .any(|c| c.signal == rec.signal && c.account == rec.account)
+        {
             return false;
         }
         self.context.push(rec);
@@ -209,8 +230,20 @@ impl ReportBuilder {
     }
 
     /// Route `signal` with [`route_signal`] and record it accordingly.
-    pub fn record_signal(&mut self, seq: Option<u64>, ts_ms: i64, signal: TamperSignal) -> bool {
-        let rec = TamperRecord { seq, ts_ms, signal };
+    /// `account` is the OS account it came from, if it concerns one session.
+    pub fn record_signal(
+        &mut self,
+        seq: Option<u64>,
+        ts_ms: i64,
+        signal: TamperSignal,
+        account: Option<String>,
+    ) -> bool {
+        let rec = TamperRecord {
+            seq,
+            ts_ms,
+            signal,
+            account,
+        };
         match route_signal(&rec.signal) {
             SignalRoute::TamperEvent => self.record_tamper(rec),
             SignalRoute::ReportContext => self.record_context(rec),
@@ -324,19 +357,16 @@ fn top_n(m: HashMap<String, u32>) -> Vec<CountedItem> {
 }
 
 /// Turn point transitions into spans covering `[start, end)` exactly:
-/// sorted, non-overlapping, contiguous, no empty spans, adjacent spans differ.
-fn build_timeline(
-    start: i64,
-    end: i64,
-    transitions: &[(i64, u64, ActivityState)],
-) -> Vec<TimelineSpan> {
-    let mut t: Vec<&(i64, u64, ActivityState)> = transitions.iter().collect();
-    t.sort_by_key(|(ts, ord, _)| (*ts, *ord));
-    let mut cur_state = t
+/// sorted, non-overlapping, contiguous, no empty spans, adjacent spans differ
+/// in state or account.
+fn build_timeline(start: i64, end: i64, transitions: &[Transition]) -> Vec<TimelineSpan> {
+    let mut t: Vec<&Transition> = transitions.iter().collect();
+    t.sort_by_key(|(ts, ord, _, _)| (*ts, *ord));
+    let (mut cur_state, mut cur_account) = t
         .iter()
         .rev()
-        .find(|(ts, _, _)| *ts <= start)
-        .map_or(ActivityState::Off, |(_, _, s)| *s);
+        .find(|(ts, _, _, _)| *ts <= start)
+        .map_or((ActivityState::Off, None), |(_, _, s, a)| (*s, a.clone()));
     let mut cur_start = start;
     let mut out = Vec::new();
     let mut i = 0;
@@ -347,23 +377,26 @@ fn build_timeline(
         while j + 1 < t.len() && t[j + 1].0 == ts {
             j += 1;
         }
-        let state = t[j].2;
+        let (state, account) = (t[j].2, &t[j].3);
         i = j + 1;
-        if ts <= start || ts >= end || state == cur_state {
+        if ts <= start || ts >= end || (state == cur_state && *account == cur_account) {
             continue;
         }
         out.push(TimelineSpan {
             start_ms: cur_start,
             end_ms: ts,
             state: cur_state,
+            account: cur_account,
         });
         cur_start = ts;
         cur_state = state;
+        cur_account = account.clone();
     }
     out.push(TimelineSpan {
         start_ms: cur_start,
         end_ms: end,
         state: cur_state,
+        account: cur_account,
     });
     out
 }
@@ -504,6 +537,7 @@ mod tests {
                 png: vec![1, 2, 3],
             }),
             burst: false,
+            account: None,
         }
     }
 
@@ -552,7 +586,8 @@ mod tests {
             vec![TimelineSpan {
                 start_ms: T0,
                 end_ms: T0 + DAY,
-                state: ActivityState::Off
+                state: ActivityState::Off,
+                account: None,
             }]
         );
     }
@@ -589,12 +624,50 @@ mod tests {
     }
 
     #[test]
+    fn timeline_spans_carry_the_account() {
+        let mut b = builder(ReportOptions::default());
+        b.record_account_state(T0, ActivityState::Active, Some("alex".into()));
+        b.record_account_state(T0 + 10, ActivityState::Active, Some("alex".into()));
+        // Fast user switching: same state, another account.
+        b.record_account_state(T0 + 20, ActivityState::Active, Some("guest".into()));
+        b.record_state(T0 + 30, ActivityState::Off);
+        let tl = b.timeline();
+        let got: Vec<_> = tl
+            .iter()
+            .map(|s| (s.start_ms - T0, s.state, s.account.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, ActivityState::Active, Some("alex")),
+                (20, ActivityState::Active, Some("guest")),
+                (30, ActivityState::Off, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn context_is_deduped_per_account() {
+        let mut b = builder(ReportOptions::default());
+        b.record_signal(None, T0 + 1, TamperSignal::VpnActive, Some("a".into()));
+        b.record_signal(None, T0 + 2, TamperSignal::VpnActive, Some("a".into()));
+        b.record_signal(None, T0 + 3, TamperSignal::VpnActive, Some("b".into()));
+        let unmonitored = TamperSignal::UnmonitoredUserSession { user: "b".into() };
+        b.record_signal(Some(9), T0 + 4, unmonitored.clone(), Some("b".into()));
+        let r = b.finish();
+        assert_eq!(r.health.context.len(), 2);
+        assert_eq!(r.health.tamper.len(), 1);
+        assert_eq!(r.health.tamper[0].signal, unmonitored);
+        assert_eq!(r.health.tamper[0].account.as_deref(), Some("b"));
+    }
+
+    #[test]
     fn signals_are_routed_and_context_deduped() {
         let mut b = builder(ReportOptions::default());
-        b.record_signal(Some(4), T0 + 10, TamperSignal::WaylandTokenLost);
-        b.record_signal(None, T0 + 20, TamperSignal::VpnActive);
-        b.record_signal(None, T0 + 30, TamperSignal::VpnActive);
-        b.record_signal(None, T0 + 40, TamperSignal::VirtualMachine);
+        b.record_signal(Some(4), T0 + 10, TamperSignal::WaylandTokenLost, None);
+        b.record_signal(None, T0 + 20, TamperSignal::VpnActive, None);
+        b.record_signal(None, T0 + 30, TamperSignal::VpnActive, None);
+        b.record_signal(None, T0 + 40, TamperSignal::VirtualMachine, None);
         let r = b.finish();
         assert_eq!(r.health.tamper.len(), 1);
         assert_eq!(r.health.tamper[0].signal, TamperSignal::WaylandTokenLost);

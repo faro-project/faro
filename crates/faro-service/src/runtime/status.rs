@@ -24,11 +24,22 @@ pub enum Phase {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServiceStatus {
     pub phase: Phase,
+    /// The agent of the session at the screen is connected (captures can
+    /// run).
     pub agent_connected: bool,
-    /// Someone is logged in at the console but no agent has been connected
-    /// for longer than the service tolerates; a `capture_failing` tamper
-    /// event was raised. Cleared when an agent connects.
+    /// The account of the session at the screen, while its agent captures.
+    pub capture_account: Option<String>,
+    /// Interactive sessions the source reports (1 for a source that does
+    /// not list sessions).
+    pub sessions: usize,
+    /// Connected agents, one per session.
+    pub agents: usize,
+    /// Some session has had no agent connected for longer than the service
+    /// tolerates; an `unmonitored_user_session` tamper event was raised.
+    /// Cleared once every session has an agent again.
     pub agent_missing: bool,
+    /// The accounts of those sessions.
+    pub unmonitored_accounts: Vec<String>,
     /// Daily reports that could not be sealed yet and are being retried.
     pub reports_unsealed: u64,
     /// Events durably committed to the outbox since start.

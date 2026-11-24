@@ -130,6 +130,23 @@ pub async fn accept_agent_with_version<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let hello = read_agent_hello(conn, timeout).await?;
+    welcome_agent_with_version(conn, service_version).await?;
+    Ok(hello)
+}
+
+/// Service side, first half of [`accept_agent`]: read and check the agent's
+/// `Hello` without answering it, so the caller can decide whether to admit
+/// this agent (for example, whether its session already has one) before
+/// sending `Welcome` with [`welcome_agent`]. Dropping the connection instead
+/// makes the agent's [`hello`] fail, and a real agent retries.
+pub async fn read_agent_hello<S>(
+    conn: &mut ServiceConnection<S>,
+    timeout: Duration,
+) -> Result<AgentHello>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let msg = conn.recv_timeout(timeout, "agent Hello").await?;
     let hello = match msg {
         AgentMsg::Hello {
@@ -173,12 +190,30 @@ where
             });
         }
     }
+    Ok(hello)
+}
+
+/// Service side, second half of [`accept_agent`]: admit an agent whose
+/// `Hello` [`read_agent_hello`] accepted.
+pub async fn welcome_agent<S>(conn: &mut ServiceConnection<S>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    welcome_agent_with_version(conn, SERVICE_VERSION).await
+}
+
+async fn welcome_agent_with_version<S>(
+    conn: &mut ServiceConnection<S>,
+    service_version: &str,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     conn.send(&ServiceMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         service_version: service_version.to_owned(),
     })
-    .await?;
-    Ok(hello)
+    .await
 }
 
 /// Best effort: the connection is being abandoned anyway, so a failure to

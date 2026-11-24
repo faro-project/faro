@@ -119,10 +119,14 @@ const DEFAULT_CAPTURE_FAILURE_THRESHOLD: u32 = 5;
 #[serde(default, deny_unknown_fields)]
 pub struct IpcConfig {
     /// Socket path. Its directory must be root-owned and not writable by
-    /// others (`faro-ipc` checks this). Must agree with the agent's.
+    /// others (`faro-ipc` checks this). Must agree with the agent's. A root
+    /// service binds one socket per account next to it
+    /// (`agent.<uid>.sock`, see `faro_ipc::session_socket_path`), since
+    /// every account's agent connects; a non-root development service
+    /// binds this path itself.
     pub socket_path: PathBuf,
-    /// Extra uids allowed to connect, besides the console user. Empty in
-    /// normal installs.
+    /// Extra uids allowed to connect besides each session's own user (they
+    /// may claim any listed session). Empty in normal installs.
     pub allowed_uids: Vec<u32>,
     /// The code-signing *designated requirement* the agent binary must
     /// satisfy (macOS), e.g. `anchor apple generic and identifier

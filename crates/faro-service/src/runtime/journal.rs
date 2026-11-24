@@ -38,11 +38,13 @@ enum Op {
     State {
         ts: i64,
         state: ActivityState,
+        account: Option<String>,
     },
     Signal {
         seq: Option<u64>,
         ts: i64,
         signal: TamperSignal,
+        account: Option<String>,
     },
     Seq(u64),
     AgentRestart,
@@ -79,6 +81,7 @@ impl ReportJournal {
             ops: vec![Op::State {
                 ts: start_ms,
                 state,
+                account: None,
             }],
             dropped: 0,
             opts,
@@ -138,13 +141,27 @@ impl ReportJournal {
         });
     }
 
-    pub fn state(&mut self, ts: i64, state: ActivityState) {
-        self.push_important(Op::State { ts, state });
+    /// From `ts` on, the device was in `state`, with `account` at the
+    /// screen (if any).
+    pub fn state(&mut self, ts: i64, state: ActivityState, account: Option<String>) {
+        self.push_important(Op::State { ts, state, account });
     }
 
-    /// A tamper or context signal; `seq` is the event that carried it, if any.
-    pub fn signal(&mut self, seq: Option<u64>, ts: i64, signal: TamperSignal) {
-        self.push_important(Op::Signal { seq, ts, signal });
+    /// A tamper or context signal; `seq` is the event that carried it, if
+    /// any, and `account` the OS account it came from.
+    pub fn signal(
+        &mut self,
+        seq: Option<u64>,
+        ts: i64,
+        signal: TamperSignal,
+        account: Option<String>,
+    ) {
+        self.push_important(Op::Signal {
+            seq,
+            ts,
+            signal,
+            account,
+        });
     }
 
     /// An event in this period that is not otherwise recorded.
@@ -207,9 +224,16 @@ impl ReportJournal {
                 Op::Flag { seq, ts, flag } => {
                     b.record_flag(*seq, *ts, flag);
                 }
-                Op::State { ts, state } => b.record_state(*ts, *state),
-                Op::Signal { seq, ts, signal } => {
-                    b.record_signal(*seq, *ts, signal.clone());
+                Op::State { ts, state, account } => {
+                    b.record_account_state(*ts, *state, account.clone())
+                }
+                Op::Signal {
+                    seq,
+                    ts,
+                    signal,
+                    account,
+                } => {
+                    b.record_signal(*seq, *ts, signal.clone(), account.clone());
                 }
                 Op::Seq(s) => b.record_seq(*s),
                 Op::AgentRestart => b.record_agent_restart(),
@@ -252,7 +276,7 @@ mod tests {
         let mut j = ReportJournal::new(0, 1000, ActivityState::Active, opts(false));
         j.capture(10, Rating::Clean);
         j.capture(20, Rating::Low);
-        j.state(30, ActivityState::Locked);
+        j.state(30, ActivityState::Locked, None);
         let flag = FlagBody {
             rating: Rating::High,
             reasons: vec![Reason {
@@ -265,10 +289,11 @@ mod tests {
             browser: None,
             thumbnail: None,
             burst: false,
+            account: None,
         };
         j.flag(4, 25, &flag);
-        j.signal(Some(5), 26, TamperSignal::WaylandTokenLost);
-        j.signal(None, 27, TamperSignal::VpnActive);
+        j.signal(Some(5), 26, TamperSignal::WaylandTokenLost, None);
+        j.signal(None, 27, TamperSignal::VpnActive, None);
         j.domain("example.org");
         let full = j.build(1000, &dev, "Laptop").unwrap();
         assert_eq!(full.counts.total(), 2);

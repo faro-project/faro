@@ -1113,6 +1113,7 @@ mod tests {
             browser: None,
             thumbnail: None,
             burst: false,
+            account: None,
         })
     }
 
@@ -1339,6 +1340,7 @@ mod tests {
                 browser: None,
                 thumbnail: None,
                 burst: false,
+                account: None,
             }),
             Urgency::Urgent,
         );
@@ -1364,6 +1366,7 @@ mod tests {
             (
                 EventBody::Tamper {
                     signal: TamperSignal::WaylandTokenLost,
+                    account: None,
                 },
                 Urgency::Urgent,
             ),
@@ -1453,6 +1456,7 @@ mod tests {
         e.write(
             EventBody::Tamper {
                 signal: TamperSignal::WaylandTokenLost,
+                account: None,
             },
             Urgency::Urgent,
         ); // 2
@@ -2094,6 +2098,7 @@ mod tests {
                 &mut e.ob,
                 &EventBody::Tamper {
                     signal: TamperSignal::WaylandTokenLost,
+                    account: None,
                 },
                 Urgency::Urgent,
                 &set,

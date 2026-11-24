@@ -32,7 +32,7 @@ impl InProcessFrameSource {
         }
     }
 
-    /// The `session` reported in [`SourceEvent::Connected`].
+    /// The `session` reported in [`SourceEvent::AgentConnected`].
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self
@@ -81,13 +81,21 @@ impl FrameSource for InProcessFrameSource {
                 events,
             } = io;
             let platform = self.platform;
-            let connected = SourceEvent::Connected {
-                agent_version: format!("in-process/{}", env!("CARGO_PKG_VERSION")),
+            // One session that is always at the screen; it has no OS
+            // account label.
+            let connected = SourceEvent::AgentConnected {
                 session: self.label.clone(),
-                user: String::new(),
+                account: String::new(),
+                agent_version: format!("in-process/{}", env!("CARGO_PKG_VERSION")),
             };
-            if events.send(connected).await.is_err() {
-                return;
+            let target = SourceEvent::CaptureTarget(Some(super::CaptureTarget {
+                session: self.label.clone(),
+                account: String::new(),
+            }));
+            for ev in [connected, target] {
+                if events.send(ev).await.is_err() {
+                    return;
+                }
             }
             let mut seen = Seen::default();
             let mut tick = tokio::time::interval(self.poll_every);
@@ -166,7 +174,10 @@ fn diff(seen: &mut Seen, obs: Observed) -> Vec<SourceEvent> {
         seen.permission = Some(obs.permission);
     }
     out.extend(obs.changes.into_iter().map(SourceEvent::SessionChanged));
-    out.extend(obs.tamper.into_iter().map(SourceEvent::Tamper));
+    out.extend(obs.tamper.into_iter().map(|signal| SourceEvent::Tamper {
+        signal,
+        account: None,
+    }));
     out
 }
 
@@ -200,7 +211,11 @@ mod tests {
         }));
         assert!(matches!(
             ev_rx.recv().await,
-            Some(SourceEvent::Connected { .. })
+            Some(SourceEvent::AgentConnected { .. })
+        ));
+        assert!(matches!(
+            ev_rx.recv().await,
+            Some(SourceEvent::CaptureTarget(Some(_)))
         ));
         cmd_tx
             .send(SourceCommand::CaptureNow(faro_ipc::CaptureReason::Startup))
@@ -223,8 +238,8 @@ mod tests {
         }
         script.with(|s| s.tamper.push(faro_proto::body::TamperSignal::VpnActive));
         loop {
-            if let SourceEvent::Tamper(t) = ev_rx.recv().await.unwrap() {
-                assert_eq!(t, faro_proto::body::TamperSignal::VpnActive);
+            if let SourceEvent::Tamper { signal, .. } = ev_rx.recv().await.unwrap() {
+                assert_eq!(signal, faro_proto::body::TamperSignal::VpnActive);
                 break;
             }
         }
