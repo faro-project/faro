@@ -17,6 +17,9 @@ postcard.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true }
+
+# Peer credentials (getpeereid / SO_PEERCRED) exist only on Unix.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.177"
 
 [dev-dependencies]

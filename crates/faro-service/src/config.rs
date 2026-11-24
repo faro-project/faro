@@ -432,9 +432,15 @@ mod tests {
 
     #[test]
     fn parses_full_file() {
-        let c = Config::from_toml_str(
-            r#"
-            state_dir = "/tmp/faro-state"
+        // `state_dir` must be absolute, and `/tmp/...` is not on Windows.
+        // A TOML literal string ('...') keeps the backslashes as written.
+        let state = if cfg!(windows) {
+            r"C:\faro-state"
+        } else {
+            "/tmp/faro-state"
+        };
+        let toml = r#"
+            state_dir = '@STATE@'
             instance_url = "https://faro.example.org"
             [capture]
             agent_kill_threshold = 2
@@ -449,10 +455,10 @@ mod tests {
             capture_mean_secs = 90
             urgency = { low = "none", medium = "urgent", high = "urgent" }
             share_top_apps = true
-            "#,
-        )
-        .unwrap();
-        assert_eq!(c.state_dir, Path::new("/tmp/faro-state"));
+            "#
+        .replace("@STATE@", state);
+        let c = Config::from_toml_str(&toml).unwrap();
+        assert_eq!(c.state_dir, Path::new(state));
         assert_eq!(c.capture.agent_kill_threshold, 2);
         assert_eq!(c.capture.agent_ping_secs, 30, "unset fields keep defaults");
         assert_eq!(c.ipc.allowed_uids, vec![501]);
