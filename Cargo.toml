@@ -9,13 +9,14 @@ members = [
     "crates/faro-platform",
     "crates/faro-platform-macos",
     "crates/faro-update",
+    "server",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.89"
+rust-version = "1.94"
 
 [workspace.dependencies]
 # Internal crates
@@ -64,7 +65,7 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "set-header", "limit", "fs"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "migrate"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "hostname"] }
 

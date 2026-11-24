@@ -195,7 +195,7 @@ On any rejection the device keeps using its last accepted manifest and surfaces 
 
 **Limits** (documented, not solved by v1):
 
-- **Removal is forward-only.** A removed ally can still decrypt items sealed to them before the device accepted the new manifest, and the instance must stop serving them those blobs. No scheme can take back a key that was already shared.
+- **Removal is forward-only.** A removed ally can still decrypt items sealed to them before the device accepted the new manifest. No scheme can take back a key that was already shared. The instance limits the damage: it serves an ally a blob only if the item was received while that ally held an active link. Being approved again later never opens items from the gap.
 - **Withholding.** A malicious instance can delay delivering a newer manifest, though it can't forge one or roll one back. The planned mitigations:
   - the tray UI and the monthly consent notice show the ally list the device is actually using;
   - the member's own client can hand a newly signed manifest to the device locally;
@@ -221,6 +221,13 @@ The instance rejects requests whose timestamp is more than 5 minutes off its own
 Heartbeats are **not** chain events, so 288 pings a day don't grow the chain. A `Heartbeat` carries `{instance_id, device_id, ts_ms, mono_ms, boot_id, state, last_seq?, last_hash?}` and is signed under `faro/heartbeat/v1`. `state` is one of `active`, `idle`, `locked`, `paused`, `sleeping` or `shutting_down`.
 
 The instance uses these fields for liveness and to tell the device which `seq` it holds (`acked_through`). It also returns `server_time_ms`, which the device compares with its own clock to detect clock tampering.
+
+`last_seq` and `last_hash` are checked against what the instance holds:
+
+- **Upload stall.** If `last_seq` stays ahead of the highest event the instance has verified for longer than the liveness grace period, the device is alive but not uploading what it records. The instance raises one urgent `upload_stalled` alert per stall.
+- **Fork.** If `last_seq` names an event the instance holds but `last_hash` differs from that event's chain hash, the device's history differs from what it uploaded. The instance raises an urgent `chain_gap` alert. So `last_hash` must be the `chain_hash` of the event at `last_seq`.
+
+Both alerts are tamper-class: allies can move them to the digest but not turn them off.
 
 ## 8. Deviations from ARCHITECTURE.md v0.2
 

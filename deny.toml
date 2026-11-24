@@ -25,6 +25,7 @@ allow = [
     "CDLA-Permissive-2.0", # webpki-root-certs / webpki-roots data
     "MPL-2.0",             # weak, file-level copyleft; allowed for unmodified dependencies only
     "BSL-1.0",
+    "0BSD",                # quoted_printable (via lettre); public-domain equivalent
 ]
 # AGPL/GPL/LGPL and non-commercial licences are rejected by omission.
 

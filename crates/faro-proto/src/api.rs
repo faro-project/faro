@@ -255,6 +255,10 @@ pub enum ServerAlertKind {
     /// The member changed a setting held on the server (for example shorter
     /// retention), so allies are told just as for device settings changes.
     MemberSettingsChanged,
+    /// The device's signed heartbeats claim events (`last_seq`) the instance
+    /// has not received, for longer than the liveness grace period: it is
+    /// alive but not uploading what it records. Tamper-class.
+    UploadStalled,
 }
 
 impl ServerAlertKind {
@@ -268,10 +272,11 @@ impl ServerAlertKind {
             ServerAlertKind::AllyRemoved => "ally_removed",
             ServerAlertKind::AllyAdded => "ally_added",
             ServerAlertKind::MemberSettingsChanged => "member_settings_changed",
+            ServerAlertKind::UploadStalled => "upload_stalled",
         }
     }
 
-    pub const ALL: [ServerAlertKind; 8] = [
+    pub const ALL: [ServerAlertKind; 9] = [
         ServerAlertKind::MissedCheckin,
         ServerAlertKind::ChainGap,
         ServerAlertKind::InvalidSignature,
@@ -280,6 +285,7 @@ impl ServerAlertKind {
         ServerAlertKind::AllyRemoved,
         ServerAlertKind::AllyAdded,
         ServerAlertKind::MemberSettingsChanged,
+        ServerAlertKind::UploadStalled,
     ];
 
     /// Inverse of [`Self::as_str`].
@@ -293,7 +299,8 @@ impl ServerAlertKind {
             | ServerAlertKind::ChainGap
             | ServerAlertKind::InvalidSignature
             | ServerAlertKind::ClockSkew
-            | ServerAlertKind::DeviceRemoved => Urgency::Urgent,
+            | ServerAlertKind::DeviceRemoved
+            | ServerAlertKind::UploadStalled => Urgency::Urgent,
             ServerAlertKind::AllyRemoved
             | ServerAlertKind::AllyAdded
             | ServerAlertKind::MemberSettingsChanged => Urgency::Normal,

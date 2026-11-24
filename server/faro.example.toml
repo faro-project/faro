@@ -1,0 +1,70 @@
+# Faro instance configuration.
+#
+# Every setting can also be overridden with an environment variable
+# (shown next to each one), which is convenient in docker-compose.
+# Start with `faro-server init --config faro.toml`, then `faro-server serve --config faro.toml`.
+
+# Where the identity key, the SQLite database and encrypted blobs are stored.   FARO_DATA_DIR
+data_dir = "/var/lib/faro"
+
+# Leave unset for SQLite in data_dir. For larger instances use Postgres:        FARO_DATABASE_URL
+# database_url = "postgres://faro:secret@localhost/faro"
+
+# The address members and allies use to reach this instance.                   FARO_PUBLIC_URL
+public_url = "https://faro.example.org"
+
+# Address to listen on.                                                         FARO_LISTEN
+listen = "0.0.0.0:8080"
+
+# Set when running behind Caddy/nginx/Traefik/Cloudflare Tunnel, so client IPs  FARO_BEHIND_PROXY
+# are taken from X-Forwarded-For (used for rate limiting).
+behind_proxy = true
+
+# Development only: allows http:// public URLs and prints emails to the console. FARO_DEV
+dev = false
+
+[instance]
+# Shown to members when they enroll a device.                                   FARO_INSTANCE_NAME
+name = "Grace Church Faro"
+
+[registration]
+# invite-only (default) | open | closed                                         FARO_REGISTRATION_MODE
+mode = "invite-only"
+# For mode = "open": who may sign up. ["*"] allows any domain.                  FARO_ALLOWED_EMAIL_DOMAINS (comma-separated)
+allowed_email_domains = []
+
+[smtp]
+# Used for sign-in links and alerts.                                            FARO_SMTP_HOST / _PORT / _USERNAME / _PASSWORD / _FROM / _TLS
+# host = "smtp.example.org"
+# port = 587
+# username = "faro@example.org"
+# password = "app-password"
+# from = "Faro <faro@example.org>"
+tls = "starttls"
+
+[retention]
+# How long the instance keeps data. Members may choose shorter, never longer.   FARO_RETENTION_EVENT_HEADER_DAYS / _BLOB_DAYS / _ALERT_DAYS
+event_header_days = 90
+blob_days = 30
+alert_days = 90
+
+[liveness]
+# A device silent for longer than this triggers an urgent missed-check-in alert. FARO_LIVENESS_GRACE_SECS
+grace_secs = 10800
+
+[rate_limit]
+# Requests per minute per IP to sign-in, setup and enrollment endpoints.        FARO_RATE_LIMIT_PER_MINUTE
+unauthenticated_per_minute = 20
+magic_links_per_email_per_hour = 5
+
+[tls]
+# Built-in HTTPS. Pick one mode (or none when behind_proxy = true).
+# 1) Automatic certificates from Let's Encrypt (TLS-ALPN-01 on the HTTPS port,  FARO_TLS_ACME_DOMAIN / _ACME_CONTACT / _ACME_PRODUCTION
+#    so `listen` should be port 443 and reachable from the internet). The
+#    domain must be the host of public_url.
+# acme_domain = "faro.example.org"
+# acme_contact = "admin@example.org"
+# acme_production = true
+# 2) A certificate you manage yourself (PEM chain + key; reloaded on restart). FARO_TLS_CERT_PATH / _KEY_PATH
+# cert_path = "/etc/faro/fullchain.pem"
+# key_path = "/etc/faro/privkey.pem"
