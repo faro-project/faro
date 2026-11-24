@@ -319,9 +319,13 @@ Per device: about 288 heartbeats a day (~90 KB) plus a 20–200 KB daily report,
 
 | Role | Can | Cannot |
 |---|---|---|
-| **Instance admin** | Configure the instance (SMTP, domain, retention, registration mode, update channel), manage accounts, see **operational metadata** (device counts, last-seen, storage use, delivery failures) | Read any report, thumbnail, URL or rating. Enroll devices for someone else. Add themselves as anyone's ally |
+| **Instance admin** | Configure the instance (SMTP, domain, retention, registration mode, update channel), invite people, disable or re-enable accounts, see **operational metadata** (device counts, last-seen, storage use, delivery failures) | Read any report, thumbnail, URL or rating. Enroll devices for someone else. Add themselves as anyone's ally. Disable an account silently, or disable their own |
 | **Member** | Enroll their own devices, invite and approve allies, see everything their allies see | Hide events from allies, delete sent reports early (retention is the same for everyone) |
 | **Ally** | Read reports and alerts for members who approved them, set notification preferences | Change a member's settings or devices |
+
+**Admins are users.** The admin role is an extra on an ordinary account, not a separate kind of account: an admin can be a member or an ally like anyone else, and one admin can disable another admin's account. Nobody can disable their own account, and the last enabled admin can't be disabled.
+
+**Disabling an account is never silent.** A disabled account can't sign in and its sessions end. Faro always tells, by email, the person themself and everyone in an accountability partnership with them: their allies (`account_disabled`), and each member they are an ally for, with that member's other allies (`ally_disabled`). These alerts are urgent and tamper-class, so they can't be switched off, only moved to the digest. Disabling stops sign-in, not monitoring: the account's devices keep reporting and alerting its allies. Re-enabling tells the same people (`account_enabled`, `ally_enabled`, normal urgency).
 
 **Registration modes** (admin setting): `invite-only` (default), `open` with an email-domain allowlist (for example `@college.edu`), or `closed`.
 
@@ -403,8 +407,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 | Urgency | Produced by | Default delivery |
 |---|---|---|
-| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, missed check-in past grace | **Immediate** email + Web Push |
-| `normal` | `medium` flag, settings change, ally added or removed, pause or resume | Bundled into the **next hourly digest** |
+| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, missed check-in past grace, an account disabled by an admin | **Immediate** email + Web Push |
+| `normal` | `medium` flag, settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
 | `none` | Clean captures, heartbeats, low-rated flags, context signals | Only in the daily report |
 
 - Server-generated alerts (missed check-in, chain gap) set their own urgency.

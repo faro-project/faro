@@ -341,17 +341,23 @@ async fn oversized_json_is_rejected() {
 #[tokio::test]
 async fn security_headers_and_uniform_errors() {
     let t = TestApp::new().await;
-    let r = t.get("/no/such/route", None).await;
+    let r = t.get("/v1/no/such/route", None).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     assert_eq!(r.error_code(), "not_found");
-    assert_eq!(r.headers["x-content-type-options"], "nosniff");
-    assert_eq!(r.headers["referrer-policy"], "no-referrer");
-    assert!(r.headers["content-security-policy"]
-        .to_str()
-        .unwrap()
-        .contains("frame-ancestors 'none'"));
-    // Dev mode: no HSTS.
-    assert!(r.headers.get("strict-transport-security").is_none());
+    // Unknown non-API paths go to the web app (its 404 page, or a note when
+    // built without it); the security headers apply there too.
+    let web = t.get("/no/such/route", None).await;
+    assert_eq!(web.status, StatusCode::NOT_FOUND);
+    for r in [&r, &web] {
+        assert_eq!(r.headers["x-content-type-options"], "nosniff");
+        assert_eq!(r.headers["referrer-policy"], "no-referrer");
+        assert!(r.headers["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'"));
+        // Dev mode: no HSTS.
+        assert!(r.headers.get("strict-transport-security").is_none());
+    }
 
     let r = t.call(Method::DELETE, "/v1/me", None, None).await;
     assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);

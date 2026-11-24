@@ -1,12 +1,13 @@
 # Developing Faro
 
-**Audience:** contributors working on the Rust workspace.
+**Audience:** contributors working on the Rust workspace and the web app.
 
 ## Toolchain
 
 - Rust stable, 1.94 or newer (`rust-version` in the root `Cargo.toml`; set by `sqlx` 0.9, which the server needs so it can share the patched SQLite that `rusqlite` 0.41 bundles). CI uses the latest stable.
 - No nightly is needed, except for the optional `cargo fuzz` targets.
 - `cargo-deny` is used for license, ban and advisory checks: `cargo deny check`.
+- Node.js 22.17 or newer (SvelteKit 3 needs it), only for the web app in `web/` (CI and the container image use Node 24). The Rust build never runs npm.
 
 ## Everyday commands
 
@@ -36,18 +37,40 @@ cargo deny check                                        # licenses, bans, source
 
 ## Invariants every change must keep
 
-These come from ARCHITECTURE.md §3.5, §5 and §12. Reviewers check them on every PR.
+These come from ARCHITECTURE.md §3.5, §4.3, §5 and §12. Reviewers check them on every PR.
 
 1. **No unblurred image leaves memory.** `faro_platform::Frame` has no `Clone`, `Serialize` or pixel-printing `Debug`, and it is zeroized on drop. The only image type in any wire or storage format is `BlurredThumbnail`.
 2. **The instance only sees ciphertext and header metadata.** Nothing in `faro-server` can decrypt anything.
 3. **Devices encrypt only to member-endorsed keys,** checked against the member key pinned at enrollment.
 4. **Tamper can't be silenced.** The server floors urgency with `EventKind::min_urgency()`, and urgent tamper alerts can only be moved to the digest, never turned off.
 5. **Clients trust project signatures for updates, never the instance.**
+6. **Disabling an account is never silent.** The person and every accountability partner are told, and the alerts can't be switched off (`account_disabled`, `ally_disabled`). Disabling stops sign-in, never monitoring.
 
 ## Dependency notes
 
 - **The crypto stack is pinned to the `rand_core` 0.6 generation:** `ed25519-dalek` 2, `crypto_box` 0.9 (sealed boxes), `chacha20poly1305` 0.10 and `argon2` 0.5. Newer major versions exist (dalek 3, `rand_core` 0.10, `crypto_box` 0.10 is still a pre-release), but mixing generations means duplicated RNG traits and awkward glue. Upgrade the whole set together in one PR, and keep the libsodium interop properties (sealed boxes; Argon2id with `p = 1`) covered by tests.
 - **Internal workspace dependencies carry `version = "0.1.0"`** next to `path`. `cargo-deny`'s wildcard ban requires it.
+
+## The web app
+
+`web/` is the browser side of an instance: a SvelteKit app (Svelte 5, TypeScript, `adapter-static`). So far it has the first-run setup wizard (`/setup`), email sign-in (`/signin`, and `/auth/verify`, where sign-in emails link), the admin console (`/admin`) and the page invitation emails link to (`/invite`); the member and ally pages will join it. Every page is prerendered to static files, and `server/build.rs` compiles `web/build` into the `faro-server` binary, which serves it from the instance's own origin (`server/src/web.rs`). There is no Node server in production.
+
+```sh
+cd web
+npm ci              # once, and after package-lock.json changes
+npm run dev         # http://localhost:5173, API proxied to faro-server on :8080
+npm run check       # svelte-check (types)
+npm run lint        # prettier --check; `npm run format` fixes
+npm run build       # web/build, which the next `cargo build -p faro-server` embeds
+```
+
+For `npm run dev`, start a server in another terminal with `cargo run -p faro-server -- serve --dev` (it prints a setup token; set `FARO_DEV_API` to proxy somewhere other than `127.0.0.1:8080`). To test the embedded build instead, run `npm run build` and rebuild the server: `/setup` is then served on :8080 itself.
+
+Without `web/build`, `faro-server` still builds and its API works; page requests get a plain-text note and the setup token message points at the `curl` instructions. Release builds set `FARO_REQUIRE_WEB=1`, which makes a missing bundle a build error. CI's `web` job runs lint, check and build, then the server's web-serving tests against the real bundle.
+
+**CSP.** Pages are served with a strict Content Security Policy built by `web::page_csp`. Scripts and stylesheets load from the instance only. The only inline script allowed is SvelteKit's per-page bootstrap, by hash (`build.rs` hashes it). Inline `style="…"` attributes are allowed only with a constant value, also by hash, and `<style>` blocks are never allowed. In components, use classes, and use Svelte's `style:` directive for dynamic values. Keep `inlineStyleThreshold` at 0, and never load anything from another origin.
+
+**API types** are hand-written in `web/src/lib/types.ts` for now, mirroring the serde types in `server/src/api` and `faro-proto`. Change both sides together.
 
 ## Testing without real hardware
 

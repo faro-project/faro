@@ -77,6 +77,10 @@ pub fn build(
         "The operator can delete data or stop the server. Devices notice when the server \
          is unreachable, and gaps in a device's log are visible to the member and allies."
             .to_owned(),
+        "An admin can disable an account, which stops that person signing in. Faro then \
+         always emails the person and everyone in an accountability partnership with them, \
+         and their computers keep being monitored and alerting their allies."
+            .to_owned(),
     ];
     let mode_text = match mode {
         RegistrationMode::InviteOnly => "by invitation only",

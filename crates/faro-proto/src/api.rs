@@ -259,6 +259,19 @@ pub enum ServerAlertKind {
     /// has not received, for longer than the liveness grace period: it is
     /// alive but not uploading what it records. Tamper-class.
     UploadStalled,
+    /// An instance admin disabled the member's account: they can no longer
+    /// sign in (their devices keep reporting). Raised on the disabled user,
+    /// who is told although disabled, and their allies. Tamper-class: it is
+    /// never silent.
+    AccountDisabled,
+    /// An admin re-enabled the member's account.
+    AccountEnabled,
+    /// An admin disabled the account of one of the member's allies, who can
+    /// no longer sign in to see the member's alerts. Raised on the member;
+    /// the alert names the ally. Tamper-class, like removing an ally.
+    AllyDisabled,
+    /// An admin re-enabled the account of one of the member's allies.
+    AllyEnabled,
 }
 
 impl ServerAlertKind {
@@ -273,10 +286,14 @@ impl ServerAlertKind {
             ServerAlertKind::AllyAdded => "ally_added",
             ServerAlertKind::MemberSettingsChanged => "member_settings_changed",
             ServerAlertKind::UploadStalled => "upload_stalled",
+            ServerAlertKind::AccountDisabled => "account_disabled",
+            ServerAlertKind::AccountEnabled => "account_enabled",
+            ServerAlertKind::AllyDisabled => "ally_disabled",
+            ServerAlertKind::AllyEnabled => "ally_enabled",
         }
     }
 
-    pub const ALL: [ServerAlertKind; 9] = [
+    pub const ALL: [ServerAlertKind; 13] = [
         ServerAlertKind::MissedCheckin,
         ServerAlertKind::ChainGap,
         ServerAlertKind::InvalidSignature,
@@ -286,6 +303,10 @@ impl ServerAlertKind {
         ServerAlertKind::AllyAdded,
         ServerAlertKind::MemberSettingsChanged,
         ServerAlertKind::UploadStalled,
+        ServerAlertKind::AccountDisabled,
+        ServerAlertKind::AccountEnabled,
+        ServerAlertKind::AllyDisabled,
+        ServerAlertKind::AllyEnabled,
     ];
 
     /// Inverse of [`Self::as_str`].
@@ -300,10 +321,14 @@ impl ServerAlertKind {
             | ServerAlertKind::InvalidSignature
             | ServerAlertKind::ClockSkew
             | ServerAlertKind::DeviceRemoved
-            | ServerAlertKind::UploadStalled => Urgency::Urgent,
+            | ServerAlertKind::UploadStalled
+            | ServerAlertKind::AccountDisabled
+            | ServerAlertKind::AllyDisabled => Urgency::Urgent,
             ServerAlertKind::AllyRemoved
             | ServerAlertKind::AllyAdded
-            | ServerAlertKind::MemberSettingsChanged => Urgency::Normal,
+            | ServerAlertKind::MemberSettingsChanged
+            | ServerAlertKind::AccountEnabled
+            | ServerAlertKind::AllyEnabled => Urgency::Normal,
         }
     }
 }

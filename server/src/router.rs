@@ -12,7 +12,7 @@
 //!    extractor applies its own, tighter limit (64 KiB for browser JSON, per
 //!    type for device uploads) *before* any parsing or signature work.
 //! 3. **Security headers**, set only if a handler did not set its own (so the
-//!    stage-B web-app handler can send a richer CSP): `nosniff`,
+//!    web app can send a page CSP): `nosniff`,
 //!    `Referrer-Policy: no-referrer`, a deny-all CSP with
 //!    `frame-ancestors 'none'`, `X-Frame-Options: DENY`,
 //!    `Cache-Control: no-store`, and HSTS unless `--dev`.
@@ -22,8 +22,12 @@
 //! enrollment, invite lookup/accept) are additionally wrapped in the per-IP
 //! rate limiter ([`crate::ratelimit::limit_unauthenticated`]).
 //!
-//! Not built yet (see the stage report): the update mirror and the embedded
-//! web app; their routers would merge into [`api_routes`] the same way.
+//! Requests no API route matches fall through to the embedded web app
+//! ([`crate::web`]), which sends its own, page-specific CSP. API paths it
+//! does not know keep the JSON 404.
+//!
+//! Not built yet (see the stage report): the update mirror; its router would
+//! merge into [`api_routes`] the same way.
 
 use crate::api::{
     admin, allies, auth, devices, events, feed, heartbeat, invites, keys, manifests, prefs,
@@ -131,13 +135,15 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         // Admin console: configuration and aggregate metadata only.
         .route("/admin/api/overview", get(admin::overview))
         .route("/admin/api/users", get(admin::list_users))
+        .route("/admin/api/users/{id}/disable", post(admin::disable_user))
+        .route("/admin/api/users/{id}/enable", post(admin::enable_user))
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),
         )
         .route("/admin/api/smtp-test", post(admin::smtp_test))
         .route("/admin/api/invites", post(admin::invite_member))
-        .fallback(|| async { AppError::NotFound })
+        .fallback(crate::web::fallback)
         .method_not_allowed_fallback(|| async { AppError::MethodNotAllowed })
 }
 

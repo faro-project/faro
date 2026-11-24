@@ -56,7 +56,9 @@ pub fn default_mode(u: Urgency) -> Mode {
 ///   `ally_removed` (removing an ally is the most direct way to stop being
 ///   watched, so the people affected are always told), and
 ///   `device_removed` (retiring a monitored device stops its monitoring
-///   just as directly).
+///   just as directly), and `account_disabled` / `ally_disabled` (an admin
+///   disabling an account is always told to that person and every
+///   accountability partner).
 ///
 /// `source` is the alert row's source column (`device` / `server`).
 pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
@@ -71,7 +73,9 @@ pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
             Some(
                 ServerAlertKind::AllyRemoved
                 | ServerAlertKind::DeviceRemoved
-                | ServerAlertKind::UploadStalled,
+                | ServerAlertKind::UploadStalled
+                | ServerAlertKind::AccountDisabled
+                | ServerAlertKind::AllyDisabled,
             ) => true,
             _ => false,
         },
@@ -239,6 +243,19 @@ mod tests {
         ));
         assert!(is_tamper_class("server", "ally_removed", Urgency::Normal));
         assert!(is_tamper_class("server", "device_removed", Urgency::Urgent));
+        // Disabling an account is never silent; re-enabling may be.
+        assert!(is_tamper_class(
+            "server",
+            "account_disabled",
+            Urgency::Urgent
+        ));
+        assert!(is_tamper_class("server", "ally_disabled", Urgency::Urgent));
+        assert!(!is_tamper_class(
+            "server",
+            "account_enabled",
+            Urgency::Normal
+        ));
+        assert!(!is_tamper_class("server", "ally_enabled", Urgency::Normal));
         // A device cannot smuggle a server kind (or vice versa).
         assert!(!is_tamper_class("device", "chain_gap", Urgency::Urgent));
         assert!(!is_tamper_class("server", "tamper", Urgency::Urgent));

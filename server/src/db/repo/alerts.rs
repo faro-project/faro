@@ -57,23 +57,27 @@ pub async fn insert_with_extra_recipient<'e>(
     a: &NewAlert<'_>,
     extra_recipient: Option<&UserId>,
 ) -> Result<bool, sqlx::Error> {
-    insert_routed(e, a, extra_recipient, None).await
+    insert_routed(e, a, extra_recipient, None, None).await
 }
 
 /// The most general insert: `extra_recipient` is told in addition to the
 /// member and their active allies; `skip_recipient` is an ally who is *not*
 /// told through this alert (the ally just added, who gets their own notice).
-/// The member themself is never skipped (see [`crate::notify`]).
+/// The member themself is never skipped (see [`crate::notify`]). `about` is
+/// the account the alert concerns when that is not the member (the ally
+/// whose account was disabled); notifications name them.
 pub async fn insert_routed<'e>(
     e: impl Executor<'e, Database = Any>,
     a: &NewAlert<'_>,
     extra_recipient: Option<&UserId>,
     skip_recipient: Option<&UserId>,
+    about: Option<&UserId>,
 ) -> Result<bool, sqlx::Error> {
     let r = sqlx::query(
         "INSERT INTO alerts (id, member_id, device_id, source, kind, urgency, event_seq, detail,
-                             dedupe_key, created_at, extra_recipient_id, skip_recipient_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                             dedupe_key, created_at, extra_recipient_id, skip_recipient_id,
+                             about_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (dedupe_key) DO NOTHING",
     )
     .bind(new_hex_id())
@@ -88,6 +92,7 @@ pub async fn insert_routed<'e>(
     .bind(a.now_ms)
     .bind(extra_recipient.map(|u| u.as_str().to_owned()))
     .bind(skip_recipient.map(|u| u.as_str().to_owned()))
+    .bind(about.map(|u| u.as_str().to_owned()))
     .execute(e)
     .await?;
     Ok(r.rows_affected() == 1)

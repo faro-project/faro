@@ -26,6 +26,8 @@ on:
       - deploy/Dockerfile
       - deploy/Dockerfile.dockerignore
       - deploy/healthcheck.sh
+      - web/package.json
+      - web/package-lock.json
       - .github/workflows/container.yml
   workflow_dispatch:
 

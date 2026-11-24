@@ -311,6 +311,23 @@ pub async fn active_ally_ids<'e>(
         .collect()
 }
 
+/// Ids of the members `ally` is an active ally for.
+pub async fn active_member_ids<'e>(
+    e: impl Executor<'e, Database = Any>,
+    ally: &UserId,
+) -> Result<Vec<UserId>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT member_id FROM ally_links WHERE ally_id = $1 AND state = 'active'
+         ORDER BY activated_at, id",
+    )
+    .bind(ally.as_str())
+    .fetch_all(e)
+    .await?;
+    rows.iter()
+        .map(|r| Ok(UserId::new(r.try_get::<String, _>("member_id")?)))
+        .collect()
+}
+
 /// One active, member-endorsed ally of `member`, as stored.
 #[derive(Debug, Clone)]
 pub struct ActiveAlly {

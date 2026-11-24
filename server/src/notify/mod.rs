@@ -25,6 +25,15 @@
 //! event kind), so a mailbox compromise reveals no more than "something
 //! happened".
 //!
+//! **Account status is the exception.** When an admin disables or
+//! re-enables an account (`account_disabled` / `account_enabled` on that
+//! person, `ally_disabled` / `ally_enabled` on each member they are an ally
+//! for), the email says so in words: it reports a decision made on the
+//! server about an account, nothing a device recorded, and the people
+//! affected must understand it from the email alone (the disabled person
+//! cannot sign in to read the feed). The disabled person is the one
+//! recipient told although their account is disabled.
+//!
 //! **Delivery.** A failure about one recipient (an unknown mailbox, a full
 //! one) is charged to that notification: retried with exponential backoff
 //! ([`policy::backoff_ms`]) up to [`policy::MAX_ATTEMPTS`], then marked
@@ -48,6 +57,7 @@ use crate::db::repo::{alerts, allies, reports, users};
 use crate::error::AppError;
 use crate::mailer::Email;
 use crate::state::AppState;
+use faro_proto::api::ServerAlertKind;
 use faro_proto::{Urgency, UserId};
 use policy::Mode;
 use std::collections::{BTreeMap, HashMap};
@@ -154,9 +164,101 @@ async fn fan_out(
     Ok(created)
 }
 
-/// Whether a due row must be dropped rather than sent.
+/// Whether a due row must be dropped rather than sent. A disabled account
+/// hears nothing, except that it was disabled.
 fn undeliverable(n: &DueNotification) -> bool {
-    n.recipient_disabled || !n.entitled
+    let told_while_disabled = account_status(n) == Some(ServerAlertKind::AccountDisabled)
+        && n.recipient_id == n.member_id;
+    (n.recipient_disabled && !told_while_disabled) || !n.entitled
+}
+
+/// The account-status kind of an alert notification, if it is one.
+fn account_status(n: &DueNotification) -> Option<ServerAlertKind> {
+    let (source, kind) = n.alert.as_ref()?;
+    if source != "server" {
+        return None;
+    }
+    ServerAlertKind::parse(kind).filter(|k| {
+        matches!(
+            k,
+            ServerAlertKind::AccountDisabled
+                | ServerAlertKind::AccountEnabled
+                | ServerAlertKind::AllyDisabled
+                | ServerAlertKind::AllyEnabled
+        )
+    })
+}
+
+/// Subject and text of an account-status notification (see the module docs).
+fn account_status_text(
+    instance: &str,
+    n: &DueNotification,
+    k: ServerAlertKind,
+) -> (String, String) {
+    let member = &n.member_name;
+    let to_member = n.recipient_id == n.member_id;
+    let ally = n.about_name.as_deref().unwrap_or("an ally");
+    match (k, to_member) {
+        (ServerAlertKind::AccountDisabled, true) => (
+            format!("Your account on {instance} was disabled"),
+            format!(
+                "An administrator of {instance} disabled your Faro account, so you can no \
+                 longer sign in. Everyone in an accountability partnership with you has been \
+                 told. Your computers are still monitored, and your allies still receive alerts \
+                 about them. If you think this is a mistake, contact the people who run \
+                 {instance}."
+            ),
+        ),
+        (ServerAlertKind::AccountDisabled, false) => (
+            format!("{member}'s account on {instance} was disabled"),
+            format!(
+                "An administrator of {instance} disabled {member}'s Faro account, so {member} \
+                 can no longer sign in. {member}'s computers are still monitored, and you will \
+                 still receive alerts about them."
+            ),
+        ),
+        (ServerAlertKind::AccountEnabled, true) => (
+            format!("Your account on {instance} was re-enabled"),
+            format!("An administrator of {instance} re-enabled your Faro account. You can sign in again."),
+        ),
+        (ServerAlertKind::AccountEnabled, false) => (
+            format!("{member}'s account on {instance} was re-enabled"),
+            format!(
+                "An administrator of {instance} re-enabled {member}'s Faro account. {member} can \
+                 sign in again."
+            ),
+        ),
+        (ServerAlertKind::AllyDisabled, true) => (
+            format!("Your ally {ally}'s account on {instance} was disabled"),
+            format!(
+                "An administrator of {instance} disabled the Faro account of {ally}, one of your \
+                 allies, so {ally} can no longer sign in to see your alerts and reports. Your \
+                 other allies still receive them."
+            ),
+        ),
+        (ServerAlertKind::AllyDisabled, false) => (
+            format!("{ally}'s account on {instance} was disabled"),
+            format!(
+                "An administrator of {instance} disabled the Faro account of {ally}, who is \
+                 also an ally for {member}. {ally} can no longer sign in. You still receive \
+                 {member}'s alerts."
+            ),
+        ),
+        (ServerAlertKind::AllyEnabled, true) => (
+            format!("Your ally {ally}'s account on {instance} was re-enabled"),
+            format!(
+                "An administrator of {instance} re-enabled the Faro account of {ally}, one of \
+                 your allies. {ally} can sign in again and see your alerts and reports."
+            ),
+        ),
+        (_, _) => (
+            format!("{ally}'s account on {instance} was re-enabled"),
+            format!(
+                "An administrator of {instance} re-enabled the Faro account of {ally}, who is \
+                 also an ally for {member}."
+            ),
+        ),
+    }
 }
 
 /// Re-check quiet hours at send time (a retry or a digest may fall inside
@@ -356,6 +458,14 @@ pub fn compose_immediate(state: &AppState, n: &DueNotification) -> Email {
     let instance = &cfg.instance.name;
     let url = &cfg.public_url;
     let member = &n.member_name;
+    if let Some(k) = account_status(n) {
+        let (subject, line) = account_status_text(instance, n, k);
+        return Email {
+            to: n.recipient_email.clone(),
+            subject,
+            text: format!("{line}\n\n{url}\n"),
+        };
+    }
     let (subject, line) = if n.to_extra_recipient {
         (
             format!("You are no longer {member}'s ally on {instance}"),
@@ -405,13 +515,18 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
         alerts: usize,
         reports: usize,
         removed: bool,
+        /// Account-status sentences (see the module docs).
+        status: Vec<String>,
     }
     let cfg = state.config();
     let mut per: BTreeMap<&str, Counts> = BTreeMap::new();
     for n in items {
         let c = per.entry(n.member_id.as_str()).or_default();
         c.name.clone_from(&n.member_name);
-        if n.to_extra_recipient {
+        if let Some(k) = account_status(n) {
+            let (subject, _) = account_status_text(&cfg.instance.name, n, k);
+            c.status.push(subject);
+        } else if n.to_extra_recipient {
             c.removed = true;
         } else if n.alert.is_none() {
             c.reports += 1;
@@ -432,6 +547,9 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
     for c in per.values() {
         if c.removed {
             lines.push(format!("- You are no longer an ally for {}.", c.name));
+        }
+        for s in &c.status {
+            lines.push(format!("- {s}."));
         }
         let mut parts = Vec::new();
         if c.urgent > 0 {
