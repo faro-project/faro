@@ -14,9 +14,9 @@ rust-version = "1.80"
 
 [workspace.dependencies]
 # Internal crates
-faro-proto = { path = "crates/faro-proto" }
-faro-crypto = { path = "crates/faro-crypto" }
-faro-platform = { path = "crates/faro-platform" }
+faro-proto = { path = "crates/faro-proto", version = "0.1.0" }
+faro-crypto = { path = "crates/faro-crypto", version = "0.1.0" }
+faro-platform = { path = "crates/faro-platform", version = "0.1.0" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
