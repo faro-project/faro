@@ -55,7 +55,7 @@ These come from ARCHITECTURE.md §3.5, §5 and §12. Reviewers check them on eve
 
 ## The macOS installer
 
-`installers/macos/build-pkg.sh` builds the `.pkg` and `installers/macos/check-pkg.sh` checks one without installing it. CI builds and checks the development package on every pull request.
+`installers/macos/build-pkg.sh` builds the `.pkg` and `installers/macos/check-pkg.sh` checks one without installing it. CI builds and checks the development package on every pull request and keeps it for 14 days as the `faro-dev-pkg-arm64-<sha>` artifact of the `macos-pkg` job (Apple Silicon only).
 
 ```sh
 installers/macos/build-pkg.sh --dev                         # unsigned, for testing only

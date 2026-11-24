@@ -61,3 +61,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
+      # For installing on a test machine. Unsigned, built for the runner's
+      # architecture (Apple Silicon), and its service accepts any program
+      # running as a logged-in user as the agent: never use it on anyone.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: faro-dev-pkg-arm64-${{ github.sha }}
+          path: target/pkg/Faro-*-dev.pkg
+          if-no-files-found: error
+          retention-days: 14
