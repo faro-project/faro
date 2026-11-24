@@ -10,6 +10,7 @@
 
 use faro_platform::{ForegroundInfo, ScreenCapture, ServiceHost, TamperSignals};
 use faro_platform_macos::{MacForeground, MacPlatform, MacScreenCapture, MacTamper};
+use std::time::Instant;
 
 fn bytes_in_use() -> i64 {
     // SAFETY: `malloc_statistics_t` is plain old data; zeroed is valid.
@@ -20,38 +21,102 @@ fn bytes_in_use() -> i64 {
 }
 
 /// Bytes retained per call after a warm-up (caches, lazily created framework
-/// singletons), as the **minimum over several measurement windows**.
+/// singletons), corrected for background growth, as the minimum over several
+/// measurement windows.
 ///
-/// `malloc_zone_statistics` is process-wide, and the capture frameworks
-/// allocate on their own background threads (XPC, CoreGraphics), so a single
-/// window can pick up unrelated transient allocations: on slow CI runners one
-/// window occasionally measured ~70 B/call where local runs measure 0. A real
-/// per-call leak grows by the same amount in *every* window, so the minimum
-/// still catches it, while transient noise does not survive the minimum.
-fn growth_per_call(mut f: impl FnMut()) -> i64 {
+/// `malloc_zone_statistics` is process-wide. On CI runners the capture
+/// frameworks' background threads (XPC, CoreGraphics) make the process grow
+/// steadily *over time*, independent of our calls. Dividing that by the call
+/// count blamed whichever API was slow (`capture_all_displays` measured
+/// ~70 B/call once, `tamper.poll` 64 B/call in every window of another run),
+/// while local runs measure 0. So each window is paired with a control of the
+/// same wall-clock length in which nothing is called, and the control's
+/// growth is subtracted. A real per-call leak scales with the number of calls
+/// and survives the subtraction; time-based drift cancels out. The minimum
+/// over windows then removes one-off transients.
+fn growth_per_call(mut f: impl FnMut()) -> Measurement {
     const WARMUP: i64 = 100;
-    const CALLS: i64 = 500;
+    const CALLS: i64 = 400;
     const WINDOWS: usize = 3;
     for _ in 0..WARMUP {
         f();
     }
-    (0..WINDOWS)
+    let windows: Vec<Window> = (0..WINDOWS)
         .map(|_| {
+            let started = Instant::now();
             let before = bytes_in_use();
             for _ in 0..CALLS {
                 f();
             }
-            (bytes_in_use() - before) / CALLS
+            let raw = bytes_in_use() - before;
+            let elapsed = started.elapsed();
+            let control_before = bytes_in_use();
+            std::thread::sleep(elapsed);
+            // Only background *growth* is subtracted. Memory freed during the
+            // control (a negative delta) says nothing about our calls, and
+            // subtracting it would inflate the result.
+            let background = (bytes_in_use() - control_before).max(0);
+            Window {
+                per_call: (raw - background) / CALLS,
+                raw_per_call: raw / CALLS,
+                background_per_call: background / CALLS,
+            }
         })
-        .min()
-        .unwrap_or(i64::MAX)
+        .collect();
+    let per_call = windows.iter().map(|w| w.per_call).min().unwrap_or(i64::MAX);
+    Measurement { per_call, windows }
 }
+
+/// One measurement window. Kept so failures (and `--nocapture` runs) show
+/// whether growth came from the calls or the background, and whether it is
+/// steady across windows (a leak) or shrinking (a cache warming up).
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // read through Debug output only.
+struct Window {
+    per_call: i64,
+    raw_per_call: i64,
+    background_per_call: i64,
+}
+
+#[derive(Debug, Clone)]
+struct Measurement {
+    /// Minimum corrected bytes per call over the windows.
+    per_call: i64,
+    #[allow(dead_code)] // read through Debug output only.
+    windows: Vec<Window>,
+}
+
+/// The leak this test was written for retained ~624 B/call (`active_app`)
+/// and ~264 B/call (`frontmost_pid`). 128 B/call still catches that class of
+/// bug with a margin over residual noise after the background correction.
+const MAX_RETAINED_PER_CALL: i64 = 128;
 
 #[test]
 fn polling_from_a_pool_less_thread_does_not_accumulate_memory() {
     // A fresh std thread has no autorelease pool, exactly like the agent's
     // tick loop.
     let report = std::thread::spawn(|| {
+        // Which capture path runs depends on the machine: without Screen
+        // Recording permission only the denial path is exercised. Print it so
+        // CI logs say which one was measured.
+        {
+            let mut probe = MacScreenCapture::new();
+            let outcome = match probe.capture_all_displays() {
+                Ok(frames) => format!(
+                    "Ok({} frame(s): {:?})",
+                    frames.len(),
+                    frames
+                        .iter()
+                        .map(|f| (f.width(), f.height()))
+                        .collect::<Vec<_>>()
+                ),
+                Err(e) => format!("Err({e})"),
+            };
+            eprintln!(
+                "capture probe: permission={:?}, one capture -> {outcome}",
+                probe.permission_state()
+            );
+        }
         let fg = MacForeground::new();
         let mut tamper = MacTamper::new();
         let mut capture = MacScreenCapture::new();
@@ -98,12 +163,13 @@ fn polling_from_a_pool_less_thread_does_not_accumulate_memory() {
     .join()
     .expect("measurement thread");
     // Printed so CI logs show the measured numbers, not just pass/fail.
-    eprintln!("bytes retained per call (min of windows): {report:?}");
-    for (what, per_call) in report {
+    eprintln!("bytes retained per call (background-corrected, min of windows): {report:?}");
+    for (what, m) in report {
         // Before the fix: active_app ~624 B/call, frontmost_pid ~264 B/call.
         assert!(
-            per_call < 64,
-            "{what} retains {per_call} bytes per call on a pool-less thread"
+            m.per_call < MAX_RETAINED_PER_CALL,
+            "{what} retains {} bytes per call on a pool-less thread ({m:?})",
+            m.per_call
         );
     }
 }

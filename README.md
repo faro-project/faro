@@ -1,6 +1,8 @@
-# Faro
+<p align="center">
+  <img src="assets/brand/faro-wordmark.svg" alt="Faro" width="360">
+</p>
 
-**Free, open-source, self-hosted screen accountability.**
+<p align="center"><strong>Free, open-source, self-hosted screen accountability.</strong></p>
 
 Faro is an accountability tool, not a surveillance tool. A person chooses to install it on their own computer and invites people they trust (their **allies**). Faro detects explicit content **on the device** and sends allies an **end-to-end-encrypted** report: a summary, a timeline and heavily blurred thumbnails. Allies are also told when monitoring stops or is tampered with.
 
@@ -28,8 +30,9 @@ There is no central Faro service. A church, a college, a small group or one pers
 crates/   Rust client crates (proto, crypto, core, detect, ipc, platform, update, service, agent)
 server/   faro-server, the self-hosted instance
 docs/     architecture, protocol and development docs
+assets/   brand assets (logo, colours)
 ```
 
 ## License
 
-[Apache-2.0](LICENSE). The "Faro" name and logo are reserved for official, project-signed builds (see ARCHITECTURE.md §11). Forks are welcome under their own name.
+[Apache-2.0](LICENSE). The "Faro" name and logo are reserved for official, project-signed builds (see ARCHITECTURE.md §11 and [assets/brand](assets/brand/README.md)). Forks are welcome under their own name.
