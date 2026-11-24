@@ -56,6 +56,8 @@ pub mod config;
 pub mod frames;
 pub mod identity;
 pub mod notice;
+// The pending-signal queue only serves the agent loop, which is Unix only.
+#[cfg(unix)]
 mod pending;
 pub mod platform;
 #[cfg(unix)]

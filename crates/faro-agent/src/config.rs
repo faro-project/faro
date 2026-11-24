@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(unix)]
 use faro_ipc::{AllowUids, PeerVerifier};
 
 use crate::identity;
@@ -37,19 +38,14 @@ pub enum ServiceTrust {
 }
 
 impl ServiceTrust {
+    /// Unix only, like the agent loop that uses it: faro-ipc has no other
+    /// transport yet.
     #[cfg(unix)]
     pub(crate) fn verifier(self) -> Box<dyn PeerVerifier> {
         match self {
             ServiceTrust::Root => Box::new(AllowUids::root()),
             ServiceTrust::SameUid => Box::new(faro_ipc::AllowSameUid),
         }
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn verifier(self) -> Box<dyn PeerVerifier> {
-        // Only the uid-0 rule is meaningful without Unix credentials, and
-        // no non-Unix transport exists yet anyway.
-        Box::new(AllowUids::root())
     }
 }
 
