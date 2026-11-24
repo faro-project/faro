@@ -6,8 +6,8 @@
 >
 > - The server (`faro-server`) runs and its API works, but **there is no web app yet** (no setup wizard, admin console or ally pages) and **no released desktop app** for members. So an instance can't yet do its real job: you can install it, create the admin account, test email and invite people, but members have nothing to enroll their computers with yet. This guide is for pilot instances and testers.
 > - Until the web app exists, first-run setup and admin tasks are done with `curl` commands, given in full below.
-> - **No official container image or binary is published yet.** You build the image yourself from the source code (one command; it takes a while the first time).
-> - The Docker files in `deploy/` have **not yet been built or tested in CI**. The commands in this guide were checked against the real `faro-server` binary, but not inside Docker.
+> - **There are no releases yet.** You can build the image yourself from the source code (one command; it takes a while the first time), or use the development image `ghcr.io/faro-project/faro-server:main` that CI builds from the latest code for amd64 and arm64 (see [Path B](#4-path-b-a-raspberry-pi)).
+> - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
 > - **Postgres is untested** in these deployment files. Use the built-in SQLite database, which is the right choice for almost everyone anyway.
 > - Not built yet: passkey sign-in (you sign in with email links for now), Web Push notifications (email only), S3 storage for attachments (local disk only), and the update mirror.
 
@@ -166,9 +166,27 @@ Now go to [section 6, First run](#6-first-run-create-the-admin-account).
 - **Your router forwards port 443 to the Pi** and your domain points at your home's public IP address. This works if your internet provider gives you a public IP address. If that address changes from time to time, you also need a dynamic-DNS service to keep your domain updated. Then use mode A exactly as in Path A.
 - **No port forwarding:** use Cloudflare Tunnel or Tailscale Funnel as described in [Path C](#5-path-c-a-home-server-without-a-public-address). This is usually easier at home.
 
-**Steps.** Log in to the Pi with `ssh`, then follow [Path A](#3-path-a-a-vps-with-docker-compose) from step 4 (install Docker) onward. If your Pi has 2 GB of memory, do step 5 (swap).
+**Steps.** Log in to the Pi with `ssh`, then follow [Path A](#3-path-a-a-vps-with-docker-compose) from step 4 (install Docker) onward, but in step 9 use the prebuilt image below instead of building. Then you can skip step 5 (swap), which is only needed for building.
 
-**The build on a Pi is slow** (it can take an hour). If you have a faster computer with Docker, you can build the image there and copy it over:
+**Use the prebuilt image (recommended).** Building on a Pi is slow (it can take an hour), so CI publishes a ready-made arm64 image. In the `faro/deploy` folder, tell Docker Compose to use it, then download and start it:
+
+```sh
+echo 'FARO_IMAGE=ghcr.io/faro-project/faro-server:main' >> .env
+chmod 600 .env
+sudo docker compose pull faro
+sudo docker compose up -d
+```
+
+Leave out `--build` from now on, because `--build` compiles Faro on the Pi again. `:main` is the latest development code. Once releases exist, use a version tag instead, such as `:0.1.0`.
+
+If `pull` says `unauthorized` or `denied`, the image is private (it is while the Faro repository is private). Create a GitHub personal access token (classic) with only the `read:packages` scope, then log in once on the Pi and pull again:
+
+```sh
+sudo docker login ghcr.io -u YOUR-GITHUB-USERNAME
+# paste the token when it asks for a password
+```
+
+**Or build it yourself on a faster computer.** If you have a faster computer with Docker, you can build the image there and copy it over:
 
 ```sh
 # On the faster computer, in the faro folder (not faro/deploy):
@@ -501,6 +519,15 @@ After a restore the log says "previous run did not shut down cleanly". That's ex
    git pull
    cd deploy
    sudo docker compose up -d --build
+   ```
+
+   If you use the prebuilt image (`FARO_IMAGE` in `deploy/.env`, as in [Path B](#4-path-b-a-raspberry-pi)), download the new image instead of building:
+
+   ```sh
+   cd faro/deploy
+   git pull
+   sudo docker compose pull faro
+   sudo docker compose up -d
    ```
 
 3. Check: `sudo docker compose exec faro faro-server version` and `sudo docker compose exec faro faro-server doctor`.

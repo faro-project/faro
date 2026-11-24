@@ -33,7 +33,11 @@ services:
       # The build context is the repository root (the whole Cargo workspace).
       context: ..
       dockerfile: deploy/Dockerfile
-    image: faro-server:local
+    # To run the prebuilt image instead of building (much faster on a
+    # Raspberry Pi), put this line in deploy/.env (next to this file):
+    #     FARO_IMAGE=ghcr.io/faro-project/faro-server:main
+    # then `docker compose pull faro && docker compose up -d` (no --build).
+    image: ${FARO_IMAGE:-faro-server:local}
     restart: unless-stopped
     env_file:
       - faro.env

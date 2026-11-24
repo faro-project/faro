@@ -24,7 +24,8 @@
 #   port 8080                    the listen port inside the container, plain
 #                                HTTP or, with FARO_TLS_ACME_DOMAIN set, HTTPS
 #
-# Status: this file has not yet been built in CI. See docs/SELF-HOSTING.md.
+# Prebuilt amd64 + arm64 images are published to ghcr.io/faro-project/faro-server
+# by .github/workflows/container.yml. See docs/SELF-HOSTING.md.
 
 # Builder: Rust 1.99.1 on Debian 13 (trixie). The workspace needs Rust >= 1.94.
 # The runtime stage below must use the same Debian release, because the
