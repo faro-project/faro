@@ -19,19 +19,32 @@ fn bytes_in_use() -> i64 {
     i64::try_from(stats.size_in_use).unwrap_or(i64::MAX)
 }
 
-/// Average bytes retained per call after a warm-up (caches, lazily created
-/// framework singletons).
+/// Bytes retained per call after a warm-up (caches, lazily created framework
+/// singletons), as the **minimum over several measurement windows**.
+///
+/// `malloc_zone_statistics` is process-wide, and the capture frameworks
+/// allocate on their own background threads (XPC, CoreGraphics), so a single
+/// window can pick up unrelated transient allocations: on slow CI runners one
+/// window occasionally measured ~70 B/call where local runs measure 0. A real
+/// per-call leak grows by the same amount in *every* window, so the minimum
+/// still catches it, while transient noise does not survive the minimum.
 fn growth_per_call(mut f: impl FnMut()) -> i64 {
     const WARMUP: i64 = 100;
-    const CALLS: i64 = 1500;
+    const CALLS: i64 = 500;
+    const WINDOWS: usize = 3;
     for _ in 0..WARMUP {
         f();
     }
-    let before = bytes_in_use();
-    for _ in 0..CALLS {
-        f();
-    }
-    (bytes_in_use() - before) / CALLS
+    (0..WINDOWS)
+        .map(|_| {
+            let before = bytes_in_use();
+            for _ in 0..CALLS {
+                f();
+            }
+            (bytes_in_use() - before) / CALLS
+        })
+        .min()
+        .unwrap_or(i64::MAX)
 }
 
 #[test]
@@ -84,6 +97,8 @@ fn polling_from_a_pool_less_thread_does_not_accumulate_memory() {
     })
     .join()
     .expect("measurement thread");
+    // Printed so CI logs show the measured numbers, not just pass/fail.
+    eprintln!("bytes retained per call (min of windows): {report:?}");
     for (what, per_call) in report {
         // Before the fix: active_app ~624 B/call, frontmost_pid ~264 B/call.
         assert!(
