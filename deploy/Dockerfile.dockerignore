@@ -1,0 +1,21 @@
+# Build-context exclusions for deploy/Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore next to the Dockerfile; the context is the
+# repository root). Keeps the context small and keeps local data, secrets
+# and build output out of the image.
+
+**/target
+.git
+**/node_modules
+web/build
+web/.svelte-kit
+**/*.db
+**/*.db-wal
+**/*.db-shm
+/data
+**/.DS_Store
+
+# Local deployment state from deploy/ (secrets, backups).
+deploy/faro.env
+deploy/.env
+deploy/backups
+deploy/*.tar

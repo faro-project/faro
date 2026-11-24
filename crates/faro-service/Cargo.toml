@@ -1,0 +1,74 @@
+[package]
+name = "faro-service"
+description = "Faro privileged service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Development builds only: let a root service accept the session agent by
+# uid alone when no code-signing requirement (`ipc.agent_requirement`) is
+# configured. Never enable in release builds: without the signature check
+# any program the user runs can pose as the agent (source/ipc.rs).
+dev = []
+
+[lib]
+name = "faro_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "faro-service"
+path = "src/main.rs"
+
+[dependencies]
+faro-proto.workspace = true
+faro-crypto.workspace = true
+faro-core.workspace = true
+faro-detect.workspace = true
+faro-ipc.workspace = true
+faro-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+tokio.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+hex.workspace = true
+url = "2.5"
+httpdate = "1.0"
+hostname = "0.4"
+# rustls (ring provider, like the rest of the workspace) with the OS trust
+# store, so instances using a locally installed CA work; no native-tls/OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+faro-platform-macos.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+axum.workspace = true
+# End-to-end tests (tests/e2e*.rs) run the real instance in-process and reuse
+# its integration-test harness (server/tests/common/mod.rs), which needs
+# sqlx (direct SQL, e.g. the malicious-instance rollback) and tower's
+# `oneshot` for the simulated browsers.
+faro-server = { path = "../../server", version = "0.1.0" }
+sqlx.workspace = true
+tower = { workspace = true, features = ["util"] }
+# Decodes the blurred thumbnail an ally downloads, to check its size.
+image.workspace = true
+# tests/agent_ipc.rs runs the real session agent (synthetic platform) against
+# the service's IPC source, and checks `--spawn-agent`'s arguments against
+# the agent's own CLI (whose dev-only flags need the `dev` feature).
+faro-agent = { path = "../faro-agent", features = ["dev"] }

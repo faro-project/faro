@@ -1,0 +1,4 @@
+faro.env
+.env
+backups/
+*.tar
