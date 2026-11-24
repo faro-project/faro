@@ -41,7 +41,7 @@ fn growth_per_call(mut f: impl FnMut()) -> Measurement {
     for _ in 0..WARMUP {
         f();
     }
-    (0..WINDOWS)
+    let windows: Vec<Window> = (0..WINDOWS)
         .map(|_| {
             let started = Instant::now();
             let before = bytes_in_use();
@@ -52,29 +52,38 @@ fn growth_per_call(mut f: impl FnMut()) -> Measurement {
             let elapsed = started.elapsed();
             let control_before = bytes_in_use();
             std::thread::sleep(elapsed);
-            let background = bytes_in_use() - control_before;
-            Measurement {
+            // Only background *growth* is subtracted. Memory freed during the
+            // control (a negative delta) says nothing about our calls, and
+            // subtracting it would inflate the result.
+            let background = (bytes_in_use() - control_before).max(0);
+            Window {
                 per_call: (raw - background) / CALLS,
                 raw_per_call: raw / CALLS,
                 background_per_call: background / CALLS,
             }
         })
-        .min_by_key(|m| m.per_call)
-        .unwrap_or(Measurement {
-            per_call: i64::MAX,
-            raw_per_call: i64::MAX,
-            background_per_call: 0,
-        })
+        .collect();
+    let per_call = windows.iter().map(|w| w.per_call).min().unwrap_or(i64::MAX);
+    Measurement { per_call, windows }
 }
 
-/// One window's numbers, kept so failures (and `--nocapture` runs) show
-/// whether growth came from the calls or from the background.
+/// One measurement window. Kept so failures (and `--nocapture` runs) show
+/// whether growth came from the calls or the background, and whether it is
+/// steady across windows (a leak) or shrinking (a cache warming up).
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // raw/background are only read through Debug output.
-struct Measurement {
+#[allow(dead_code)] // read through Debug output only.
+struct Window {
     per_call: i64,
     raw_per_call: i64,
     background_per_call: i64,
+}
+
+#[derive(Debug, Clone)]
+struct Measurement {
+    /// Minimum corrected bytes per call over the windows.
+    per_call: i64,
+    #[allow(dead_code)] // read through Debug output only.
+    windows: Vec<Window>,
 }
 
 /// The leak this test was written for retained ~624 B/call (`active_app`)
@@ -87,6 +96,27 @@ fn polling_from_a_pool_less_thread_does_not_accumulate_memory() {
     // A fresh std thread has no autorelease pool, exactly like the agent's
     // tick loop.
     let report = std::thread::spawn(|| {
+        // Which capture path runs depends on the machine: without Screen
+        // Recording permission only the denial path is exercised. Print it so
+        // CI logs say which one was measured.
+        {
+            let mut probe = MacScreenCapture::new();
+            let outcome = match probe.capture_all_displays() {
+                Ok(frames) => format!(
+                    "Ok({} frame(s): {:?})",
+                    frames.len(),
+                    frames
+                        .iter()
+                        .map(|f| (f.width(), f.height()))
+                        .collect::<Vec<_>>()
+                ),
+                Err(e) => format!("Err({e})"),
+            };
+            eprintln!(
+                "capture probe: permission={:?}, one capture -> {outcome}",
+                probe.permission_state()
+            );
+        }
         let fg = MacForeground::new();
         let mut tamper = MacTamper::new();
         let mut capture = MacScreenCapture::new();
