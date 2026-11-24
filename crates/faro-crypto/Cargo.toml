@@ -1,0 +1,26 @@
+[package]
+name = "faro-crypto"
+description = "Faro cryptography: Ed25519, X25519 sealed boxes, XChaCha20-Poly1305, Argon2id"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+faro-proto.workspace = true
+ed25519-dalek.workspace = true
+crypto_box.workspace = true
+chacha20poly1305.workspace = true
+argon2.workspace = true
+blake3.workspace = true
+rand_core.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,39 @@
+# cargo-deny policy (ARCHITECTURE.md §11): every third-party component must be
+# Apache-2.0 compatible. Run: cargo deny check
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0", # webpki-root-certs / webpki-roots data
+    "MPL-2.0",             # weak, file-level copyleft; allowed for unmodified dependencies only
+    "BSL-1.0",
+]
+# AGPL/GPL/LGPL and non-commercial licences are rejected by omission.
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
