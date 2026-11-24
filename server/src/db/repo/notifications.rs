@@ -86,6 +86,9 @@ pub struct DueNotification {
     pub alert: Option<(String, String)>,
     /// This recipient is the alert's extra recipient (the removed ally).
     pub to_extra_recipient: bool,
+    /// Display name of the account the alert is about, when that is not the
+    /// member (the ally whose account was disabled or re-enabled).
+    pub about_name: Option<String>,
 }
 
 /// Due pending notifications of one mode, oldest first.
@@ -103,6 +106,7 @@ pub async fn due<'e>(
                 a.source AS alert_source, a.kind AS alert_kind,
                 a.extra_recipient_id,
                 m.display_name AS member_name, d.name AS device_name,
+                ab.display_name AS about_name,
                 CASE WHEN n.recipient_id = COALESCE(a.member_id, rp.member_id)
                        OR n.recipient_id = a.extra_recipient_id
                        OR EXISTS (SELECT 1 FROM ally_links l
@@ -115,6 +119,7 @@ pub async fn due<'e>(
          LEFT JOIN reports rp ON rp.id = n.report_id
          JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id)
          LEFT JOIN devices d ON d.id = COALESCE(a.device_id, rp.device_id)
+         LEFT JOIN users ab ON ab.id = a.about_user_id
          WHERE n.status = 'pending' AND n.mode = $1 AND n.due_at <= $2
            AND n.next_attempt_at <= $2
          ORDER BY n.created_at, n.id
@@ -148,6 +153,7 @@ pub async fn due<'e>(
                 attempts: r.try_get("attempts")?,
                 created_at_ms: r.try_get("created_at")?,
                 alert: source.zip(kind),
+                about_name: r.try_get("about_name")?,
             })
         })
         .collect()

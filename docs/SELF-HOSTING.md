@@ -4,8 +4,7 @@
 
 > **Status: pre-alpha. Read this first.**
 >
-> - The server (`faro-server`) runs and its API works, but **there is no web app yet** (no setup wizard, admin console or ally pages) and **no released desktop app** for members. So an instance can't yet do its real job: you can install it, create the admin account, test email and invite people, but members have nothing to enroll their computers with yet. This guide is for pilot instances and testers.
-> - Until the web app exists, first-run setup and admin tasks are done with `curl` commands, given in full below.
+> - The server (`faro-server`) runs and its API works. Its web app so far has the **setup page**, **sign-in** by emailed link and the **admin console** (overview, inviting members, settings, email test); there are no member or ally pages yet, and **no released desktop app** for members. So an instance can't yet do its real job: you can install it, create the admin account, test email and invite people, but members have nothing to enroll their computers with yet. This guide is for pilot instances and testers.
 > - **There are no releases yet.** You can build the image yourself from the source code (one command; it takes a while the first time), or use the development image `ghcr.io/faro-project/faro-server:main` that CI builds from the latest code for amd64 and arm64 (see [Path B](#4-path-b-a-raspberry-pi)).
 > - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
 > - **Postgres is untested** in these deployment files. Use the built-in SQLite database, which is the right choice for almost everyone anyway.
@@ -257,7 +256,7 @@ Your instance gets an address like `https://homeserver.tail1234.ts.net`, so you 
 
 ## 6. First run: create the admin account
 
-The web setup wizard isn't built yet, so for now you create the admin account with `curl`. Run these commands on the server itself (or on any Mac or Linux computer). They talk to your instance's real `https://` address, which also proves HTTPS works.
+You create the admin account on your instance's setup page, using a one-time token from the server's log.
 
 **1. Find the one-time setup token.** The first time Faro starts, it prints a token in its log:
 
@@ -273,22 +272,41 @@ faro-1  |
 faro-1  |     xkaJFpo_XSesNsQ-EbUJAz4qhd194Q0EgKUmDT7gGBU
 ```
 
-The log also says "Open https://…/setup and paste it": that page doesn't exist yet, so use the next steps instead.
-
 If the token is missing (for example because the container was recreated) or more than 24 hours old, make a new one. This cancels any older token:
 
 ```sh
 sudo docker compose exec faro faro-server init
 ```
 
-**2. Save your instance address and the token** in the terminal, so the commands below can use them (replace both values with yours):
+**2. Open the setup page** in your web browser: `https://faro.yourchurch.org/setup` (your instance's address followed by `/setup`). It walks you through three steps:
+
+- **Admin account:** paste the token and enter your email address and name. This creates the admin account and signs this browser in. The token then stops working, and nobody else can claim the instance. The admin account is also a member account, so you can use Faro yourself; being admin gives you no access to anyone else's data.
+- **Email:** sends a test message to your address. Set up email first ([section 7](#7-email-smtp)); if the test fails, the page explains the error code. You can skip this and come back.
+- **Registration and retention:** who may create an account (invite only, anyone with an address at your domains, or closed) and how many days data is kept. You can keep the defaults.
+
+**3. Use the admin console** at `https://faro.yourchurch.org/admin` (the **Admin** link at the top of every page, once you're signed in as the admin):
+
+- **Overview:** how many people and computers there are, when computers last checked in, storage use and email delivery, plus the notice members see of what you can and cannot see as the operator.
+- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own.
+- **Settings:** registration, retention and the missed check-in grace period.
+- **Email:** send yourself a test message.
+
+If you've been signed out (sessions last 30 days), sign in at `/signin`: enter your email address and open the link Faro emails you. Signing in needs working email, so set it up ([section 7](#7-email-smtp)).
+
+### The same tasks with `curl`
+
+Everything above can also be done with `curl`, for example to script it, or with a build of `faro-server` that has no web app. Run these commands on the server itself (or on any Mac or Linux computer). They talk to your instance's real `https://` address, which also proves HTTPS works.
+
+Steps 2 and 3 create the admin account without the setup page. **If you used the setup page, skip them:** do step 1, sign `curl` in with "Signing `curl` in" (after step 9), and continue at step 4.
+
+**1. Save your instance address and the token** in the terminal, so the commands below can use them (replace both values with yours):
 
 ```sh
 FARO=https://faro.yourchurch.org
 TOKEN=xkaJFpo_XSesNsQ-EbUJAz4qhd194Q0EgKUmDT7gGBU
 ```
 
-**3. Check that the instance is waiting for setup:**
+**2. Check that the instance is waiting for setup:**
 
 ```sh
 curl -s "$FARO/v1/setup"
@@ -296,7 +314,7 @@ curl -s "$FARO/v1/setup"
 
 It should answer `{"needs_setup":true}`.
 
-**4. Create the admin account** (use your real email address and name). This also signs you in: `curl` keeps your sign-in in the file `faro-admin.cookies`.
+**3. Create the admin account** (use your real email address and name). This also signs you in: `curl` keeps your sign-in in the file `faro-admin.cookies`.
 
 ```sh
 curl -s -c faro-admin.cookies -X POST "$FARO/v1/setup" \
@@ -306,13 +324,13 @@ curl -s -c faro-admin.cookies -X POST "$FARO/v1/setup" \
 
 The answer starts with `{"user":{"id":"usr_…"` and shows `"admin":true`. The token now stops working, and nobody else can claim the instance. The admin account is also a member account, so you can use Faro yourself; being admin gives you no access to anyone else's data.
 
-**5. Check that you're signed in:**
+**4. Check that you're signed in:**
 
 ```sh
 curl -s -b faro-admin.cookies "$FARO/v1/me"
 ```
 
-**6. Send yourself a test email** (set up email first, [section 7](#7-email-smtp)):
+**5. Send yourself a test email** (set up email first, [section 7](#7-email-smtp)):
 
 ```sh
 curl -s -b faro-admin.cookies -X POST "$FARO/admin/api/smtp-test"
@@ -320,14 +338,14 @@ curl -s -b faro-admin.cookies -X POST "$FARO/admin/api/smtp-test"
 
 `{"ok":true,"error":null,"sent_to":"you@yourchurch.org"}` means the email was handed to your mail provider; check your inbox (and spam folder). The test always goes to your own address. If `ok` is `false`, see the error codes in [section 7](#7-email-smtp).
 
-**7. Look at the instance overview** (counts only; see [section 11](#11-what-you-as-the-operator-can-and-cannot-see)):
+**6. Look at the instance overview** (counts only; see [section 11](#11-what-you-as-the-operator-can-and-cannot-see)):
 
 ```sh
 curl -s -b faro-admin.cookies "$FARO/admin/api/overview"
 curl -s -b faro-admin.cookies "$FARO/admin/api/users"
 ```
 
-**8. Change settings (optional).** Registration is invite-only by default. To let anyone with an address at your college sign up, or to shorten how long data is kept:
+**7. Change settings (optional).** Registration is invite-only by default. To let anyone with an address at your college sign up, or to shorten how long data is kept:
 
 ```sh
 curl -s -b faro-admin.cookies -X PATCH "$FARO/admin/api/settings" \
@@ -341,7 +359,7 @@ curl -s -b faro-admin.cookies -X PATCH "$FARO/admin/api/settings" \
 
 The answer shows the settings now in effect. Registration modes are `invite-only`, `open` (needs `allowed_email_domains`; `["*"]` means any domain) and `closed`. Retention can only be set in days, from 1 to 3650. Settings changed this way are stored in the database and take priority over `faro.env` from then on.
 
-**9. Invite a member:**
+**8. Invite a member:**
 
 ```sh
 curl -s -b faro-admin.cookies -X POST "$FARO/admin/api/invites" \
@@ -351,14 +369,14 @@ curl -s -b faro-admin.cookies -X POST "$FARO/admin/api/invites" \
 
 They get an email invitation, valid for 7 days. (Until the web and desktop apps are released, there's little they can do with it.)
 
-**10. Sign out and delete the sign-in file.** `faro-admin.cookies` works like a password for 30 days, so don't leave it lying around:
+**9. Sign out and delete the sign-in file.** `faro-admin.cookies` works like a password for 30 days, so don't leave it lying around:
 
 ```sh
 curl -s -b faro-admin.cookies -X POST "$FARO/v1/auth/logout"
 rm faro-admin.cookies
 ```
 
-**Signing in again later** (until the web app exists): ask for a sign-in link, which is emailed to you:
+**Signing `curl` in.** Your browser signs in at `/signin`, but `curl` keeps its own sign-in. Ask for a sign-in link, which is emailed to you:
 
 ```sh
 curl -s -X POST "$FARO/v1/auth/magic-link" \
@@ -397,7 +415,7 @@ Notes:
 **Test it** in two ways:
 
 1. `sudo docker compose exec faro faro-server doctor` connects and signs in to your mail server without sending anything ([section 8](#8-checking-your-instance-faro-server-doctor)).
-2. The test email endpoint (step 6 of [First run](#6-first-run-create-the-admin-account)) actually sends a message to you.
+2. The test email (the setup page's Email step, or step 5 of the `curl` tasks in [First run](#6-first-run-create-the-admin-account)) actually sends a message to you.
 
 What the error codes mean:
 
@@ -567,7 +585,7 @@ Responsibilities that come with running an instance:
 
 If you prefer to run `faro-server` directly (for example on an existing Debian or Ubuntu server), build it from source and use the systemd unit in `deploy/faro-server.service`.
 
-1. **Build** (as your normal user):
+1. **Build** (as your normal user). Building the web app (the setup page) needs **Node.js 22.17 or newer**. The `nodejs` packages in Debian and Ubuntu are older, so install a current version as [nodejs.org's download page](https://nodejs.org/en/download) shows for Linux, and check it with `node --version`. Then:
 
    ```sh
    sudo apt-get install -y build-essential git curl
@@ -575,8 +593,11 @@ If you prefer to run `faro-server` directly (for example on an existing Debian o
    . "$HOME/.cargo/env"
    git clone https://github.com/faro-project/faro.git
    cd faro
-   cargo build --release --locked -p faro-server
+   (cd web && npm ci && npm run build)
+   FARO_REQUIRE_WEB=1 cargo build --release --locked -p faro-server
    ```
+
+   `FARO_REQUIRE_WEB=1` stops the build if the web app is missing. Without it, the build still works but the server has no setup page.
 
 2. **Install the binary, a user and the configuration:**
 

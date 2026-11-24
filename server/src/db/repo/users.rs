@@ -110,6 +110,34 @@ pub async fn count_admins<'e>(e: impl Executor<'e, Database = Any>) -> Result<i6
     row.try_get("n")
 }
 
+/// Enabled admins other than `except` (so the last one can't be disabled).
+pub async fn count_enabled_admins_except<'e>(
+    e: impl Executor<'e, Database = Any>,
+    except: &UserId,
+) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS n FROM users WHERE is_admin = 1 AND disabled = 0 AND id <> $1",
+    )
+    .bind(except.as_str())
+    .fetch_one(e)
+    .await?;
+    row.try_get("n")
+}
+
+/// Set an account's disabled flag. Returns false if it already had that value.
+pub async fn set_disabled<'e>(
+    e: impl Executor<'e, Database = Any>,
+    id: &UserId,
+    disabled: bool,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("UPDATE users SET disabled = $1 WHERE id = $2 AND disabled <> $1")
+        .bind(flag(disabled))
+        .bind(id.as_str())
+        .execute(e)
+        .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 pub async fn touch_login<'e>(
     e: impl Executor<'e, Database = Any>,
     id: &UserId,

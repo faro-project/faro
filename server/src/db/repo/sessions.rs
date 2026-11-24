@@ -77,3 +77,15 @@ pub async fn delete<'e>(
         .await?;
     Ok(())
 }
+
+/// End every session of a user (their account was disabled).
+pub async fn delete_for_user<'e>(
+    e: impl Executor<'e, Database = Any>,
+    user: &faro_proto::UserId,
+) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user.as_str())
+        .execute(e)
+        .await?;
+    Ok(r.rows_affected())
+}

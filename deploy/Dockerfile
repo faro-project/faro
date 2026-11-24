@@ -17,6 +17,9 @@
 # setup to get wrong. Emulated arm64 builds are slow; building directly on
 # the Raspberry Pi or another arm64 machine is faster.
 #
+# The web app (web/, SvelteKit) is built in its own Node stage and embedded
+# into the binary; the build fails if it is missing (FARO_REQUIRE_WEB=1).
+#
 # Runtime layout:
 #   /usr/local/bin/faro-server   the binary (ENTRYPOINT; default command `serve`)
 #   /data                        data directory (identity key, SQLite DB, blobs,
@@ -27,6 +30,16 @@
 # Prebuilt amd64 + arm64 images are published to ghcr.io/faro-project/faro-server
 # by .github/workflows/container.yml. See docs/SELF-HOSTING.md.
 
+# Web app: plain static files, the same on every platform, so it is built
+# once on the build machine's own platform rather than under emulation.
+FROM --platform=$BUILDPLATFORM node:24-trixie-slim AS web
+
+WORKDIR /web
+COPY web/package.json web/package-lock.json web/.npmrc ./
+RUN --mount=type=cache,target=/root/.npm,sharing=locked npm ci
+COPY web/ ./
+RUN npm run build
+
 # Builder: Rust 1.99.1 on Debian 13 (trixie). The workspace needs Rust >= 1.94.
 # The runtime stage below must use the same Debian release, because the
 # binary links against that release's glibc.
@@ -34,6 +47,7 @@ FROM rust:1.99.1-slim-trixie AS builder
 
 WORKDIR /src
 COPY . .
+COPY --from=web /web/build web/build
 
 # Only a C compiler is needed beyond Rust (for ring and the bundled SQLite);
 # the slim Rust image already ships gcc and libc6-dev. TLS is rustls with
@@ -44,7 +58,7 @@ COPY . .
 # The target directory is deliberately *not* a cache mount: it is
 # per-platform and the build must produce a binary in this layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --release --locked -p faro-server --bin faro-server \
+    FARO_REQUIRE_WEB=1 cargo build --release --locked -p faro-server --bin faro-server \
  && install -m 0755 target/release/faro-server /usr/local/bin/faro-server \
  && /usr/local/bin/faro-server version
 

@@ -39,6 +39,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "liveness_retention_fixes",
                     include_str!("../../migrations/0004_liveness_retention_fixes.sql"),
                 ),
+                (
+                    5,
+                    "account_status_alerts",
+                    include_str!("../../migrations/0005_account_status_alerts.sql"),
+                ),
             ]
         }
     }

@@ -42,6 +42,32 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test -p faro-platform-macos --test autorelease_growth -- --nocapture
 
+  # The SvelteKit web app (web/): format, types and the static build, then
+  # faro-server built with that bundle embedded (FARO_REQUIRE_WEB=1 fails
+  # the build if a page is missing) and its web-serving tests.
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run check
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p faro-server --lib web
+        working-directory: .
+        env:
+          FARO_REQUIRE_WEB: "1"
+
   deny:
     runs-on: ubuntu-24.04
     steps:

@@ -28,6 +28,7 @@
 //! | [`server`] | the HTTP(S) listener and graceful shutdown |
 //! | [`backup`] | `faro-server backup`: DB snapshot + identity key + blobs tarball |
 //! | [`doctor`] | `faro-server doctor`: read-only configuration checks |
+//! | [`web`] | the embedded web app (setup wizard, …) built from `web/` |
 //! | [`cli`] | `faro-server serve \| init \| backup \| doctor \| version` |
 //!
 //! Integration tests build the full router in-process with
@@ -57,6 +58,7 @@ pub mod settings;
 pub mod state;
 pub mod tls;
 pub mod tokens;
+pub mod web;
 pub mod workers;
 
 pub use error::{AppError, AppResult};

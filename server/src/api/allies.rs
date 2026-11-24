@@ -234,6 +234,7 @@ pub async fn approve(
         // The new ally hears about it from the notice below, not as an
         // "alert" about themself.
         Some(&ally),
+        None,
     )
     .await?;
     tx.commit().await?;

@@ -17,6 +17,12 @@ path = "src/lib.rs"
 name = "faro-server"
 path = "src/main.rs"
 
+[build-dependencies]
+# build.rs: CSP hashes of the embedded web app's inline scripts. sha2 0.10 is
+# already in the tree (ed25519-dalek).
+base64.workspace = true
+sha2 = "0.10"
+
 [dependencies]
 faro-proto.workspace = true
 faro-crypto.workspace = true

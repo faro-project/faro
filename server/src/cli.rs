@@ -185,11 +185,17 @@ fn mailer_for(cfg: &Config) -> Result<Arc<dyn Mailer>, CliError> {
 }
 
 fn print_setup_token(cfg: &Config, token: &str) {
-    eprintln!(
-        "\nOne-time setup token (valid 24 hours, single use):\n\n    {token}\n\n\
-         Open {}/setup and paste it to create the admin account.\n",
-        cfg.public_url
-    );
+    let next = if crate::web::is_embedded() {
+        format!(
+            "Open {}/setup and paste it to create the admin account.",
+            cfg.public_url
+        )
+    } else {
+        "This build has no web app, so there is no setup page: create the admin account \
+         with `curl` as described in docs/SELF-HOSTING.md (\"First run\")."
+            .to_owned()
+    };
+    eprintln!("\nOne-time setup token (valid 24 hours, single use):\n\n    {token}\n\n{next}\n");
 }
 
 async fn run_init(cfg: Config) -> Result<(), CliError> {
