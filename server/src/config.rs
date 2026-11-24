@@ -34,8 +34,11 @@ pub enum ConfigError {
     #[error("invalid config file {path}: {source}")]
     Toml {
         path: PathBuf,
+        /// Boxed: `toml::de::Error` is ~96 bytes, which made every
+        /// `Result<_, ConfigError>` (and `CliError`) exceed clippy's
+        /// `result_large_err` limit on Windows, where `PathBuf` is larger.
         #[source]
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     #[error("invalid value for {key}: {reason}")]
     Env { key: String, reason: String },
@@ -362,7 +365,7 @@ impl Config {
     pub fn from_toml_str(s: &str, path: &Path) -> Result<Self, ConfigError> {
         toml::from_str(s).map_err(|source| ConfigError::Toml {
             path: path.to_owned(),
-            source,
+            source: Box::new(source),
         })
     }
 

@@ -118,6 +118,20 @@ pub enum CliError {
     },
 }
 
+// Error types are returned by value from most CLI functions. Clippy's
+// `result_large_err` rejects them at 128 bytes, and `PathBuf`/`OsString` are
+// larger on Windows than on macOS/Linux, so a type that passes here can fail
+// only on Windows CI. These limits leave headroom so growth is caught on
+// every platform. (macOS: ConfigError 48, CliError 80.)
+const _: () = assert!(
+    std::mem::size_of::<ConfigError>() <= 64,
+    "ConfigError grew: box large fields (see result_large_err)"
+);
+const _: () = assert!(
+    std::mem::size_of::<CliError>() <= 104,
+    "CliError grew: box large fields (see result_large_err)"
+);
+
 /// Load the configuration: file (if any), then env, then CLI flags, then
 /// validate once with everything applied.
 pub fn load_config(

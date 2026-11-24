@@ -294,6 +294,8 @@ impl TarJob {
 
 /// Create a new directory only its owner can enter (0700 on Unix).
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    // `mut` is only needed for the Unix-only `mode` call below.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
