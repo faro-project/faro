@@ -3,7 +3,8 @@
 <!-- Faro Agent.app: the per-session agent wrapped in a bundle so macOS shows
      "Faro Agent" for the Screen Recording permission and in Login Items, and
      so its code-signing identifier is org.faro.agent (the service's
-     ipc.agent_requirement). It has no UI of its own (LSUIElement). -->
+     ipc.agent_requirement). LSUIElement: no Dock icon or app menu; its only
+     UI is the menu-bar icon and the monitoring notice. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>

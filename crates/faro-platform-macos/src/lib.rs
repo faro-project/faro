@@ -11,6 +11,9 @@
 //! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN (edge-triggered) | agent |
 //! | `ServiceHost` | [`MacServiceHost`]: launchd plists, `SMAppService`, console sessions | service |
 //!
+//! [`ui`] is the agent's menu-bar icon and monitoring notice (§12); it has no
+//! `faro-platform` trait because only the macOS agent binary drives it.
+//!
 //! On every other OS this crate compiles to an empty library, so the
 //! workspace builds everywhere and only macOS binaries depend on it for real.
 //!
@@ -50,6 +53,8 @@ pub mod service;
 pub mod session;
 #[cfg(target_os = "macos")]
 pub mod tamper;
+#[cfg(target_os = "macos")]
+pub mod ui;
 
 #[cfg(target_os = "macos")]
 pub use bridge::{BridgeError, DEFAULT_TIMEOUT as CAPTURE_TIMEOUT};

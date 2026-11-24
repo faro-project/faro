@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! faro-agent run [--socket PATH | env FARO_AGENT_SOCKET] [--session ID] [--user NAME]
-//!                [--synthetic] [--trust-same-uid-service]   # `dev` builds only
+//!                [--synthetic] [--trust-same-uid-service] [--no-ui]   # `dev` builds only
 //! ```
 
 use clap::{Parser, Subcommand};
@@ -48,6 +48,13 @@ pub struct RunArgs {
     #[cfg(feature = "dev")]
     #[arg(long)]
     pub trust_same_uid_service: bool,
+
+    /// Show no menu-bar icon or notice window (macOS), e.g. to run outside
+    /// a GUI session. Development builds only (`--features dev`): the icon
+    /// is how everyone at the computer knows it is monitored (§12).
+    #[cfg(feature = "dev")]
+    #[arg(long)]
+    pub no_ui: bool,
 }
 
 #[cfg(test)]

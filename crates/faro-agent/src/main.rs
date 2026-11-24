@@ -1,6 +1,8 @@
 //! `faro-agent`: the per-session agent binary. See the library docs for
 //! what it does; this file only parses arguments, picks the platform layer,
-//! sets up logging and signals, and runs [`faro_agent::Agent`].
+//! sets up logging and signals, and runs [`faro_agent::Agent`]. On macOS
+//! the main thread runs the menu-bar icon and notice window instead
+//! (`faro_platform_macos::ui`), and the agent runs on a worker thread.
 //!
 //! launchd starts it as `faro-agent run` (see
 //! `faro_platform_macos::LaunchdJob::agent`).
@@ -30,6 +32,83 @@ fn init_logging() {
 
 #[cfg(unix)]
 fn run(args: RunArgs) -> ExitCode {
+    #[cfg(target_os = "macos")]
+    if ui_wanted(&args) {
+        return run_with_ui(args);
+    }
+    exit_code(run_agent(args, faro_agent::LogNotices, None))
+}
+
+#[cfg(unix)]
+fn exit_code(ok: bool) -> ExitCode {
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unused_variables)] // `args` is only read in `dev` builds
+fn ui_wanted(args: &RunArgs) -> bool {
+    #[cfg(feature = "dev")]
+    if args.no_ui {
+        tracing::warn!("development mode: no menu-bar icon or notice window");
+        return false;
+    }
+    true
+}
+
+/// macOS: AppKit takes the main thread for the menu-bar icon and the
+/// notice window (`faro_platform_macos::ui`), and the agent runs on a
+/// worker thread, which ends the process when the agent stops.
+#[cfg(target_os = "macos")]
+fn run_with_ui(args: RunArgs) -> ExitCode {
+    use faro_platform_macos::ui::{MainThreadMarker, SessionUi};
+    use std::sync::Arc;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        tracing::error!("the agent's UI must start on the main thread");
+        return ExitCode::FAILURE;
+    };
+    // AppKit's Quit (sent at logout) stops the agent the way SIGTERM does,
+    // so it still says Goodbye.
+    let quit = Arc::new(tokio::sync::Notify::new());
+    let ui = {
+        let quit = quit.clone();
+        SessionUi::new(mtm, move || {
+            tracing::info!("asked to quit");
+            quit.notify_one();
+        })
+    };
+    let handle = ui.handle();
+    let notices = move |title: &str, body: &str| {
+        tracing::info!(title, "showing a service notice");
+        tracing::debug!(title, body, "service notice body");
+        handle.show_notice(title, body);
+    };
+    let agent = std::thread::Builder::new()
+        .name("faro-agent".to_owned())
+        .spawn(move || {
+            let ok = run_agent(args, notices, Some(quit));
+            std::process::exit(if ok { 0 } else { 1 });
+        });
+    if let Err(e) = agent {
+        tracing::error!(error = %e, "could not start the agent thread");
+        return ExitCode::FAILURE;
+    }
+    ui.run();
+    // AppKit's loop doesn't return on its own; the agent thread exits.
+    ExitCode::FAILURE
+}
+
+/// Run the agent until it stops. `quit`, if given, stops it like SIGTERM.
+#[cfg(unix)]
+fn run_agent(
+    args: RunArgs,
+    notices: impl faro_agent::NoticeSink + 'static,
+    quit: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> bool {
     use faro_agent::{Agent, AgentConfig, ExitReason};
 
     let mut config = AgentConfig::new(args.socket.clone());
@@ -49,10 +128,10 @@ fn run(args: RunArgs) -> ExitCode {
         Ok(p) => p,
         Err(msg) => {
             tracing::error!("{msg}");
-            return ExitCode::FAILURE;
+            return false;
         }
     };
-    let mut agent = Agent::new(config, platform);
+    let mut agent = Agent::new(config, platform).with_notice_sink(notices);
     if let Some(probe) = accessibility {
         agent = agent.with_accessibility_probe(probe);
     }
@@ -64,11 +143,11 @@ fn run(args: RunArgs) -> ExitCode {
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!(error = %e, "could not start the async runtime");
-            return ExitCode::FAILURE;
+            return false;
         }
     };
     let result = runtime.block_on(async {
-        let stop = match termination() {
+        let stop = match termination(quit) {
             Ok(stop) => stop,
             Err(e) => {
                 tracing::error!(error = %e, "could not install signal handlers");
@@ -80,17 +159,17 @@ fn run(args: RunArgs) -> ExitCode {
     match result {
         Some(Ok(ExitReason::Shutdown(reason))) => {
             tracing::info!(?reason, "exiting at the service's request");
-            ExitCode::SUCCESS
+            true
         }
         Some(Ok(ExitReason::Stopped)) => {
             tracing::info!("exiting on signal");
-            ExitCode::SUCCESS
+            true
         }
         Some(Err(e)) => {
             tracing::error!(error = %e, "agent failed");
-            ExitCode::FAILURE
+            false
         }
-        None => ExitCode::FAILURE,
+        None => false,
     }
 }
 
@@ -102,16 +181,25 @@ fn run(_args: RunArgs) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Completes on SIGTERM (launchd/systemd at logout) or SIGINT.
+/// Completes on SIGTERM (launchd/systemd at logout), SIGINT, or `quit`.
 #[cfg(unix)]
-fn termination() -> std::io::Result<impl std::future::Future<Output = ()>> {
+fn termination(
+    quit: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> std::io::Result<impl std::future::Future<Output = ()>> {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     Ok(async move {
+        let quit = async {
+            match quit {
+                Some(q) => q.notified().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = term.recv() => {}
             _ = int.recv() => {}
+            () = quit => {}
         }
     })
 }
