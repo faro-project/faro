@@ -371,9 +371,12 @@ mod tests {
         let nested = d.path().join("a");
         std::fs::create_dir(&nested).unwrap();
         let dotted = nested.join("..").join("a");
+        // Compare as paths, not strings: the separator is `\\` on Windows.
+        let resolved = snapshot_target(&dotted).unwrap();
+        assert_eq!(resolved, snapshot_target(&nested).unwrap());
         assert_eq!(
-            snapshot_target(&dotted).unwrap(),
-            t.replace("faro.db", "a/faro.db")
+            Path::new(&resolved),
+            Path::new(&t).parent().unwrap().join("a").join("faro.db")
         );
         assert!(snapshot_target(&d.path().join("missing")).is_err());
     }
