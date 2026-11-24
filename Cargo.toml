@@ -9,6 +9,8 @@ members = [
     "crates/faro-platform",
     "crates/faro-platform-macos",
     "crates/faro-update",
+    "crates/faro-service",
+    "crates/faro-agent",
     "server",
 ]
 

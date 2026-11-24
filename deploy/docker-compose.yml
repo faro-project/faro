@@ -1,0 +1,118 @@
+# Faro instance with Docker Compose.
+#
+# Quick start (full walkthrough in docs/SELF-HOSTING.md):
+#
+#     cd deploy
+#     cp faro.env.example faro.env && chmod 600 faro.env   # then edit faro.env
+#     mkdir -p backups && sudo chown 10001:10001 backups
+#     docker compose up -d --build
+#     docker compose logs faro        # shows the one-time setup token
+#
+# Two ways to provide HTTPS. Pick one, and set the matching lines in faro.env:
+#
+#   Mode A, built-in HTTPS (simplest on a VPS): faro-server gets and renews a
+#     Let's Encrypt certificate itself (TLS-ALPN-01 challenge, so only port 443
+#     is needed, no port 80). faro.env: FARO_TLS_ACME_DOMAIN + FARO_TLS_ACME_CONTACT.
+#     Keep the "443:8080" port line below.
+#
+#   Mode B, behind a proxy or tunnel: Caddy, nginx, Traefik, Cloudflare Tunnel
+#     or Tailscale Funnel terminates HTTPS and forwards plain HTTP to faro:8080.
+#     faro.env: FARO_BEHIND_PROXY=true. Swap the "443:8080" port line below for the
+#     loopback-only "127.0.0.1:8080:8080" one (the Caddy and cloudflared services
+#     in this file reach faro over the compose network; a proxy or Tailscale on
+#     the host itself uses the loopback port).
+#
+# Inside the container faro-server always listens on port 8080; in mode A that
+# port speaks HTTPS.
+
+name: faro
+
+services:
+  faro:
+    build:
+      # The build context is the repository root (the whole Cargo workspace).
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: faro-server:local
+    restart: unless-stopped
+    env_file:
+      - faro.env
+    ports:
+      # Mode A (built-in HTTPS): the internet reaches port 443 on this machine.
+      - "443:8080"
+      # Mode B with a proxy/tunnel running on this machine itself (nginx on the
+      # host, `tailscale funnel`): comment out the line above and use this one,
+      # which is only reachable from this machine.
+      # - "127.0.0.1:8080:8080"
+    volumes:
+      # Identity key, SQLite database, encrypted blobs, ACME certificates.
+      # Back it up with `faro-server backup` (below), not by copying files.
+      - faro-data:/data
+      # Where `docker compose exec faro faro-server backup --out /backups/...`
+      # writes. Must be owned by UID 10001: `sudo chown 10001:10001 backups`.
+      - ./backups:/backups
+    # faro-server drains requests and stops its workers (up to 15 s) on SIGTERM.
+    stop_grace_period: 30s
+    # The image's HEALTHCHECK (deploy/healthcheck.sh) applies; `docker compose ps`
+    # shows "healthy" once /.well-known/faro answers.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# ---------------------------------------------------------------------------
+# Optional: Caddy as the HTTPS proxy (mode B). Use this instead of mode A if
+# this machine already serves other websites, or you prefer Caddy. To enable:
+#   1. In faro.env: comment out FARO_TLS_ACME_* and set FARO_BEHIND_PROXY=true.
+#   2. In the faro service above, comment out the "443:8080" port line and
+#      uncomment the "127.0.0.1:8080:8080" one.
+#   3. Uncomment this service and the two caddy volumes at the bottom, and
+#      replace faro.example.org with your domain.
+# Caddy also redirects http:// to https:// on port 80.
+# ---------------------------------------------------------------------------
+  # caddy:
+  #   image: caddy:2.11.9
+  #   restart: unless-stopped
+  #   command: caddy reverse-proxy --from faro.example.org --to faro:8080
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #     - "443:443/udp"
+  #   volumes:
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on:
+  #     - faro
+
+# ---------------------------------------------------------------------------
+# Optional: Cloudflare Tunnel (mode B) for a home server without a public IP
+# or open ports. To enable:
+#   1. In faro.env: comment out FARO_TLS_ACME_* and set FARO_BEHIND_PROXY=true.
+#   2. In the faro service above, comment out the "443:8080" port line and
+#      uncomment the "127.0.0.1:8080:8080" one.
+#   3. In the Cloudflare dashboard create a tunnel, add a public hostname
+#      (your domain) with service type HTTP and URL  faro:8080
+#   4. Put the tunnel token in deploy/.env as  CLOUDFLARE_TUNNEL_TOKEN=...
+#      (chmod 600 .env), and uncomment this service.
+# ---------------------------------------------------------------------------
+  # cloudflared:
+  #   image: cloudflare/cloudflared:2026.11.0
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in deploy/.env}
+  #   depends_on:
+  #     - faro
+
+volumes:
+  faro-data:
+  # caddy-data:
+  # caddy-config:

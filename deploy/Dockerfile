@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+#
+# Container image for faro-server, the self-hosted Faro instance.
+#
+# Build from the repository root (the whole Cargo workspace is the build
+# context; deploy/Dockerfile.dockerignore keeps target/ and .git out of it):
+#
+#     docker build -f deploy/Dockerfile -t faro-server:local .
+#
+# or let deploy/docker-compose.yml build it. Multi-arch (amd64 + arm64):
+#
+#     docker buildx build -f deploy/Dockerfile \
+#         --platform linux/amd64,linux/arm64 -t <registry>/faro-server:<tag> --push .
+#
+# Each platform is compiled natively for that platform (under QEMU emulation
+# when it is not the build machine's own), so there is no cross-compiler
+# setup to get wrong. Emulated arm64 builds are slow; building directly on
+# the Raspberry Pi or another arm64 machine is faster.
+#
+# Runtime layout:
+#   /usr/local/bin/faro-server   the binary (ENTRYPOINT; default command `serve`)
+#   /data                        data directory (identity key, SQLite DB, blobs,
+#                                ACME certificates): mount a volume here
+#   port 8080                    the listen port inside the container, plain
+#                                HTTP or, with FARO_TLS_ACME_DOMAIN set, HTTPS
+#
+# Status: this file has not yet been built in CI. See docs/SELF-HOSTING.md.
+
+# Builder: Rust 1.99.1 on Debian 13 (trixie). The workspace needs Rust >= 1.94.
+# The runtime stage below must use the same Debian release, because the
+# binary links against that release's glibc.
+FROM rust:1.99.1-slim-trixie AS builder
+
+WORKDIR /src
+COPY . .
+
+# Only a C compiler is needed beyond Rust (for ring and the bundled SQLite);
+# the slim Rust image already ships gcc and libc6-dev. TLS is rustls with
+# compiled-in root certificates, so there is no OpenSSL dependency.
+#
+# The registry cache only holds downloaded crate sources, which are the same
+# on every platform, so sharing it between amd64 and arm64 builds is safe.
+# The target directory is deliberately *not* a cache mount: it is
+# per-platform and the build must produce a binary in this layer.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    cargo build --release --locked -p faro-server --bin faro-server \
+ && install -m 0755 target/release/faro-server /usr/local/bin/faro-server \
+ && /usr/local/bin/faro-server version
+
+# Runtime: Debian 13 slim, matching the builder's glibc. Kept to Debian
+# rather than distroless so `docker compose exec faro faro-server backup`,
+# restore with tar, and the bash health check all work in the container.
+FROM debian:trixie-slim
+
+# faro-server itself verifies TLS (SMTP, Postgres, ACME) against root
+# certificates compiled into the binary; the OS store is installed for any
+# tool an operator runs inside the container.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# A fixed, unprivileged UID/GID so a bind-mounted backup directory can be
+# chowned to it on the host (`chown 10001:10001 backups`).
+RUN groupadd --system --gid 10001 faro \
+ && useradd --system --uid 10001 --gid 10001 --home-dir /data --no-create-home \
+        --shell /usr/sbin/nologin faro \
+ && mkdir -p /data /backups \
+ && chown 10001:10001 /data /backups \
+ && chmod 0700 /data
+
+COPY --from=builder /usr/local/bin/faro-server /usr/local/bin/faro-server
+COPY --chmod=0755 deploy/healthcheck.sh /usr/local/bin/faro-healthcheck
+
+# Defaults for the container. Everything else (public URL, TLS mode, SMTP)
+# comes from FARO_* variables, see deploy/faro.env.example.
+ENV FARO_DATA_DIR=/data \
+    FARO_LISTEN=0.0.0.0:8080
+
+# Docker copies /data's ownership (10001, mode 0700) into a new named volume.
+VOLUME ["/data"]
+WORKDIR /data
+USER 10001:10001
+EXPOSE 8080
+
+# /.well-known/faro over plain HTTP; a TCP check when TLS is built in
+# (see deploy/healthcheck.sh).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/faro-healthcheck"]
+
+# faro-server drains requests and stops its workers on SIGTERM; give it
+# longer than Docker's 10 s default with `stop_grace_period` (compose) or
+# `docker stop -t 30`.
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/faro-server"]
+CMD ["serve"]
