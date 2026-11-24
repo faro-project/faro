@@ -951,6 +951,9 @@ impl Core {
         if newly.is_empty() {
             return;
         }
+        // Publish the missing accounts before the tamper events count up, so
+        // nobody watching the status sees a tamper event without its cause.
+        self.update_session_status();
         for (account, active, absent_ms) in newly {
             tracing::warn!(
                 %account,
@@ -967,7 +970,6 @@ impl Core {
                 self.set_activity(ActivityState::Unmonitored);
             }
         }
-        self.update_session_status();
     }
 
     async fn capture_failed(&mut self, reason: &str) {
