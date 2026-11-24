@@ -1,0 +1,34 @@
+#!/bin/bash
+# After installing: lock down the files, install the default configuration
+# if there is none, and start the service and an agent in every account that
+# is logged in now. Accounts that log in later (including ones created
+# after install) get their agent from the global LaunchAgent.
+set -eu
+. "$(dirname "$0")/lib.sh"
+
+target="${3:-/}"
+if [[ "$target" != "/" ]]; then
+    log "Faro installs on the startup disk only (got $target)"
+    exit 1
+fi
+
+chown -R root:wheel /Library/Faro "$DAEMON_PLIST" "$AGENT_PLIST"
+chmod -R go-w /Library/Faro
+chmod 644 "$DAEMON_PLIST" "$AGENT_PLIST"
+
+# The state directory holds the device key and the outbox: root only.
+state="/Library/Application Support/Faro"
+install -d -m 700 -o root -g wheel "$state"
+if [[ ! -e "$state/service.toml" ]]; then
+    install -m 600 -o root -g wheel /Library/Faro/service.toml.default "$state/service.toml"
+fi
+
+log "starting the service"
+launchctl bootstrap system "$DAEMON_PLIST"
+launchctl enable "system/$DAEMON_LABEL"
+
+for uid in $(gui_uids); do
+    log "starting the agent for uid $uid"
+    launchctl bootstrap "gui/$uid" "$AGENT_PLIST" || log "could not start the agent for uid $uid; it starts at that account's next login"
+done
+exit 0

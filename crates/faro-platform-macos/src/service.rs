@@ -16,13 +16,16 @@
 //! The plist generators here are pure so the installer tooling and tests can
 //! use them. The real installation paths are:
 //!
-//! 1. **Signed `.pkg` (primary, §3.3 "Distribution")**: the package payload
-//!    places `Faro.app` in `/Applications` and the generated plists in
+//! 1. **Signed `.pkg` (primary, §3.3 "Distribution")**, built by
+//!    `installers/macos/build-pkg.sh`: the payload places the programs in
+//!    `/Library/Faro` ([`pkg_layout`]; the agent inside `Faro Agent.app`)
+//!    and the plists from [`pkg_daemon_job`] and [`pkg_agent_job`] in
 //!    `/Library/LaunchDaemons/org.faro.service.plist` and
-//!    `/Library/LaunchAgents/org.faro.agent.plist` (root-owned, 0644), and
-//!    the `postinstall` script runs `launchctl bootstrap system …` for the
-//!    daemon and `launchctl bootstrap gui/<uid> …` for each logged-in user.
-//!    Plists for this path use [`ProgramLocation::Absolute`].
+//!    `/Library/LaunchAgents/org.faro.agent.plist` (root-owned, 0644). The
+//!    `postinstall` script runs `launchctl bootstrap system …` for the
+//!    daemon and `launchctl bootstrap gui/<uid> …` for every logged-in
+//!    account; the global LaunchAgent covers later logins. Plists for this
+//!    path use [`ProgramLocation::Absolute`].
 //! 2. **`SMAppService` (macOS 13+)**: the app bundle embeds the plists in
 //!    `Contents/Library/LaunchDaemons|LaunchAgents/` using
 //!    [`ProgramLocation::BundleRelative`] (`BundleProgram`), and the signed
@@ -274,6 +277,43 @@ fn validate_label(label: &str) -> Result<(), PlistError> {
     } else {
         Err(PlistError::InvalidLabel(label.into()))
     }
+}
+
+/// Where the `.pkg` installs Faro (`installers/macos`). Programs live in
+/// `/Library/Faro`, root-owned and readable by everyone (every account's
+/// session runs the agent); the state directory
+/// (`/Library/Application Support/Faro`, 0700) holds only root's data.
+pub mod pkg_layout {
+    /// The privileged service binary.
+    pub const SERVICE_PROGRAM: &str = "/Library/Faro/bin/faro-service";
+    /// The agent, inside an app bundle so macOS attributes the Screen
+    /// Recording permission (and the code-signing identifier
+    /// `org.faro.agent`) to "Faro Agent".
+    pub const AGENT_APP: &str = "/Library/Faro/Faro Agent.app";
+    pub const AGENT_PROGRAM: &str = "/Library/Faro/Faro Agent.app/Contents/MacOS/faro-agent";
+    /// Bundle identifier of `Faro Agent.app`.
+    pub const AGENT_BUNDLE_ID: &str = "org.faro.agent";
+    /// The installed daemon plist.
+    pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/org.faro.service.plist";
+    /// The installed **global** LaunchAgent: launchd starts it in every
+    /// account's GUI session, including accounts created after install.
+    pub const AGENT_PLIST: &str = "/Library/LaunchAgents/org.faro.agent.plist";
+}
+
+/// The daemon job the `.pkg` installs ([`pkg_layout`]).
+pub fn pkg_daemon_job() -> LaunchdJob {
+    let mut job = LaunchdJob::daemon(ProgramLocation::Absolute(
+        pkg_layout::SERVICE_PROGRAM.into(),
+    ));
+    job.associated_bundle_ids = vec![pkg_layout::AGENT_BUNDLE_ID.into()];
+    job
+}
+
+/// The global agent job the `.pkg` installs ([`pkg_layout`]).
+pub fn pkg_agent_job() -> LaunchdJob {
+    let mut job = LaunchdJob::agent(ProgramLocation::Absolute(pkg_layout::AGENT_PROGRAM.into()));
+    job.associated_bundle_ids = vec![pkg_layout::AGENT_BUNDLE_ID.into()];
+    job
 }
 
 /// XML for the LaunchDaemon (`org.faro.service`).

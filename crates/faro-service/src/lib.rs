@@ -42,6 +42,7 @@
 //!    parsing; endorsements and manifests are verified locally; the instance
 //!    identity key is pinned and re-checked; redirects are not followed.
 
+pub mod accounts;
 pub mod backoff;
 pub mod cli;
 pub mod client;

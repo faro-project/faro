@@ -11,13 +11,18 @@ use crate::config::Config;
 use crate::enroll::{self, EnrollParams, InstanceInfo};
 use crate::link::{self, EnrollCode};
 use crate::runtime::{AgentSpawn, Service, ServiceError};
-use crate::state::{self, StateDir};
+use crate::state::{self, StateDir, StateError};
 use clap::{Parser, Subcommand, ValueEnum};
 use faro_core::clock::{Clock, SystemClock};
+use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How often an unenrolled `run` checks whether `enroll` has finished.
+const ENROLLMENT_POLL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(name = "faro-service", version, about = "The privileged Faro service")]
@@ -217,6 +222,11 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
 }
 
 fn confirm_prompt(info: &InstanceInfo) -> bool {
+    print!(
+        "{}",
+        crate::accounts::enrollment_notice(crate::accounts::local_accounts().as_ref())
+    );
+    println!();
     println!("Instance: {}", info.name);
     println!("URL:      {}", info.url);
     println!("ID:       {}", info.well_known.instance_id);
@@ -263,6 +273,10 @@ async fn cmd_enroll(
     };
     let enrollment = enroll::enroll(&dir, clock.clone(), &params, |info| {
         if yes {
+            print!(
+                "{}",
+                crate::accounts::enrollment_notice(crate::accounts::local_accounts().as_ref())
+            );
             println!("Enrolling with {} ({})", info.name, info.url);
             true
         } else {
@@ -289,6 +303,15 @@ async fn cmd_enroll(
         println!("Approve the device in the web app; `faro-service run` finishes activation.");
         return Ok(());
     }
+    if installed_service_running() {
+        // The installed service is waiting for this enrollment and will
+        // pick it up; activating here too would race it.
+        println!(
+            "Approve the device in the web app. The Faro service is running and finishes \
+             activation once you do."
+        );
+        return Ok(());
+    }
     println!("Waiting for you to approve this device in the web app (Ctrl-C to stop waiting)…");
     let client = enroll::device_client(&enrollment, key.clone(), clock, &opts, None)?;
     let device_pubkey = key.public();
@@ -306,11 +329,59 @@ async fn cmd_enroll(
     Ok(())
 }
 
+/// Whether the packaged service (launchd daemon) is installed, so it, not
+/// this command, activates the device.
+fn installed_service_running() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::path::Path::new(faro_platform_macos::pkg_layout::DAEMON_PLIST).exists()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// An installed service starts before the member enrolls the device. Rather
+/// than exit (and be restarted by launchd every few seconds), wait for
+/// `faro-service enroll` to write the enrollment record. Returns `false` if
+/// `stop` fired first.
+async fn wait_for_enrollment(
+    dir: &StateDir,
+    every: Duration,
+    stop: impl Future<Output = ()>,
+) -> Result<bool, CliError> {
+    let enrolled = |dir: &StateDir| match dir.enrollment() {
+        Ok(_) => Ok(true),
+        Err(StateError::NotEnrolled) => Ok(false),
+        Err(e) => Err(CliError::State(e)),
+    };
+    if enrolled(dir)? {
+        return Ok(true);
+    }
+    tracing::info!("this device is not enrolled yet; waiting for `faro-service enroll`");
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            _ = &mut stop => return Ok(false),
+            _ = tokio::time::sleep(every) => {}
+        }
+        if enrolled(dir)? {
+            tracing::info!("enrolled; starting");
+            return Ok(true);
+        }
+    }
+}
+
 async fn cmd_run(
     config: Config,
     spawn_agent: Option<PathBuf>,
     capture: CaptureMode,
 ) -> Result<(), CliError> {
+    let dir = StateDir::open(&config.state_dir)?;
+    if !wait_for_enrollment(&dir, ENROLLMENT_POLL, shutdown_signal()).await? {
+        return Ok(());
+    }
     let socket = config.ipc.socket_path.clone();
     let mut b = Service::builder(config);
     if let Some(p) = spawn_agent {
@@ -416,6 +487,19 @@ fn cmd_status(config: &Config) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn run_waits_for_enrollment_until_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = StateDir::open(tmp.path().join("state")).unwrap();
+        let stopped = wait_for_enrollment(&dir, Duration::from_millis(5), async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        })
+        .await
+        .unwrap();
+        assert!(!stopped, "not enrolled, so it waits until told to stop");
+    }
+
     use super::*;
     use clap::CommandFactory;
 
