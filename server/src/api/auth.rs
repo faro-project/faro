@@ -9,7 +9,7 @@
 //! app then POSTs it to `/v1/auth/magic-link/verify`.
 
 use super::ApiJson;
-use crate::auth::{normalize_email, session};
+use crate::auth::{normalize_display_name, normalize_email, session};
 use crate::config::RegistrationMode;
 use crate::db::repo::invites::{self, InviteKind};
 use crate::db::repo::{auth_tokens, member_keys, sessions, users};
@@ -260,6 +260,42 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppRes
 pub struct MeResponse {
     pub user: users::User,
     pub has_member_keys: bool,
+}
+
+/// `PATCH /v1/me` body: the fields a person may change about themself.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateMe {
+    pub display_name: Option<String>,
+}
+
+/// `PATCH /v1/me`: change your own display name (1–64 printable
+/// characters), as members, allies and admins see it, and as emails name
+/// you. Accounts made by signing in start with the address's local part.
+pub async fn update_me(
+    State(state): State<AppState>,
+    s: session::SessionUser,
+    ApiJson(req): ApiJson<UpdateMe>,
+) -> AppResult<Json<MeResponse>> {
+    if let Some(name) = &req.display_name {
+        let name = normalize_display_name(name).ok_or_else(|| {
+            AppError::bad_request(
+                "invalid_display_name",
+                "display_name must be 1-64 printable characters",
+            )
+        })?;
+        users::set_display_name(state.db().pool(), &s.user.id, &name).await?;
+    }
+    let user = users::by_id(state.db().pool(), &s.user.id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let has_member_keys = member_keys::sign_pubkey(state.db().pool(), &user.id)
+        .await?
+        .is_some();
+    Ok(Json(MeResponse {
+        user,
+        has_member_keys,
+    }))
 }
 
 /// `GET /v1/me`

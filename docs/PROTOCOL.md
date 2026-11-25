@@ -1,9 +1,11 @@
 # Faro wire protocol, v1
 
 **Status:** Draft, matches `crates/faro-proto` and `crates/faro-crypto` at protocol version 1.
-**Audience:** anyone re-implementing Faro's signing, hashing or encryption (the TypeScript ally web app, alternative clients) and security reviewers.
+**Audience:** anyone re-implementing Faro's signing, hashing or encryption (the web app's TypeScript port in `web/src/lib/crypto`, alternative clients) and security reviewers.
 
 The Rust crates are the reference implementation. If this document and the code disagree, the code is right and this document has a bug.
+
+Cross-implementation test vectors live in `crates/faro-crypto/tests/data/web-vectors.json`. The Rust test `web_vectors` and the web app's `npm test` both check them, and its `from_web` section holds what the TypeScript code wrapped and signed, which Rust must open and verify.
 
 ---
 
@@ -43,6 +45,7 @@ Tags in use:
 | `faro/key-id/v1` | Key identifier |
 | `faro/safety-code/v1` | Safety code |
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
+| `faro/key-rewrap/v1` | Member-signed replacement of their wrapped keys (§4.3) |
 
 ## 3. Events and the hash chain
 
@@ -144,7 +147,33 @@ The member and ally private keys are wrapped in the browser and stored on the in
 ```
 
 - The key is derived with Argon2id v1.3 and `p = 1`, which matches libsodium's `crypto_pwhash_ALG_ARGON2ID13`. The cipher is XChaCha20-Poly1305 with AAD `faro/wrapped-secret/v1`.
-- Recovery codes are 160 random bits written as 8 groups of 4 Crockford-base32 characters. They are used as a second passphrase that wraps the same secret.
+- Recovery codes are 160 random bits written as 8 groups of 4 Crockford-base32 characters. They are used as a second passphrase that wraps the same secret. The passphrase bytes are the code in its canonical form: uppercase, groups joined by `-` (`7K2M-…`). Clients normalize what a person types first: case, spaces and dashes don't matter, `I` and `L` read as `1`, and `O` as `0`.
+- Readers must ignore fields they don't know, and must refuse parameters they can't afford. The web app accepts `m_cost_kib` up to 1 GiB (Rust: 4 GiB).
+
+**What the instance stores.** The wrapped secrets are opaque to the server, which only checks that each one is a JSON object of at most 8 KiB. The web app writes them like this:
+
+| Field | Contents |
+|---|---|
+| `PUT /v1/me/keys` `wrapped_sign_key` | The member's Ed25519 seed (32 bytes) under the passphrase |
+| `PUT /v1/me/keys` `wrapped_enc_key` | The member's X25519 secret (32 bytes) under the passphrase, with the **same salt and parameters** as `wrapped_sign_key` (its own random nonce), so unlocking costs one Argon2id run |
+| `PUT /v1/me/keys` `recovery_wrapped` | `{"sign": WrappedSecret, "enc": WrappedSecret}`: the same two secrets under the recovery code, sharing one derivation likewise |
+| `POST /v1/invites/{token}/accept` `wrapped_privkey` | The ally's X25519 secret under the passphrase, as a `WrappedSecret`, plus a `"recovery"` field: the same secret under the recovery code. A reader that knows only `WrappedSecret` ignores `recovery` and still opens it with the passphrase |
+
+After unlocking, clients check the secrets against the public keys stored next to them (and the member's `enc_binding` signature), so a modified blob can't substitute other keys.
+
+**Changing the passphrase.** The keys never change, only their wrapped copies: `PUT /v1/me/keys/wrapped` takes a member-signed `KeyRewrap`, flattened with `sig` like an endorsement:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `member_id` | string | |
+| `sign_pubkey` | 32 bytes | The member's signing key, which must be the stored one |
+| `issued_at_ms` | i64 | Within 5 minutes of the instance's clock, and later than the last change |
+| `wrapped_sign_key`, `wrapped_enc_key`, `recovery_wrapped` | string | The **JSON text** of each new value, exactly as signed; the instance verifies, then parses and stores it |
+
+`signing_bytes = Canonical("faro/key-rewrap/v1").str(instance_id).str(member_id).fixed(sign_pubkey).i64(issued_at_ms).str(wrapped_sign_key).str(wrapped_enc_key).str(recovery_wrapped)`.
+
+The instance can't tell a good wrapped key from garbage, so the signature is what stops a stolen session from overwriting a member's keys and locking them out. Carrying the values as signed text means nobody has to canonicalize JSON. The freshness rules stop an old request from being replayed to restore an old passphrase. Ally keys can't be re-wrapped yet: an X25519 key can't sign, so this needs a different proof of possession.
 
 ## 5. Trust: endorsements
 

@@ -11,6 +11,7 @@
 
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
+	import Logo from '#lib/ui/Logo.svelte';
 	import { api, describeError } from '#lib/api.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import AccountStep from '#lib/setup/AccountStep.svelte';
@@ -83,6 +84,8 @@
 <svelte:head>
 	<title>Set up Faro</title>
 </svelte:head>
+
+<div class="brand-mark"><Logo height={56} /></div>
 
 <h1>Set up this Faro instance</h1>
 {#if overview}
@@ -191,6 +194,12 @@
 {/if}
 
 <style>
+	.brand-mark {
+		display: flex;
+		justify-content: center;
+		margin: 0.5rem 0 2rem;
+	}
+
 	.progress {
 		list-style: none;
 		display: flex;

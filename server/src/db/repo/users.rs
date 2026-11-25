@@ -151,6 +151,20 @@ pub async fn touch_login<'e>(
     Ok(())
 }
 
+/// Change an account's display name (already normalized).
+pub async fn set_display_name<'e>(
+    e: impl Executor<'e, Database = Any>,
+    id: &UserId,
+    display_name: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET display_name = $1 WHERE id = $2")
+        .bind(display_name)
+        .bind(id.as_str())
+        .execute(e)
+        .await?;
+    Ok(())
+}
+
 /// Grant the ally role (idempotent).
 pub async fn grant_ally<'e>(
     e: impl Executor<'e, Database = Any>,

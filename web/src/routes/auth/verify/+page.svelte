@@ -11,6 +11,7 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { api, ApiError, describeError } from '#lib/api.ts';
+	import { pendingInvite } from '#lib/keys/pending-invite.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { VerifyResponse, WellKnown } from '#lib/types.ts';
 
@@ -51,7 +52,8 @@
 			const res = await api.post<VerifyResponse>('/v1/auth/magic-link/verify', { token });
 			token = '';
 			session.signedIn(res.user);
-			await goto(resolve('/'), { replaceState: true });
+			// Back to an invitation the person was accepting, if any.
+			await goto(resolve(pendingInvite() ? '/invite' : '/'), { replaceState: true });
 		} catch (e) {
 			if (e instanceof ApiError && e.code === 'invalid_or_expired_link') {
 				token = '';

@@ -80,6 +80,34 @@ pub async fn get<'e>(
     }))
 }
 
+/// Replace the wrapped private keys of `user_id`, whose signing key is
+/// `sign_pubkey`, if the change is newer than the last one (`updated_at`).
+/// Returns false if there are no such keys or the change is not newer.
+pub async fn update_wrapped<'e>(
+    e: impl Executor<'e, Database = Any>,
+    user_id: &UserId,
+    sign_pubkey: &SignPublicKey,
+    wrapped_sign_key: &serde_json::Value,
+    wrapped_enc_key: &serde_json::Value,
+    recovery_wrapped: &serde_json::Value,
+    issued_at_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE member_keys
+         SET wrapped_sign_key = $1, wrapped_enc_key = $2, recovery_wrapped = $3, updated_at = $4
+         WHERE user_id = $5 AND sign_pubkey = $6 AND updated_at < $4",
+    )
+    .bind(wrapped_sign_key.to_string())
+    .bind(wrapped_enc_key.to_string())
+    .bind(recovery_wrapped.to_string())
+    .bind(issued_at_ms)
+    .bind(user_id.as_str())
+    .bind(sign_pubkey.to_b64())
+    .execute(e)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 /// Just the member's signing key (hot path for device endorsement checks).
 pub async fn sign_pubkey<'e>(
     e: impl Executor<'e, Database = Any>,

@@ -22,6 +22,7 @@ const TAG_DEVICE_ENDORSEMENT: &str = "faro/device-endorsement/v2";
 const TAG_MEMBER_SELF: &str = "faro/member-enc-key/v1";
 const TAG_KEY_ID: &str = "faro/key-id/v1";
 const TAG_SAFETY: &str = "faro/safety-code/v1";
+const TAG_KEY_REWRAP: &str = "faro/key-rewrap/v1";
 
 /// Short, stable identifier for a public key: first 8 bytes of a tagged
 /// BLAKE3 hash, lowercase hex (16 chars).
@@ -221,6 +222,45 @@ impl MemberEncKeyBinding {
             .str(self.member_id.as_str())
             .fixed(self.member_enc_pubkey.as_bytes())
             .i64(self.endorsed_at_ms)
+            .finish()
+    }
+}
+
+/// "Member M on instance I, holding signing key K, replaces the stored
+/// wrapped copies of their private keys with these", for example after a
+/// passphrase change (PROTOCOL.md §4.3).
+///
+/// The wrapped copies are opaque to the instance, so it can't tell a good
+/// replacement from garbage. Requiring the member's signature means that a
+/// stolen session alone can't overwrite them and lock the member out of
+/// their own keys. The three wrapped values are carried as the exact JSON
+/// text that was signed, so no JSON canonicalization is needed: the
+/// instance verifies the bytes it received, then parses them.
+///
+/// `issued_at_ms` must be within the request clock skew of the instance's
+/// time and later than the previous change, so an old request can't be
+/// replayed to restore an old passphrase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyRewrap {
+    pub instance_id: InstanceId,
+    pub member_id: UserId,
+    pub sign_pubkey: SignPublicKey,
+    pub issued_at_ms: i64,
+    pub wrapped_sign_key: String,
+    pub wrapped_enc_key: String,
+    pub recovery_wrapped: String,
+}
+
+impl KeyRewrap {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        Canonical::new(TAG_KEY_REWRAP)
+            .str(self.instance_id.as_str())
+            .str(self.member_id.as_str())
+            .fixed(self.sign_pubkey.as_bytes())
+            .i64(self.issued_at_ms)
+            .str(&self.wrapped_sign_key)
+            .str(&self.wrapped_enc_key)
+            .str(&self.recovery_wrapped)
             .finish()
     }
 }

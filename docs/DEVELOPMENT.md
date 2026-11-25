@@ -53,7 +53,7 @@ These come from ARCHITECTURE.md §3.5, §4.3, §5 and §12. Reviewers check them
 
 ## The web app
 
-`web/` is the browser side of an instance: a SvelteKit app (Svelte 5, TypeScript, `adapter-static`). So far it has the first-run setup wizard (`/setup`), email sign-in (`/signin`, and `/auth/verify`, where sign-in emails link), the admin console (`/admin`) and the page invitation emails link to (`/invite`); the member and ally pages will join it. Every page is prerendered to static files, and `server/build.rs` compiles `web/build` into the `faro-server` binary, which serves it from the instance's own origin (`server/src/web.rs`). There is no Node server in production.
+`web/` is the browser side of an instance: a SvelteKit app (Svelte 5, TypeScript, `adapter-static`). Every page is prerendered to static files, and `server/build.rs` compiles `web/build` into the `faro-server` binary, which serves it from the instance's own origin (`server/src/web.rs`). There is no Node server in production.
 
 ```sh
 cd web
@@ -62,11 +62,34 @@ npm run dev         # http://localhost:5173, API proxied to faro-server on :8080
 npm run check       # svelte-check (types)
 npm run lint        # prettier --check; `npm run format` fixes
 npm run build       # web/build, which the next `cargo build -p faro-server` embeds
+npm test            # the crypto port against the Rust test vectors
+npm run vectors     # rewrite the vectors' from_web part after changing web/src/lib/crypto
 ```
+
+| Page | For | What it does |
+|---|---|---|
+| `/` | everyone | Landing page; signed in, a dashboard with next steps |
+| `/setup` | the first admin | Setup token, admin account, test email, registration and retention |
+| `/signin`, `/auth/verify` | everyone | Email sign-in; sign-in emails link to `/auth/verify` |
+| `/invite` | invitees | Member invitations hand over to sign-in; ally invitations create (or unlock) the ally key and accept |
+| `/keys` | members | Create member keys (passphrase and recovery code), sign the first recipient list |
+| `/computers` | members | Enrollment codes and links (with `m`), approving and removing computers |
+| `/allies` | members | Inviting allies, safety codes, approving and removing them, re-signing after one leaves |
+| `/activity` | members | Their own feed, decrypted with their key: what their allies see |
+| `/supporting`, `/supporting/member?id=` | allies | The members they support, each member's feed, notification settings, safety code, leaving |
+| `/settings` | everyone | Name, key fingerprints, changing a member's passphrase or recovery code, a member's retention and own notifications |
+| `/privacy` | everyone | The operator privacy notice |
+| `/admin/…` | admins | Overview, people, settings, email |
+
+**Keys in the browser.** Private keys are created, wrapped and unwrapped in the page (`web/src/lib/keys`), held in memory only (`keyring.svelte.ts`: forgotten on reload, sign-out, "Lock" or after 30 idle minutes) and never sent anywhere unwrapped. Everything the browser builds on is checked first: a recipient manifest the server returns must verify against the member's own key, enrollment links take the member key fingerprint from the unlocked key, and safety codes are computed from the viewer's own key, never the server's copy. The storage formats are in PROTOCOL.md §4.3.
+
+**Crypto.** `web/src/lib/crypto` ports what browsers need from `faro-proto` and `faro-crypto` (canonical encoding, key ids, safety codes, Ed25519, opening sealed boxes and items, Argon2id wrapping, manifests and endorsements) on the audited, pure-JavaScript `@noble` libraries. WebAssembly libsodium isn't an option: the page CSP has no `'wasm-unsafe-eval'`. Argon2id at the default 64 MiB / 3 passes takes well under a second. Both implementations check `crates/faro-crypto/tests/data/web-vectors.json`, in both directions; change one side, run both tests.
+
+**The logo** is imported from `assets/brand` (the `$brand` alias in `vite.config.ts`), never copied into `web/` or redrawn; the container build copies that directory into its web stage.
 
 For `npm run dev`, start a server in another terminal with `cargo run -p faro-server -- serve --dev` (it prints a setup token; set `FARO_DEV_API` to proxy somewhere other than `127.0.0.1:8080`). To test the embedded build instead, run `npm run build` and rebuild the server: `/setup` is then served on :8080 itself.
 
-Without `web/build`, `faro-server` still builds and its API works; page requests get a plain-text note and the setup token message points at the `curl` instructions. Release builds set `FARO_REQUIRE_WEB=1`, which makes a missing bundle a build error. CI's `web` job runs lint, check and build, then the server's web-serving tests against the real bundle.
+Without `web/build`, `faro-server` still builds and its API works; page requests get a plain-text note and the setup token message points at the `curl` instructions. Release builds set `FARO_REQUIRE_WEB=1`, which makes a missing bundle a build error. CI's `web` job runs lint, check, the crypto tests and build, then the server's web-serving tests against the real bundle.
 
 **CSP.** Pages are served with a strict Content Security Policy built by `web::page_csp`. Scripts and stylesheets load from the instance only. The only inline script allowed is SvelteKit's per-page bootstrap, by hash (`build.rs` hashes it). Inline `style="…"` attributes are allowed only with a constant value, also by hash, and `<style>` blocks are never allowed. In components, use classes, and use Svelte's `style:` directive for dynamic values. Keep `inlineStyleThreshold` at 0, and never load anything from another origin.
 

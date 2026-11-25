@@ -7,7 +7,7 @@ use axum::http::{Method, StatusCode};
 use common::*;
 use faro_crypto::SigningKey;
 use faro_proto::api::{DeviceState, Heartbeat, MemberKeysResponse};
-use faro_proto::keys::{DeviceEndorsement, MemberEncKeyBinding};
+use faro_proto::keys::{DeviceEndorsement, KeyRewrap, MemberEncKeyBinding};
 use faro_proto::{EventKind, Urgency, UserId};
 use serde_json::json;
 
@@ -459,4 +459,125 @@ async fn too_many_outstanding_codes_are_refused() {
     assert_eq!(r.error_code(), "too_many_codes");
     t.clock.advance_ms(10 * 60 * 1000 + 1);
     t.enroll_code(&s).await;
+}
+
+/// A signed `PUT /v1/me/keys/wrapped` body re-wrapping `keys` under `pass`.
+fn rewrap_body(
+    t: &TestApp,
+    member: &UserId,
+    keys: &MemberKeys,
+    signer: &SigningKey,
+    pass: &[u8],
+    issued_at_ms: i64,
+) -> serde_json::Value {
+    let p = faro_crypto::KdfParams::insecure_for_tests();
+    let ws = faro_crypto::wrap_secret(keys.sign.to_bytes().as_slice(), pass, p).unwrap();
+    let we = faro_crypto::wrap_secret(keys.enc.secret_bytes().as_slice(), pass, p).unwrap();
+    let rewrap = KeyRewrap {
+        instance_id: t.instance_id(),
+        member_id: member.clone(),
+        sign_pubkey: keys.sign.public(),
+        issued_at_ms,
+        wrapped_sign_key: serde_json::to_string(&ws).unwrap(),
+        wrapped_enc_key: serde_json::to_string(&we).unwrap(),
+        recovery_wrapped: json!({ "sign": ws, "enc": we }).to_string(),
+    };
+    serde_json::to_value(signer.endorse(rewrap)).unwrap()
+}
+
+#[tokio::test]
+async fn members_can_rewrap_their_keys_with_a_signed_request() {
+    let t = TestApp::new().await;
+    let (member, s) = t.sign_in("sam@example.org").await;
+    let keys = t.create_member_keys(&member, &s).await;
+    t.clock.advance_ms(1_000);
+    let now = t.clock_ms();
+
+    let put = |body| t.call(Method::PUT, "/v1/me/keys/wrapped", Some(body), Some(&s));
+
+    let r = put(rewrap_body(
+        &t,
+        &member,
+        &keys,
+        &keys.sign,
+        b"new pass",
+        now,
+    ))
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let stored = t.get("/v1/me/keys", Some(&s)).await;
+    let w: faro_crypto::WrappedSecret =
+        serde_json::from_value(stored.body["wrapped_sign_key"].clone()).unwrap();
+    assert_eq!(
+        &**faro_crypto::unwrap_secret(&w, b"new pass").unwrap(),
+        keys.sign.to_bytes().as_slice()
+    );
+    // The public keys and their binding are untouched.
+    assert_eq!(stored.body["sign_pubkey"], json!(keys.sign.public()));
+
+    // Replaying it, or an older request, can't restore an old passphrase.
+    let r = put(rewrap_body(
+        &t,
+        &member,
+        &keys,
+        &keys.sign,
+        b"new pass",
+        now,
+    ))
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.error_code(), "stale_request");
+    let r = put(rewrap_body(
+        &t,
+        &member,
+        &keys,
+        &keys.sign,
+        b"old",
+        now - 10,
+    ))
+    .await;
+    assert_eq!(r.error_code(), "stale_request");
+
+    // Too far from the server's clock.
+    let r = put(rewrap_body(
+        &t,
+        &member,
+        &keys,
+        &keys.sign,
+        b"x",
+        now + 10 * 60_000,
+    ))
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.error_code(), "stale_request");
+
+    // A session alone (any other key) can't do it.
+    let other = SigningKey::generate();
+    let r = put(rewrap_body(&t, &member, &keys, &other, b"x", now + 1)).await;
+    assert_eq!(r.error_code(), "bad_rewrap_signature");
+
+    // Changing a signed field breaks the signature.
+    let mut body = rewrap_body(&t, &member, &keys, &keys.sign, b"x", now + 2);
+    body["wrapped_enc_key"] = json!(body["wrapped_sign_key"].clone());
+    let r = put(body).await;
+    assert_eq!(r.error_code(), "bad_rewrap_signature");
+
+    // Naming another member is refused before anything else.
+    let mut body = rewrap_body(&t, &member, &keys, &keys.sign, b"x", now + 3);
+    body["member_id"] = json!("usr_someoneelse");
+    let r = put(body).await;
+    assert_eq!(r.error_code(), "rewrap_mismatch");
+
+    // The wrapped values must be JSON objects, even when properly signed.
+    let rewrap = KeyRewrap {
+        instance_id: t.instance_id(),
+        member_id: member.clone(),
+        sign_pubkey: keys.sign.public(),
+        issued_at_ms: now + 4,
+        wrapped_sign_key: "\"just a string\"".into(),
+        wrapped_enc_key: "{}".into(),
+        recovery_wrapped: "{}".into(),
+    };
+    let r = put(serde_json::to_value(keys.sign.endorse(rewrap)).unwrap()).await;
+    assert_eq!(r.error_code(), "invalid_wrapped_key");
 }

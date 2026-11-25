@@ -441,3 +441,61 @@ async fn magic_links_are_limited_per_address() {
         .count();
     assert_eq!(n, 2);
 }
+
+#[tokio::test]
+async fn people_can_change_their_own_display_name() {
+    let t = TestApp::new().await;
+    let (id, session) = t.setup_admin("sam@example.org").await;
+
+    let r = t
+        .call(
+            Method::PATCH,
+            "/v1/me",
+            Some(json!({ "display_name": "  Sam Rivera  " })),
+            Some(&session),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["user"]["display_name"], "Sam Rivera");
+    assert_eq!(r.body["user"]["id"], id.as_str());
+    let me = t.get("/v1/me", Some(&session)).await;
+    assert_eq!(me.body["user"]["display_name"], "Sam Rivera");
+
+    for bad in [
+        json!(""),
+        json!("   "),
+        json!("x".repeat(65)),
+        json!("tab\there"),
+    ] {
+        let r = t
+            .call(
+                Method::PATCH,
+                "/v1/me",
+                Some(json!({ "display_name": bad })),
+                Some(&session),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(r.error_code(), "invalid_display_name");
+    }
+    // Only the name can change: roles and email are not editable here.
+    let r = t
+        .call(
+            Method::PATCH,
+            "/v1/me",
+            Some(json!({ "email": "other@example.org" })),
+            Some(&session),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    // Signed out: no change.
+    let r = t
+        .call(
+            Method::PATCH,
+            "/v1/me",
+            Some(json!({ "display_name": "Mallory" })),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+}

@@ -423,7 +423,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 - **Daily reports are built on the device** (weekly is optional). Each contains an activity timeline, counts by rating, flagged moments with reasons and blurred thumbnails, optional top domains and apps (off by default), and a tamper and health summary.
 - **Urgent and normal items** go out as small encrypted events and trigger notifications according to §5.4.
-- **Ally web app** (served by the instance; desktop app in Phase 2): unlock with a passphrase or a passkey PRF, decrypt locally. Feed per member, urgency badges, device health, and conversation prompts. The product's real goal is honest conversation, not policing.
+- **Ally web app** (served by the instance; desktop app in Phase 2): unlock with a passphrase or a passkey PRF, decrypt locally. Feed per member, urgency badges, device health, and conversation prompts. The product's real goal is honest conversation, not policing. *Status: the web app has the member and ally pages. Keys unlock with a passphrase or recovery code (passkey PRF not yet); the crypto is a pure-JS TypeScript port of `faro-crypto`, since the page CSP rules out WebAssembly, checked against shared test vectors.*
 - **Member view**: exactly what allies see, plus the false-positive note.
 - **An ally of members on several instances** has one account per instance in v1. The ally desktop app (Phase 2) can hold several instance accounts in one place.
 

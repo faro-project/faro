@@ -4,7 +4,7 @@
 
 > **Status: pre-alpha. Read this first.**
 >
-> - The server (`faro-server`) runs and its API works. Its web app so far has the **setup page**, **sign-in** by emailed link and the **admin console** (overview, inviting members, settings, email test); there are no member or ally pages yet, and **no released desktop app** for members. So an instance can't yet do its real job: you can install it, create the admin account, test email and invite people, but members have nothing to enroll their computers with yet. This guide is for pilot instances and testers.
+> - The server (`faro-server`) runs and its API works. Its web app has the **setup page**, **sign-in** by emailed link, the **admin console** (overview, inviting members, settings, email test), and the **member and ally pages**: members set up their keys, add and approve computers, invite and approve allies and see their own activity; allies accept invitations and read the alerts and reports of the people they support. There is **no released desktop app** for members yet, only development builds of the macOS client, so members have nothing official to enroll their computers with. This guide is for pilot instances and testers.
 > - **There are no releases yet.** You can build the image yourself from the source code (one command; it takes a while the first time), or use the development image `ghcr.io/faro-project/faro-server:main` that CI builds from the latest code for amd64 and arm64 (see [Path B](#4-path-b-a-raspberry-pi)).
 > - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
 > - **Postgres is untested** in these deployment files. Use the built-in SQLite database, which is the right choice for almost everyone anyway.
@@ -571,7 +571,7 @@ In short:
 - **You can see** account names and email addresses, who is connected to whom, device names and when they last checked in, *when* events happen and their kind and urgency (but not their content), delivery problems, storage use, and network addresses (kept only in memory, for rate limiting).
 - **You cannot see** reports, timelines, thumbnails, web addresses visited, or what triggered an alert: those are encrypted on members' computers, and only their chosen allies can decrypt them. Your server never has the keys.
 - **You cannot** enroll a computer for someone else, make yourself someone's ally, or hide events from allies. Faro is for people who choose accountability for themselves; it must not be used to monitor anyone who hasn't opted in.
-- **One honest limit:** once the web app exists, allies who use it in a browser trust the operator not to tamper with the code the server sends them. The notice says so too, and a separate desktop app for allies is planned for those who don't want to rely on that.
+- **One honest limit:** members and allies who use the web app in a browser trust the operator not to tamper with the code the server sends them. The notice says so too, and a separate desktop app for allies is planned for those who don't want to rely on that.
 
 Responsibilities that come with running an instance:
 
