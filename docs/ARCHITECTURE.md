@@ -209,8 +209,10 @@ frame ─▶ dHash dedupe ─▶ preprocess
 **Thumbnail.** About 320 px wide with a strong Gaussian blur (σ≈12) followed by pixelation. It shows the gist ("a video player with a person") without explicit detail. The blur is applied before any encryption or persistence, so the output can't be reversed.
 
 **Models.** Swappable, versioned and signed by the project, and distributed through the update channel (§3.8).
-- Baseline: an open NSFW classifier exported to ONNX and quantized to int8, chosen in a Phase 0 benchmark. **Every candidate needs to be compatible with Apache-2.0.** OpenNSFW is BSD. Avoid AGPL or non-commercial weights, and check NudeNet's terms specifically.
-- Long term: **a small CLIP-style encoder (MobileCLIP or OpenCLIP, permissively licensed) with linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head.
+- **Weights must be permissively licensed** (§11): no GPL, AGPL or non-commercial weights. The candidates and their licences are compared in [research/model-licenses.md](research/model-licenses.md).
+- **Training data:** no model trained on a dataset with documented child sexual abuse material. Today that means NudeNet's dataset and LAION-5B, and the list grows with any later finding. A model's training data must be disclosed well enough to check this.
+- Baseline for the beta: **OpenNSFW** (Yahoo, BSD-2-Clause), converted by the project from Yahoo's original weights to ONNX and quantized to int8. It is ImageNet-pretrained, which is allowed for this baseline only. NudeNet is excluded: it is GPL or AGPL, and its dataset contained CSAM.
+- Long term: **a permissively licensed OpenCLIP image encoder that isn't ImageNet-based, with Faro's own linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head. MobileCLIP no longer qualifies: Apple relicensed its weights as research-only in 2025.
 - Runtime: `ort` with CoreML, DirectML and CPU execution providers. Target under 80 ms per frame on CPU.
 - **Screenshot domain gap**: `models/` includes a screenshot-specific eval set, and CI fails on regressions.
 - Later: on-device OCR (Apple Vision, `Windows.Media.Ocr`) combined with keyword lists.
@@ -519,7 +521,7 @@ Institutions running instances (churches, colleges) make consent even more impor
 **Phase 0: Spikes (2–4 weeks)**
 1. macOS ScreenCaptureKit from a LaunchAgent: permission persistence and re-prompt behavior.
 2. Windows: capture from an agent launched by the service into the user session; multi-monitor, user switching, RDP.
-3. Model benchmark plus Apache-compatible license review.
+3. Model benchmark: OpenNSFW, exported to int8 ONNX, on the screenshot eval set. The license review is done ([research/model-licenses.md](research/model-licenses.md)).
 4. Wayland portal restore tokens on GNOME and KDE.
 5. Crypto round trip: Rust encrypt → browser decrypt, member-signed ally keys.
 6. `faro-server` skeleton on SQLite with built-in ACME, running on a Raspberry Pi.
