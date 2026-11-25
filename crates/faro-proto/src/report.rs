@@ -49,16 +49,22 @@ pub struct RatingCounts {
 
 impl RatingCounts {
     pub fn add(&mut self, r: Rating) {
-        match r {
-            Rating::Clean => self.clean += 1,
-            Rating::Low => self.low += 1,
-            Rating::Medium => self.medium += 1,
-            Rating::High => self.high += 1,
-        }
+        let n = match r {
+            Rating::Clean => &mut self.clean,
+            Rating::Low => &mut self.low,
+            Rating::Medium => &mut self.medium,
+            Rating::High => &mut self.high,
+        };
+        *n = n.saturating_add(1);
     }
 
+    /// All captures, saturating at `u32::MAX`. A decrypted report comes from
+    /// a device the member controls, so its counts can be anything.
     pub fn total(&self) -> u32 {
-        self.clean + self.low + self.medium + self.high
+        self.clean
+            .saturating_add(self.low)
+            .saturating_add(self.medium)
+            .saturating_add(self.high)
     }
 }
 
@@ -179,4 +185,23 @@ pub struct ReportUpload {
     pub header: ReportHeader,
     pub sig: Signature,
     pub body: EncryptedItem,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_saturate_instead_of_overflowing() {
+        // Counts in a decrypted report are whatever the device wrote; adding
+        // them up used to overflow (a panic in debug builds, a wrong total
+        // in release).
+        let mut c: RatingCounts =
+            serde_json::from_str(r#"{"clean":4294967295,"low":1,"medium":0,"high":2}"#).unwrap();
+        assert_eq!(c.total(), u32::MAX);
+        c.add(Rating::Clean);
+        assert_eq!(c.clean, u32::MAX);
+        c.add(Rating::Medium);
+        assert_eq!((c.medium, c.total()), (1, u32::MAX));
+    }
 }

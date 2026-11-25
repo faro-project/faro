@@ -118,13 +118,16 @@ pub const MAX_ACCOUNT_LABEL: usize = 64;
 /// to [`MAX_ACCOUNT_LABEL`] characters. It travels only inside encrypted
 /// bodies, so the instance never sees it.
 pub fn account_label(name: &str) -> String {
-    name.chars()
+    let cut: String = name
+        .chars()
         .filter(|c| !c.is_control())
         .collect::<String>()
         .trim()
         .chars()
         .take(MAX_ACCOUNT_LABEL)
-        .collect()
+        .collect();
+    // The cut can land just after a space, so trim again.
+    cut.trim_end().to_owned()
 }
 
 /// Tamper signals (§3.7). Context-only signals are listed here too
@@ -330,6 +333,16 @@ mod tests {
             account_label(&"x".repeat(200)).chars().count(),
             MAX_ACCOUNT_LABEL
         );
+    }
+
+    #[test]
+    fn account_label_cut_never_leaves_trailing_space() {
+        // Found by the `encoding` fuzz target: a space at the cut point
+        // survived the trim, which ran before the cut.
+        let name = format!("{}{}", "a".repeat(MAX_ACCOUNT_LABEL - 1), " b");
+        let label = account_label(&name);
+        assert_eq!(label, "a".repeat(MAX_ACCOUNT_LABEL - 1));
+        assert_eq!(label.trim(), label);
     }
 
     #[test]
