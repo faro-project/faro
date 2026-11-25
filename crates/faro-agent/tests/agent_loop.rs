@@ -16,7 +16,7 @@ use faro_ipc::{
     HELLO_TIMEOUT,
 };
 use faro_platform::synthetic::{Scene, Script};
-use faro_platform::{AppInfo, PermissionState, SessionChange, TamperSignal};
+use faro_platform::{AppInfo, BrowserContext, PermissionState, SessionChange, TamperSignal};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -389,6 +389,53 @@ async fn state_changes_and_tamper_are_forwarded() {
                 ..
             }
         )
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn browser_tab_follows_the_foreground() {
+    let (h, server) = Harness::start(Script::new()).await;
+    let (mut conn, _) = accept(&server).await;
+    // No browser: the first report clears whatever the service held, and
+    // comes after the foreground.
+    let (_, fg) = recv_until(&mut conn, |m| {
+        matches!(m, AgentMsg::Foreground { .. } | AgentMsg::Browser(_))
+    })
+    .await;
+    assert!(matches!(fg, AgentMsg::Foreground { .. }));
+    recv_until(&mut conn, |m| {
+        *m == AgentMsg::Browser(BrowserContext::default())
+    })
+    .await;
+
+    let tab = BrowserContext {
+        url: Some("https://example.test/".into()),
+        title: None,
+        incognito: false,
+    };
+    h.script.with(|s| {
+        s.app = Some(AppInfo {
+            id: "com.apple.Safari".into(),
+            name: None,
+        });
+        s.browser = Some(tab.clone());
+    });
+    let (_, fg) = recv_until(&mut conn, |m| {
+        matches!(m, AgentMsg::Foreground { app: Some(a), .. } if a.id == "com.apple.Safari")
+            || matches!(m, AgentMsg::Browser(b) if b.url.is_some())
+    })
+    .await;
+    assert!(
+        matches!(fg, AgentMsg::Foreground { .. }),
+        "the app comes before its tab"
+    );
+    recv_until(&mut conn, |m| *m == AgentMsg::Browser(tab.clone())).await;
+
+    // Leaving the browser clears the tab.
+    h.script.with(|s| s.browser = None);
+    recv_until(&mut conn, |m| {
+        *m == AgentMsg::Browser(BrowserContext::default())
     })
     .await;
 }

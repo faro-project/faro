@@ -6,7 +6,7 @@
 //! | Trait | Implementation | Runs in |
 //! |---|---|---|
 //! | `ScreenCapture` | [`MacScreenCapture`]: ScreenCaptureKit `SCScreenshotManager` (14+), `CGDisplayCreateImage` (13) | agent |
-//! | `ForegroundInfo` | [`MacForeground`]: window list + fresh `NSRunningApplication`; titles via Accessibility | agent |
+//! | `ForegroundInfo` | [`MacForeground`]: window list + fresh `NSRunningApplication`; titles and browser tab URLs ([`browser`]) via Accessibility | agent |
 //! | `SessionState` | [`MacSession`]: CGEventSource idle, CGSession lock, display/system sleep | agent |
 //! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN (edge-triggered) | agent |
 //! | `ServiceHost` | [`MacServiceHost`]: launchd plists, `SMAppService`, console sessions | service |
@@ -39,6 +39,8 @@
 
 #[cfg(target_os = "macos")]
 mod bridge;
+#[cfg(target_os = "macos")]
+pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod capture;
 #[cfg(target_os = "macos")]
