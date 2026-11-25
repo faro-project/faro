@@ -41,6 +41,29 @@ fn checked_in_plists_match_the_generator() {
     check(pkg_agent_job(), pkg_layout::AGENT_PLIST);
 }
 
+/// `Faro Agent.app` opens `faro://enroll` links (issue #62): its
+/// Info.plist registers the `faro` scheme, under the bundle id the service's
+/// code-signing requirement names.
+#[test]
+fn the_agent_bundle_opens_faro_links() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../installers/macos/Info.plist.in");
+    let info: plist::Dictionary = plist::from_file(&path).expect("Info.plist.in parses");
+    assert_eq!(
+        info.get("CFBundleIdentifier").and_then(|v| v.as_string()),
+        Some("org.faro.agent")
+    );
+    let schemes: Vec<&str> = info
+        .get("CFBundleURLTypes")
+        .and_then(|v| v.as_array())
+        .expect("CFBundleURLTypes")
+        .iter()
+        .filter_map(|t| t.as_dictionary()?.get("CFBundleURLSchemes")?.as_array())
+        .flatten()
+        .filter_map(|s| s.as_string())
+        .collect();
+    assert_eq!(schemes, ["faro"]);
+}
+
 #[test]
 fn the_agent_runs_in_every_gui_session() {
     let xml = pkg_agent_job().to_plist_xml().unwrap();
