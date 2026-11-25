@@ -100,24 +100,42 @@ jobs:
           tool: cargo-deny
       - run: cargo deny --all-features check licenses bans sources advisories
 
-  # The macOS installer: build the unsigned development package (a release
-  # package needs the project's Developer ID) and check its payload, scripts
-  # and installer options without installing it.
+  # The macOS installer: build the unsigned, universal (arm64 + x86_64)
+  # development package (a release package needs the project's Developer ID)
+  # and check its payload, scripts and installer options without installing
+  # it. The arm64 tests run in `test (macos)`; this job runs the client's
+  # x86_64 tests under Rosetta.
   macos-pkg:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
       - run: installers/macos/test-uninstall.sh
-      # For installing on a test machine. Unsigned, built for the runner's
-      # architecture (Apple Silicon), and its service accepts any program
-      # running as a logged-in user as the agent: never use it on anyone.
+      # The server is not part of the macOS package, so it is left out. The
+      # x86_64 test binaries need Rosetta 2 on the runner. Without it they
+      # are still built, and the job warns that they did not run.
+      - name: x86_64 client tests (Rosetta)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: |
+          tests=(cargo test --workspace --exclude faro-server --target x86_64-apple-darwin --locked)
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            "${tests[@]}" --no-fail-fast
+          else
+            "${tests[@]}" --no-run
+            echo "::warning::Rosetta 2 is not installed on this runner: the x86_64 tests were built but not run."
+          fi
+      # For installing on a test machine. Unsigned, universal, and its
+      # service accepts any program running as a logged-in user as the
+      # agent: never use it on anyone.
       - uses: actions/upload-artifact@v4
         with:
-          name: faro-dev-pkg-arm64-${{ github.sha }}
+          name: faro-dev-pkg-universal-${{ github.sha }}
           path: target/pkg/Faro-*-dev.pkg
           if-no-files-found: error
           retention-days: 14
