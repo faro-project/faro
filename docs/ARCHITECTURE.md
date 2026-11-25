@@ -214,7 +214,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 - Baseline for the beta: **OpenNSFW** (Yahoo, BSD-2-Clause), converted by the project from Yahoo's original weights to ONNX and quantized to int8. It is ImageNet-pretrained, which is allowed for this baseline only. NudeNet is excluded: it is GPL or AGPL, and its dataset contained CSAM.
 - Long term: **a permissively licensed OpenCLIP image encoder that isn't ImageNet-based, with Faro's own linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head. MobileCLIP no longer qualifies: Apple relicensed its weights as research-only in 2025.
 - Runtime: `ort` with CoreML, DirectML and CPU execution providers. Target under 80 ms per frame on CPU.
-- **Screenshot domain gap**: `models/` includes a screenshot-specific eval set, and CI fails on regressions.
+- **Screenshot domain gap**: a screenshot-specific eval set, curated by the maintainer and kept outside the repository because it contains explicit imagery. `models/eval-baseline.json` holds its metrics (never images), and CI fails on regressions (DEVELOPMENT.md "Model benchmark").
 - Later: on-device OCR (Apple Vision, `Windows.Media.Ocr`) combined with keyword lists.
 
 **Context signals.** Domain categorization uses open blocklists (check licenses: StevenBlack/hosts is MIT; review OISD and UT1 terms) compiled into an FST or Bloom filter and shipped as a signed bundle. The browser extension reports `{url, title, incognito}` over native messaging. A browser in use without the extension is reported as context.

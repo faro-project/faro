@@ -1,0 +1,200 @@
+//! The `model-bench` command line (feature `onnx`). It lives in the library
+//! rather than in the example so that tests can drive it.
+//!
+//! Exit status: 0 when everything ran (and the gate, if any, passed), 1 on
+//! a regression, 2 on any error, including results that can't be compared.
+
+use super::{gate, run, BenchReport, EvalSet, GateConfig, RunOptions};
+use crate::classifier::onnx::OnnxClassifier;
+use crate::classifier::{load_model, load_model_at};
+use crate::error::DetectError;
+use crate::fusion::{PolicyConfig, PolicyEngine};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+pub const USAGE: &str = "\
+usage: model-bench --manifest M.json [--model M.onnx] --set DIR [options]
+       model-bench --results R.json --baseline B.json [gate options]
+
+Benchmark an ONNX image classifier on a labelled set of PNG screenshots
+(DIR/explicit, DIR/suggestive, DIR/neutral, ...) and print per-class
+precision and recall at the policy thresholds, a confusion matrix, the
+ratings per class and CPU latency. Nothing but metrics is ever written.
+
+  --manifest PATH        model manifest (licence and BLAKE3 are checked)
+  --model PATH           model file, instead of the manifest's `file`
+  --set DIR              the labelled test set
+  --policy PATH          policy JSON (default: the built-in policy)
+  --json PATH            also write the results as JSON
+  --warmup N             untimed runs before timing (default 3)
+  --baseline PATH        gate the results against this baseline report
+  --results PATH         gate an existing report instead of running
+
+gate options:
+  --recall-label NAME    class whose recall is gated (default explicit)
+  --max-recall-drop F    allowed absolute recall drop (default 0.02)
+  --max-p95-increase F   allowed relative p95 increase (default 0.25)
+
+exit status: 0 ok, 1 regression, 2 error
+";
+
+#[derive(Debug, Default)]
+struct Args {
+    manifest: Option<PathBuf>,
+    model: Option<PathBuf>,
+    set: Option<PathBuf>,
+    policy: Option<PathBuf>,
+    json: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+    results: Option<PathBuf>,
+    warmup: Option<usize>,
+    gate: GateConfig,
+    help: bool,
+}
+
+fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
+    let mut a = Args::default();
+    let mut it = args.into_iter();
+    while let Some(flag) = it.next() {
+        if flag == "-h" || flag == "--help" {
+            a.help = true;
+            continue;
+        }
+        let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
+        let path = |v: String| Some(PathBuf::from(v));
+        let number = |v: String| {
+            v.parse::<f64>()
+                .map_err(|_| format!("{flag}: {v:?} is not a number"))
+        };
+        match flag.as_str() {
+            "--manifest" => a.manifest = path(value()?),
+            "--model" => a.model = path(value()?),
+            "--set" => a.set = path(value()?),
+            "--policy" => a.policy = path(value()?),
+            "--json" => a.json = path(value()?),
+            "--baseline" => a.baseline = path(value()?),
+            "--results" => a.results = path(value()?),
+            "--warmup" => {
+                let v = value()?;
+                a.warmup = Some(v.parse().map_err(|_| format!("--warmup: {v:?}"))?);
+            }
+            "--recall-label" => a.gate.recall_label = value()?,
+            "--max-recall-drop" => a.gate.max_recall_drop = number(value()?)?,
+            "--max-p95-increase" => a.gate.max_p95_increase = number(value()?)?,
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+    }
+    Ok(a)
+}
+
+fn read_report(path: &Path) -> Result<BenchReport, DetectError> {
+    let bytes = std::fs::read(path).map_err(|source| DetectError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    BenchReport::from_json(&bytes)
+        .map_err(|e| DetectError::Bench(format!("{}: {e}", path.display())))
+}
+
+fn load_policy(path: Option<&Path>) -> Result<PolicyEngine, DetectError> {
+    let cfg = match path {
+        None => PolicyConfig::default(),
+        Some(p) => {
+            let bytes = std::fs::read(p).map_err(|source| DetectError::Io {
+                path: p.to_owned(),
+                source,
+            })?;
+            serde_json::from_slice(&bytes)
+                .map_err(|e| DetectError::Config(format!("{}: {e}", p.display())))?
+        }
+    };
+    PolicyEngine::new(cfg)
+}
+
+/// Run the tool. `args` excludes the program name. Returns the exit status.
+pub fn main(
+    args: impl IntoIterator<Item = String>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> u8 {
+    let args = match parse(args) {
+        Ok(a) if a.help => {
+            let _ = out.write_all(USAGE.as_bytes());
+            return 0;
+        }
+        Ok(a) => a,
+        Err(e) => {
+            let _ = writeln!(err, "model-bench: {e}\n\n{USAGE}");
+            return 2;
+        }
+    };
+    match execute(&args, out, err) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(DetectError::Bench(m)) => {
+            let _ = writeln!(err, "model-bench: {m}");
+            2
+        }
+        Err(e) => {
+            let _ = writeln!(err, "model-bench: {e}");
+            2
+        }
+    }
+}
+
+/// `Ok(false)` is a regression.
+fn execute(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> Result<bool, DetectError> {
+    let usage = |m: &str| DetectError::Bench(format!("{m} (see --help)"));
+    let report = if let Some(results) = &a.results {
+        if a.manifest.is_some() || a.set.is_some() || a.json.is_some() {
+            return Err(usage(
+                "--results gates an existing report; it takes no --manifest, --set or --json",
+            ));
+        }
+        if a.baseline.is_none() {
+            return Err(usage("--results needs --baseline"));
+        }
+        read_report(results)?
+    } else {
+        let (Some(manifest), Some(set)) = (&a.manifest, &a.set) else {
+            return Err(usage("--manifest and --set are required"));
+        };
+        let policy = load_policy(a.policy.as_deref())?;
+        // Read the baseline first so that a typo fails before a long run.
+        if let Some(b) = &a.baseline {
+            read_report(b)?;
+        }
+        let model = match &a.model {
+            Some(m) => load_model_at(manifest, m)?,
+            None => load_model(manifest)?,
+        };
+        let mut classifier = OnnxClassifier::new(model)?;
+        let set = EvalSet::open(set, &super::allowed_classes(policy.config()))?;
+        if cfg!(debug_assertions) {
+            let _ = writeln!(
+                err,
+                "model-bench: warning: unoptimized build, latency is not representative (use --release)"
+            );
+        }
+        let opts = RunOptions {
+            warmup: a.warmup.unwrap_or(RunOptions::default().warmup),
+        };
+        let report = run(&mut classifier, &policy, &set, &opts)?;
+        let _ = out.write_all(report.to_text().as_bytes());
+        if let Some(path) = &a.json {
+            std::fs::write(path, report.to_json()).map_err(|source| DetectError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+        report
+    };
+
+    let Some(baseline) = &a.baseline else {
+        return Ok(true);
+    };
+    let outcome = gate(&read_report(baseline)?, &report, &a.gate)?;
+    let _ = writeln!(out, "\nbaseline {}", baseline.display());
+    let _ = out.write_all(outcome.to_text().as_bytes());
+    Ok(outcome.passed())
+}
