@@ -1022,7 +1022,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "faro-agent"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "clap",
  "faro-ipc",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "faro-core"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "faro-crypto",
  "faro-proto",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "faro-crypto"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "argon2",
  "blake3",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "faro-detect"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "faro-ipc"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "faro-platform",
  "faro-proto",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "faro-platform"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "faro-proto",
  "thiserror",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "faro-platform-macos"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "block2",
  "dispatch2",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "faro-proto"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "faro-server"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "faro-service"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "axum",
  "clap",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "faro-update"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "blake3",
