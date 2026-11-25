@@ -132,6 +132,7 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 | Labels | Machine | Jobs |
 |---|---|---|
 | `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)`, `macos-pkg` |
+| `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` |
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
 

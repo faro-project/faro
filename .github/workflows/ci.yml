@@ -33,6 +33,10 @@ jobs:
         include:
           - os: macos
             runner: [self-hosted, macOS, ARM64]
+          # Intel Macs are supported in the beta, so the whole workspace
+          # also builds and tests natively on x86_64.
+          - os: macos-intel
+            runner: [self-hosted, macOS, X64]
           - os: windows
             runner: [self-hosted, Windows, X64]
           - os: linux
