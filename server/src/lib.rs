@@ -20,6 +20,7 @@
 //! | [`api`] | HTTP handlers, one module per area of §4.5 |
 //! | [`router`] | route table and the security middleware stack |
 //! | [`settings`] | admin-editable settings (registration, retention, grace) |
+//! | [`roles`] | granting and revoking the admin role, always told |
 //! | [`branding`] | instance logo and customizations, and the rules for operator text |
 //! | [`notify`] | the notifier: fan-out, immediate email, hourly digests (§5.4) |
 //! | [`liveness`] | missed-check-in monitor, downtime-aware (§3.7) |
@@ -55,6 +56,7 @@ pub mod mailer;
 pub mod notify;
 pub mod ratelimit;
 pub mod retention;
+pub mod roles;
 pub mod router;
 pub mod server;
 pub mod settings;

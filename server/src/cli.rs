@@ -1,5 +1,5 @@
 //! Command-line interface: `faro-server serve | init | backup | doctor |
-//! updates | version`.
+//! updates | admin | version`.
 //!
 //! * `init` creates the data directory and the instance identity key,
 //!   migrates the database, and prints a one-time setup token for the web
@@ -14,6 +14,9 @@
 //! * `updates status` shows what the update mirror holds; `updates import
 //!   --from DIR` loads a release by hand on an air-gapped instance. See
 //!   [`crate::updates`].
+//! * `admin grant --email ADDRESS` makes an existing account an admin: the
+//!   way back in when nobody can sign in as an admin. Told to the person and
+//!   every other admin like a change in the console; see [`crate::roles`].
 //! * `version` prints the server and protocol versions.
 //!
 //! Secrets printed here (setup tokens) go to **stdout/stderr only**, never
@@ -95,8 +98,32 @@ pub enum Command {
         #[command(subcommand)]
         action: UpdatesCommand,
     },
+    /// Manage admins from the server itself.
+    Admin {
+        #[command(subcommand)]
+        action: AdminCommand,
+    },
     /// Print version information.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminCommand {
+    /// Make an existing account an admin, for when nobody can sign in as an
+    /// admin any more. The person and every other admin are emailed, by the
+    /// running server (or when it next starts).
+    Grant {
+        /// Path to faro.toml (optional; FARO_* env vars override it).
+        #[arg(long, env = "FARO_CONFIG")]
+        config: Option<PathBuf>,
+        /// Development mode (see `serve --dev`).
+        #[arg(long)]
+        dev: bool,
+        /// The account's email address. The person must have signed in
+        /// once, so the account exists.
+        #[arg(long)]
+        email: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,6 +181,10 @@ pub enum CliError {
     UpdatesOff,
     #[error("update mirror: {0}")]
     Updates(Box<crate::updates::MirrorError>),
+    #[error("{0}")]
+    Refused(String),
+    #[error(transparent)]
+    App(Box<crate::error::AppError>),
     #[error("cannot listen on {addr}: {source}")]
     Listen {
         addr: std::net::SocketAddr,
@@ -419,6 +450,61 @@ async fn run_updates(action: UpdatesCommand) -> Result<(), CliError> {
     }
 }
 
+/// `admin grant`: make the account with `email` an admin (module docs).
+/// Returns what to print.
+pub async fn admin_grant(state: &crate::state::AppState, email: &str) -> Result<String, CliError> {
+    use crate::db::repo::users;
+    let email = crate::auth::normalize_email(email)
+        .ok_or_else(|| CliError::Refused(format!("{email:?} is not an email address")))?;
+    let Some(user) = users::by_email(state.db().pool(), &email).await? else {
+        return Err(CliError::Refused(format!(
+            "there is no account with the address {email}: the person must sign in once first"
+        )));
+    };
+    if user.roles.admin {
+        return Ok(format!("{email} is already an admin. Nothing changed."));
+    }
+    match crate::roles::set_admin(state, &user.id, true, crate::roles::By::CommandLine).await {
+        Ok(r) => Ok(format!(
+            "{email} is now an admin. Faro emails {} {} about it (the person and every other \
+             admin), from the running server or when it next starts.",
+            r.told,
+            if r.told == 1 { "person" } else { "people" }
+        )),
+        Err(crate::error::AppError::Conflict { code, message }) => {
+            Err(CliError::Refused(match code {
+                "account_disabled" => format!(
+                    "{email}'s account is disabled, so it can't be made an admin. Choose \
+                     another account."
+                ),
+                "account_deleting" => format!(
+                    "{email}'s account is being deleted, so it can't be made an admin. Choose \
+                     another account."
+                ),
+                _ => message,
+            }))
+        }
+        Err(e) => Err(CliError::App(Box::new(e))),
+    }
+}
+
+async fn run_admin(action: AdminCommand) -> Result<(), CliError> {
+    match action {
+        AdminCommand::Grant { config, dev, email } => {
+            let cfg = load_config(config.as_deref(), std::env::vars(), false, dev)?;
+            // Nothing is sent from here: the server's notifier sends the
+            // notices this writes.
+            let state =
+                bootstrap::open(cfg, Arc::new(LogMailer::new(false)), Arc::new(SystemClock))
+                    .await?;
+            let result = admin_grant(&state, &email).await;
+            state.db().close().await;
+            println!("{}", result?);
+            Ok(())
+        }
+    }
+}
+
 /// Entry point used by `main`.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -473,6 +559,7 @@ pub fn main() -> ExitCode {
                         run_doctor(cfg, !no_smtp_check).await
                     }
                     Command::Updates { action } => run_updates(action).await,
+                    Command::Admin { action } => run_admin(action).await,
                     Command::Version => Ok(()),
                 }
             })

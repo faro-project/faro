@@ -157,6 +157,40 @@ pub async fn count_enabled_admins_except<'e>(
     row.try_get("n")
 }
 
+/// Enabled admins other than `except`, oldest account first: who is told
+/// when the admin role changes. Admins being deleted are included (they
+/// are admins until the purge).
+pub async fn enabled_admin_ids_except<'e>(
+    e: impl Executor<'e, Database = Any>,
+    except: &UserId,
+) -> Result<Vec<UserId>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id FROM users WHERE is_admin = 1 AND disabled = 0 AND id <> $1
+         ORDER BY created_at, id",
+    )
+    .bind(except.as_str())
+    .fetch_all(e)
+    .await?;
+    rows.iter()
+        .map(|r| Ok(UserId::new(r.try_get::<String, _>("id")?)))
+        .collect()
+}
+
+/// Grant or revoke the admin role. Returns false if the account already
+/// had that value.
+pub async fn set_admin<'e>(
+    e: impl Executor<'e, Database = Any>,
+    id: &UserId,
+    admin: bool,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("UPDATE users SET is_admin = $1 WHERE id = $2 AND is_admin <> $1")
+        .bind(flag(admin))
+        .bind(id.as_str())
+        .execute(e)
+        .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 /// Set an account's disabled flag. Returns false if it already had that value.
 pub async fn set_disabled<'e>(
     e: impl Executor<'e, Database = Any>,

@@ -3,6 +3,7 @@
 //! Handlers never build SQL themselves; they call these functions inside a
 //! transaction (`&mut *tx`) or directly on the pool.
 
+pub mod admin_log;
 pub mod alerts;
 pub mod allies;
 pub mod auth_tokens;

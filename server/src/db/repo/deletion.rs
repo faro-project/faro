@@ -41,6 +41,8 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("liveness_episodes", "member_id", Clears::Rows),
     ("retention_overrides", "member_id", Clears::Rows),
     ("member_manifests", "member_id", Clears::Rows),
+    ("admin_log", "user_id", Clears::SetNull),
+    ("admin_log", "actor_id", Clears::SetNull),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -56,7 +58,8 @@ pub enum Clears {
     /// transaction refuses to run while any is left ([`blob_count`]).
     Content,
     /// The column is set to NULL; the row belongs to someone else (another
-    /// member's alert that named this person, an invite they redeemed).
+    /// member's alert that named this person, an invite they redeemed, an
+    /// admin log entry that now names "a deleted account").
     SetNull,
 }
 
@@ -65,7 +68,8 @@ pub enum Clears {
 pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM notifications WHERE recipient_id = $1
         OR alert_id IN (SELECT id FROM alerts WHERE member_id = $1)
-        OR report_id IN (SELECT id FROM reports WHERE member_id = $1)",
+        OR report_id IN (SELECT id FROM reports WHERE member_id = $1)
+        OR admin_log_id IN (SELECT id FROM admin_log WHERE user_id = $1)",
     // Index rows naming the user on other members' items. The signed
     // headers themselves are left alone (they are the other member's).
     "DELETE FROM event_recipients WHERE recipient_id = $1",
@@ -73,6 +77,8 @@ pub const PURGE_BY_ID: &[&str] = &[
     "UPDATE alerts SET extra_recipient_id = NULL WHERE extra_recipient_id = $1",
     "UPDATE alerts SET skip_recipient_id = NULL WHERE skip_recipient_id = $1",
     "UPDATE alerts SET about_user_id = NULL WHERE about_user_id = $1",
+    "UPDATE admin_log SET user_id = NULL WHERE user_id = $1",
+    "UPDATE admin_log SET actor_id = NULL WHERE actor_id = $1",
     "DELETE FROM alerts WHERE member_id = $1",
     "DELETE FROM reports WHERE member_id = $1",
     "DELETE FROM events WHERE member_id = $1",
