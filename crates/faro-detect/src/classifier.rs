@@ -685,6 +685,30 @@ mod tests {
         assert!(i.validate().is_err());
     }
 
+    /// The manifests of the model the macOS package ships, and of its fp32
+    /// original (crates/faro-detect/models/opennsfw).
+    #[test]
+    fn opennsfw_manifests_are_valid() {
+        for raw in [
+            include_str!("../models/opennsfw/manifest.json"),
+            include_str!("../models/opennsfw/manifest-fp32.json"),
+        ] {
+            let i: ModelInfo = serde_json::from_str(raw).unwrap();
+            i.validate().unwrap();
+            assert_eq!(i.license, "BSD-2-Clause");
+            let a = i.attribution.as_ref().unwrap();
+            assert_eq!(a.copyright, ["Copyright 2016, Yahoo Inc."]);
+            let text = i.license_text.as_deref().unwrap();
+            assert!(text.starts_with("Copyright 2016, Yahoo Inc.\n"));
+            assert!(text.contains("Redistributions in binary form must reproduce"));
+            assert_eq!(i.labels, ["sfw", "nsfw"]);
+            // The default policy reads `nsfw` as explicit.
+            let scores = ImageScores::new([("sfw", 0.05), ("nsfw", 0.95)]).unwrap();
+            let r = crate::PolicyEngine::default().fuse(&scores, &[]);
+            assert_eq!(r.rating, faro_proto::body::Rating::High, "{r:?}");
+        }
+    }
+
     #[test]
     fn manifest_needs_what_the_licence_asks_for() {
         let manifest_err = |i: ModelInfo| match i.validate() {
