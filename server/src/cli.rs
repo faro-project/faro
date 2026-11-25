@@ -263,6 +263,9 @@ async fn run_init(cfg: Config) -> Result<(), CliError> {
 }
 
 async fn run_serve(cfg: Config) -> Result<(), CliError> {
+    if cfg.uses_postgres() {
+        tracing::warn!("Postgres database: {}", crate::db::POSTGRES_UNSUPPORTED);
+    }
     let listen = cfg.listen;
     let mailer = mailer_for(&cfg)?;
     let state = bootstrap::open(cfg, mailer, Arc::new(SystemClock)).await?;

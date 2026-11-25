@@ -7,7 +7,7 @@
 > - The server (`faro-server`) runs and its API works. Its web app has the **setup page**, **sign-in** by emailed link, the **admin console** (overview, inviting members, settings, email test), and the **member and ally pages**: members set up their keys, add and approve computers, invite and approve allies and see their own activity; allies accept invitations and read the alerts and reports of the people they support. There is **no released desktop app** for members yet, only development builds of the macOS client, so members have nothing official to enroll their computers with. This guide is for pilot instances and testers.
 > - **There are no releases yet.** You can build the image yourself from the source code (one command; it takes a while the first time), or use the development image `ghcr.io/faro-project/faro-server:main` that CI builds from the latest code for amd64 and arm64 (see [Path B](#4-path-b-a-raspberry-pi)).
 > - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
-> - **Postgres is untested** in these deployment files. Use the built-in SQLite database, which is the right choice for almost everyone anyway.
+> - **The beta supports SQLite only.** Use the built-in SQLite database, which is the right choice for almost everyone anyway. `faro-server` can also run on Postgres (`FARO_DATABASE_URL=postgres://…`), but that is **experimental and not supported in this release**: nothing tests it, and `faro-server doctor` and the startup log warn about it.
 > - The **update mirror** is built, but the Faro project hasn't published a signed release or its root of trust yet, so there is nothing to mirror, and the macOS client doesn't install updates yet. See [Updates for members' computers](#updates-for-members-computers).
 > - Not built yet: passkey sign-in (you sign in with email links for now), Web Push notifications (email only), and S3 storage for attachments (local disk only).
 
@@ -461,7 +461,7 @@ faro-server doctor
 0 failure(s), 0 warning(s)
 ```
 
-`FAIL` lines need fixing; `WARN` lines work but deserve a look. Add `--no-smtp-check` to skip connecting to the mail server. `doctor` only reads; it never changes anything.
+`FAIL` lines need fixing; `WARN` lines work but deserve a look. On a Postgres database `doctor` adds `[WARN] postgres       experimental, not supported in this release (the beta supports SQLite only)`, and `serve` logs the same warning at startup; Faro still runs. Add `--no-smtp-check` to skip connecting to the mail server. `doctor` only reads; it never changes anything.
 
 ---
 
@@ -525,7 +525,7 @@ After a restore the log says "previous run did not shut down cleanly". That's ex
 
 **Moving to a new server:** set up the new server with your `faro.env` (Path A steps 1 to 8), build the image with `sudo docker compose build`, then do restore steps 2 and 3 there and point your DNS at the new server. Faro refuses to start if the identity key and the database don't belong together, so a mixed-up restore can't go unnoticed.
 
-**Postgres:** the backup file then contains the identity key and attachments but not the database. `faro-server backup` prints how to back up the database with `pg_dump`; keep both files together.
+**Postgres** (experimental, not supported in this release): the backup file then contains the identity key and attachments but not the database. `faro-server backup` prints how to back up the database with `pg_dump`; keep both files together.
 
 ---
 
