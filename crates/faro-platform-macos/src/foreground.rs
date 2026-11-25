@@ -33,6 +33,11 @@
 //! optional (§3.3). Each AX call is bounded by a short messaging timeout so a
 //! hung app cannot stall the agent.
 //!
+//! # Browser tabs
+//!
+//! With the same permission, the active tab's URL in Safari, Chrome, Edge,
+//! Brave and Arc, reduced to its scheme and host. See [`crate::browser`].
+//!
 //! # Autorelease pools
 //!
 //! AppKit returns many objects autoreleased (`runningApplications`,
@@ -45,7 +50,7 @@
 //! [`autoreleasepool`], which drains those objects before returning (the
 //! values we return are plain Rust data).
 
-use faro_platform::{AppInfo, ForegroundInfo};
+use faro_platform::{AppInfo, BrowserContext, ForegroundInfo};
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement};
@@ -56,10 +61,11 @@ use objc2_core_graphics::{
 };
 use std::ptr::NonNull;
 
+use crate::browser::{self, Browser};
 use crate::cf;
 
 /// How long one Accessibility request may block, in seconds.
-const AX_TIMEOUT_SECS: f32 = 0.25;
+pub(crate) const AX_TIMEOUT_SECS: f32 = 0.25;
 
 /// Normal application windows live on layer 0; menus, the Dock, overlays and
 /// the menu bar live above it.
@@ -132,6 +138,24 @@ impl ForegroundInfo for MacForeground {
                 return None;
             }
             focused_window_title(frontmost_pid_now()?)
+        })
+    }
+
+    /// See [`crate::browser`].
+    fn browser(&self) -> Option<BrowserContext> {
+        autoreleasepool(|_| {
+            if !accessibility_trusted() {
+                return None;
+            }
+            let pid = frontmost_pid_now()?;
+            let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+            let browser = Browser::from_bundle_id(&app.bundleIdentifier()?.to_string())?;
+            let url = browser::tab_url_now(pid, browser)?;
+            Some(BrowserContext {
+                url: Some(url),
+                title: None,
+                incognito: false,
+            })
         })
     }
 }
@@ -267,6 +291,19 @@ mod tests {
             assert!(!t.trim().is_empty());
         }
         let _ = accessibility_trusted();
+    }
+
+    #[test]
+    fn smoke_browser_does_not_panic() {
+        if let Some(b) = MacForeground::new().browser() {
+            // No values in the messages: this may be a real tab.
+            let url = b.url.expect("a browser context always has a URL");
+            assert!(
+                browser::reduce_url(&url).as_deref() == Some(url.as_str()),
+                "the URL is already reduced"
+            );
+            assert!(b.title.is_none() && !b.incognito);
+        }
     }
 
     #[test]

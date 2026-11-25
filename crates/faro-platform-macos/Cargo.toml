@@ -16,6 +16,8 @@ thiserror.workspace = true
 zeroize.workspace = true
 libc = "0.2"
 plist = "1.8"
+# Reduces browser tab URLs to scheme and host (`browser`).
+url = "2.5"
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
@@ -58,6 +60,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFDictionary",
     "CFNumber",
     "CFString",
+    "CFURL",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",

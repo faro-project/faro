@@ -9,9 +9,10 @@
 //! * captures every display **only when the service asks** (`CaptureNow`;
 //!   the service owns the schedule, §3.4), moves the raw pixels into
 //!   `Frames` messages and drops them as soon as they are written;
-//! * reports foreground app/window, session state (idle, locked, display
-//!   asleep), permission state, session edges and tamper signals, both
-//!   periodically and when they change;
+//! * reports foreground app/window, the browser tab where the platform can
+//!   read it, session state (idle, locked, display asleep), permission
+//!   state, session edges and tamper signals, both periodically and when
+//!   they change;
 //! * answers liveness pings, shows service notices, and exits when told to.
 //!
 //! It holds no keys, no event log and no schedule. Everything it knows is
@@ -30,6 +31,9 @@
 //! * **Window titles are sensitive.** They are sent to the service (it needs
 //!   them for context signals, §3.5) but logged only at `debug` level, never
 //!   at `info` or above. Message kinds, not contents, are what get logged.
+//! * **Browser URLs are more sensitive still.** The platform reduces them to
+//!   `scheme://host/` before the agent sees them, and the agent never logs
+//!   them at any level.
 //! * **The agent only streams to the real service.** In production it
 //!   requires the socket's listener to be root ([`ServiceTrust::Root`]), so a
 //!   same-user impostor listening on a stale path gets nothing.

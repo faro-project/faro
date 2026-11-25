@@ -155,7 +155,7 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | ⚠ Risk | Recent macOS versions periodically ask users to re-confirm screen-capture access. A Phase 0 spike needs to confirm the current behavior. Worst case: the re-prompt is a normal step, and declining it reports as tamper. |
 | Service | A **LaunchDaemon** (`SMAppService.daemon`) plus a **global LaunchAgent** in `/Library/LaunchAgents`, so the agent starts in every account's session, including accounts created after install. `KeepAlive` on both. |
 | Active window | `NSWorkspace` for the frontmost app. Window titles go through `AXUIElement` (Accessibility permission, optional; revoking it is reported). |
-| Browser URL | Extension first. Fallback: AppleScript or Accessibility for Safari and Chrome. |
+| Browser URL | Extension first. Fallback: Accessibility for Safari, Chrome, Edge, Brave and Arc (the page's `AXURL`, else the address field), with the same permission as window titles. Not AppleScript, which needs an Automation permission for each browser. Only `scheme://host/` leaves the agent, since domain categorization and the report use only the host. Private windows can't be told apart this way, so `incognito` is false until the extension reports it. |
 | Network signals (Phase 2) | A Network Extension DNS proxy as a System Extension. |
 | Distribution | A Developer ID signed + notarized `.pkg`, built and signed **once by the Faro project**. The installer is the same for every instance (§3.8). It installs `/Library/Faro/bin/faro-uninstall`, which sends the `goodbye` (§3.7) before removing anything. |
 

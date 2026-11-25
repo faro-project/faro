@@ -6,8 +6,8 @@
 //! signals, all from one handle.
 
 use crate::{
-    AgentPlatform, AppInfo, ForegroundInfo, Frame, PermissionState, PixelFormat, PlatformError,
-    Result, ScreenCapture, SessionChange, SessionState, TamperSignal, TamperSignals,
+    AgentPlatform, AppInfo, BrowserContext, ForegroundInfo, Frame, PermissionState, PixelFormat,
+    PlatformError, Result, ScreenCapture, SessionChange, SessionState, TamperSignal, TamperSignals,
 };
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +31,8 @@ pub struct ScriptState {
     pub fail_capture: bool,
     pub app: Option<AppInfo>,
     pub title: Option<String>,
+    /// What [`ForegroundInfo::browser`] returns. `None` by default.
+    pub browser: Option<BrowserContext>,
     pub idle_secs: u64,
     pub locked: bool,
     pub display_asleep: bool,
@@ -52,6 +54,7 @@ impl Default for ScriptState {
                 name: Some("Editor".into()),
             }),
             title: Some("Untitled".into()),
+            browser: None,
             idle_secs: 0,
             locked: false,
             display_asleep: false,
@@ -158,6 +161,10 @@ impl ForegroundInfo for SyntheticForeground {
 
     fn window_title(&self) -> Option<String> {
         self.0.with(|s| s.title.clone())
+    }
+
+    fn browser(&self) -> Option<BrowserContext> {
+        self.0.with(|s| s.browser.clone())
     }
 }
 

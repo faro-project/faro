@@ -1138,6 +1138,7 @@ dependencies = [
  "plist",
  "tempfile",
  "thiserror",
+ "url",
  "zeroize",
 ]
 
