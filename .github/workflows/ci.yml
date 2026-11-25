@@ -103,8 +103,7 @@ jobs:
   # The macOS installer: build the unsigned, universal (arm64 + x86_64)
   # development package (a release package needs the project's Developer ID)
   # and check its payload, scripts and installer options without installing
-  # it. The arm64 tests run in `test (macos)`; this job runs the client's
-  # x86_64 tests under Rosetta.
+  # it. `macos-pkg-intel` then checks the same package on the Intel Mac.
   macos-pkg:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
@@ -116,20 +115,6 @@ jobs:
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
       - run: installers/macos/test-uninstall.sh
-      # The server is not part of the macOS package, so it is left out. The
-      # x86_64 test binaries need Rosetta 2 on the runner. Without it they
-      # are still built, and the job warns that they did not run.
-      - name: x86_64 client tests (Rosetta)
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "13.0"
-        run: |
-          tests=(cargo test --workspace --exclude faro-server --target x86_64-apple-darwin --locked)
-          if arch -x86_64 /usr/bin/true 2>/dev/null; then
-            "${tests[@]}" --no-fail-fast
-          else
-            "${tests[@]}" --no-run
-            echo "::warning::Rosetta 2 is not installed on this runner: the x86_64 tests were built but not run."
-          fi
       # For installing on a test machine. Unsigned, universal, and its
       # service accepts any program running as a logged-in user as the
       # agent: never use it on anyone.
@@ -139,3 +124,32 @@ jobs:
           path: target/pkg/Faro-*-dev.pkg
           if-no-files-found: error
           retention-days: 14
+
+  # The universal package on the Intel Mac: check it, then expand it (never
+  # install it) and start the x86_64 slice of each program with `--version`,
+  # which shows the Intel slices load and run.
+  macos-pkg-intel:
+    needs: macos-pkg
+    runs-on: [self-hosted, macOS, X64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: faro-dev-pkg-universal-${{ github.sha }}
+          path: pkg-intel
+      - run: installers/macos/check-pkg.sh pkg-intel/Faro-*-dev.pkg
+      - name: Start the x86_64 programs
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          pkgutil --expand-full pkg-intel/Faro-*-dev.pkg pkg-intel/expanded
+          faro=pkg-intel/expanded/faro-component.pkg/Payload/Library/Faro
+          for bin in "$faro/bin/faro-service" "$faro/Faro Agent.app/Contents/MacOS/faro-agent"; do
+            out="$(arch -x86_64 "$bin" --version)"
+            echo "$out"
+            if [[ "$out" != "$(basename "$bin") $version" ]]; then
+              echo "::error::$(basename "$bin") --version printed \"$out\" (want $version)"
+              exit 1
+            fi
+          done
+      - if: always()
+        run: rm -rf pkg-intel

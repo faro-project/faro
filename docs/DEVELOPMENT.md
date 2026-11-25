@@ -118,7 +118,7 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 
 - **The package is universal.** It runs on Apple Silicon and Intel Macs. `build-pkg.sh` builds `faro-service` and `faro-agent` once for `aarch64-apple-darwin` and once for `x86_64-apple-darwin`, then joins each pair with `lipo -create`. Apple's clang compiles the C code (the bundled SQLite, `ring`, `blake3`) for both, so no other toolchain is needed. `--arch arm64` or `--arch x86_64` builds one architecture only, which is faster; check such a package with `check-pkg.sh --arch arm64 …`.
 - **Every slice targets macOS 13.** `build-pkg.sh` sets `MACOSX_DEPLOYMENT_TARGET` from the `os-version min` in `Distribution.xml.in`. `check-pkg.sh` fails if any Mach-O file in the payload lacks an architecture, if `hostArchitectures` is not `arm64,x86_64`, or if a slice's minimum macOS is not 13.0.
-- **x86_64 tests.** The `macos-pkg` job runs the client crates' tests for `x86_64-apple-darwin` under Rosetta 2. If the runner has no Rosetta, it builds them and warns instead. Locally: `cargo test --workspace --exclude faro-server --target x86_64-apple-darwin`.
+- **On Intel.** The `macos-pkg-intel` job runs on the Intel Mac runner after `macos-pkg`. It checks the same universal package, expands it without installing it, and runs the x86_64 `faro-service` and `faro-agent` with `--version`. On an Apple Silicon Mac with Rosetta 2, `cargo test --target x86_64-apple-darwin` runs the x86_64 tests locally.
 
 - **A `--dev` package is not safe to use on anyone.** Its `faro-service` is built with the `dev` feature, so it accepts any program running as a logged-in user as the agent. Install it only on a test machine.
 - **A release package** needs `FARO_SIGN_IDENTITY` (Developer ID Application), `FARO_INSTALLER_IDENTITY` (Developer ID Installer) and `FARO_TEAM_ID`. The package's default `service.toml` sets `ipc.agent_requirement` from the team ID. `FARO_NOTARY_PROFILE` (a `notarytool` keychain profile) also notarizes and staples it.
@@ -140,6 +140,8 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
 
+The Intel Mac (`self-hosted, macOS, X64`) also runs `macos-pkg-intel`, which checks the universal package that `macos-pkg` built and starts its x86_64 programs.
+
 There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`.
 
 Each runner runs one job at a time, and a new push to a pull request cancels its older CI run. The workflows install Rust (`dtolnay/rust-toolchain`) and Node (`actions/setup-node`) themselves. Each machine needs:
@@ -147,6 +149,6 @@ Each runner runs one job at a time, and a new push to a pull request cancels its
 - **All:** `git`, `curl`, and a C compiler and linker for the crates with C code.
 - **Linux:** `build-essential` and `pkg-config`. Docker with Buildx for the container build. If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
 - **Windows:** Git for Windows in its default location (the `test` job puts `C:\Program Files\Git\bin` first on `PATH`, ahead of WSL's `bash`, for the toolchain action's bash steps), and the Visual Studio Build Tools C++ workload for the MSVC linker.
-- **macOS:** Xcode Command Line Tools, and Rosetta 2 (`softwareupdate --install-rosetta`) so `macos-pkg` can run the x86_64 tests. On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
+- **macOS:** Xcode Command Line Tools. On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
 
 Jobs aren't sandboxed: anyone who can push a branch can run code on these machines as the runner's user, and files stay between jobs. Keep the runners in an account with nothing else on it where you can, and never let them take jobs from a public repository.
