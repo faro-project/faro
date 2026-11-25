@@ -223,7 +223,8 @@ mod tests {
         assert!(MemberSettings::change_event(&a, &a).is_none());
         let b = MemberSettings::new(
             300,
-            UrgencyPolicy::new(Urgency::Normal, Urgency::Urgent, Urgency::Urgent).unwrap(),
+            // Raises `low` and lowers `medium` from its default to its floor.
+            UrgencyPolicy::new(Urgency::Normal, Urgency::Normal, Urgency::Urgent).unwrap(),
             true,
             true,
             Some(7),

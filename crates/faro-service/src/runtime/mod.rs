@@ -291,7 +291,7 @@ impl ServiceBuilder {
             .classifier
             .unwrap_or_else(|| Box::new(NullClassifier::new()));
         let detector = Detector::new(&DetectorConfig::default(), classifier, self.domains)?;
-        let settings = self.config.member_settings.clone();
+        let settings = state::settings_in_effect(&dir, self.config.member_settings.as_ref());
         let rng = match self.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::rngs::StdRng::from_entropy(),
