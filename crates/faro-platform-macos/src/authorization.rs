@@ -7,6 +7,7 @@
 //!   Authorization::new_empty()
 //!   external_form() ── 32 bytes ──────▶ from_external_form()
 //!                                       ensure_enroll_rule()  ──────▶ read (and fix) the rule
+//!                                       copy_rights(no dialog) ─────▶ must be refused
 //!                                       copy_rights(org.faro.enroll,
 //!                                         prompt naming the instance) ▶ admin name + password
 //!                                       ◀───────────────────────────── yes / no
@@ -29,7 +30,14 @@
 //! service reads the right before every prompt and accepts it only if
 //! [`definition_ok`] says it is exactly Faro's rule. A root service
 //! rewrites a missing or different right and reads it back; a non-root
-//! service never writes it and refuses. Anything unexpected fails closed.
+//! service never writes it and refuses. Anything unexpected fails closed,
+//! including a more specific `config.*` right for it ([`GUARD_RIGHTS`])
+//! that could let someone else change it.
+//!
+//! **Why the agent's authorization is checked first.** It must not carry
+//! the right already (asked without a dialog, authd must refuse), so an
+//! approval given in some other program's dialog, with that program's
+//! words, is never accepted.
 //!
 //! The FFI is raw `extern "C"` against Security.framework, like the
 //! service's code-signature check.
@@ -147,6 +155,10 @@ pub enum AuthError {
     /// `org.faro.enroll` is not exactly Faro's rule.
     #[error("the `{ENROLL_RIGHT}` rule was changed: {0}")]
     RuleAltered(String),
+    /// The authorization handed over already carried the right: approved
+    /// somewhere else, not in Faro's own prompt.
+    #[error("the authorization was approved before Faro asked")]
+    AlreadyAuthorized,
     /// Any other Authorization Services failure.
     #[error("{call} failed (OSStatus {status})")]
     Os { call: &'static str, status: OSStatus },
@@ -460,6 +472,21 @@ fn write_enroll_rule() -> Result<(), AuthError> {
     check("AuthorizationRightSet", status)
 }
 
+/// Rights that decide who may add, change or remove [`ENROLL_RIGHT`] more
+/// specifically than Apple's `config.add.`, `config.modify.` and
+/// `config.remove.`. None of them should ever exist; one that does could
+/// let someone other than root or an administrator rewrite Faro's rule
+/// between the check and the prompt, so the check fails closed.
+pub const GUARD_RIGHTS: &[&str] = &[
+    "config.add.org.faro.enroll",
+    "config.modify.org.faro.enroll",
+    "config.remove.org.faro.enroll",
+    "config.modify.org.faro.",
+    "config.modify.org.",
+    "config.remove.org.faro.",
+    "config.remove.org.",
+];
+
 /// What [`ensure_enroll_rule`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleCheck {
@@ -473,6 +500,13 @@ pub enum RuleCheck {
 /// (a root service) a missing or different rule is rewritten and read back;
 /// without it, it is refused.
 pub fn ensure_enroll_rule(may_write: bool) -> Result<RuleCheck, AuthError> {
+    for guard in GUARD_RIGHTS {
+        if read_rule(guard)?.is_some() {
+            return Err(AuthError::RuleAltered(format!(
+                "`{guard}` exists, so the rule may be changed without an administrator"
+            )));
+        }
+    }
     let problem = match read_rule(ENROLL_RIGHT)? {
         Some(def) => match definition_ok(&def) {
             Ok(()) => return Ok(RuleCheck::Correct),
@@ -499,6 +533,13 @@ pub fn ensure_enroll_rule(may_write: bool) -> Result<RuleCheck, AuthError> {
 /// showing `prompt`. Blocks until an administrator answers, and destroys
 /// the rights before it returns. `Ok` carries what was found about the
 /// rule, for the log.
+///
+/// The agent's authorization must not carry the right already: asked
+/// without a dialog first, it must be refused. Otherwise another program
+/// could have shown the dialog with words of its own, got an
+/// administrator's approval into an authorization, and handed that over.
+/// Faro's rule should make this impossible anyway (`timeout: 0`,
+/// `shared: false`); the check costs nothing.
 pub fn approve_enrollment(
     external_form: &[u8; EXTERNAL_FORM_LEN],
     prompt: &str,
@@ -506,6 +547,11 @@ pub fn approve_enrollment(
 ) -> Result<RuleCheck, AuthError> {
     let rule = ensure_enroll_rule(may_write_rule)?;
     let auth = Authorization::from_external_form(external_form)?;
+    match auth.copy_rights(ENROLL_RIGHT, None, false) {
+        Err(AuthError::InteractionNotAllowed | AuthError::Denied) => {}
+        Ok(()) => return Err(AuthError::AlreadyAuthorized),
+        Err(e) => return Err(e),
+    }
     auth.copy_rights(ENROLL_RIGHT, Some(prompt), true)?;
     Ok(rule)
 }
@@ -609,6 +655,15 @@ mod tests {
             ),
             "{r:?}"
         );
+    }
+
+    /// Read-only: on a normal Mac no right overrides who may change
+    /// Faro's rule.
+    #[test]
+    fn no_guard_right_exists() {
+        for g in GUARD_RIGHTS {
+            assert_eq!(read_rule(g), Ok(None), "{g}");
+        }
     }
 
     #[test]

@@ -111,6 +111,10 @@ impl Approver for SystemApprover {
                 tracing::error!(error = %e, "refusing to ask for approval");
                 Err(ApprovalError::Unavailable(e.to_string()))
             }
+            Err(e @ AuthError::AlreadyAuthorized) => {
+                tracing::error!(error = %e, "refusing an authorization approved elsewhere");
+                Err(ApprovalError::Failed(e.to_string()))
+            }
             Err(e @ AuthError::Os { .. }) => Err(ApprovalError::Failed(e.to_string())),
         }
     }
