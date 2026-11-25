@@ -24,7 +24,7 @@ libfuzzer-sys = "0.4"
 # and to sign with. This crate is never shipped.
 faro-update = { path = "..", features = ["testing"] }
 faro-proto = { path = "../../faro-proto" }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [[example]]
 name = "seed_corpus"

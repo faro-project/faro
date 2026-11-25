@@ -465,4 +465,20 @@ mod tests {
         assert_eq!(ServerAlertKind::ChainGap.urgency(), Urgency::Urgent);
         assert_eq!(ServerAlertKind::MissedCheckin.urgency(), Urgency::Urgent);
     }
+
+    #[test]
+    fn opaque_json_survives_being_stored_as_text() {
+        // Found by the `api` fuzz target. The server stores
+        // `wrapped_privkey.to_string()` and later matches the row by the
+        // text of the value it parsed back; without correctly rounded
+        // float parsing this number came back one ulp off, so the text
+        // changed and the match could never succeed.
+        let json = r#"{"enc_pubkey":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "wrapped_privkey":{"x":9555555555555555555555555555555555555555555555555555556.0472870}}"#;
+        let up: AllyKeyUpload = serde_json::from_str(json).unwrap();
+        let stored = up.wrapped_privkey.to_string();
+        let back: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, up.wrapped_privkey);
+        assert_eq!(back.to_string(), stored);
+    }
 }
