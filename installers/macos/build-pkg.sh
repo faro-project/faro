@@ -12,6 +12,7 @@
 #
 # What it installs (faro_platform_macos::pkg_layout):
 #   /Library/Faro/bin/faro-service              the privileged service
+#   /Library/Faro/bin/faro-uninstall            removes Faro, telling allies first
 #   /Library/Faro/Faro Agent.app                the session agent (org.faro.agent)
 #   /Library/Faro/service.toml.default          copied to the state dir if absent
 #   /Library/LaunchDaemons/org.faro.service.plist
@@ -79,6 +80,7 @@ echo "==> staging the payload"
 cp -R "$here/payload/." "$root/"
 install -d -m 755 "$root/Library/Faro/bin"
 install -m 755 "$bin/faro-service" "$root/Library/Faro/bin/faro-service"
+install -m 755 "$here/faro-uninstall" "$root/Library/Faro/bin/faro-uninstall"
 
 app="$root/Library/Faro/Faro Agent.app"
 install -d -m 755 "$app/Contents/MacOS"

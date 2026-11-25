@@ -1,0 +1,117 @@
+#!/bin/bash
+# Remove Faro from this Mac. Installed as /Library/Faro/bin/faro-uninstall.
+#
+#   sudo /Library/Faro/bin/faro-uninstall [--yes] [--force]
+#
+# Uninstalling is always allowed, but never silent (ARCHITECTURE.md §3.7,
+# §12): before anything is removed, the member's allies are sent an urgent
+# "Faro was uninstalled from <this computer>".
+#
+#   1. Stop the service. It records an orderly shutdown and uploads what it
+#      has queued.
+#   2. `faro-service goodbye`: write the signed goodbye event and deliver it.
+#      If the instance can't be reached, nothing is written: the service is
+#      started again and nothing is removed, so you can retry when online.
+#      --force removes Faro anyway; allies then see a missed check-in
+#      instead of the goodbye.
+#   3. Stop the agent in every account's session, then remove the programs,
+#      the launchd jobs, the state directory (device key and outbox) and the
+#      package receipt.
+#
+#   --yes    don't ask for confirmation
+#   --force  remove Faro even if allies can't be told first
+set -u
+
+DAEMON_LABEL=org.faro.service
+AGENT_LABEL=org.faro.agent
+DAEMON_PLIST=/Library/LaunchDaemons/org.faro.service.plist
+AGENT_PLIST=/Library/LaunchAgents/org.faro.agent.plist
+FARO_DIR=/Library/Faro
+STATE_DIR="/Library/Application Support/Faro"
+SERVICE="$FARO_DIR/bin/faro-service"
+PKG_ID=org.faro.pkg
+# `faro-service goodbye` exit status: written but not delivered.
+EXIT_GOODBYE_QUEUED=3
+
+yes=0
+force=0
+for arg in "$@"; do
+    case "$arg" in
+        --yes) yes=1 ;;
+        --force) force=1 ;;
+        -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown argument: $arg (see --help)" >&2; exit 2 ;;
+    esac
+done
+
+say() { echo "faro-uninstall: $*"; }
+die() { echo "faro-uninstall: $*" >&2; exit 1; }
+
+[[ "$(id -u)" == 0 ]] || die "run it as root: sudo $0"
+
+# The uids of every account with a GUI login session (also in the package's
+# scripts/lib.sh, which is not installed).
+gui_uids() {
+    ps -axo uid=,comm= | awk '$2 ~ /\/loginwindow$/ && $1 >= 501 { print $1 }' | sort -un
+}
+
+start_service() {
+    launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null || launchctl kickstart "system/$DAEMON_LABEL" 2>/dev/null || true
+}
+
+if [[ -x "$SERVICE" ]]; then
+    "$SERVICE" status 2>/dev/null || true
+    echo
+fi
+cat <<'EOF'
+This removes Faro from this computer, for every account. The member's allies
+are told that Faro was uninstalled, before anything is removed.
+EOF
+if (( ! yes )); then
+    answer=""
+    read -r -p "Remove Faro? [y/N] " answer || true
+    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { say "nothing was changed"; exit 1; }
+fi
+
+# ---- 1. stop the service --------------------------------------------------
+if launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1; then
+    say "stopping the service"
+    launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null || true
+fi
+
+# ---- 2. goodbye -------------------------------------------------------------
+if [[ -x "$SERVICE" ]]; then
+    say "telling the allies"
+    "$SERVICE" goodbye --reason uninstalled
+    rc=$?
+    if (( rc == EXIT_GOODBYE_QUEUED )); then
+        # Written: never start the service again after a goodbye. Allies see
+        # a missed check-in instead.
+        say "the goodbye could not be delivered; allies will see a missed check-in instead"
+    elif (( rc != 0 )); then
+        if (( force )); then
+            say "allies could not be told (--force: removing anyway); they will see a missed check-in instead"
+        else
+            say "allies could not be told, so Faro was not removed; starting the service again"
+            [[ -f "$DAEMON_PLIST" ]] && start_service
+            die "fix the problem above and run this again, or use --force to remove Faro anyway"
+        fi
+    fi
+else
+    say "$SERVICE is missing; removing what is left"
+fi
+
+# ---- 3. remove --------------------------------------------------------------
+for uid in $(gui_uids); do
+    if launchctl print "gui/$uid/$AGENT_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
+    fi
+done
+# The plists go first, so nothing starts a Faro program again.
+rm -f "$DAEMON_PLIST" "$AGENT_PLIST"
+rm -rf "$STATE_DIR"
+# Bash has read this script from an open file, so it can remove itself.
+rm -rf "$FARO_DIR"
+pkgutil --forget "$PKG_ID" >/dev/null 2>&1 || true
+
+say "Faro was removed from this computer"

@@ -22,6 +22,7 @@
 //! the endorsement's manifest anchor (PROTOCOL.md §5.1).
 
 mod core;
+mod goodbye;
 pub mod journal;
 mod net;
 pub mod spawn;
@@ -29,6 +30,7 @@ mod status;
 pub mod supervisor;
 
 pub use self::core::{PauseRequest, AGENT_ABSENT_MS};
+pub use goodbye::{say_goodbye, GoodbyeError, GoodbyeOptions, GoodbyeOutcome};
 pub use spawn::AgentSpawn;
 pub use status::{Phase, ServiceStatus};
 
@@ -188,6 +190,8 @@ impl ServiceBuilder {
     pub fn build(self) -> Result<Service, ServiceError> {
         self.config.validate()?;
         let dir = StateDir::open(&self.config.state_dir)?;
+        // Before reading the chain head: nothing else may append to it.
+        let lock = dir.try_lock()?;
         let enrollment = Arc::new(dir.enrollment()?);
         let key = state::load_device_key(&dir)?;
         let clock: Arc<dyn Clock> = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
@@ -255,6 +259,7 @@ impl ServiceBuilder {
             control_tx,
             control_rx,
             pokes: Pokes::default(),
+            lock,
         })
     }
 }
@@ -310,6 +315,8 @@ pub struct Service {
     control_tx: mpsc::Sender<Control>,
     control_rx: mpsc::Receiver<Control>,
     pokes: Pokes,
+    /// Held until `run` returns ([`StateDir::try_lock`]).
+    lock: state::StateLock,
 }
 
 impl Service {
@@ -345,6 +352,7 @@ impl Service {
             control_tx,
             mut control_rx,
             pokes,
+            lock: _lock,
         } = self;
         tokio::pin!(shutdown);
         let (stop_tx, stop_rx) = watch::channel(false);

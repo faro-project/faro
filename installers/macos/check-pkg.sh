@@ -48,11 +48,14 @@ fi
 other="$(xattr -r "$work/payload" 2>/dev/null | awk -F': ' '{print $NF}' | sort -u | grep -vx 'com.apple.provenance' || true)"
 [[ -z "$other" ]] || fail "payload carries extended attributes: $other"
 expect "Library/Faro/bin/faro-service" 100755
+expect "Library/Faro/bin/faro-uninstall" 100755
 expect "Library/Faro/Faro Agent.app/Contents/MacOS/faro-agent" 100755
 expect "Library/Faro/Faro Agent.app/Contents/Info.plist" 100644
 expect "Library/Faro/service.toml.default" 100644
 expect "Library/LaunchDaemons/org.faro.service.plist" 100644
 expect "Library/LaunchAgents/org.faro.agent.plist" 100644
+
+bash -n "$work/payload/Library/Faro/bin/faro-uninstall" || fail "faro-uninstall does not parse"
 
 info="$work/payload/Library/Faro/Faro Agent.app/Contents/Info.plist"
 [[ "$(plutil -extract CFBundleIdentifier raw "$info")" == org.faro.agent ]] || fail "agent bundle id"

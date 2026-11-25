@@ -4,22 +4,34 @@
 //! faro-service [--config FILE] [--state-dir DIR] [-v] enroll (--link faro://enroll?... | --instance URL --code XXXX-XXXX [--member-key ID]) [--name NAME] [--yes] [--no-wait]
 //! faro-service [--config FILE] [--state-dir DIR] [-v] run [--socket PATH] [--spawn-agent BIN] [--capture ipc|in-process]
 //! faro-service [--config FILE] [--state-dir DIR] status
+//! faro-service [--config FILE] [--state-dir DIR] goodbye [--reason uninstalled|account-deleted | --moved-to HOST] [--within SECS]
 //! ```
+//!
+//! `goodbye` exits 0 once allies have been told (or there was nobody to
+//! tell), 1 if nothing was written (the service may be restarted safely),
+//! and [`EXIT_GOODBYE_QUEUED`] if the goodbye was written but not delivered.
 
 use crate::client::ClientOptions;
 use crate::config::Config;
 use crate::enroll::{self, EnrollParams, InstanceInfo};
 use crate::link::{self, EnrollCode};
-use crate::runtime::{AgentSpawn, Service, ServiceError};
+use crate::runtime::{
+    say_goodbye, AgentSpawn, GoodbyeError, GoodbyeOptions, GoodbyeOutcome, Service, ServiceError,
+};
 use crate::state::{self, StateDir, StateError};
 use clap::{Parser, Subcommand, ValueEnum};
 use faro_core::clock::{Clock, SystemClock};
+use faro_proto::body::GoodbyeReason;
 use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// `goodbye`'s exit status when the goodbye was written but the instance
+/// did not acknowledge it: the uninstaller goes ahead and says so.
+pub const EXIT_GOODBYE_QUEUED: u8 = 3;
 
 /// How often an unenrolled `run` checks whether `enroll` has finished.
 const ENROLLMENT_POLL: Duration = Duration::from_secs(5);
@@ -91,6 +103,33 @@ pub enum Command {
     },
     /// Show enrollment and outbox state (no network access).
     Status,
+    /// Tell allies that monitoring ends on purpose (the uninstaller runs
+    /// this after stopping the service). Writes an urgent `goodbye` event
+    /// and uploads it.
+    Goodbye {
+        #[arg(
+            long,
+            value_enum,
+            default_value = "uninstalled",
+            conflicts_with = "moved_to"
+        )]
+        reason: GoodbyeKind,
+        /// The device is moving to another instance (its host name is
+        /// shown to allies of this one).
+        #[arg(long, value_name = "HOST")]
+        moved_to: Option<String>,
+        /// Seconds to keep trying to deliver the goodbye once written.
+        #[arg(long, default_value_t = 60, value_name = "SECS")]
+        within: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GoodbyeKind {
+    /// Faro is being removed from this computer.
+    Uninstalled,
+    /// The member is deleting their account.
+    AccountDeleted,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +150,11 @@ enum CliError {
     Outbox(#[from] faro_core::OutboxError),
     #[error("{0}")]
     Usage(String),
+    #[error(transparent)]
+    Goodbye(#[from] GoodbyeError),
+    /// Not a failure to report as one: see [`EXIT_GOODBYE_QUEUED`].
+    #[error("the goodbye (event {seq}) is written but was not delivered: {error}")]
+    GoodbyeQueued { seq: u64, error: String },
     #[error("cannot start the async runtime: {0}")]
     Runtime(std::io::Error),
 }
@@ -132,6 +176,10 @@ pub fn main() -> ExitCode {
     };
     match rt.block_on(dispatch(cli)) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e @ CliError::GoodbyeQueued { .. }) => {
+            eprintln!("faro-service: {e}");
+            ExitCode::from(EXIT_GOODBYE_QUEUED)
+        }
         Err(e) => {
             eprintln!("faro-service: {e}");
             ExitCode::FAILURE
@@ -218,6 +266,51 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
             cmd_run(config, spawn_agent, capture).await
         }
         Command::Status => cmd_status(&config),
+        Command::Goodbye {
+            reason,
+            moved_to,
+            within,
+        } => {
+            let reason = match (moved_to, reason) {
+                (Some(host), _) => {
+                    let host = host.trim().to_owned();
+                    if host.is_empty() || host.len() > 253 || host.contains(['/', ' ']) {
+                        return Err(CliError::Usage(
+                            "--moved-to takes the new instance's host name".into(),
+                        ));
+                    }
+                    GoodbyeReason::MovedInstance {
+                        new_instance_host: host,
+                    }
+                }
+                (None, GoodbyeKind::Uninstalled) => GoodbyeReason::Uninstalled,
+                (None, GoodbyeKind::AccountDeleted) => GoodbyeReason::AccountDeleted,
+            };
+            let mut opts = GoodbyeOptions::new(reason);
+            opts.deliver_within = Duration::from_secs(within);
+            cmd_goodbye(&config, opts).await
+        }
+    }
+}
+
+async fn cmd_goodbye(config: &Config, opts: GoodbyeOptions) -> Result<(), CliError> {
+    match say_goodbye(config, opts).await? {
+        GoodbyeOutcome::Delivered { seq } => {
+            println!("Goodbye delivered (event {seq}): your allies are being told.");
+            Ok(())
+        }
+        GoodbyeOutcome::NotEnrolled => {
+            println!("This device is not enrolled; there is nobody to tell.");
+            Ok(())
+        }
+        GoodbyeOutcome::NotActivated => {
+            println!(
+                "This device was never approved by its member; no ally was told about it, \
+                 so there is nobody to tell."
+            );
+            Ok(())
+        }
+        GoodbyeOutcome::Queued { seq, error } => Err(CliError::GoodbyeQueued { seq, error }),
     }
 }
 
@@ -506,6 +599,37 @@ mod tests {
     #[test]
     fn cli_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_goodbye() {
+        let c = Cli::try_parse_from(["faro-service", "goodbye"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Goodbye {
+                reason: GoodbyeKind::Uninstalled,
+                moved_to: None,
+                within: 60
+            }
+        ));
+        let c = Cli::try_parse_from(["faro-service", "goodbye", "--moved-to", "faro.example.net"])
+            .unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Goodbye {
+                moved_to: Some(_),
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "faro-service",
+            "goodbye",
+            "--reason",
+            "account-deleted",
+            "--moved-to",
+            "x.example"
+        ])
+        .is_err());
     }
 
     #[test]
