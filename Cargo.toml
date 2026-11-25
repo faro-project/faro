@@ -15,21 +15,21 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.94"
 
 [workspace.dependencies]
 # Internal crates
-faro-proto = { path = "crates/faro-proto", version = "0.1.0" }
-faro-crypto = { path = "crates/faro-crypto", version = "0.1.0" }
-faro-core = { path = "crates/faro-core", version = "0.1.0" }
-faro-detect = { path = "crates/faro-detect", version = "0.1.0" }
-faro-ipc = { path = "crates/faro-ipc", version = "0.1.0" }
-faro-platform = { path = "crates/faro-platform", version = "0.1.0" }
-faro-platform-macos = { path = "crates/faro-platform-macos", version = "0.1.0" }
-faro-update = { path = "crates/faro-update", version = "0.1.0" }
+faro-proto = { path = "crates/faro-proto", version = "0.1.0-beta.1" }
+faro-crypto = { path = "crates/faro-crypto", version = "0.1.0-beta.1" }
+faro-core = { path = "crates/faro-core", version = "0.1.0-beta.1" }
+faro-detect = { path = "crates/faro-detect", version = "0.1.0-beta.1" }
+faro-ipc = { path = "crates/faro-ipc", version = "0.1.0-beta.1" }
+faro-platform = { path = "crates/faro-platform", version = "0.1.0-beta.1" }
+faro-platform-macos = { path = "crates/faro-platform-macos", version = "0.1.0-beta.1" }
+faro-update = { path = "crates/faro-update", version = "0.1.0-beta.1" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

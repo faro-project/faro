@@ -504,7 +504,7 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-fn load_ca_file(path: &Path) -> Result<Vec<reqwest::Certificate>, ClientError> {
+pub(crate) fn load_ca_file(path: &Path) -> Result<Vec<reqwest::Certificate>, ClientError> {
     let err = |reason: String| ClientError::CaFile {
         path: path.display().to_string(),
         reason,

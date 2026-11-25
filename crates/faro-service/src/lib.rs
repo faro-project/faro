@@ -17,6 +17,7 @@
 //! | [`enroll`] | enrollment, endorsement verification, manifest bootstrap |
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
+//! | [`update`] | client self-update: verify against the project root, download, install |
 //! | [`cli`] | the command line |
 //!
 //! ## Invariants kept here (docs/DEVELOPMENT.md)
@@ -52,10 +53,11 @@ pub mod link;
 pub mod runtime;
 pub mod source;
 pub mod state;
+pub mod update;
 
 pub use config::Config;
 pub use runtime::{
     say_goodbye, AgentSpawn, GoodbyeError, GoodbyeOptions, GoodbyeOutcome, PauseRequest, Phase,
-    Service, ServiceBuilder, ServiceError, ServiceHandle, ServiceStatus,
+    Service, ServiceBuilder, ServiceError, ServiceHandle, ServiceStatus, UpdateOverrides,
 };
 pub use source::{FrameSource, InProcessFrameSource, SourceCommand, SourceEvent, SourceIo};
