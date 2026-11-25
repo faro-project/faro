@@ -6,11 +6,13 @@
 	import { page } from '$app/state';
 	import icon from '$brand/faro-icon.svg';
 	import { describeError } from '#lib/api.ts';
+	import { branding } from '#lib/branding.svelte.ts';
 	import { date } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import Logo from '#lib/ui/Logo.svelte';
+	import BrandMark from '#lib/ui/BrandMark.svelte';
+	import SupportContact from '#lib/ui/SupportContact.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -67,6 +69,15 @@
 		return item.match.test(page.url.pathname.slice(base.length) || '/');
 	}
 
+	// The instance's branding (operator content, see #lib/branding.ts): its
+	// logo next to Faro's, its name, and a support contact in the footer.
+	let showName = $derived(
+		!!instance.info && instance.info.name !== 'Faro' && (branding.info?.show_name ?? true)
+	);
+	let homeLabel = $derived(
+		branding.info?.logo ? `${branding.info.instance_name} and Faro, home` : 'Faro home'
+	);
+
 	let footerText = $derived.by(() => {
 		const i = instance.info;
 		if (!i) return 'Powered by Faro';
@@ -78,6 +89,7 @@
 		// Header only: pages that need the session handle errors themselves.
 		session.refresh().catch(() => {});
 		instance.load().catch(() => {});
+		branding.load().catch(() => {});
 	});
 
 	async function signOut() {
@@ -99,9 +111,9 @@
 
 <header class="site-header">
 	<div class="bar">
-		<a class="brand" href={resolve('/')} aria-label="Faro home">
-			<Logo height={26} alt="Faro" />
-			{#if instance.info && instance.info.name !== 'Faro'}
+		<a class="brand" href={resolve('/')} aria-label={homeLabel}>
+			<BrandMark logo={branding.info?.logo} name={branding.info?.instance_name} />
+			{#if showName && instance.info}
 				<span class="instance" title="This instance">{instance.info.name}</span>
 			{/if}
 		</a>
@@ -188,6 +200,7 @@
 <footer class="site-footer">
 	<div class="inner">
 		<span>{footerText}</span>
+		<SupportContact contact={branding.info?.support} />
 		<a href={resolve('/privacy')}>What this instance can see</a>
 	</div>
 </footer>

@@ -20,7 +20,7 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check .",
 		"format": "prettier --write .",
-		"test": "node --test 'src/lib/crypto/*.test.ts' 'src/lib/keys/*.test.ts'",
+		"test": "node --test 'src/lib/crypto/*.test.ts' 'src/lib/keys/*.test.ts' 'src/lib/*.test.ts'",
 		"vectors": "node scripts/web-vectors.ts"
 	},
 	"devDependencies": {

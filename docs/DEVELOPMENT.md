@@ -80,13 +80,25 @@ npm run vectors     # rewrite the vectors' from_web part after changing web/src/
 | `/supporting`, `/supporting/member?id=` | allies | The members they support, each member's feed, notification settings, safety code, leaving |
 | `/settings` | everyone | Name, key fingerprints, changing the passphrase or getting a new recovery code (member and ally keys), a member's retention and own notifications, deleting the account (every page then shows the hold, with Cancel deletion) |
 | `/privacy` | everyone | The operator privacy notice |
-| `/admin/…` | admins | Overview, people, settings, email |
+| `/admin/…` | admins | Overview, people, settings, branding, email |
 
 **Keys in the browser.** Private keys are created, wrapped and unwrapped in the page (`web/src/lib/keys`), held in memory only (`keyring.svelte.ts`: forgotten on reload, sign-out, "Lock" or after 30 idle minutes) and never sent anywhere unwrapped. Everything the browser builds on is checked first: a recipient manifest the server returns must verify against the member's own key, enrollment links take the member key fingerprint from the unlocked key, and safety codes are computed from the viewer's own key, never the server's copy. A new passphrase or recovery code replaces only the wrapped copies (`web/src/lib/keys/wrapping.ts`): each new copy is opened again and checked against the stored public key before it is uploaded. The storage formats are in PROTOCOL.md §4.3.
 
 **Crypto.** `web/src/lib/crypto` ports what browsers need from `faro-proto` and `faro-crypto` (canonical encoding, key ids, safety codes, Ed25519, opening sealed boxes and items, Argon2id wrapping, manifests and endorsements) on the audited, pure-JavaScript `@noble` libraries. WebAssembly libsodium isn't an option: the page CSP has no `'wasm-unsafe-eval'`. Argon2id at the default 64 MiB / 3 passes takes well under a second. Both implementations check `crates/faro-crypto/tests/data/web-vectors.json`, in both directions; change one side, run both tests.
 
 **The logo** is imported from `assets/brand` (the `$brand` alias in `vite.config.ts`), never copied into `web/` or redrawn; the container build copies that directory into its web stage.
+
+**Instance branding** (`/admin/branding`) is operator content, and the two logos follow different rules:
+
+| | Faro's logo | The instance's logo |
+|---|---|---|
+| Comes from | `assets/brand`, through `$brand` | an admin's upload: PNG, JPEG or WebP, at most 1 MB and 4096 px a side; SVG refused |
+| Changed by | nobody: never redrawn or recoloured | the server: decoded and re-encoded to a PNG of at most 512 px (`faro_server::branding::reencode_logo`) |
+| Stored | in the binary (`web/build`) | in the database, table `branding` (migration 0007, base64 in `logo_png`), so backups include it |
+| Served at | `/_app/immutable/…` | `GET /v1/branding/logo/{id}.png`, `id` a hash of the PNG: `image/png`, `nosniff`, a sandboxing CSP, cached a year |
+| Shown | always | only next to Faro's (`lib/ui/BrandMark.svelte`), alt text the instance name |
+
+The toggles and text are in the same row (`settings_json`). Pages read `GET /v1/branding` (public, only what is switched on); admins use `GET`/`PATCH /admin/api/branding` and `PUT`/`DELETE /admin/api/branding/logo` (raw image body, `Content-Type` `image/png`, `image/jpeg` or `image/webp`). Operator text is one plain line, length-limited, with no control or invisible characters, and a support contact is an email address or an `https://` URL. The server checks this (`faro_server::branding`) and the web app checks again (`web/src/lib/branding.ts`). Only the files in `BRANDING_FILES` there may show it, all page chrome. `npm test` fails if any other file does, if any file uses `{@html}`, or if operator text is styled like a Faro notice.
 
 For `npm run dev`, start a server in another terminal with `cargo run -p faro-server -- serve --dev` (it prints a setup token; set `FARO_DEV_API` to proxy somewhere other than `127.0.0.1:8080`). To test the embedded build instead, run `npm run build` and rebuild the server: `/setup` is then served on :8080 itself.
 

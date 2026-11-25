@@ -262,6 +262,46 @@ export interface WellKnown {
 	protocol: number;
 }
 
+// ---- Instance branding (`/v1/branding`, `/admin/api/branding`) ----------
+// Operator content: plain text, shown only in page chrome (see
+// web/src/lib/branding.ts).
+
+/** The logo is at `/v1/branding/logo/{id}.png`. */
+export interface BrandingLogo {
+	id: string;
+	width: number;
+	height: number;
+}
+
+export type SupportContact = { kind: 'email'; value: string } | { kind: 'url'; value: string };
+
+/** `GET /v1/branding`: only what is switched on. */
+export interface PublicBranding {
+	instance_name: string;
+	show_name: boolean;
+	logo: BrandingLogo | null;
+	welcome: string | null;
+	support: SupportContact | null;
+}
+
+export interface BrandingSettings {
+	show_logo: boolean;
+	show_name: boolean;
+	welcome_enabled: boolean;
+	welcome: string;
+	support_enabled: boolean;
+	support: string;
+}
+
+export type BrandingPatch = Partial<BrandingSettings>;
+
+/** `GET /admin/api/branding` */
+export interface AdminBranding {
+	instance_name: string;
+	settings: BrandingSettings;
+	logo: BrandingLogo | null;
+}
+
 // ---- Member keys (`/v1/me/keys`) ----------------------------------------
 
 /**

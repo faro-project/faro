@@ -374,6 +374,8 @@ GET  /v1/updates/...              mirrored, project-signed update metadata + art
 POST /v1/invites, /accept         ally invitations
 DELETE /v1/me                     ask for your account to be deleted (§12): recent sign-in + your address
 POST /v1/me/deletion/cancel       cancel it during the 7-day hold
+GET  /v1/branding                 instance logo id, welcome line, support contact (public; only what is switched on)
+GET  /v1/branding/logo/{id}.png   the logo, re-encoded by the server; the id changes with the logo
 /admin/*                          admin console (instance admins only, metadata only)
 ```
 
@@ -408,6 +410,7 @@ Self-hosting means many operators with varying security skills. The design assum
 | Forge or suppress urgent events | Headers are device-signed, and suppression shows up as a gap in the member's own view and the hash chain |
 | Push a malicious client update | Clients verify **project** signatures, not instance signatures |
 | **Serve malicious web-app JavaScript to steal ally keys** | The hardest risk, common to all web E2EE. Mitigations: (a) the embedded web app is a **project-signed, versioned bundle**, and the server refuses to start with an unsigned bundle unless run in `--dev`; (b) a **Faro Ally desktop app** (Tauri, project-signed, Phase 2) gives security-sensitive allies a client that doesn't load code from the instance; (c) Subresource Integrity plus a strict CSP; (d) document honestly that an ally using the web app trusts the instance operator not to modify the code |
+| Make a page look like a Faro security message (instance branding) | Branding is plain text, one short line, labelled as the instance admins', and shown only in page chrome (header, footer, sign-in and setup pages), never in alerts, feeds, reports, safety codes, fingerprints, tamper warnings, enrollment or emails. The logo is decoded and re-encoded to PNG by the server (SVG refused) and always sits next to Faro's, never in place of it |
 | See metadata | Accepted: who is linked to whom, device counts, timing, event kinds and **urgency levels** (§5.4). Documented in the operator privacy notice |
 
 ### 5.4 Urgency flags

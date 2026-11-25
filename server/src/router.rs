@@ -28,8 +28,8 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, devices, events, feed, heartbeat, invites, keys, manifests,
-    prefs, privacy, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, heartbeat, invites, keys,
+    manifests, prefs, privacy, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -146,6 +146,9 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             get(prefs::get_retention).put(prefs::put_retention),
         )
         .route("/v1/privacy-notice", get(privacy::get))
+        // Instance branding: public, shown before sign-in.
+        .route("/v1/branding", get(branding::get_public))
+        .route("/v1/branding/logo/{file}", get(branding::get_logo))
         // The update mirror: public, project-signed releases (§3.8).
         .route(UPDATES_PATH, get(updates::info))
         .route(
@@ -172,6 +175,14 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),
+        )
+        .route(
+            "/admin/api/branding",
+            get(branding::admin_get).patch(branding::admin_patch),
+        )
+        .route(
+            "/admin/api/branding/logo",
+            put(branding::admin_put_logo).delete(branding::admin_delete_logo),
         )
         .route("/admin/api/smtp-test", post(admin::smtp_test))
         .route("/admin/api/invites", post(admin::invite_member))

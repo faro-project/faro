@@ -290,9 +290,27 @@ sudo docker compose exec faro faro-server init
 - **Overview:** how many people and computers there are, when computers last checked in, storage use and email delivery, plus the notice members see of what you can and cannot see as the operator.
 - **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. People can delete their own accounts from Settings. The People page then shows "being deleted" with the date, and while the deletion waits you can't disable or re-enable that account. As the only admin you can't delete your own account.
 - **Settings:** registration, retention and the missed check-in grace period.
+- **Branding:** your logo and a few things to show or hide (see below).
 - **Email:** send yourself a test message.
 
 If you've been signed out (sessions last 30 days), sign in at `/signin`: enter your email address and open the link Faro emails you. Signing in needs working email, so set it up ([section 7](#7-email-smtp)).
+
+### Branding your instance
+
+**Admin → Branding** lets you add your own logo and choose what else to show. Changes apply on the next page load, without a restart, and nobody is notified.
+
+- **Logo.** Upload a PNG, JPEG or WebP file of up to 1 MB and 4096 pixels on each side. SVG is not accepted, because SVG files can contain scripts. Faro makes its own copy as a PNG, at most 512 pixels wide or high, without the file's metadata, and serves it from your instance. It shows in the header and on the sign-in and setup pages: your logo, a thin line, then Faro's logo. It never replaces Faro's logo. Pick a logo that reads well on white: in the dark theme it is shown on a white background. You can replace or remove it at any time.
+- **What to show.** Each of these can be switched on or off:
+  - your logo;
+  - the instance name in the header (on by default; the name itself is set in `faro.toml`);
+  - a welcome line on the sign-in page: one line of plain text, up to 200 characters;
+  - a support contact in the footer and on the sign-in page: an email address or an `https://` link.
+
+Your text is shown exactly as you type it, as plain text (no HTML or formatting), and always labelled as coming from your instance's admins. It appears only in the header, footer and sign-in page, never in alerts, reports, safety codes or emails. Faro refuses line breaks and invisible or text-direction characters.
+
+The logo and these settings are stored in the database, so backups include them.
+
+**Faro's logo and yours.** Faro's logo comes with the software and is never recoloured or changed (see `assets/brand/README.md`); you may use it to say you run Faro. Your logo is yours: Faro shows it next to its own, re-encoded, never in place of it.
 
 ### The same tasks with `curl`
 

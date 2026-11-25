@@ -49,6 +49,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "account_deletion",
                     include_str!("../../migrations/0006_account_deletion.sql"),
                 ),
+                (
+                    7,
+                    "branding",
+                    include_str!("../../migrations/0007_branding.sql"),
+                ),
             ]
         }
     }

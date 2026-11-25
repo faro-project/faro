@@ -6,6 +6,7 @@
 pub mod alerts;
 pub mod allies;
 pub mod auth_tokens;
+pub mod branding;
 pub mod deletion;
 pub mod devices;
 pub mod enroll_codes;
