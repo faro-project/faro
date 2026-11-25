@@ -6,7 +6,11 @@
 //!    directory (after resolving symlinks) must be owned by root or our
 //!    effective uid and must not be group/world-writable; every ancestor must
 //!    be owned by root or us and be either not group/world-writable or
-//!    sticky (like `/tmp`). Otherwise another user could swap the socket for
+//!    sticky (like `/tmp`). One exception: a root-owned ancestor may be
+//!    writable by a group that only the system uses (`wheel`, gid 0, and on
+//!    macOS `daemon`, gid 1, whose only member is root). macOS ships
+//!    `/var/run` as `root:daemon` mode 775, the parent of the service's
+//!    socket directory. Otherwise another user could swap the socket for
 //!    their own and impersonate the service.
 //! 2. **The socket never exists with loose permissions.** It is bound inside
 //!    a fresh private (0700) staging directory, chmod/chowned there, and then
@@ -342,18 +346,34 @@ fn check_secure_dir(dir: &Path) -> Result<()> {
                 format!("ancestor owned by uid {}, expected root or {me}", md.uid()),
             ));
         }
-        let sticky = md.mode() & S_ISVTX != 0;
-        if md.mode() & 0o022 != 0 && !sticky {
-            return Err(insecure(
-                anc,
-                format!(
-                    "ancestor mode {:o} is group- or world-writable without the sticky bit",
-                    md.mode() & 0o7777
-                ),
-            ));
+        if let Some(reason) = ancestor_write_problem(md.mode(), md.uid(), md.gid()) {
+            return Err(insecure(anc, reason));
         }
     }
     Ok(())
+}
+
+/// Groups only the system uses: `wheel` (gid 0) everywhere, and on macOS
+/// `daemon` (gid 1), whose only member is root. A root-owned ancestor that
+/// only such a group can also write is as safe as one only root can write.
+fn is_system_group(gid: u32) -> bool {
+    gid == 0 || (cfg!(target_os = "macos") && gid == 1)
+}
+
+/// Why an ancestor directory with this mode, owner and group would let
+/// someone other than root or us replace the socket directory, if it would.
+fn ancestor_write_problem(mode: u32, uid: u32, gid: u32) -> Option<String> {
+    if mode & S_ISVTX != 0 || mode & 0o022 == 0 {
+        return None;
+    }
+    let world = mode & 0o002 != 0;
+    if !world && uid == 0 && is_system_group(gid) {
+        return None;
+    }
+    Some(format!(
+        "ancestor mode {:o} is group- or world-writable without the sticky bit",
+        mode & 0o7777
+    ))
 }
 
 /// See the module docs, point 2. Leaves a dead socket in place (the atomic
@@ -562,5 +582,52 @@ mod tests {
         // Nothing bound for the account: fall back to the base path.
         let base = Path::new("/nonexistent-faro-dir/agent.sock");
         assert_eq!(resolve_agent_socket(base, 501), base);
+    }
+}
+
+#[cfg(test)]
+mod ancestor_tests {
+    use super::ancestor_write_problem;
+
+    #[test]
+    fn private_and_sticky_ancestors_are_fine() {
+        assert!(ancestor_write_problem(0o40755, 0, 0).is_none());
+        assert!(ancestor_write_problem(0o41777, 0, 0).is_none(), "/tmp");
+        assert!(ancestor_write_problem(0o40755, 501, 20).is_none());
+    }
+
+    #[test]
+    fn root_owned_system_group_writable_is_fine() {
+        assert!(
+            ancestor_write_problem(0o40775, 0, 0).is_none(),
+            "root:wheel 775"
+        );
+        if cfg!(target_os = "macos") {
+            // macOS ships /var/run as root:daemon 775.
+            assert!(
+                ancestor_write_problem(0o40775, 0, 1).is_none(),
+                "root:daemon 775"
+            );
+        } else {
+            assert!(ancestor_write_problem(0o40775, 0, 1).is_some());
+        }
+    }
+
+    #[test]
+    fn other_writable_ancestors_are_refused() {
+        // Another group (staff, admin, a user's own group).
+        assert!(
+            ancestor_write_problem(0o40775, 0, 20).is_some(),
+            "root:staff 775"
+        );
+        assert!(
+            ancestor_write_problem(0o40775, 0, 80).is_some(),
+            "root:admin 775"
+        );
+        // A system group, but not owned by root.
+        assert!(ancestor_write_problem(0o40775, 501, 0).is_some());
+        // World-writable without the sticky bit, whatever the group.
+        assert!(ancestor_write_problem(0o40777, 0, 0).is_some());
+        assert!(ancestor_write_problem(0o40757, 0, 1).is_some());
     }
 }
