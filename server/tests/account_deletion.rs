@@ -653,10 +653,42 @@ async fn the_purge_waits_for_mail_to_work() {
     let o = t.get("/admin/api/overview", Some(&w.admin_s)).await;
     assert_eq!(o.body["deletions"], json!({ "pending": 1, "overdue": 0 }));
 
-    // A week past the hold, the admin is told it is held up.
+    let doctor = faro_server::doctor::run(t.state.config(), false).await;
+    let c = doctor.get("deletions").expect("doctor checks deletions");
+    assert_eq!(c.level, faro_server::doctor::Level::Ok, "{}", c.detail);
+
+    // A week past the hold, the admin is told it is held up, in the console
+    // and by `doctor` (which reads the real clock: move the hold back).
     t.clock.advance_ms(HOLD);
     let o = t.get("/admin/api/overview", Some(&w.admin_s)).await;
     assert_eq!(o.body["deletions"], json!({ "pending": 1, "overdue": 1 }));
+    let real_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let held = sqlx::query("SELECT deletion_purge_after FROM users WHERE id = $1")
+        .bind(w.sam.as_str())
+        .fetch_one(t.state.db().pool())
+        .await
+        .unwrap()
+        .try_get::<i64, _>("deletion_purge_after")
+        .unwrap();
+    sqlx::query("UPDATE users SET deletion_purge_after = $1 WHERE id = $2")
+        .bind(real_now - HOLD - DAY)
+        .bind(w.sam.as_str())
+        .execute(t.state.db().pool())
+        .await
+        .unwrap();
+    let doctor = faro_server::doctor::run(t.state.config(), false).await;
+    let c = doctor.get("deletions").unwrap();
+    assert_eq!(c.level, faro_server::doctor::Level::Warn, "{}", c.detail);
+    assert!(c.detail.contains("1 account deletion"), "{}", c.detail);
+    sqlx::query("UPDATE users SET deletion_purge_after = $1 WHERE id = $2")
+        .bind(held)
+        .bind(w.sam.as_str())
+        .execute(t.state.db().pool())
+        .await
+        .unwrap();
 
     // Once mail works the notices go out, and then the purge runs.
     t.mailer.set_failing(false);
