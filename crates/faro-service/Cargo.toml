@@ -63,7 +63,7 @@ axum.workspace = true
 # its integration-test harness (server/tests/common/mod.rs), which needs
 # sqlx (direct SQL, e.g. the malicious-instance rollback) and tower's
 # `oneshot` for the simulated browsers.
-faro-server = { path = "../../server", version = "0.1.0" }
+faro-server = { path = "../../server", version = "0.1.0-beta.1" }
 sqlx.workspace = true
 tower = { workspace = true, features = ["util"] }
 # Decodes the blurred thumbnail an ally downloads, to check its size.
