@@ -16,7 +16,7 @@
 //! | [`client`] | the signed, size-bounded instance API client |
 //! | [`enroll`] | enrollment, endorsement verification, manifest bootstrap |
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
-//! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats |
+//! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
 //! | [`cli`] | the command line |
 //!
 //! ## Invariants kept here (docs/DEVELOPMENT.md)
@@ -55,7 +55,7 @@ pub mod state;
 
 pub use config::Config;
 pub use runtime::{
-    AgentSpawn, PauseRequest, Phase, Service, ServiceBuilder, ServiceError, ServiceHandle,
-    ServiceStatus,
+    say_goodbye, AgentSpawn, GoodbyeError, GoodbyeOptions, GoodbyeOutcome, PauseRequest, Phase,
+    Service, ServiceBuilder, ServiceError, ServiceHandle, ServiceStatus,
 };
 pub use source::{FrameSource, InProcessFrameSource, SourceCommand, SourceEvent, SourceIo};

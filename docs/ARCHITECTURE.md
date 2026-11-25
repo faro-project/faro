@@ -157,7 +157,7 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | Active window | `NSWorkspace` for the frontmost app. Window titles go through `AXUIElement` (Accessibility permission, optional; revoking it is reported). |
 | Browser URL | Extension first. Fallback: AppleScript or Accessibility for Safari and Chrome. |
 | Network signals (Phase 2) | A Network Extension DNS proxy as a System Extension. |
-| Distribution | A Developer ID signed + notarized `.pkg`, built and signed **once by the Faro project**. The installer is the same for every instance (§3.8). |
+| Distribution | A Developer ID signed + notarized `.pkg`, built and signed **once by the Faro project**. The installer is the same for every instance (§3.8). It installs `/Library/Faro/bin/faro-uninstall`, which sends the `goodbye` (§3.7) before removing anything. |
 
 #### Windows (10 22H2+, 11)
 

@@ -7,6 +7,7 @@
 //! | `endorsement.json` | the member-signed `DeviceEndorsement`, once verified | 0600 |
 //! | `settings.json` | the member settings last announced to allies | 0600 |
 //! | `outbox.sqlite3` | `faro_core::Outbox` (ciphertext only) | 0600 |
+//! | `service.lock` | empty; [`StateDir::try_lock`] holds an exclusive lock on it | 0600 |
 //!
 //! The directory is 0700 and must be owned by the service's user. Secrets
 //! are written atomically (temp file created 0600, fsync, rename, fsync of
@@ -33,6 +34,8 @@ pub const DEVICE_KEY_FILE: &str = "device.key";
 pub const ENROLLMENT_FILE: &str = "enrollment.json";
 pub const ENDORSEMENT_FILE: &str = "endorsement.json";
 pub const SETTINGS_FILE: &str = "settings.json";
+/// Locked by whichever process writes the event chain (`run`, `goodbye`).
+pub const LOCK_FILE: &str = "service.lock";
 /// Permissions the service has seen granted, so a revocation made while the
 /// service was stopped is still reported (runtime/core.rs).
 pub const PERMISSIONS_FILE: &str = "permissions.json";
@@ -54,6 +57,8 @@ pub enum StateError {
     Corrupt { path: PathBuf, reason: String },
     #[error("this device is not enrolled yet (run `faro-service enroll`)")]
     NotEnrolled,
+    #[error("another faro-service (probably the running service) is using {path}; stop it first")]
+    Busy { path: PathBuf },
     #[error("this device is already enrolled with {instance} as {device}; remove the state directory to enroll again")]
     AlreadyEnrolled { instance: String, device: DeviceId },
 }
@@ -227,6 +232,30 @@ impl StateDir {
             })
     }
 
+    /// Take the exclusive lock that every writer of the event chain holds.
+    ///
+    /// The outbox has no lock of its own, and two processes appending to it
+    /// would each sign a different event with the same `seq`: a forked
+    /// chain, which the instance reports to allies as tamper. `run` holds
+    /// the lock for its lifetime and `goodbye` for its own, so a `goodbye`
+    /// can't be written while the service is still running. The OS releases
+    /// it when the process exits, however it exits.
+    ///
+    /// Returns [`StateError::Busy`] if another process holds it.
+    pub fn try_lock(&self) -> Result<StateLock, StateError> {
+        let path = self.file(LOCK_FILE);
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let file = opts.open(&path).map_err(io_err(&path))?;
+        match file.try_lock() {
+            Ok(()) => Ok(StateLock { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(StateError::Busy { path }),
+            Err(fs::TryLockError::Error(e)) => Err(io_err(&path)(e)),
+        }
+    }
+
     /// The enrollment record, or [`StateError::NotEnrolled`].
     pub fn enrollment(&self) -> Result<Enrollment, StateError> {
         self.read_json(ENROLLMENT_FILE)?
@@ -237,6 +266,12 @@ impl StateDir {
     pub fn endorsement(&self) -> Result<Option<Signed<DeviceEndorsement>>, StateError> {
         self.read_json(ENDORSEMENT_FILE)
     }
+}
+
+/// An exclusive hold on the state directory; released on drop.
+#[derive(Debug)]
+pub struct StateLock {
+    _file: fs::File,
 }
 
 /// Generate a fresh device key and store it, replacing any previous one.
@@ -417,6 +452,21 @@ mod tests {
             load_device_key(&dir),
             Err(StateError::Corrupt { .. })
         ));
+    }
+
+    #[test]
+    fn the_lock_is_exclusive_until_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = StateDir::open(tmp.path().join("state")).unwrap();
+        let held = dir.try_lock().unwrap();
+        // A second open file description (as another process would have)
+        // is refused, not blocked.
+        let again = StateDir::open(dir.path()).unwrap();
+        assert!(matches!(again.try_lock(), Err(StateError::Busy { .. })));
+        drop(held);
+        let _second = again.try_lock().expect("free once the first is dropped");
+        #[cfg(unix)]
+        assert_eq!(mode(&dir.file(LOCK_FILE)), 0o600);
     }
 
     #[test]

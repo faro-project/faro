@@ -108,6 +108,7 @@ On macOS the agent binary shows a menu-bar icon and the service's notices, which
 ```sh
 installers/macos/build-pkg.sh --dev                         # unsigned, for testing only
 installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
+installers/macos/test-uninstall.sh                          # the uninstaller's decisions, on a fake /Library
 ```
 
 - **A `--dev` package is not safe to use on anyone.** Its `faro-service` is built with the `dev` feature, so it accepts any program running as a logged-in user as the agent. Install it only on a test machine.
@@ -115,7 +116,9 @@ installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
 - **The layout is fixed:** programs in `/Library/Faro` (the agent inside `Faro Agent.app`, bundle id `org.faro.agent`), the daemon in `/Library/LaunchDaemons` and the **global** LaunchAgent in `/Library/LaunchAgents`, which launchd starts in every account's session. The paths live in `faro_platform_macos::pkg_layout`.
 - **The launchd plists are checked in** under `installers/macos/payload`, and a test keeps them equal to the generator. After changing `pkg_daemon_job` or `pkg_agent_job`, run `FARO_BLESS=1 cargo test -p faro-platform-macos --test installer_plists`.
 - **After installing,** the service waits for enrollment. `sudo /Library/Faro/bin/faro-service enroll --link '…'` lists the computer's accounts, enrolls it, and leaves activation to the running service.
-- **Not there yet:** an uninstaller (it must send `goodbye`, §3.7), universal (arm64 + x86_64) binaries, and the tray app. Until the uninstaller exists, removing Faro shows up to allies as missed heartbeats.
+- **Uninstalling:** `sudo /Library/Faro/bin/faro-uninstall` stops the service, runs `faro-service goodbye` so allies get an urgent "Faro was uninstalled" (§3.7), then stops every session's agent and removes the programs, the launchd jobs, the state directory and the package receipt. If the instance can't be reached, `goodbye` writes nothing, so the uninstaller restarts the service and removes nothing. `--force` removes Faro anyway, and allies then see a missed check-in instead. A goodbye that is written but not delivered (exit status 3) never backs out: a service running again after its own goodbye would contradict it.
+- **One writer per chain:** `run` and `goodbye` both hold an exclusive lock on `service.lock` in the state directory (`StateDir::try_lock`), so a second `faro-service run`, or a `goodbye` while the service runs, is refused instead of forking the event chain.
+- **Not there yet:** universal (arm64 + x86_64) binaries and the tray app.
 
 ## CI runners
 

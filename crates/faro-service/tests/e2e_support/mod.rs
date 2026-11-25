@@ -709,6 +709,27 @@ impl Device {
         }
     }
 
+    /// `faro-service goodbye` on this state dir, as the uninstaller runs it
+    /// (the service should be stopped first). Waits at most `lock_wait` for
+    /// the state lock and delivers within a few seconds.
+    pub async fn goodbye(
+        &self,
+        lock_wait: Duration,
+    ) -> Result<faro_service::GoodbyeOutcome, faro_service::GoodbyeError> {
+        let cfg = Config {
+            state_dir: self.state_dir.clone(),
+            ..Config::default()
+        };
+        let mut opts =
+            faro_service::GoodbyeOptions::new(faro_proto::body::GoodbyeReason::Uninstalled);
+        opts.clock = Some(Arc::new(self.clock.clone()));
+        opts.lock_wait = lock_wait;
+        opts.deliver_within = Duration::from_secs(3);
+        tokio::time::timeout(REAL_TIMEOUT, faro_service::say_goodbye(&cfg, opts))
+            .await
+            .expect("goodbye finishes in time")
+    }
+
     /// Poke the uploader and wait until the instance acknowledged every
     /// committed event. Returns the last `seq`.
     pub async fn upload_all(&self) -> u64 {

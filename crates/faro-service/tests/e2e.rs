@@ -23,9 +23,10 @@ use e2e_support::*;
 use faro_crypto::CryptoError;
 use faro_platform::synthetic::Scene;
 use faro_platform::PermissionState;
-use faro_proto::body::{EventBody, Rating, TamperSignal};
+use faro_proto::body::{EventBody, GoodbyeReason, Rating, TamperSignal};
 use faro_proto::{EventHeader, EventKind, Urgency};
-use faro_service::Phase;
+use faro_service::{GoodbyeError, GoodbyeOutcome, Phase};
+use std::time::Duration;
 
 /// Inject a distinct active-tamper signal (the service suppresses an
 /// identical signal repeated within a minute, so each call names its own
@@ -627,4 +628,113 @@ async fn midnight_rollover_seals_the_day_and_starts_the_next() {
     assert_eq!(periods[0].1, midnight, "the day ends at midnight");
     assert_eq!(periods[1].0, midnight, "the next period starts at midnight");
     assert!(periods[1].1 > midnight);
+}
+
+/// 10. Uninstall (§3.7): with the service stopped, `goodbye` seals an urgent
+///     `goodbye` to the ally, who is alerted by email. The device is retired:
+///     its silence afterwards is not a missed check-in. While the service
+///     runs, `goodbye` refuses (two writers would fork the chain).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn uninstall_goodbye_alerts_the_ally_and_retires_the_device() {
+    let w = World::new().await;
+    let mut dev = w.active_device(quiet_classifier()).await;
+    dev.upload_all().await;
+
+    let refused = dev.goodbye(Duration::ZERO).await;
+    assert!(
+        matches!(refused, Err(GoodbyeError::ServiceRunning { .. })),
+        "{refused:?}"
+    );
+
+    dev.shutdown().await;
+    let before = w.stored_seqs(&dev).await;
+    w.t.notify_now().await;
+    let mails_before = w.t.alert_mail_to(ALLY_EMAIL).len();
+
+    let seq = match dev.goodbye(Duration::from_secs(1)).await {
+        Ok(GoodbyeOutcome::Delivered { seq }) => seq,
+        other => panic!("goodbye not delivered: {other:?}"),
+    };
+    let stored = w.stored_seqs(&dev).await;
+    assert_eq!(
+        i64::try_from(seq).expect("seq fits"),
+        *stored.last().expect("stored"),
+        "the goodbye is the last event"
+    );
+    assert_eq!(stored.len(), before.len() + 1, "{before:?} -> {stored:?}");
+
+    let ev = w.feed_event(&w.ally.session, &dev, seq).await;
+    assert_eq!(ev.kind, EventKind::Goodbye);
+    assert_eq!(ev.urgency, Urgency::Urgent);
+    let item = w.event_item(&w.ally.session, &dev, seq).await;
+    let body: EventBody = serde_json::from_slice(
+        &open_event(&item, &dev, seq, &w.ally.id, &w.ally.keys.enc).expect("ally opens it"),
+    )
+    .expect("EventBody");
+    assert_eq!(
+        body,
+        EventBody::Goodbye {
+            reason: GoodbyeReason::Uninstalled
+        }
+    );
+    let alerts = w.alerts().await;
+    assert!(
+        alerts
+            .iter()
+            .any(|(kind, urgency, _)| kind == "goodbye" && urgency == "urgent"),
+        "{alerts:?}"
+    );
+    w.t.notify_now().await;
+    let mails = w.t.alert_mail_to(ALLY_EMAIL);
+    assert!(mails.len() > mails_before, "the ally was emailed");
+    for m in &mails[mails_before..] {
+        assert!(m.subject.starts_with("Urgent:"), "{:?}", m.subject);
+        assert_content_free(m, &[]);
+    }
+
+    // Long past the grace period: the goodbye was the alert.
+    let grace_ms =
+        i64::try_from(w.state().settings().liveness.grace_secs).expect("grace fits") * 1000;
+    w.t.clock.advance_ms(grace_ms + 3_600_000);
+    let s = faro_server::liveness::run_once(w.state(), w.started_ms)
+        .await
+        .expect("liveness pass");
+    assert_eq!(s.missed, 0, "a retired device is not judged");
+}
+
+/// 11. `goodbye` while the instance is unreachable writes nothing, so the
+///     uninstaller can back out and restart the service with an unchanged
+///     chain. A device its member never approved has nobody to tell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goodbye_writes_nothing_when_it_cannot_be_delivered() {
+    let w = World::new().await;
+    let pending = w.enroll_device().await;
+    assert_eq!(
+        pending.goodbye(Duration::ZERO).await.expect("goodbye"),
+        GoodbyeOutcome::NotActivated
+    );
+
+    let mut dev = w.active_device(quiet_classifier()).await;
+    dev.shutdown().await;
+    let head = || {
+        let o = faro_core::Outbox::open(
+            dev.dir.path(),
+            &dev.enrollment.instance_id,
+            &dev.enrollment.device_id,
+        )
+        .expect("outbox");
+        o.head().expect("head").next_seq
+    };
+    let next = head();
+
+    w.gate.cut();
+    let r = dev.goodbye(Duration::ZERO).await;
+    assert!(matches!(r, Err(GoodbyeError::Unreachable(_))), "{r:?}");
+    assert_eq!(head(), next, "nothing was written");
+
+    // The service starts again on the same chain (the lock was released).
+    dev.start(quiet_classifier());
+    dev.wait("running again", |s| s.phase == Phase::Running)
+        .await;
+    dev.shutdown().await;
 }
