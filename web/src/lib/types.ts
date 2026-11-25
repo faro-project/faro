@@ -50,6 +50,47 @@ export interface SetupResponse {
 export interface Me {
 	user: User;
 	has_member_keys: boolean;
+	/** When this session signed in: deleting the account needs a recent sign-in. */
+	session_started_at_ms: number;
+	/** The pending deletion of this account, if the person asked for one. */
+	deletion: PendingDeletion | null;
+}
+
+// ---- Account deletion ------------------------------------------------------
+
+/** A requested account deletion: nothing is removed until `purge_after_ms`. */
+export interface PendingDeletion {
+	requested_at_ms: number;
+	/** The end of the 7-day hold. */
+	purge_after_ms: number;
+	/** When the purge started; it can no longer be cancelled. */
+	started_at_ms: number | null;
+}
+
+/** Who a deletion notice (or its cancellation) went to. */
+export interface DeletionTold {
+	/** The person's own allies. */
+	allies: number;
+	/** Members the person is an ally for. */
+	members: number;
+}
+
+/** `DELETE /v1/me` body */
+export interface DeleteMe {
+	confirm_email: string;
+}
+
+/** `DELETE /v1/me` response */
+export interface DeletionRequested {
+	deletion: PendingDeletion;
+	told: DeletionTold;
+}
+
+/** `POST /v1/me/deletion/cancel` response */
+export interface DeletionCancelled {
+	requested_at_ms: number;
+	cancelled_at_ms: number;
+	told: DeletionTold;
 }
 
 export type RegistrationMode = 'invite-only' | 'open' | 'closed';
@@ -132,6 +173,11 @@ export interface Overview {
 		pending: number;
 		sent: number;
 	};
+	/** Accounts waiting to be deleted, and purges held up a week past their hold. */
+	deletions: {
+		pending: number;
+		overdue: number;
+	};
 	smtp_configured: boolean;
 	settings: InstanceSettings;
 }
@@ -149,6 +195,8 @@ export interface AdminUserRow {
 	device_count: number;
 	/** Most recent check-in of any of the user's devices. */
 	devices_last_seen_at_ms: number | null;
+	/** When the account will be deleted, if the person asked for that. */
+	deletion_purge_after_ms: number | null;
 }
 
 /** `POST /admin/api/invites` (and member ally invites) response. */
@@ -299,6 +347,8 @@ export interface AllyLink {
 	ally_enc_pubkey: string | null;
 	ally_key_id: string | null;
 	member_sign_pubkey: string | null;
+	/** When the ally's account will be deleted, if they asked for that. */
+	deletion_purge_after_ms: number | null;
 }
 
 export interface ManifestStatus {
@@ -332,6 +382,8 @@ export interface SupportedMember {
 	activated_at_ms: number | null;
 	member_sign_pubkey: string | null;
 	ally_enc_pubkey: string | null;
+	/** When the member's account will be deleted, if they asked for that. */
+	deletion_purge_after_ms: number | null;
 }
 
 /** `POST /v1/invites/{token}/accept` */
@@ -370,7 +422,10 @@ export type ServerAlertKind =
 	| 'account_disabled'
 	| 'account_enabled'
 	| 'ally_disabled'
-	| 'ally_enabled';
+	| 'ally_enabled'
+	| 'account_deleted'
+	| 'ally_deleted'
+	| 'account_deletion_cancelled';
 
 export type FeedItem =
 	| {

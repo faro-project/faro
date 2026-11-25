@@ -75,6 +75,8 @@
 	onDestroy(() => clearInterval(tick));
 
 	let pending = $derived(devices?.filter((d) => d.status === 'pending_endorsement') ?? []);
+	// While the account is being deleted, nothing new joins it (§12).
+	let deleting = $derived(!!session.deletion);
 	let active = $derived(
 		(devices?.filter((d) => d.status === 'active') ?? []).sort((a, b) =>
 			a.name.localeCompare(b.name)
@@ -238,7 +240,14 @@
 
 		{#if done}<div class="notice ok" role="status"><p>✓ {done}</p></div>{/if}
 
-		{#if !session.hasMemberKeys}
+		{#if deleting}
+			<div class="notice warn">
+				<p>
+					Your account is being deleted, so you can't add or approve computers. Your computers are
+					still monitored until the deletion.
+				</p>
+			</div>
+		{:else if !session.hasMemberKeys}
 			<div class="notice info">
 				<p>
 					Before adding a computer, <a href={resolve('/keys')}>set up your keys</a>. They approve
@@ -267,7 +276,7 @@
 									</div>
 								</div>
 								<div class="row-actions">
-									{#if approving?.device_id !== d.device_id}
+									{#if approving?.device_id !== d.device_id && !deleting}
 										<button class="primary small" type="button" onclick={() => startApprove(d)}>
 											Review and approve
 										</button>
@@ -277,7 +286,7 @@
 									</button>
 								</div>
 							</div>
-							{#if approving?.device_id === d.device_id}
+							{#if approving?.device_id === d.device_id && !deleting}
 								<div class="approve">
 									{#if !keyring.memberFor(user.id)}
 										<UnlockKeys kind="member" {user}>
@@ -330,13 +339,13 @@
 		<section class="section" aria-labelledby="add">
 			<div class="section-head">
 				<h2 id="add">Add a computer</h2>
-				{#if !adding && session.hasMemberKeys}
+				{#if !adding && session.hasMemberKeys && !deleting}
 					<button class="primary small" type="button" onclick={() => (adding = true)}>
 						Add a computer
 					</button>
 				{/if}
 			</div>
-			{#if adding}
+			{#if adding && !deleting}
 				<div class="card">
 					{#if !keyring.memberFor(user.id)}
 						<UnlockKeys kind="member" {user}>

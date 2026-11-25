@@ -1,6 +1,7 @@
 <script lang="ts">
-	// Account settings: who you are here, your keys, and (for members) how
-	// long your history is kept and how you hear about your own alerts.
+	// Account settings: who you are here, your keys, (for members) how long
+	// your history is kept and how you hear about your own alerts, and
+	// deleting your account.
 	import { resolve } from '$app/paths';
 	import { api, describeError } from '#lib/api.ts';
 	import { unb64 } from '#lib/crypto/bytes.ts';
@@ -12,6 +13,7 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { AllyKeyBlob, MemberKeysBlob, RetentionView, RetentionWindows } from '#lib/types.ts';
 	import ChangePassphrase from '#lib/ui/ChangePassphrase.svelte';
+	import DeleteAccount from '#lib/ui/DeleteAccount.svelte';
 	import DisplayName from '#lib/ui/DisplayName.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
@@ -210,6 +212,8 @@
 				<NotificationPrefs memberId={user.id} about="yourself" />
 			</section>
 		{/if}
+
+		<DeleteAccount {user} />
 	{/snippet}
 </Gate>
 
