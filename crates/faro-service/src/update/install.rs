@@ -7,7 +7,9 @@
 //! Before it installs anything, the updater asks the installer to check
 //! the package itself ([`Installer::check_package`]). On macOS that is the
 //! package's Developer ID signature and notarization
-//! ([`super::signature`]): a second layer, in case the update keys leak.
+//! ([`super::signature`]), then the version inside it
+//! ([`super::package_version`]): a second layer, in case the update keys
+//! leak.
 //!
 //! On macOS ([`LaunchdInstaller`]) the install runs as the one-shot launchd
 //! job `org.faro.update` (`faro_platform_macos::update_job`), because the
@@ -17,7 +19,7 @@
 //! Windows has no client yet.
 
 use super::signature::PackageCheckError;
-use faro_update::TargetInfo;
+use faro_update::{TargetInfo, Version};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,10 +33,16 @@ pub enum InstallError {
 /// Starts installing a verified package.
 pub trait Installer: Send + Sync + std::fmt::Debug {
     /// Check `package` itself before it is installed, beyond the metadata
-    /// (on macOS: Faro's Developer ID signature and notarization). There is
+    /// (on macOS: Faro's Developer ID signature and notarization, and that
+    /// the version inside it is `target`'s and above `installed`). There is
     /// no default: every installer says what it checks. Called on a
     /// blocking thread; it must not change anything on disk.
-    fn check_package(&self, package: &Path, target: &TargetInfo) -> Result<(), PackageCheckError>;
+    fn check_package(
+        &self,
+        package: &Path,
+        target: &TargetInfo,
+        installed: &Version,
+    ) -> Result<(), PackageCheckError>;
 
     /// Start installing `package` (already verified against `target`).
     /// Returns once the install has *started*: on success the installer
@@ -132,7 +140,12 @@ impl LaunchdInstaller {
 
 #[cfg(target_os = "macos")]
 impl Installer for LaunchdInstaller {
-    fn check_package(&self, package: &Path, target: &TargetInfo) -> Result<(), PackageCheckError> {
+    fn check_package(
+        &self,
+        package: &Path,
+        target: &TargetInfo,
+        installed: &Version,
+    ) -> Result<(), PackageCheckError> {
         use super::signature::{self, Accepted};
         match signature::check_package(package)? {
             Accepted::Verified { team_id } => tracing::info!(
@@ -145,6 +158,11 @@ impl Installer for LaunchdInstaller {
                 "development build: installing the update package without checking its signature"
             ),
         }
+        // Only once it is known to be Faro's: the package says which
+        // version it is, and that must be what the metadata says.
+        let version =
+            super::package_version::check_version(package, &target.custom.version, installed)?;
+        tracing::info!(%version, %installed, "the update package is the version the metadata says");
         Ok(())
     }
 

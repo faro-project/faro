@@ -129,11 +129,12 @@ pub const fn is_team_id(s: &str) -> bool {
 /// Why a package was not accepted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PackageCheckError {
-    /// The package is not Faro's: never install it, report tamper.
-    #[error("the package is not signed and notarized as Faro's: {0}")]
+    /// The package is not Faro's, or not the version the metadata says
+    /// ([`super::package_version`]): never install it, report tamper.
+    #[error("the update package is refused: {0}")]
     Rejected(String),
     /// The check couldn't conclude: don't install, try again later.
-    #[error("cannot confirm the package's signature: {0}")]
+    #[error("cannot confirm the update package: {0}")]
     Unconfirmed(String),
 }
 
