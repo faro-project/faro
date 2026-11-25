@@ -1,16 +1,20 @@
-//! Run the updater's package signature check on a `.pkg`, by hand.
+//! Run the updater's package checks on a `.pkg`, by hand.
 //!
 //! ```sh
 //! FARO_TEAM_ID=ABCDE12345 cargo run -p faro-service --example check_package -- Faro-1.2.0.pkg
 //! ```
 //!
-//! It is the same check the packaged service runs before it installs an
-//! update (`faro_service::update::signature`), with the Team ID compiled in
-//! from `FARO_TEAM_ID`. Without one it refuses every package, and with
-//! `--features faro-service/dev` it skips the check. Exit status: 0 if the
-//! package would be installed, 1 if it was rejected (the service would
-//! report tamper), 2 if the check couldn't conclude.
+//! They are the checks the packaged service runs before it installs an
+//! update. First the signature (`faro_service::update::signature`), with
+//! the Team ID compiled in from `FARO_TEAM_ID`: without one it refuses
+//! every package, and with `--features faro-service/dev` it skips it. Then
+//! the version inside the package (`faro_service::update::package_version`),
+//! which the service compares with the update metadata's and the running
+//! one. Exit status: 0 if the package would be installed as the version
+//! printed, 1 if it was rejected (the service would report tamper), 2 if a
+//! check couldn't conclude.
 
+use faro_service::update::package_version;
 use faro_service::update::signature::{self, Accepted, PackageCheckError, BUILD_POLICY};
 use std::process::ExitCode;
 
@@ -28,15 +32,24 @@ fn main() -> ExitCode {
         }
     };
     println!("policy: {BUILD_POLICY:?}");
-    match signature::check_package(&pkg) {
+    let r = match signature::check_package(&pkg) {
         Ok(Accepted::Verified { team_id }) => {
-            println!("accepted: signed by Faro's Developer ID ({team_id}) and notarized");
-            ExitCode::SUCCESS
+            println!("signature: Faro's Developer ID ({team_id}), notarized");
+            Ok(())
         }
         Ok(Accepted::Unchecked) => {
-            println!("accepted without a check (development build)");
-            ExitCode::SUCCESS
+            println!("signature: not checked (development build)");
+            Ok(())
         }
+        Err(e) => Err(e),
+    };
+    let r = r.and_then(|()| {
+        let v = package_version::read_version(&pkg)?;
+        println!("version: {v}");
+        Ok(())
+    });
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e @ PackageCheckError::Rejected(_)) => {
             println!("rejected: {e}");
             ExitCode::from(1)

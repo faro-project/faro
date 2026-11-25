@@ -316,16 +316,25 @@ A client trusts the root it shipped with, never the instance. On each check it:
 2. fetches and verifies `timestamp.json`, then `targets.json`, which must match the timestamp's commitment byte for byte (a mirror that switches release between the two requests is retried later);
 3. selects for its platform, arch and OS version in the instance's channel, never below its installed version;
 4. downloads the artifact, reading at most the signed length plus one byte, and keeps it only if length and BLAKE3 match;
-5. on macOS, checks the package's own signature before installing it: a Developer ID Installer certificate that chains to Apple's Developer ID CA, from the Team ID the installed client was built with, and notarized (Gatekeeper accepts it as "Notarized Developer ID").
+5. on macOS, checks the package's own signature before installing it: a Developer ID Installer certificate that chains to Apple's Developer ID CA, from the Team ID the installed client was built with, and notarized (Gatekeeper accepts it as "Notarized Developer ID");
+6. on macOS, reads the version inside the package and installs it only if that version equals the target's `version` and is above the installed version (semver precedence, so `0.1.0-beta.1 < 0.1.0`).
 
 It persists its trust state after every step, including failed ones. The instance chooses the channel, so it can hold clients back or move them between channels, but it can't make them install anything the project didn't sign or go back to an older release.
 
-**Step 5 is a second layer.** The metadata (steps 1 to 4) decides what to install. The package signature only stops a package the metadata approved but Faro's Apple identity didn't sign, for example if the targets and timestamp keys leak (KEY-CEREMONY.md §4.2). The Team ID is compiled into the client (`FARO_TEAM_ID`, the value `ipc.agent_requirement` is built from), never read from the update, its metadata or the mirror. The checks are `pkgutil --check-signature` and `spctl --assess --type install` (`crates/faro-service/src/update/signature.rs`):
+**Steps 5 and 6 are a second layer.** The metadata (steps 1 to 4) decides what to install. The package signature only stops a package the metadata approved but Faro's Apple identity didn't sign, for example if the targets and timestamp keys leak (KEY-CEREMONY.md §4.2). The Team ID is compiled into the client (`FARO_TEAM_ID`, the value `ipc.agent_requirement` is built from), never read from the update, its metadata or the mirror. The checks are `pkgutil --check-signature` and `spctl --assess --type install` (`crates/faro-service/src/update/signature.rs`):
 
 - **Rejected** (unsigned, another team, not a Developer ID Installer certificate): not installed and never retried. The service reports it as a tamper-class `integrity_failure` (ARCHITECTURE.md §3.7), once each time it starts while the metadata still offers that package.
 - **Unconfirmed** (a tool failed, Gatekeeper didn't confirm notarization, or the client has no Team ID): not installed, and tried again at the next check.
 - **Offline:** release packages carry a stapled notarization ticket, so the check needs no connection to Apple. Without a ticket Gatekeeper asks Apple; offline that is unconfirmed, never a pass.
 - **Development builds** (the `dev` feature, no Team ID) skip step 5. A build without the `dev` feature never does: without a Team ID it installs nothing.
+
+**Step 6 stops a signed package listed under another version.** Without it, someone holding the targets and timestamp keys could list an old release Faro really signed, say `0.1.0-beta.1`'s package, as `99.0.0`. Its signature passes, so the client would go back to that release while it thinks it upgraded. Rollback protection in the metadata doesn't help, because the metadata is what lies. The version comes from the package itself:
+
+- **Where.** `build-pkg.sh` passes the full semver version to `pkgbuild --version`, which writes it into the component's `PackageInfo` (`<pkg-info identifier="org.faro.pkg" version="…">`), and puts it in the Distribution's `pkg-ref`. Both must agree. The app bundle's version can't serve: bundle versions are plain integers (`0.1.0` for `0.1.0-beta.1`). `check-pkg.sh` checks both, and that the packaged `faro-service --version` reports the same version.
+- **How.** The client reads the xar archive itself (`crates/faro-service/src/update/package_version.rs`). It runs nothing from the package and unpacks nothing to disk. It reads only the table of contents, `Distribution`, and the `PackageInfo` of the one component the Distribution installs. The table of contents must match the checksum the package signature covers, and both files their archived and extracted checksums in it. So the version read is in the bytes Faro signed.
+- **Rejected:** the version isn't the target's or isn't above the installed one, the component isn't `org.faro.pkg`, or a checksum doesn't match. As in step 5: not installed, never retried, and reported as `integrity_failure`.
+- **Unconfirmed:** the archive is in a form the reader doesn't know: an unsupported checksum or encoding, an entry missing or given twice, a version that isn't semver, or a `Distribution` and `PackageInfo` that disagree. Not installed, and tried again at the next check.
+- **Development builds** run step 6 too.
 
 ### 8.3 What the mirror does
 

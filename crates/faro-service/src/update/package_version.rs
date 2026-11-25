@@ -102,13 +102,14 @@ pub fn read_version(pkg: &Path) -> Result<Version, PackageCheckError> {
 /// The version of Faro's component in the flat package `r`.
 pub fn read_version_from<R: Read + Seek>(r: &mut R) -> Result<Version, PackageCheckError> {
     let mut xar = Xar::open(r)?;
-    let toc = xar.toc_text()?;
+    let (compressed, toc) = xar.toc()?;
     let doc = parse_xml(&toc, "the TOC")?;
     let root = doc.root_element();
     if !root.has_tag_name("xar") {
         return Err(bad("the TOC is not a xar TOC"));
     }
     let toc = one(root, "toc")?;
+    xar.check_toc(toc, &compressed)?;
     let top: Vec<_> = elements(toc, "file").collect();
 
     let dist = xar.read_file(file_data(named(&top, "Distribution")?)?, "Distribution")?;
@@ -299,17 +300,20 @@ impl<'r, R: Read + Seek> Xar<'r, R> {
         Ok(buf)
     }
 
-    /// The TOC, decompressed, after checking it against the checksum the
-    /// package signature covers.
-    fn toc_text(&mut self) -> Result<String, PackageCheckError> {
+    /// The TOC as stored (compressed) and as text.
+    fn toc(&mut self) -> Result<(Vec<u8>, String), PackageCheckError> {
         if self.heap() > self.len {
             return Err(bad("the xar TOC runs past the end of the package"));
         }
         let compressed = self.read_at(self.header, self.toc_compressed)?;
         let toc = inflate(&compressed, self.toc_size, "the TOC")?;
-        let toc = utf8(toc, "the TOC")?;
-        let doc = parse_xml(&toc, "the TOC")?;
-        let sum = one(one(doc.root_element(), "toc")?, "checksum")?;
+        Ok((compressed, utf8(toc, "the TOC")?))
+    }
+
+    /// Check the stored TOC against the checksum the package signature
+    /// covers: `<toc><checksum>` says where in the heap it is.
+    fn check_toc(&mut self, toc: Node<'_, '_>, compressed: &[u8]) -> Result<(), PackageCheckError> {
+        let sum = one(toc, "checksum")?;
         if attr(sum, "style")? != self.algo.name() {
             return Err(bad("the TOC checksum style differs from the xar header's"));
         }
@@ -318,13 +322,12 @@ impl<'r, R: Read + Seek> Xar<'r, R> {
         if size != self.algo.len() as u64 {
             return Err(bad("the TOC checksum has the wrong size"));
         }
-        let stored = self.read_heap(offset, size)?;
-        if stored != self.algo.digest(&compressed) {
+        if self.read_heap(offset, size)? != self.algo.digest(compressed) {
             return Err(Rejected(
                 "the package's table of contents doesn't match its checksum".into(),
             ));
         }
-        Ok(toc)
+        Ok(())
     }
 
     /// A file's contents, checked against both of its checksums.

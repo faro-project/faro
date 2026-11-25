@@ -245,6 +245,11 @@ for ((i = 0; i < n; i++)); do
     plutil -replace "$i.BundleIsRelocatable" -bool NO "$work/component.plist"
 done
 chmod 755 "$here/scripts/preinstall" "$here/scripts/postinstall"
+# --version writes the full semver version into PackageInfo, and
+# Distribution.xml.in gets it too. The updater reads both before it
+# installs a package and refuses one that isn't the version the update
+# metadata names (crates/faro-service/src/update/package_version.rs), so
+# they must stay the full version, never the bundle version.
 COPYFILE_DISABLE=1 pkgbuild --root "$root" \
     --component-plist "$work/component.plist" \
     --scripts "$here/scripts" \
