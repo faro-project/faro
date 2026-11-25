@@ -143,7 +143,7 @@ Classes are the policy's kinds, not a model's labels, so one set measures models
 
 **The baseline** is `models/eval-baseline.json`: a results file from the macOS runner, metrics only, so it is safe to commit. There is none until the maintainer picks a model and the set is on the runner; until then the CI job warns and passes. To create or update it, download the `model-eval-metrics-<sha>` artifact of the run you accept and commit its `results.json` as the baseline, in the same pull request that changes the model, the set or the policy (or accepts a regression), and say why.
 
-**In CI.** The harness itself is tested on every pull request against a synthetic set the tests generate (solid colours and UI-like windows) and a tiny ONNX graph they encode by hand (`classifier/test_onnx.rs`), so no model or image is downloaded or committed: `cargo test -p faro-detect` on every runner uses a pure-Rust stand-in for the graph, and the macOS `test` job also runs `cargo test -p faro-detect --features onnx` (the `onnx` feature's build script downloads ONNX Runtime). The `model-eval` job runs the gate on the real set on the macOS runner, only when the runner's `.env` sets:
+**In CI.** The harness itself is tested on every pull request against a synthetic set the tests generate (solid colours and UI-like windows) and a tiny ONNX graph they encode by hand (`classifier/test_onnx.rs`), so no model or image is downloaded or committed: `cargo test -p faro-detect` on every runner uses a pure-Rust stand-in for the graph, and the macOS `test` job also runs `cargo test -p faro-detect --features onnx` (the `onnx` feature's build script downloads ONNX Runtime). The `model-eval` job runs the gate on the real set on the macOS runner. It runs on `main` only (each push, or a manual run from the Actions tab), never on a pull request, so a change to the harness is reviewed before it touches the set. To gate a candidate model before merging, run the tool locally. The job also runs only when the runner's `.env` sets:
 
 | Variable | Value |
 |---|---|
@@ -157,7 +157,7 @@ It uploads `results.json` and nothing else.
 - **Never commit it,** and never copy it into the repository, a worktree, `target/`, an issue, a pull request or a CI artifact. Keep it on an encrypted volume outside the repository, readable by no account but yours and the runner's.
 - **Adults only, obtained lawfully.** Anything that might depict a minor stays out of the set, without exception.
 - **The tool writes metrics only.** Images enter through `Frame`, one at a time, and are zeroized when dropped (`privacy_tests::benchmark_frames_are_zeroized`); no image, thumbnail or per-image result is written, and the set appears only as a digest. It deliberately doesn't list which images were missed. File names can appear in error messages, and so in CI logs: name files neutrally (`0001.png`).
-- **The runner can read it.** Anyone who can push a branch can run code on the macOS runner (see CI runners), and so read the set. Keep push access to maintainers, and remove `FARO_MODEL_EVAL_SET` from the runner if that changes.
+- **The runner can read it.** Keeping `model-eval` off pull requests stops unreviewed harness changes from running on the set, but it is not a sandbox: anyone who can push a branch can run any code on the macOS runner (see CI runners), and so read the set. Keep push access to maintainers, and remove `FARO_MODEL_EVAL_SET` (and the set itself) from the runner before the repository goes public or that changes.
 
 ## The macOS installer
 

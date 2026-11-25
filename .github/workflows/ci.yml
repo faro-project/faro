@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs, for example of the model gate (model-eval) on main.
+  workflow_dispatch:
 
 # Each self-hosted runner takes one job at a time, so a new push to a pull
 # request cancels its older run instead of queueing behind it.
@@ -136,8 +138,11 @@ jobs:
   # and lives only on the macOS runner, outside the repository: the job is
   # skipped unless the runner's .env sets FARO_MODEL_EVAL_SET (the set) and
   # FARO_MODEL_EVAL_MANIFEST (the model under test). Only the metrics JSON
-  # is uploaded, never an image or a per-image result.
+  # is uploaded, never an image or a per-image result. It runs on main only
+  # (pushes and manual runs), never on a pull request, so changes to the
+  # harness are reviewed before they run against the real set.
   model-eval:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - id: check
