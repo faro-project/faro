@@ -1077,8 +1077,10 @@ dependencies = [
 name = "faro-detect"
 version = "0.1.0-beta.1"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "blake3",
+ "clap",
  "faro-platform",
  "faro-proto",
  "fst",
@@ -1090,6 +1092,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
  "zeroize",
 ]
 

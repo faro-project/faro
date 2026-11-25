@@ -100,6 +100,29 @@ Without `web/build`, `faro-server` still builds and its API works; page requests
 
 `faro-update`'s `testing` feature adds `faro_update::testing::ToyProject`, a project with its own keys. It signs releases (root, targets, timestamp, artifacts) and writes them in the upstream layout (PROTOCOL.md §8.1), so the mirror and client tests can publish whatever they need. Enable it only in `[dev-dependencies]`, never in a shipped binary. `server/tests/updates.rs` serves such a directory over HTTP on localhost to exercise the online mirror.
 
+## The domain category bundle
+
+`faro-detect`'s `DomainCategorizer` (§3.5 "Context signals") loads a compiled FST bundle. The `domains-compile` example builds it from the blocklists listed in `crates/faro-detect/domains/sources.toml`. Run it from the repository root:
+
+```sh
+cargo run -p faro-detect --example domains-compile -- fetch --config crates/faro-detect/domains/sources.toml
+cargo run -p faro-detect --example domains-compile -- build --config crates/faro-detect/domains/sources.toml \
+    --out target/domains/domains.bin
+```
+
+- **`fetch`** downloads each approved `url` source with `curl` into `target/domains/sources` (`--sources-dir` changes it) and keeps it only if its BLAKE3 matches the pin in `sources.toml`. Sources can also be local files (`path`, relative to the config).
+- **`build`** reads only those files, refuses any that don't match their pin, and writes `domains.bin` and `domains.manifest.json`: the sources, their licences, attribution and entry counts, the licence texts, and the bundle's size and BLAKE3. Nothing in either depends on the time or the machine, so the same config always gives byte-identical files.
+- **Approved, pending and refused (§11).** Every source records an SPDX licence and a state, and the maintainer decides it:
+  - **Approved** (`approved = true`) sources are always fetched and compiled. Their licence must be on `faro_detect::ALLOWED_MODEL_LICENSES`, or the config is rejected.
+  - **Pending** (`approved = false`) sources are left out. `--allow-unapproved` includes them for local experiments only: the manifest then says `"unapproved_included": true`, and such a bundle must never ship. Their `terms` field says what the upstream terms are.
+  - **Refused** (`refused = "reason"`) sources stay in the config, so nobody proposes them again, but they are never fetched or compiled, even with `--allow-unapproved`.
+- **Attribution travels with the bundle.** The manifest ships next to `domains.bin` and has to be enough to comply on its own. So an approved source whose licence asks for attribution (anything on the allowlist except CC0-1.0 and the Unlicense) needs a `[source.attribution]` table: `author`, the upstream's verbatim `copyright` lines, `source_url`, `license_url`, and `changes`, a note of what the conversion did. For licences whose text must accompany copies (MIT, BSD, ISC, Zlib, Apache-2.0), the `copyright` lines are required and the text goes once under `[license_texts]`. CC BY 4.0 only needs the link to the licence. Without any of these, `fetch` and `build` refuse the config. The manifest copies every source's attribution and the texts of the licences it uses.
+- **Moving to a newer upstream revision:** change the commit in the URL, run `fetch` (it stops at a file whose hash changed and prints the new hash), review what changed upstream and that its licence and copyright notices didn't, then update the pin.
+- **Never commit a downloaded list or a built bundle.** The tests use the hand-written fixtures in `crates/faro-detect/examples/domains-compile/fixtures` (`.gitattributes` there keeps their bytes, and so their pins, the same on Windows).
+- `domains-compile hash FILE…` prints BLAKE3 hashes for pinning a new source.
+
+Shipping the bundle through the update channel and loading it in the packaged service come later. The service already accepts one through the `domains` builder method in `faro-service`'s runtime.
+
 ## Testing without real hardware
 
 `faro_platform::synthetic::Script` drives a fake screen, foreground app, session state and tamper signals. Use it for anything above the OS layer. Tests that need real OS permissions (for example macOS Screen Recording) are `#[ignore]`d and say so in their name or doc comment.
