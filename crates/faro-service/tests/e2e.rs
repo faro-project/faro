@@ -805,6 +805,7 @@ impl faro_service::update::install::Installer for RecordingInstaller {
         &self,
         _package: &std::path::Path,
         target: &faro_update::TargetInfo,
+        _installed: &faro_update::Version,
     ) -> Result<(), faro_service::update::signature::PackageCheckError> {
         self.checked.lock().unwrap().push(target.name.clone());
         match &self.reject {
