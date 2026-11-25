@@ -8,3 +8,6 @@ target/
 node_modules/
 /web/build
 /web/.svelte-kit
+
+# The maintainer's personal release checklist
+/RELEASE-CHECKLIST.md
