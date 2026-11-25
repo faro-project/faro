@@ -14,6 +14,13 @@
 # image by digest only; the merge job then joins the digests into one
 # manifest list and applies the tags. Pull requests that touch the container
 # files build both platforms and smoke-test them, but push nothing.
+#
+# If one platform's build fails on a push to main, the merge job still
+# publishes the platforms that built (with a warning naming the missing
+# one), so a broken amd64 build on GitHub's runners doesn't hold back the
+# arm64 image for Raspberry Pis. The tags then point at an image without
+# that platform until the next good build. Release tags (vX.Y.Z) still need
+# every platform: a release is never published half-built.
 
 name: Container image
 
@@ -130,18 +137,49 @@ jobs:
 
   merge:
     name: publish multi-arch image
-    if: github.event_name != 'pull_request'
+    # always(): run even when a build job failed (see the header). Never
+    # after a cancellation, and never for a release tag with a failed build.
+    if: >-
+      always()
+      && github.event_name != 'pull_request'
+      && needs.build.result != 'cancelled'
+      && (needs.build.result == 'success' || !startsWith(github.ref, 'refs/tags/'))
     needs: build
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
+      # One directory per platform (digests-linux-amd64/…), so the next
+      # step can tell which platforms built.
       - uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
-          merge-multiple: true
+
+      - name: Platforms that built
+        id: digests
+        env:
+          # Keep in step with the build matrix.
+          PLATFORMS: linux-amd64 linux-arm64
+        run: |
+          shopt -s nullglob
+          refs=""
+          for p in $PLATFORMS; do
+            files=("$RUNNER_TEMP/digests/digests-$p"/*)
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "::warning title=Partial image::No $p image: its build failed, so this publish has only the other platforms."
+              continue
+            fi
+            for f in "${files[@]}"; do
+              refs="$refs $IMAGE@sha256:$(basename "$f")"
+            done
+          done
+          if [ -z "$refs" ]; then
+            echo "::error::No platform built; nothing to publish."
+            exit 1
+          fi
+          echo "refs=$refs" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -162,12 +200,13 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/digests
+        env:
+          REFS: ${{ steps.digests.outputs.refs }}
         run: |
-          # shellcheck disable=SC2046
+          # shellcheck disable=SC2046,SC2086
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf "$IMAGE@sha256:%s " *)
+            $REFS
 
       - name: Inspect
         env:
