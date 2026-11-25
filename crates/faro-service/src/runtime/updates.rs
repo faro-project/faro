@@ -32,7 +32,10 @@ pub fn rejected_package_signal(version: &faro_update::Version, reason: &str) -> 
 }
 
 /// Check after `first`, then about every `every`, until `stop` flips. A
-/// rejected package is reported to the core through `control` as tamper.
+/// rejected package is reported to the core through `control` as tamper,
+/// once per run of the service: a report lost to a restart before
+/// activation is made again, and a lasting attack is reported again after
+/// each restart.
 pub async fn update_loop(
     updater: ClientUpdater,
     first: Duration,
@@ -50,6 +53,7 @@ pub async fn update_loop(
         Ok(None) => {}
         Err(e) => tracing::warn!(error = %e, "cannot read the update record"),
     }
+    let mut reported = std::collections::BTreeSet::new();
     let mut wait = first;
     loop {
         tokio::select! {
@@ -68,12 +72,16 @@ pub async fn update_loop(
             Ok(Outcome::GaveUp { version }) => {
                 tracing::warn!(%version, "not retrying an update that failed to install");
             }
-            Ok(Outcome::Rejected { version, reason }) => {
-                // Before activation the core isn't reading yet; the signal
-                // waits in the channel until it is.
-                let sig = rejected_package_signal(&version, &reason);
-                if let Err(e) = control.try_send(Control::Tamper(sig)) {
-                    tracing::error!(error = %e, "could not report the rejected update package");
+            Ok(Outcome::Rejected { version, reason })
+            | Ok(Outcome::PreviouslyRejected { version, reason }) => {
+                if reported.insert(version.to_string()) {
+                    // Before activation the core isn't reading yet; the
+                    // signal waits in the channel until it is.
+                    let sig = rejected_package_signal(&version, &reason);
+                    if let Err(e) = control.try_send(Control::Tamper(sig)) {
+                        reported.remove(&version.to_string());
+                        tracing::error!(error = %e, "could not report the rejected update package");
+                    }
                 }
             }
             Ok(o) => tracing::debug!(outcome = ?o, "update check"),

@@ -446,7 +446,8 @@ mod tests {
     const TEAM: &str = "ABCDE12345";
 
     /// Output in the shape `pkgutil --check-signature` prints for a
-    /// notarized release package (fingerprints shortened).
+    /// notarized release package (made-up leaf fingerprint). The "(1)" in
+    /// the name checks that the team is taken from the last parentheses.
     fn pkgutil_ok(team: &str) -> String {
         format!(
             "Package \"Faro-1.2.0.pkg\":\n\

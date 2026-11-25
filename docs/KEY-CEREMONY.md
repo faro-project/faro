@@ -382,7 +382,10 @@ The timestamp must be re-signed about every day, by a machine, with no one prese
 First, what a leak costs:
 
 - **Timestamp key alone:** an attacker can keep clients on the current release (for example hold back a security fix) until `targets.json` expires, and can push clients' timestamp version so high that your real timestamps are refused until you rotate. They can't add or change a release file.
-- **Targets and timestamp keys together:** an attacker who also controls what some clients download (their own instance, or your publishing location) can make those clients **install code you didn't write**. Faro's macOS updater installs any package these keys approve. It doesn't check the package's Developer ID signature itself. Treat the targets key as the most valuable key after the root keys.
+- **Targets and timestamp keys together:** an attacker who also controls what some clients download (their own instance, or your publishing location) can approve any file as a release. Treat the targets key as the most valuable key after the root keys.
+  - **On macOS a second layer stops most of this.** Before installing, the updater checks the package's own signature: Faro's Developer ID Installer certificate (the Team ID compiled into the installed client) and notarization (PROTOCOL.md §8.2, step 5). So the attacker also needs the Developer ID Installer key and the notary credentials, which live in the Mac runner's keychain, not in Actions. A package that fails is not installed, and allies get a tamper alert.
+  - **What it doesn't stop:** a package you did sign and notarize, approved under a higher version number. The attacker could make clients install an older Faro release, or a build you signed but never published. Keep the signing keychain locked when no release is building (DEVELOPMENT.md, "Releasing").
+  - **Other platforms** have no second layer yet. There, these two keys are enough.
 
 #### Option A: GitHub Actions secrets
 
@@ -647,7 +650,7 @@ What clients do: they accept the new root, and from then on the old key counts f
 | What happened | What you do | What clients do |
 |---|---|---|
 | **The timestamp key leaked** | Rotate it at once ([6.3](#63-rotate-the-targets-or-timestamp-key)). | Until the new root: the attacker can hold them on the current release, but not change it. After it: they forget the attacker's timestamps and continue. |
-| **The targets key leaked** (with option A, assume the timestamp key leaked too) | Rotate **both** at once in one root. Tell instance admins. Check every published file against what you built. Find how the key leaked before trusting the new place. | Clients that installed nothing bad are fine after the new root. A client that installed a package you didn't build is compromised and must be reinstalled by hand. |
+| **The targets key leaked** (with option A, assume the timestamp key leaked too) | Rotate **both** at once in one root. Tell instance admins. Check every published file against what you built. Find how the key leaked before trusting the new place. | Clients that installed nothing bad are fine after the new root. macOS clients refuse a package that Faro's Developer ID didn't sign and notarize, and tell allies (a tamper alert). A client that installed a package you didn't build is compromised and must be reinstalled by hand. |
 | **An online key was lost** (secret deleted) | Rotate it ([6.3](#63-rotate-the-targets-or-timestamp-key)). | Nothing until the timestamp expires, then no updates until you publish. They keep running. |
 | **One root drive died** | Use its backup. Copy the key to a new drive. | Nothing. |
 | **One root key is lost** (both drives) | Replace it soon ([6.4](#64-replace-a-root-key)) with the other two. | Nothing. |

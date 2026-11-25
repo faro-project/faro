@@ -33,9 +33,11 @@
 //!
 //! **Rejected packages.** A package that fails the signature check with
 //! positive evidence that it isn't Faro's is recorded in `rejected` in
-//! `update-attempts.json`, never retried, and reported once
-//! ([`Outcome::Rejected`]) so the service can raise a tamper-class
-//! integrity failure. Nothing is installed and no install is recorded as
+//! `update-attempts.json` and never retried. The check that rejects it
+//! returns [`Outcome::Rejected`], and later checks that select it again
+//! return [`Outcome::PreviouslyRejected`] with the same reason, so the
+//! service can raise a tamper-class integrity failure (once per start: a
+//! report lost before activation is made again). Nothing is installed and no install is recorded as
 //! pending. A check that can't conclude installs nothing and is tried
 //! again at the next check.
 //!
@@ -202,8 +204,8 @@ pub enum Outcome {
     /// The package for `version` failed its signature check just now:
     /// not installed, and never retried. Report it as tamper.
     Rejected { version: Version, reason: String },
-    /// That package was rejected by an earlier check.
-    PreviouslyRejected { version: Version },
+    /// That package was rejected by an earlier check, for `reason`.
+    PreviouslyRejected { version: Version, reason: String },
 }
 
 /// What happened to the previous install, judged at service start.
@@ -386,8 +388,8 @@ impl ClientUpdater {
             return Ok(Outcome::NotInstallable { version });
         };
         let key = target.blake3.to_prefixed_hex();
-        if self.attempts()?.rejected.contains_key(&key) {
-            return Ok(Outcome::PreviouslyRejected { version });
+        if let Some(reason) = self.attempts()?.rejected.get(&key).cloned() {
+            return Ok(Outcome::PreviouslyRejected { version, reason });
         }
 
         let package = self.download(&target).await?;

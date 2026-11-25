@@ -513,13 +513,14 @@ async fn a_package_that_fails_its_signature_check_is_never_installed() {
     assert!(a.failures.is_empty());
     assert_eq!(a.rejected.len(), 1);
 
-    // Later checks don't download, check or report it again, even if a
-    // check would now pass.
+    // Later checks don't download or check it again, even if a check
+    // would now pass. They give the reason, for the service to report.
     installer.set_verdict(None);
     assert_eq!(
         u.check().await.unwrap(),
         Outcome::PreviouslyRejected {
-            version: Version::new(1, 2, 0)
+            version: Version::new(1, 2, 0),
+            reason: "signed by team ZZZZZ99999, not ABCDE12345".into()
         }
     );
     assert_eq!(installer.checked().len(), 1);

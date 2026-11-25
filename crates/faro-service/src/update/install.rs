@@ -60,6 +60,11 @@ pub fn platform_installer(state_dir: &Path) -> Option<std::sync::Arc<dyn Install
         // SAFETY: geteuid has no preconditions and cannot fail.
         let root = unsafe { libc::geteuid() } == 0;
         if packaged && root {
+            if super::signature::BUILD_POLICY == super::signature::PackagePolicy::RefuseAll {
+                tracing::warn!(
+                    "this build has no Team ID (FARO_TEAM_ID): it will refuse every update package"
+                );
+            }
             return Some(std::sync::Arc::new(LaunchdInstaller::new(state_dir)));
         }
         None
