@@ -4,6 +4,7 @@ pub mod account;
 pub mod admin;
 pub mod allies;
 pub mod auth;
+pub mod branding;
 pub mod devices;
 pub mod events;
 pub mod feed;
