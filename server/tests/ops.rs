@@ -165,6 +165,37 @@ async fn doctor_reports_problems_without_changing_anything() {
     assert_eq!(r.get("identity").unwrap().level, Level::Fail);
 }
 
+#[tokio::test]
+async fn doctor_warns_that_postgres_is_unsupported() {
+    use faro_server::doctor::{check_postgres, Report};
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = test_config(dir.path());
+    let mut r = Report::default();
+    check_postgres(&cfg, &mut r);
+    assert!(r.get("postgres").is_none(), "no line for SQLite");
+
+    // The SQLite instance's full report has no such line either.
+    let t = TestApp::new().await;
+    let r = faro_server::doctor::run(t.state.config(), false).await;
+    assert!(r.get("postgres").is_none(), "{}", r.render());
+
+    for url in ["postgres://faro:secret@db/faro", "postgresql://db/faro"] {
+        cfg.database_url = Some(url.into());
+        cfg.validate().unwrap();
+        let mut r = Report::default();
+        check_postgres(&cfg, &mut r);
+        let c = r.get("postgres").unwrap();
+        assert_eq!(c.level, Level::Warn);
+        assert!(
+            c.detail
+                .starts_with("experimental, not supported in this release"),
+            "{}",
+            c.detail
+        );
+        assert!(!r.has_failures(), "a warning, not a refusal");
+    }
+}
+
 fn self_signed(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, Vec<u8>) {
     let ck = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let cert = dir.join("cert.pem");

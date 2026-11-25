@@ -46,6 +46,7 @@ Tags in use:
 | `faro/safety-code/v1` | Safety code |
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
 | `faro/key-rewrap/v1` | Member-signed replacement of their wrapped keys (§4.3) |
+| `faro/ally-key-rewrap/v1` | Challenge-proven replacement of an ally's wrapped key (§4.3) |
 
 ## 3. Events and the hash chain
 
@@ -173,7 +174,25 @@ After unlocking, clients check the secrets against the public keys stored next t
 
 `signing_bytes = Canonical("faro/key-rewrap/v1").str(instance_id).str(member_id).fixed(sign_pubkey).i64(issued_at_ms).str(wrapped_sign_key).str(wrapped_enc_key).str(recovery_wrapped)`.
 
-The instance can't tell a good wrapped key from garbage, so the signature is what stops a stolen session from overwriting a member's keys and locking them out. Carrying the values as signed text means nobody has to canonicalize JSON. The freshness rules stop an old request from being replayed to restore an old passphrase. Ally keys can't be re-wrapped yet: an X25519 key can't sign, so this needs a different proof of possession.
+The instance can't tell a good wrapped key from garbage, so the signature is what stops a stolen session from overwriting a member's keys and locking them out. Carrying the values as signed text means nobody has to canonicalize JSON. The freshness rules stop an old request from being replayed to restore an old passphrase.
+
+**Changing an ally's passphrase.** The ally key is X25519 and can't sign, so possession is proven with a challenge instead. The stored format doesn't change (the `wrapped_privkey` row above), and neither does the key, so members see the same safety code and devices the same endorsement.
+
+1. `POST /v1/me/ally-key/challenge` returns `{enc_pubkey, issued_at_ms, sealed_challenge}`: 32 bytes sealed to the ally's key (`crypto_box_seal`, base64url). The instance computes the challenge as a keyed hash (with its token-hashing key) over the ally's id, their key, `issued_at_ms` and the stored `wrapped_privkey`, so it keeps no state, and once the wrapping changes, every earlier challenge stops matching.
+2. The browser opens it and sends `PUT /v1/me/ally-key/wrapped`: an `AllyKeyRewrap`, flattened with `proof`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `ally_id` | string | The signed-in account |
+| `enc_pubkey` | 32 bytes | Must be the stored ally key: it can be re-wrapped, never replaced |
+| `issued_at_ms` | i64 | From the challenge; refused once more than 5 minutes old |
+| `wrapped_privkey` | string | The **JSON text** of the new value, exactly as proven; the instance checks it, then parses and stores it |
+| `proof` | `b3:<hex>` | `BLAKE3-keyed(challenge, proof_bytes)` |
+
+`proof_bytes = Canonical("faro/ally-key-rewrap/v1").str(instance_id).str(ally_id).fixed(enc_pubkey).i64(issued_at_ms).str(wrapped_privkey)`.
+
+The browser never sends the opened challenge itself, only a MAC keyed with it. Otherwise a hostile instance could pass off an item's sealed key as a "challenge" and have the ally's browser open it. Before uploading, the browser opens each new copy it made, from the exact text it will send, and checks that the secret inside has the stored public key, because a bad copy would lock the ally out of every member they support. Members' browsers do the same check before `PUT /v1/me/keys/wrapped`. Neither change notifies anyone.
 
 ## 5. Trust: endorsements
 

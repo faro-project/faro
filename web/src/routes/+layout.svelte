@@ -174,10 +174,10 @@
 			</p>
 		</div>
 	{/if}
-	{#if keyring.memberRecovered && !page.url.pathname.endsWith('/settings')}
+	{#if (keyring.memberRecovered || keyring.allyRecovered) && !page.url.pathname.endsWith('/settings')}
 		<div class="notice warn" role="status">
 			<p>
-				You unlocked your keys with your recovery code.
+				You unlocked your {keyring.memberRecovered ? 'keys' : 'ally key'} with your recovery code.
 				<a href={resolve('/settings')}>Choose a new passphrase</a> so you don't need it next time.
 			</p>
 		</div>

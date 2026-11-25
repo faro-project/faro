@@ -65,7 +65,7 @@ axum.workspace = true
 # its integration-test harness (server/tests/common/mod.rs), which needs
 # sqlx (direct SQL, e.g. the malicious-instance rollback) and tower's
 # `oneshot` for the simulated browsers.
-faro-server = { path = "../../server", version = "0.1.0" }
+faro-server = { path = "../../server", version = "0.1.0-beta.1" }
 sqlx.workspace = true
 tower = { workspace = true, features = ["util"] }
 # tests/update.rs serves a directory as a fake instance's mirror.

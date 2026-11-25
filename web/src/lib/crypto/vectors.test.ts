@@ -18,6 +18,7 @@ import {
 } from './passphrase.ts';
 import {
 	allyEndorsementSigningBytes,
+	allyKeyRewrapProofBytes,
 	checkManifest,
 	deviceEndorsementSigningBytes,
 	eventBodyAad,
@@ -26,6 +27,7 @@ import {
 	manifestSigningBytes,
 	memberBindingSigningBytes,
 	nextManifest,
+	proveAllyKeyRewrap,
 	reportBodyAad,
 	signWith,
 	validateManifest,
@@ -189,6 +191,30 @@ test('manifests, endorsements and bindings match Rust', () => {
 		assert.ok(verifySigned(pk, s, bytes as (b: any) => Uint8Array), name);
 	}
 	assert.equal(V.device_endorsement.signed.min_manifest.hash, V.manifest.hash);
+});
+
+test('ally key re-wrap proofs match Rust', () => {
+	const { proof, ...body } = V.ally_key_rewrap.proven;
+	const challenge = unhex(V.ally_key_rewrap.challenge_hex);
+	assert.equal(hex(allyKeyRewrapProofBytes(body)), V.ally_key_rewrap.proof_bytes_hex);
+	assert.equal(proveAllyKeyRewrap(body, challenge).proof, proof);
+	// Every field, and the challenge, is covered.
+	const other = new Uint8Array(challenge).fill(0x56);
+	assert.notEqual(proveAllyKeyRewrap(body, other).proof, proof);
+	for (const change of [
+		{ instance_id: 'inst_other' },
+		{ ally_id: 'usr_other' },
+		{ enc_pubkey: K.ally_b_pubkey },
+		{ issued_at_ms: body.issued_at_ms + 1 },
+		{ wrapped_privkey: body.wrapped_privkey + ' ' }
+	]) {
+		assert.notEqual(proveAllyKeyRewrap({ ...body, ...change }, challenge).proof, proof);
+	}
+	assert.throws(() => proveAllyKeyRewrap(body, challenge.subarray(1)), /32 bytes/);
+	// The 32-byte challenge comes as a sealed box to the ally key, like the
+	// Rust-sealed box here.
+	const opened = sealOpen(unb64(V.sealed_box.sealed), unb64(V.sealed_box.recipient_secret));
+	assert.equal(opened.length, 32);
 });
 
 test('manifest validation and the next version', () => {

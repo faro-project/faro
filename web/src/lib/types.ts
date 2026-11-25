@@ -307,6 +307,16 @@ export interface AllyKeyBlob {
 	created_at_ms: number;
 }
 
+/**
+ * `POST /v1/me/ally-key/challenge`: 32 bytes sealed to the ally key, for
+ * proving `PUT /v1/me/ally-key/wrapped` (an `AllyKeyRewrap` with `proof`).
+ */
+export interface AllyKeyChallenge {
+	enc_pubkey: string;
+	issued_at_ms: number;
+	sealed_challenge: string;
+}
+
 // ---- Devices -------------------------------------------------------------
 
 export type Platform = 'macos' | 'windows' | 'linux';
