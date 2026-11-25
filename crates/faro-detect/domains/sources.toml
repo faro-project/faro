@@ -26,8 +26,10 @@
 # `domains-compile fetch`. It stops at the first file whose hash changed and
 # prints the new hash. Check what changed upstream (and that the licence and
 # copyright notices haven't), update that `blake3` pin, and repeat until
-# fetch passes.
+# fetch passes. Then bump `bundle_version`: the update channel publishes each
+# bundle version once, and refuses the same version with other bytes.
 version = 1
+bundle_version = "1.0.0"
 
 # The text that applies together with each MIT source's copyright notices.
 [license_texts]

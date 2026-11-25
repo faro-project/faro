@@ -422,7 +422,7 @@ impl VerifiedModel {
     }
 }
 
-fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, DetectError> {
+pub(crate) fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, DetectError> {
     let io = |source| DetectError::Io {
         path: path.to_owned(),
         source,

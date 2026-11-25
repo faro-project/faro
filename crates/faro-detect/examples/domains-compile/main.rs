@@ -12,9 +12,12 @@
 //! A source is either a `url`, which `fetch` downloads into `--sources-dir`
 //! (named after the source), or a local `path` relative to the config file.
 //! `build` reads only those files, refuses any whose hash differs from its
-//! pin, and writes the bundle plus a JSON manifest (sources, licences,
-//! attribution, entry counts, BLAKE3 of the bundle). The same config and
-//! inputs always give byte-identical outputs.
+//! pin, and writes the bundle plus a JSON manifest
+//! ([`faro_detect::DomainsManifest`]: the config's `bundle_version`,
+//! sources, licences, attribution, entry counts, BLAKE3 of the bundle).
+//! Clients load the two with [`faro_detect::load_domains`], which checks
+//! all of it again. The same config and inputs always give byte-identical
+//! outputs.
 //!
 //! A source is in one of three states:
 //!
@@ -36,9 +39,12 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Parser, Subcommand};
-use faro_detect::attribution::{check_attribution, Attribution, AttributionError};
+use faro_detect::attribution::{
+    check_attribution, license_is_allowed, spdx_ids, Attribution, AttributionError,
+};
 use faro_detect::{
-    Category, CompileStats, DomainCategorizer, DomainCategorizerBuilder, ALLOWED_MODEL_LICENSES,
+    Category, CompileStats, DomainCategorizer, DomainCategorizerBuilder, DomainSource,
+    DomainsBundleInfo, DomainsManifest, DOMAINS_MANIFEST_FORMAT,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,7 +54,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CONFIG_VERSION: u32 = 1;
-const MANIFEST_FORMAT: &str = "faro-domains-manifest/1";
 /// Largest source file accepted (the biggest lists in use are a few MB).
 const MAX_SOURCE_BYTES: u64 = 256 << 20;
 const DEFAULT_SOURCES_DIR: &str = "target/domains/sources";
@@ -179,6 +184,10 @@ fn blake3_hex(bytes: &[u8]) -> String {
 #[serde(deny_unknown_fields)]
 struct Config {
     version: u32,
+    /// The bundle's own version (`MAJOR.MINOR.PATCH`), copied into the
+    /// manifest. Bump it whenever a source or pin changes: the update
+    /// channel publishes each version once and never changes its bytes.
+    bundle_version: String,
     /// Full licence texts by SPDX id, for licences in
     /// [`faro_detect::attribution::TEXT_REQUIRED_LICENSES`]. Copied into the manifest.
     #[serde(default)]
@@ -249,6 +258,11 @@ impl Config {
             "unsupported config version {} (expected {CONFIG_VERSION})",
             config.version
         );
+        ensure!(
+            is_release_version(&config.bundle_version),
+            "bundle_version {:?} must be MAJOR.MINOR.PATCH (with an optional -pre-release)",
+            config.bundle_version
+        );
         for (id, text) in &config.license_texts {
             ensure!(
                 !text.trim().is_empty(),
@@ -268,20 +282,24 @@ impl Config {
     }
 }
 
-/// The licence identifiers in an SPDX expression (operators and
-/// parentheses dropped; `WITH` is kept, so it never matches the allowlist).
-fn spdx_ids(expr: &str) -> Vec<&str> {
-    expr.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-        .filter(|t| !t.is_empty() && *t != "AND" && *t != "OR")
-        .collect()
-}
-
-/// Whether every identifier in an SPDX expression is on the allowlist.
-/// Deliberately conservative: `OR` is treated like `AND`, and `WITH`
-/// exceptions are not accepted.
-fn license_is_permissive(expr: &str) -> bool {
-    let ids = spdx_ids(expr);
-    !ids.is_empty() && ids.iter().all(|id| ALLOWED_MODEL_LICENSES.contains(id))
+/// `MAJOR.MINOR.PATCH`, optionally `-pre` (semver without build metadata,
+/// which can't appear in a target name).
+fn is_release_version(v: &str) -> bool {
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
+    let numeric = |p: &str| {
+        !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && (p == "0" || !p.starts_with('0'))
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| numeric(p))
+        && pre.is_none_or(|p| {
+            p.split('.').all(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+        })
 }
 
 impl Source {
@@ -326,7 +344,7 @@ impl Source {
         }
         if self.approved {
             ensure!(
-                license_is_permissive(&self.license),
+                license_is_allowed(&self.license),
                 "source {name} is approved, but its licence {:?} is not on the \
                  Apache-2.0-compatible allowlist (ARCHITECTURE.md §11)",
                 self.license
@@ -469,9 +487,10 @@ enum Why {
 /// The result of [`compile`].
 #[derive(Debug)]
 struct Compiled {
+    version: String,
     bundle: Vec<u8>,
     domains: usize,
-    sources: Vec<SourceReport>,
+    sources: Vec<DomainSource>,
     /// The texts of the licences of the included sources.
     license_texts: BTreeMap<String, String>,
     excluded: Vec<Excluded>,
@@ -526,7 +545,7 @@ fn compile(
                 license_texts.insert(id.to_owned(), text.clone());
             }
         }
-        sources.push(SourceReport::new(s, stats));
+        sources.push(source_report(s, stats));
     }
     ensure!(!sources.is_empty(), "no sources to compile");
     let categorizer = builder.build()?;
@@ -539,6 +558,7 @@ fn compile(
         "bundle round trip lost entries"
     );
     Ok(Compiled {
+        version: config.bundle_version.clone(),
         bundle,
         domains: categorizer.len(),
         sources,
@@ -547,73 +567,31 @@ fn compile(
     })
 }
 
-/// The JSON written next to the bundle. It has no timestamps, so identical
-/// inputs give an identical manifest.
-#[derive(Debug, Serialize)]
-struct Manifest {
-    format: &'static str,
-    notice: &'static str,
-    bundle: BundleInfo,
-    /// Distinct domains in the bundle.
-    domains: usize,
-    /// True only for `--allow-unapproved` builds, which must never ship.
-    unapproved_included: bool,
-    sources: Vec<SourceReport>,
-    license_texts: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Serialize)]
-struct BundleInfo {
-    file: String,
-    bytes: u64,
-    blake3: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SourceReport {
-    name: String,
-    category: Category,
-    format: Format,
-    license: String,
-    approved: bool,
-    origin: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    homepage: Option<String>,
-    blake3: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attribution: Option<Attribution>,
-    /// Non-empty, non-comment lines.
-    lines: usize,
-    /// Domains accepted (some may also be in other sources).
-    domains: usize,
-    /// Tokens that couldn't be used (IP literals, local names, bad syntax).
-    skipped: usize,
-}
-
-impl SourceReport {
-    fn new(s: &Source, stats: CompileStats) -> Self {
-        SourceReport {
-            name: s.name.clone(),
-            category: s.category,
-            format: s.format,
-            license: s.license.clone(),
-            approved: s.approved,
-            origin: s.origin().to_owned(),
-            homepage: s.homepage.clone(),
-            blake3: s.blake3.clone(),
-            attribution: s.attribution.clone(),
-            lines: stats.lines,
-            domains: stats.domains,
-            skipped: stats.skipped,
-        }
+fn source_report(s: &Source, stats: CompileStats) -> DomainSource {
+    DomainSource {
+        name: s.name.clone(),
+        category: s.category,
+        format: s.format.to_string(),
+        license: s.license.clone(),
+        approved: s.approved,
+        origin: s.origin().to_owned(),
+        homepage: s.homepage.clone(),
+        blake3: s.blake3.clone(),
+        attribution: s.attribution.clone(),
+        lines: stats.lines,
+        domains: stats.domains,
+        skipped: stats.skipped,
     }
 }
 
-fn manifest(compiled: &Compiled, bundle_file: &str) -> Manifest {
-    Manifest {
-        format: MANIFEST_FORMAT,
-        notice: MANIFEST_NOTICE,
-        bundle: BundleInfo {
+/// The JSON written next to the bundle ([`DomainsManifest`]). It has no
+/// timestamps, so identical inputs give an identical manifest.
+fn manifest(compiled: &Compiled, bundle_file: &str) -> DomainsManifest {
+    DomainsManifest {
+        format: DOMAINS_MANIFEST_FORMAT.to_owned(),
+        notice: MANIFEST_NOTICE.to_owned(),
+        version: compiled.version.clone(),
+        bundle: DomainsBundleInfo {
             file: bundle_file.to_owned(),
             bytes: compiled.bundle.len() as u64,
             blake3: blake3_hex(&compiled.bundle),
@@ -632,7 +610,7 @@ fn build(
     out: &Path,
     manifest_path: &Path,
     allow_unapproved: bool,
-) -> Result<(Vec<Excluded>, Manifest)> {
+) -> Result<(Vec<Excluded>, DomainsManifest)> {
     let config = Config::load(config_path)?;
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     let compiled = compile(&config, config_dir, sources_dir, allow_unapproved)?;
@@ -640,7 +618,11 @@ fn build(
     Ok((compiled.excluded, m))
 }
 
-fn write_outputs(compiled: &Compiled, out: &Path, manifest_path: &Path) -> Result<Manifest> {
+fn write_outputs(
+    compiled: &Compiled,
+    out: &Path,
+    manifest_path: &Path,
+) -> Result<DomainsManifest> {
     let file = out
         .file_name()
         .and_then(|f| f.to_str())
@@ -697,7 +679,8 @@ mod tests {
     /// by `[source.attribution]` and `[license_texts]` tables).
     fn source_toml(extra: &str) -> String {
         format!(
-            "version = 1\n[[source]]\nname = \"s\"\ncategory = \"adult\"\nformat = \"domains\"\n\
+            "version = 1\nbundle_version = \"1.0.0\"\n[[source]]\nname = \"s\"\n\
+             category = \"adult\"\nformat = \"domains\"\n\
              blake3 = \"{}\"\n{extra}\n",
             "0".repeat(64)
         )
@@ -757,7 +740,8 @@ mod tests {
         );
 
         let m = manifest(&c, "domains.bin");
-        assert_eq!(m.format, MANIFEST_FORMAT);
+        assert_eq!(m.format, DOMAINS_MANIFEST_FORMAT);
+        assert_eq!(m.version, "1.0.0");
         assert_eq!(m.bundle.blake3, blake3_hex(&c.bundle));
         assert_eq!(m.bundle.bytes, c.bundle.len() as u64);
         assert!(!m.unapproved_included);
@@ -783,6 +767,36 @@ mod tests {
         let ja = serde_json::to_string(&manifest(&a, "domains.bin")).unwrap();
         let jb = serde_json::to_string(&manifest(&b, "domains.bin")).unwrap();
         assert_eq!(ja, jb);
+    }
+
+    #[test]
+    fn bundle_versions() {
+        for ok in ["1.0.0", "0.10.2", "2.0.0-rc.1"] {
+            assert!(is_release_version(ok), "{ok}");
+        }
+        for bad in ["", "1", "1.0", "1.0.0+b", "01.0.0", "1.0.0-", "1.0.0-a..b", "v1.0.0"] {
+            assert!(!is_release_version(bad), "{bad}");
+        }
+        let ok = "path = \"x\"\nlicense = \"CC0-1.0\"\napproved = true";
+        let text = source_toml(ok).replace("\"1.0.0\"", "\"1.0\"");
+        assert!(format!("{:#}", Config::parse(&text).unwrap_err()).contains("bundle_version"));
+    }
+
+    /// A client refuses what `--allow-unapproved` builds.
+    #[test]
+    fn unapproved_builds_never_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("domains.bin");
+        let manifest_path = out.with_extension("manifest.json");
+        build(
+            &fixtures().join("sources.toml"),
+            &fixtures().join("no-such-dir"),
+            &out,
+            &manifest_path,
+            true,
+        )
+        .unwrap();
+        assert!(faro_detect::load_domains(&manifest_path).is_err());
     }
 
     #[test]
@@ -850,7 +864,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let body = b"fetched-fixture.test\n";
         let text = format!(
-            "version = 1\n[[source]]\nname = \"remote\"\ncategory = \"gambling\"\n\
+            "version = 1\nbundle_version = \"1.0.0\"\n[[source]]\nname = \"remote\"\n\
+             category = \"gambling\"\n\
              format = \"domains\"\nlicense = \"CC0-1.0\"\napproved = true\n\
              url = \"https://example.invalid/list.txt\"\nblake3 = \"{}\"\n",
             blake3_hex(body)
@@ -885,6 +900,10 @@ mod tests {
         assert_eq!(excluded.len(), 2);
         let bundle = fs::read(&out).unwrap();
         assert!(DomainCategorizer::from_bytes(&bundle).is_ok());
+        // A client loads it with every check (faro_detect::load_domains).
+        let loaded = faro_detect::load_domains(&manifest_path).unwrap();
+        assert_eq!(loaded.manifest.version, "1.0.0");
+        assert_eq!(loaded.categorizer.len(), 4);
         let m: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         assert_eq!(m["bundle"]["file"], "domains.bin");
@@ -1032,7 +1051,7 @@ mod tests {
         let twice = format!(
             "{}{}",
             source_toml(ok),
-            source_toml(ok).replace("version = 1\n", "")
+            source_toml(ok).replace("version = 1\nbundle_version = \"1.0.0\"\n", "")
         );
         assert!(format!("{:#}", Config::parse(&twice).unwrap_err()).contains("duplicate"));
     }

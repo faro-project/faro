@@ -59,6 +59,7 @@ pub mod bench;
 pub mod classifier;
 pub mod context;
 pub mod dhash;
+pub mod domain_manifest;
 pub mod domains;
 mod error;
 pub mod fusion;
@@ -80,6 +81,10 @@ pub use classifier::{
 };
 pub use context::{AppRule, ContextAnalyzer, ContextConfig, ContextFinding, ContextSignals};
 pub use dhash::{dhash, hamming, DedupeDecision, Deduper, DEFAULT_DEDUPE_THRESHOLD};
+pub use domain_manifest::{
+    load_domains, DomainSource, DomainsBundleInfo, DomainsManifest, LoadedDomains,
+    DOMAINS_MANIFEST_FORMAT,
+};
 pub use domains::{Category, CompileStats, DomainCategorizer, DomainCategorizerBuilder};
 pub use error::DetectError;
 pub use fusion::{FusionResult, PolicyConfig, PolicyEngine};
