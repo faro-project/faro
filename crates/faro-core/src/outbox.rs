@@ -464,6 +464,12 @@ impl Outbox {
         let path = dir.join(OUTBOX_FILE);
         restrict_perms(&path)?;
         let mut conn = Connection::open(&path)?;
+        // How long to wait for another connection's transaction. SQLite's
+        // busy handler polls rather than queues, so a connection that
+        // commits and begins again straight away can keep the others
+        // waiting past this. Nothing does that here: the service has one
+        // connection, shared by all its tasks, and the `status` and `enroll`
+        // commands make a few short transactions (#53).
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -1735,39 +1741,74 @@ mod tests {
         );
     }
 
+    /// Six connections race to move the checkpoint, each presenting the
+    /// versions in its own order. After its own `accept_manifest`, a
+    /// connection must never read a checkpoint below the version it
+    /// presented, and the newest manifest wins in the end.
+    ///
+    /// The connections are opened first and then race in rounds: in each
+    /// round every connection makes one `accept_manifest` call, all at once.
+    /// That is how the outbox is shared in practice (one update, then other
+    /// work), and every round has six writers contending for the lock.
+    ///
+    /// Free-running loops are not a race at all. SQLite's busy handler polls
+    /// instead of queueing, so a connection that commits and begins again
+    /// straight away keeps the lock while the others sleep: the threads ran
+    /// one after another, and the last one to get the lock waited for the
+    /// others' whole runs. On the Windows runner that passed the 5 s busy
+    /// timeout (#53). In rounds, a connection waits for at most five single
+    /// updates.
     #[test]
     fn racing_checkpoint_updates_never_move_backwards() {
         let e = env();
         const VERSIONS: u64 = 40;
+        const THREADS: u64 = 6;
         let manifests: std::sync::Arc<Vec<SignedRecipientManifest>> =
             std::sync::Arc::new((1..=VERSIONS).map(|v| e.f.manifest(v)).collect());
-        let threads: Vec<_> = (0..6u64)
+        let round = std::sync::Arc::new(std::sync::Barrier::new(THREADS as usize));
+        let threads: Vec<_> = (0..THREADS)
             .map(|t| {
-                let dir = e.dir.clone();
-                let inst = e.f.inst.clone();
-                let dev = e.w.device_id().clone();
+                let mut ob = Outbox::open(&e.dir, &e.f.inst, e.w.device_id()).unwrap();
                 let pinned = e.pinned();
                 let member = e.f.member.clone();
                 let manifests = manifests.clone();
-                std::thread::spawn(move || {
-                    let mut ob = Outbox::open(&dir, &inst, &dev).unwrap();
-                    // Each thread walks the versions in a different order.
-                    for i in 0..VERSIONS {
+                let round = round.clone();
+                std::thread::spawn(move || -> Result<(), String> {
+                    let mut step = |i: u64| -> Result<(), String> {
+                        // Each thread walks the versions in a different order.
                         let v = (i * (2 * t + 1) + t) % VERSIONS + 1;
                         let m = &manifests[(v - 1) as usize];
                         match ob.accept_manifest(m, &pinned, &member) {
                             Ok(_) => {}
                             Err(OutboxError::Manifest(RecipientError::Rollback { .. })) => {}
-                            Err(other) => panic!("unexpected {other:?}"),
+                            Err(other) => return Err(format!("accepting v{v}: {other:?}")),
                         }
-                        let now = ob.manifest_checkpoint().unwrap().unwrap();
-                        assert!(now.version >= v, "checkpoint went below {v}: {now:?}");
+                        let now = ob
+                            .manifest_checkpoint()
+                            .map_err(|err| format!("reading after v{v}: {err:?}"))?
+                            .ok_or("checkpoint disappeared")?;
+                        if now.version < v {
+                            return Err(format!("checkpoint went below {v}: {now:?}"));
+                        }
+                        Ok(())
+                    };
+                    let mut result = Ok(());
+                    for i in 0..VERSIONS {
+                        // Keep meeting the others after a failure, so they
+                        // are not left waiting at the barrier.
+                        round.wait();
+                        if result.is_ok() {
+                            result = step(i);
+                        }
                     }
+                    result
                 })
             })
             .collect();
-        for t in threads {
-            t.join().unwrap();
+        for (t, handle) in threads.into_iter().enumerate() {
+            if let Err(err) = handle.join().unwrap() {
+                panic!("thread {t}: {err}");
+            }
         }
         let last = manifests.last().unwrap().body.reference();
         assert_eq!(e.ob.manifest_checkpoint().unwrap(), Some(last));
