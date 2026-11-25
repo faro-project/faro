@@ -43,6 +43,7 @@ pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod db;
+pub mod deletion;
 pub mod device_auth;
 pub mod doctor;
 pub mod error;

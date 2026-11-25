@@ -492,9 +492,11 @@ async fn a_member_can_remove_a_device_and_allies_are_told() {
 
     let r = t.call(Method::DELETE, &path, None, Some(&session)).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
-    // Its token and key no longer authenticate.
+    // Its token and key no longer authenticate. The device itself (token
+    // and signature) learns why, so its uninstaller knows allies were told.
     let r = t.heartbeat(&dev, DeviceState::Active).await;
-    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.error_code(), "device_removed");
     // It is gone from the list, its episode is closed, and the removal is
     // an urgent alert.
     let l = t.get("/v1/me/devices", Some(&session)).await;

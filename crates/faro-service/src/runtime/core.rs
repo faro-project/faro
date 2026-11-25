@@ -272,6 +272,11 @@ fn capture_reason(cause: CaptureCause) -> CaptureReason {
     }
 }
 
+/// An empty context is how the agent says no browser tab is known.
+fn browser_context(b: BrowserContext) -> Option<BrowserContext> {
+    (b != BrowserContext::default()).then_some(b)
+}
+
 fn url_host(b: &BrowserContext) -> Option<String> {
     let u = url::Url::parse(b.url.as_deref()?).ok()?;
     u.host_str().map(str::to_owned)
@@ -1165,6 +1170,11 @@ impl Core {
                     self.context.app.as_ref().map(|a| &a.id) != app.as_ref().map(|a| &a.id);
                 self.context.app = app;
                 self.context.window_title = title;
+                if changed {
+                    // The tab belonged to the previous app. The agent sends
+                    // the new app's tab, if any, right after.
+                    self.context.browser = None;
+                }
                 if changed && self.capturing() {
                     self.scheduler
                         .on_trigger(mono, Trigger::ForegroundAppChanged);
@@ -1173,7 +1183,7 @@ impl Core {
             SourceEvent::Browser(b) => {
                 let changed = b.url.is_some()
                     && self.context.browser.as_ref().and_then(|c| c.url.as_ref()) != b.url.as_ref();
-                self.context.browser = Some(b);
+                self.context.browser = browser_context(b);
                 if changed && self.capturing() {
                     self.scheduler.on_trigger(mono, Trigger::NewUrl);
                 }
@@ -1348,5 +1358,29 @@ impl Core {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_browser_context_clears() {
+        assert_eq!(browser_context(BrowserContext::default()), None);
+        let private = BrowserContext {
+            incognito: true,
+            ..BrowserContext::default()
+        };
+        assert_eq!(browser_context(private.clone()), Some(private));
+    }
+
+    #[test]
+    fn reduced_urls_keep_their_host() {
+        let b = BrowserContext {
+            url: Some("https://example.test/".into()),
+            ..BrowserContext::default()
+        };
+        assert_eq!(url_host(&b).as_deref(), Some("example.test"));
     }
 }

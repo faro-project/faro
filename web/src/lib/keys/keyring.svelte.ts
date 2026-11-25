@@ -31,6 +31,8 @@ class Keyring {
 	ally = $state.raw<AllyKey | null>(null);
 	/** The member keys were unlocked with the recovery code (time for a new passphrase). */
 	memberRecovered = $state(false);
+	/** The ally key was unlocked with the recovery code. */
+	allyRecovered = $state(false);
 
 	private timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -45,9 +47,10 @@ class Keyring {
 		this.touch();
 	}
 
-	setAlly(k: AllyKey) {
+	setAlly(k: AllyKey, recovered = false) {
 		this.forgetAlly();
 		this.ally = k;
+		this.allyRecovered = recovered;
 		this.touch();
 	}
 
@@ -82,6 +85,7 @@ class Keyring {
 	private forgetAlly() {
 		if (this.ally) wipe(this.ally.encSecret);
 		this.ally = null;
+		this.allyRecovered = false;
 	}
 
 	lock() {

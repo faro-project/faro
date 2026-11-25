@@ -14,6 +14,7 @@ import type {
 	ServerAlertKind,
 	TamperSignal
 } from '../types.ts';
+import { date } from '../format.ts';
 
 export type Tone = 'urgent' | 'normal' | 'info' | 'good';
 
@@ -204,6 +205,40 @@ function describeAlert(
 			const n = who(after('ally:'));
 			return {
 				title: n ? `${n}'s account was re-enabled` : "An ally's account was re-enabled",
+				tone: 'info'
+			};
+		}
+		case 'account_deleted': {
+			const when = Number(d.purge_after);
+			return {
+				title: 'The account is being deleted',
+				text: when
+					? `Until ${date(when)} nothing changes, and the deletion can be cancelled. Then everything about the account is removed from this server.`
+					: 'After 7 days everything about the account is removed from this server.',
+				tone
+			};
+		}
+		case 'ally_deleted': {
+			const n = who(d.ally);
+			const when = Number(d.purge_after);
+			return {
+				title: n ? `${n} is deleting their account` : 'An ally is deleting their account',
+				text: when
+					? `They stop being an ally on ${date(when)}, unless they cancel.`
+					: 'They stop being an ally after 7 days, unless they cancel.',
+				tone
+			};
+		}
+		case 'account_deletion_cancelled': {
+			const n = who(d.ally);
+			const asked = Number(d.requested);
+			return {
+				title: d.ally
+					? `${n ?? 'An ally'} cancelled deleting their account`
+					: 'The account deletion was cancelled',
+				text: asked
+					? `The deletion was asked for on ${date(asked)}. Nothing will be deleted.`
+					: undefined,
 				tone: 'info'
 			};
 		}

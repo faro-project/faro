@@ -89,6 +89,10 @@ pub struct DueNotification {
     /// Display name of the account the alert is about, when that is not the
     /// member (the ally whose account was disabled or re-enabled).
     pub about_name: Option<String>,
+    /// The alert's `detail` code (account-status emails take dates from it).
+    pub alert_detail: Option<String>,
+    /// When the alert was raised.
+    pub alert_created_at_ms: Option<i64>,
 }
 
 /// Due pending notifications of one mode, oldest first.
@@ -104,6 +108,7 @@ pub async fn due<'e>(
                 COALESCE(a.member_id, rp.member_id) AS member_id,
                 COALESCE(a.device_id, rp.device_id) AS device_id,
                 a.source AS alert_source, a.kind AS alert_kind,
+                a.detail AS alert_detail, a.created_at AS alert_created_at,
                 a.extra_recipient_id,
                 m.display_name AS member_name, d.name AS device_name,
                 ab.display_name AS about_name,
@@ -154,6 +159,8 @@ pub async fn due<'e>(
                 created_at_ms: r.try_get("created_at")?,
                 alert: source.zip(kind),
                 about_name: r.try_get("about_name")?,
+                alert_detail: r.try_get("alert_detail")?,
+                alert_created_at_ms: r.try_get("alert_created_at")?,
             })
         })
         .collect()

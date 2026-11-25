@@ -7,7 +7,7 @@
 > - The server (`faro-server`) runs and its API works. Its web app has the **setup page**, **sign-in** by emailed link, the **admin console** (overview, inviting members, settings, email test), and the **member and ally pages**: members set up their keys, add and approve computers, invite and approve allies and see their own activity; allies accept invitations and read the alerts and reports of the people they support. There is **no released desktop app** for members yet, only development builds of the macOS client, so members have nothing official to enroll their computers with. This guide is for pilot instances and testers.
 > - **There are no releases yet.** You can build the image yourself from the source code (one command; it takes a while the first time), or use the development image `ghcr.io/faro-project/faro-server:main` that CI builds from the latest code for amd64 and arm64 (see [Path B](#4-path-b-a-raspberry-pi)).
 > - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
-> - **Postgres is untested** in these deployment files. Use the built-in SQLite database, which is the right choice for almost everyone anyway.
+> - **The beta supports SQLite only.** Use the built-in SQLite database, which is the right choice for almost everyone anyway. `faro-server` can also run on Postgres (`FARO_DATABASE_URL=postgres://…`), but that is **experimental and not supported in this release**: nothing tests it, and `faro-server doctor` and the startup log warn about it.
 > - The **update mirror** is built, and the macOS client installs updates from it, but the Faro project hasn't published a signed release or its root of trust yet, so there is nothing to mirror. See [Updates for members' computers](#updates-for-members-computers).
 > - Not built yet: passkey sign-in (you sign in with email links for now), Web Push notifications (email only), and S3 storage for attachments (local disk only).
 
@@ -288,7 +288,7 @@ sudo docker compose exec faro faro-server init
 **3. Use the admin console** at `https://faro.yourchurch.org/admin` (the **Admin** link at the top of every page, once you're signed in as the admin):
 
 - **Overview:** how many people and computers there are, when computers last checked in, storage use and email delivery, plus the notice members see of what you can and cannot see as the operator.
-- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own.
+- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. People can delete their own accounts from Settings. The People page then shows "being deleted" with the date, and while the deletion waits you can't disable or re-enable that account. As the only admin you can't delete your own account.
 - **Settings:** registration, retention and the missed check-in grace period.
 - **Email:** send yourself a test message.
 
@@ -453,6 +453,7 @@ faro-server doctor
 [OK  ] database       sqlite reachable, schema up to date (4 migrations)
 [OK  ] identity       instance inst_… matches identity.key
 [OK  ] settings       registration invite-only, retention 90/30/90 days (headers/blobs/alerts), liveness grace 10800 s
+[OK  ] deletions      no account deletions pending
 [OK  ] smtp           smtp.example.org reachable
 [OK  ] disk           18.2 GiB free
 [OK  ] updates        release metadata version 12 (4 artifacts cached)
@@ -461,7 +462,7 @@ faro-server doctor
 0 failure(s), 0 warning(s)
 ```
 
-`FAIL` lines need fixing; `WARN` lines work but deserve a look. Add `--no-smtp-check` to skip connecting to the mail server. `doctor` only reads; it never changes anything.
+`FAIL` lines need fixing; `WARN` lines work but deserve a look. On a Postgres database `doctor` adds `[WARN] postgres       experimental, not supported in this release (the beta supports SQLite only)`, and `serve` logs the same warning at startup; Faro still runs. A `WARN` on `deletions` means an account deletion has waited more than a week past its 7-day hold: Faro deletes an account only after everyone has been emailed about it, so fix email (§7) and it goes ahead. Add `--no-smtp-check` to skip connecting to the mail server. `doctor` only reads; it never changes anything.
 
 ---
 
@@ -497,6 +498,8 @@ Open root's scheduled tasks with `sudo crontab -e` and add this line, replacing 
 
 **Why delete old backups:** Faro deletes old data on schedule (attachments after 30 days by default). Backups kept much longer than that would keep deleted data alive. Keep backups no longer than your retention period, both on the server and wherever you copy them.
 
+**Deleted accounts stay in older backups.** When someone deletes their account (Settings → Delete your account), Faro waits 7 days, makes sure everyone was emailed, and then removes everything about them from the server. Backups made before that still hold their data until you delete those backups. The account page tells people this.
+
 ### Restore a backup
 
 This replaces the instance's current data with the backup. Use the name of your backup file.
@@ -521,11 +524,13 @@ This replaces the instance's current data with the backup. Use the name of your 
    sudo docker compose exec faro faro-server doctor
    ```
 
+**Restoring brings deleted accounts back.** A backup made before someone's account was deleted still has their account, data and computers. Their computers would be accepted again if Faro is still installed on them. After a restore, check the People page in the admin console. If someone who deleted their account is listed again, tell them and ask them to delete it again. Their allies are told again when they do.
+
 After a restore the log says "previous run did not shut down cleanly". That's expected: the backup was taken while Faro was running. Attachments uploaded after the backup was made, which the restored database doesn't know about, are cleaned up automatically after a day.
 
 **Moving to a new server:** set up the new server with your `faro.env` (Path A steps 1 to 8), build the image with `sudo docker compose build`, then do restore steps 2 and 3 there and point your DNS at the new server. Faro refuses to start if the identity key and the database don't belong together, so a mixed-up restore can't go unnoticed.
 
-**Postgres:** the backup file then contains the identity key and attachments but not the database. `faro-server backup` prints how to back up the database with `pg_dump`; keep both files together.
+**Postgres** (experimental, not supported in this release): the backup file then contains the identity key and attachments but not the database. `faro-server backup` prints how to back up the database with `pg_dump`; keep both files together.
 
 ---
 

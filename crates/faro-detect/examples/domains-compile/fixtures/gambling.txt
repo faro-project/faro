@@ -1,0 +1,3 @@
+# Hand-written fixture for the domains-compile tests. Not a real blocklist.
+casino-fixture.test
+||bets-fixture.test^

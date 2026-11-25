@@ -1,6 +1,6 @@
 # macOS installer
 
-`build-pkg.sh` builds `target/pkg/Faro-<version>[-dev].pkg`, and `check-pkg.sh` checks a built package without installing it. See [docs/DEVELOPMENT.md](../../docs/DEVELOPMENT.md#the-macos-installer) for how to build signed packages and what is still missing.
+`build-pkg.sh` builds the universal (arm64 + x86_64) `target/pkg/Faro-<version>[-dev].pkg`, and `check-pkg.sh` checks a built package without installing it. See [docs/DEVELOPMENT.md](../../docs/DEVELOPMENT.md#the-macos-installer) for how to build signed packages and what is still missing.
 
 | Path | What |
 |---|---|

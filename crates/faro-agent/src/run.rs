@@ -31,7 +31,7 @@ use faro_ipc::{
     hello, AgentConnection, AgentHello, AgentMsg, IpcClient, IpcError, PeerVerifier, ServiceMsg,
     ShutdownReason, WirePermissionState,
 };
-use faro_platform::{AgentPlatform, AppInfo, PermissionState};
+use faro_platform::{AgentPlatform, AppInfo, BrowserContext, PermissionState};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -173,6 +173,7 @@ struct Reported {
     permission: Option<(WirePermissionState, Option<bool>)>,
     session: Option<SessionKey>,
     foreground: Option<(Option<AppInfo>, Option<String>)>,
+    browser: Option<Option<BrowserContext>>,
     last_full: Option<Instant>,
 }
 
@@ -534,6 +535,15 @@ impl Runtime {
             };
             send(conn, timeout, &msg).await?;
             reported.foreground = Some(foreground);
+        }
+
+        // After `Foreground`: the service drops the browser context when the
+        // app changes, and this brings the new one. `None` goes out as an
+        // empty context, which clears it. URLs are never logged.
+        if full || reported.browser.as_ref() != Some(&obs.browser) {
+            let msg = AgentMsg::Browser(obs.browser.clone().unwrap_or_default());
+            send(conn, timeout, &msg).await?;
+            reported.browser = Some(obs.browser);
         }
 
         if full {

@@ -10,6 +10,18 @@
     },
     "signing_bytes_hex": "6661726f2f616c6c792d656e646f7273656d656e742f76310000000015696e73745f303132333435363738396162636465660000000c7573725f6d656d62657230310000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14000001a0c4537940"
   },
+  "ally_key_rewrap": {
+    "challenge_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+    "proof_bytes_hex": "6661726f2f616c6c792d6b65792d7265777261702f76310000000015696e73745f303132333435363738396162636465660000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14000001a0c45686800000002d7b2276223a312c226e6f7465223a2270c3a4737377c3b6726420e29c93222c227265636f76657279223a7b7d7d",
+    "proven": {
+      "ally_id": "usr_ally_a",
+      "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+      "instance_id": "inst_0123456789abcdef",
+      "issued_at_ms": 1790000400000,
+      "proof": "b3:db055b326c318c2b24512fa9f509cd2d214036e9159a80254e3b2bee243c1e68",
+      "wrapped_privkey": "{\"v\":1,\"note\":\"pässwörd ✓\",\"recovery\":{}}"
+    }
+  },
   "canonical": {
     "event_body_aad_hex": "6661726f2f6576656e742d626f64792f76310000000015696e73745f303132333435363738396162636465660000000c6465765f6c6170746f7030310000000000000011",
     "layout_hex": "740000010000000261620000000000000002ffffffffffffffffaabb",
@@ -74,9 +86,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "W5QsxgF5mODPendQyMsNWQ",
-          "nonce": "IewmOWSbp8HCK9rEXumHXGclpL-E8Azn",
-          "ciphertext": "DWbDbIpwIBzHv0A78KWiNsSi5J2F27pFQ90dXS9TpH_uffqkSIXHEppaxZues2tV",
+          "salt": "LLiBTY32EEbSE0iqUXvjgg",
+          "nonce": "MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG",
+          "ciphertext": "fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx",
           "recovery": {
             "v": 1,
             "kdf": "argon2id13",
@@ -85,9 +97,9 @@
               "t_cost": 2,
               "p_cost": 1
             },
-            "salt": "YaA5GzWj8o2p2nOKl0p-dA",
-            "nonce": "AAkBRCgj1MAE4GBORN_Ais4OPlrvoTUJ",
-            "ciphertext": "cdo2vDR9SvOA3I4l_7704g7mQFFyg7wQdmXbZszCXyNpPQXe7sNcJxd7rYfL1gAS"
+            "salt": "4QSdWUYOsycfvMos7Ad_ug",
+            "nonce": "8kksamF4AX3g6mWek99bd2Jn55PBfWAF",
+            "ciphertext": "wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi"
           }
         }
       },
@@ -102,9 +114,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "YaA5GzWj8o2p2nOKl0p-dA",
-          "nonce": "AAkBRCgj1MAE4GBORN_Ais4OPlrvoTUJ",
-          "ciphertext": "cdo2vDR9SvOA3I4l_7704g7mQFFyg7wQdmXbZszCXyNpPQXe7sNcJxd7rYfL1gAS"
+          "salt": "4QSdWUYOsycfvMos7Ad_ug",
+          "nonce": "8kksamF4AX3g6mWek99bd2Jn55PBfWAF",
+          "ciphertext": "wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi"
         }
       },
       {
@@ -118,9 +130,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "9LVTjOZ2uk3o_CapinsRVg",
-          "nonce": "VDcFImteae07eNmtPj208rKYfrGYwNPB",
-          "ciphertext": "zgh-tCGFIyEmrsAs1fz3ya3PNc6VRLiwTE7p9H3r1NAKxJxCBskDTzS_qox82ji5"
+          "salt": "_mgQvv7QP2piWDqj72gLGQ",
+          "nonce": "9iv0Akrd8YdoCau6wa8s8PugUXqLDpqI",
+          "ciphertext": "9huGlm-j-_bOGgjBhVVDxlSeiiN-Wu3WvWZ0x4VQtQPIF4-jiyTNLI55XbV-CAlZ"
         }
       },
       {
@@ -134,9 +146,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "9LVTjOZ2uk3o_CapinsRVg",
-          "nonce": "DddPJMwZILfGYo_5Y1qIahhoYat-H2OF",
-          "ciphertext": "tGkLgCiqOAL7NPN4VhkFXhgsBUOcmb2Bsii-OiiVjKHvGeYEQgDlCir9icYt_PSA"
+          "salt": "_mgQvv7QP2piWDqj72gLGQ",
+          "nonce": "Ov7eWzrCLYa22eVTNN5tD94eHNX6G5Ue",
+          "ciphertext": "qgOpMFY8Y0t1C2sEcZuNTM1_zFxs6vy-eDJmfoGyZv9cT5X-pPDCleThXVSAespX"
         }
       }
     ],
@@ -186,10 +198,21 @@
       "member_id": "usr_member01",
       "sign_pubkey": "NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y",
       "issued_at_ms": 1790000300000,
-      "wrapped_sign_key": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"W5QsxgF5mODPendQyMsNWQ\",\"nonce\":\"IewmOWSbp8HCK9rEXumHXGclpL-E8Azn\",\"ciphertext\":\"DWbDbIpwIBzHv0A78KWiNsSi5J2F27pFQ90dXS9TpH_uffqkSIXHEppaxZues2tV\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"YaA5GzWj8o2p2nOKl0p-dA\",\"nonce\":\"AAkBRCgj1MAE4GBORN_Ais4OPlrvoTUJ\",\"ciphertext\":\"cdo2vDR9SvOA3I4l_7704g7mQFFyg7wQdmXbZszCXyNpPQXe7sNcJxd7rYfL1gAS\"}}",
+      "wrapped_sign_key": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"LLiBTY32EEbSE0iqUXvjgg\",\"nonce\":\"MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG\",\"ciphertext\":\"fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"4QSdWUYOsycfvMos7Ad_ug\",\"nonce\":\"8kksamF4AX3g6mWek99bd2Jn55PBfWAF\",\"ciphertext\":\"wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi\"}}",
       "wrapped_enc_key": "{\"v\":1}",
       "recovery_wrapped": "{\"sign\":{},\"enc\":{}}",
-      "sig": "GwL5581hl5Q6AJ6H9mw90L50CJjHM6lBTWpBT7BZUB6zIUexzw48b31ESn6adeKJ8rR7Xsf76ztWFs6IRIGxAw"
+      "sig": "7WiKcXvHgpUjAYMgjyVxGoaWAelUM1U0SOUbOJAhMsobWOU3sSDf28qI48cWyktnYWbG_XGwrkUK9ADpGps9Bg"
+    },
+    "ally_key_rewrap": {
+      "challenge_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+      "proven": {
+        "instance_id": "inst_0123456789abcdef",
+        "ally_id": "usr_ally_a",
+        "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+        "issued_at_ms": 1790000400000,
+        "wrapped_privkey": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"LLiBTY32EEbSE0iqUXvjgg\",\"nonce\":\"MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG\",\"ciphertext\":\"fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"4QSdWUYOsycfvMos7Ad_ug\",\"nonce\":\"8kksamF4AX3g6mWek99bd2Jn55PBfWAF\",\"ciphertext\":\"wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi\"}}",
+        "proof": "b3:6ef2c6b79e2d38ea3996da66f46d48e405fa08e14cb152aecf2de4415be21429"
+      }
     }
   },
   "ids": {

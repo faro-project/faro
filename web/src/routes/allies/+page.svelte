@@ -116,6 +116,9 @@
 		}
 	}
 
+	// While the account is being deleted, nothing new joins it (§12).
+	let deleting = $derived(!!session.deletion);
+
 	let copied = $state('');
 	async function copy(text: string) {
 		try {
@@ -269,7 +272,14 @@
 				<p>{actionError}</p>
 			</div>{/if}
 
-		{#if !session.hasMemberKeys}
+		{#if deleting}
+			<div class="notice warn">
+				<p>
+					Your account is being deleted, so you can't invite or approve allies. Your allies keep
+					getting your alerts until the deletion.
+				</p>
+			</div>
+		{:else if !session.hasMemberKeys}
 			<div class="notice info">
 				<p>
 					You can invite allies now; to approve them, first <a href={resolve('/keys')}>
@@ -312,6 +322,9 @@
 									<div class="row-title">
 										<strong>{a.display_name}</strong>
 										<span class="chip pending">Accepted your invitation</span>
+										{#if a.deletion_purge_after_ms}
+											<span class="chip off">Deleting their account</span>
+										{/if}
 									</div>
 									<div class="row-meta">
 										{a.email} ·
@@ -319,7 +332,7 @@
 									</div>
 								</div>
 								<div class="row-actions">
-									{#if reviewing !== a.ally_id}
+									{#if reviewing !== a.ally_id && !deleting && !a.deletion_purge_after_ms}
 										<button
 											class="primary small"
 											type="button"
@@ -338,7 +351,7 @@
 									</button>
 								</div>
 							</div>
-							{#if reviewing === a.ally_id}
+							{#if reviewing === a.ally_id && !deleting}
 								<div class="review">
 									{#if !keyring.memberFor(user.id)}
 										<UnlockKeys kind="member" {user}>
@@ -416,10 +429,20 @@
 								<div>
 									<div class="row-title">
 										<strong>{a.display_name}</strong><span class="chip good">Ally</span>
+										{#if a.deletion_purge_after_ms}
+											<span class="chip normal">Leaving {date(a.deletion_purge_after_ms)}</span>
+										{/if}
 									</div>
 									<div class="row-meta">
 										{a.email} · since {date(a.activated_at_ms ?? a.created_at_ms)}
 									</div>
+									{#if a.deletion_purge_after_ms}
+										<div class="row-meta">
+											{a.display_name} is deleting their account. They stay your ally until {date(
+												a.deletion_purge_after_ms
+											)}; then confirm your updated ally list here.
+										</div>
+									{/if}
 								</div>
 								<button class="secondary small" type="button" onclick={() => confirmRemove(a)}>
 									Remove…
@@ -431,49 +454,51 @@
 			{/if}
 		</section>
 
-		<form class="card section" onsubmit={invite} novalidate>
-			<h2>Invite an ally</h2>
-			<p class="muted">
-				They get an email invitation, valid for 7 days, and accept it by signing in with that
-				address. You approve them after comparing a safety code.
-			</p>
-			<div class="invite-row">
-				<label class="visually-hidden" for="ally-email">Ally's email address</label>
-				<input
-					id="ally-email"
-					type="email"
-					placeholder="name@example.org"
-					bind:value={inviteEmail}
-					autocomplete="off"
-					aria-invalid={inviteError ? 'true' : undefined}
-					aria-describedby={inviteError ? 'ally-email-error' : undefined}
-				/>
-				<button class="primary" type="submit" disabled={inviteBusy}>
-					{inviteBusy ? 'Sending…' : 'Send invitation'}
-				</button>
-			</div>
-			{#if inviteError}<span class="field-error" id="ally-email-error">{inviteError}</span>{/if}
-			{#if invited.length}
-				<ul class="sent" aria-live="polite">
-					{#each invited as i (i.email)}
-						<li>
-							<span>
-								✓ Invitation sent to <strong>{i.email}</strong>, valid until {date(
-									i.expires_at_ms
-								)}.
-							</span>
-							<button class="link small" type="button" onclick={() => copy(i.invite_url)}>
-								{copied === i.invite_url ? 'Copied' : 'Copy the link'}
-							</button>
-						</li>
-					{/each}
-				</ul>
-				<p class="muted small">
-					Only {invited.length === 1 ? 'that address' : 'those addresses'} can accept, so sharing the
-					link another way is safe.
+		{#if !deleting}
+			<form class="card section" onsubmit={invite} novalidate>
+				<h2>Invite an ally</h2>
+				<p class="muted">
+					They get an email invitation, valid for 7 days, and accept it by signing in with that
+					address. You approve them after comparing a safety code.
 				</p>
-			{/if}
-		</form>
+				<div class="invite-row">
+					<label class="visually-hidden" for="ally-email">Ally's email address</label>
+					<input
+						id="ally-email"
+						type="email"
+						placeholder="name@example.org"
+						bind:value={inviteEmail}
+						autocomplete="off"
+						aria-invalid={inviteError ? 'true' : undefined}
+						aria-describedby={inviteError ? 'ally-email-error' : undefined}
+					/>
+					<button class="primary" type="submit" disabled={inviteBusy}>
+						{inviteBusy ? 'Sending…' : 'Send invitation'}
+					</button>
+				</div>
+				{#if inviteError}<span class="field-error" id="ally-email-error">{inviteError}</span>{/if}
+				{#if invited.length}
+					<ul class="sent" aria-live="polite">
+						{#each invited as i (i.email)}
+							<li>
+								<span>
+									✓ Invitation sent to <strong>{i.email}</strong>, valid until {date(
+										i.expires_at_ms
+									)}.
+								</span>
+								<button class="link small" type="button" onclick={() => copy(i.invite_url)}>
+									{copied === i.invite_url ? 'Copied' : 'Copy the link'}
+								</button>
+							</li>
+						{/each}
+					</ul>
+					<p class="muted small">
+						Only {invited.length === 1 ? 'that address' : 'those addresses'} can accept, so sharing the
+						link another way is safe.
+					</p>
+				{/if}
+			</form>
+		{/if}
 	{/snippet}
 </Gate>
 

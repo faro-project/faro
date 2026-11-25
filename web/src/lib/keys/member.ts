@@ -44,6 +44,7 @@ import {
 } from '../crypto/proto.ts';
 import type { MemberKeysBlob, PutMemberKeys, RecoveryWrapped, User } from '../types.ts';
 import type { MemberKeys } from './keyring.svelte.ts';
+import { rewrapMemberWrapped, type RewrapChoice } from './wrapping.ts';
 
 export const MIN_PASSPHRASE = 10;
 
@@ -261,62 +262,39 @@ export async function ensureManifest(
 // ---- Changing the passphrase ----------------------------------------------
 
 /**
- * Re-wrap the unlocked member keys under a new passphrase (and, if asked, a
- * new recovery code), signed with the member key so the server accepts the
+ * Re-wrap the unlocked member keys under a new passphrase and/or a new
+ * recovery code, signed with the member key so the server accepts the
  * replacement (`PUT /v1/me/keys/wrapped`, PROTOCOL.md §4.3). The keys
- * themselves don't change. Returns the new recovery code, if one was made.
+ * themselves don't change, and each new copy is checked before it is sent
+ * (`wrapping.ts`). Returns the new recovery code, if one was made.
  */
 export async function rewrapMemberKeys(
 	keys: MemberKeys,
 	instanceId: string,
-	passphrase: string,
-	newRecovery: boolean,
+	choice: RewrapChoice,
 	onProgress?: Progress
 ): Promise<string | null> {
 	const current = await getMemberKeys();
 	if (!current) throw new Error('Your keys are not set up.');
-	if (!equal(unb64Fixed(current.sign_pubkey, 32), keys.signPk)) {
+	if (
+		!equal(unb64Fixed(current.sign_pubkey, 32), keys.signPk) ||
+		!equal(unb64Fixed(current.enc_binding.member_enc_pubkey, 32), keys.encPk)
+	) {
 		throw new UnwrapError('unsupported', 'The keys on the server are not the ones you unlocked.');
 	}
-	const steps = newRecovery ? 2 : 1;
-	const pw = await deriveWrapKey(passphrase, undefined, undefined, (f) => onProgress?.(f / steps));
-	let recoveryCode: string | null = null;
-	let recovery: string;
-	try {
-		if (newRecovery) {
-			recoveryCode = generateRecoveryCode();
-			const rc = await deriveWrapKey(recoveryCode, undefined, undefined, (f) =>
-				onProgress?.(0.5 + f / 2)
-			);
-			try {
-				const r: RecoveryWrapped = {
-					sign: wrapWithKey(keys.signSeed, rc),
-					enc: wrapWithKey(keys.encSecret, rc)
-				};
-				recovery = JSON.stringify(r);
-			} finally {
-				wipe(rc.key);
-			}
-		} else {
-			recovery = JSON.stringify(current.recovery_wrapped);
-		}
-		const body = signWith(
-			keys.signSeed,
-			{
-				instance_id: instanceId,
-				member_id: keys.userId,
-				sign_pubkey: b64(keys.signPk),
-				issued_at_ms: Date.now(),
-				wrapped_sign_key: JSON.stringify(wrapWithKey(keys.signSeed, pw)),
-				wrapped_enc_key: JSON.stringify(wrapWithKey(keys.encSecret, pw)),
-				recovery_wrapped: recovery
-			},
-			keyRewrapSigningBytes
-		);
-		await api.put('/v1/me/keys/wrapped', body);
-	} finally {
-		wipe(pw.key);
-	}
+	const { recoveryCode, ...wrapped } = await rewrapMemberWrapped(keys, current, choice, onProgress);
+	const body = signWith(
+		keys.signSeed,
+		{
+			instance_id: instanceId,
+			member_id: keys.userId,
+			sign_pubkey: b64(keys.signPk),
+			issued_at_ms: Date.now(),
+			...wrapped
+		},
+		keyRewrapSigningBytes
+	);
+	await api.put('/v1/me/keys/wrapped', body);
 	return recoveryCode;
 }
 

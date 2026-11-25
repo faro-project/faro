@@ -1,6 +1,7 @@
 <script lang="ts">
-	// Account settings: who you are here, your keys, and (for members) how
-	// long your history is kept and how you hear about your own alerts.
+	// Account settings: who you are here, your keys and their passphrases,
+	// (for members) how long your history is kept and how you hear about
+	// your own alerts, and deleting your account.
 	import { resolve } from '$app/paths';
 	import { api, describeError } from '#lib/api.ts';
 	import { unb64 } from '#lib/crypto/bytes.ts';
@@ -12,6 +13,7 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { AllyKeyBlob, MemberKeysBlob, RetentionView, RetentionWindows } from '#lib/types.ts';
 	import ChangePassphrase from '#lib/ui/ChangePassphrase.svelte';
+	import DeleteAccount from '#lib/ui/DeleteAccount.svelte';
 	import DisplayName from '#lib/ui/DisplayName.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
@@ -150,8 +152,12 @@
 				</button>
 			{/if}
 			{#if user.roles.member && memberKeys}
-				<h3>Passphrase</h3>
-				<ChangePassphrase {user} />
+				<h3>{user.roles.ally && allyKey ? 'Member key passphrase' : 'Passphrase'}</h3>
+				<ChangePassphrase {user} kind="member" />
+			{/if}
+			{#if user.roles.ally && allyKey}
+				<h3>{user.roles.member && memberKeys ? 'Ally key passphrase' : 'Passphrase'}</h3>
+				<ChangePassphrase {user} kind="ally" />
 			{/if}
 			<p class="muted small">
 				Keys unlock in one browser tab at a time and lock again after 30 idle minutes. Forgot your
@@ -210,6 +216,8 @@
 				<NotificationPrefs memberId={user.id} about="yourself" />
 			</section>
 		{/if}
+
+		<DeleteAccount {user} />
 	{/snippet}
 </Gate>
 

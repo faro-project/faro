@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs, for example of the model gate (model-eval) on main.
+  workflow_dispatch:
 
 # Each self-hosted runner takes one job at a time, so a new push to a pull
 # request cancels its older run instead of queueing behind it.
@@ -63,6 +65,15 @@ jobs:
       - name: macOS leak-test measurements
         if: runner.os == 'macOS'
         run: cargo test -p faro-platform-macos --test autorelease_growth -- --nocapture
+      # The ONNX Runtime classifier and the model benchmark harness, run on
+      # a synthetic set and a tiny graph the tests generate. The `onnx`
+      # feature's build script downloads prebuilt ONNX Runtime binaries, so
+      # this runs on one runner only.
+      - name: faro-detect with ONNX Runtime
+        if: runner.os == 'macOS'
+        run: |
+          cargo clippy -p faro-detect --features onnx --all-targets -- -D warnings
+          cargo test -p faro-detect --features onnx
 
   # The SvelteKit web app (web/): format, types and the static build, then
   # faro-server built with that bundle embedded (FARO_REQUIRE_WEB=1 fails
@@ -104,24 +115,112 @@ jobs:
           tool: cargo-deny
       - run: cargo deny --all-features check licenses bans sources advisories
 
-  # The macOS installer: build the unsigned development package (a release
-  # package needs the project's Developer ID) and check its payload, scripts
-  # and installer options without installing it.
+  # The macOS installer: build the unsigned, universal (arm64 + x86_64)
+  # development package (a release package needs the project's Developer ID)
+  # and check its payload, scripts and installer options without installing
+  # it. `macos-pkg-intel` then checks the same package on the Intel Mac.
   macos-pkg:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
       - run: installers/macos/test-uninstall.sh
-      # For installing on a test machine. Unsigned, built for the runner's
-      # architecture (Apple Silicon), and its service accepts any program
-      # running as a logged-in user as the agent: never use it on anyone.
+      # For installing on a test machine. Unsigned, universal, and its
+      # service accepts any program running as a logged-in user as the
+      # agent: never use it on anyone.
       - uses: actions/upload-artifact@v4
         with:
-          name: faro-dev-pkg-arm64-${{ github.sha }}
+          name: faro-dev-pkg-universal-${{ github.sha }}
           path: target/pkg/Faro-*-dev.pkg
           if-no-files-found: error
           retention-days: 14
+
+  # The universal package on the Intel Mac: check it, then expand it (never
+  # install it) and start the x86_64 slice of each program with `--version`,
+  # which shows the Intel slices load and run.
+  macos-pkg-intel:
+    needs: macos-pkg
+    runs-on: [self-hosted, macOS, X64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: faro-dev-pkg-universal-${{ github.sha }}
+          path: pkg-intel
+      - run: installers/macos/check-pkg.sh pkg-intel/Faro-*-dev.pkg
+      - name: Start the x86_64 programs
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          pkgutil --expand-full pkg-intel/Faro-*-dev.pkg pkg-intel/expanded
+          faro=pkg-intel/expanded/faro-component.pkg/Payload/Library/Faro
+          for bin in "$faro/bin/faro-service" "$faro/Faro Agent.app/Contents/MacOS/faro-agent"; do
+            out="$(arch -x86_64 "$bin" --version)"
+            echo "$out"
+            if [[ "$out" != "$(basename "$bin") $version" ]]; then
+              echo "::error::$(basename "$bin") --version printed \"$out\" (want $version)"
+              exit 1
+            fi
+          done
+      - if: always()
+        run: rm -rf pkg-intel
+
+  # The model regression gate on the real, maintainer-curated test set
+  # (docs/DEVELOPMENT.md "Model benchmark"). The set holds explicit imagery
+  # and lives only on the macOS runner, outside the repository: the job is
+  # skipped unless the runner's .env sets FARO_MODEL_EVAL_SET (the set) and
+  # FARO_MODEL_EVAL_MANIFEST (the model under test). Only the metrics JSON
+  # is uploaded, never an image or a per-image result. It runs on main only
+  # (pushes and manual runs), never on a pull request, so changes to the
+  # harness are reviewed before they run against the real set.
+  model-eval:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - id: check
+        run: |
+          if [ -n "${FARO_MODEL_EVAL_SET:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "FARO_MODEL_EVAL_SET is not set on this runner: skipping the model gate"
+          fi
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+      - if: steps.check.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.check.outputs.enabled == 'true'
+        uses: Swatinem/rust-cache@v2
+      - name: Benchmark
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          if [ -z "${FARO_MODEL_EVAL_MANIFEST:-}" ]; then
+            echo "::error::FARO_MODEL_EVAL_SET is set but FARO_MODEL_EVAL_MANIFEST is not"
+            exit 2
+          fi
+          mkdir -p target/model-eval
+          rm -f target/model-eval/results.json
+          cargo run --release -p faro-detect --features onnx --example model-bench -- \
+            --manifest "$FARO_MODEL_EVAL_MANIFEST" --set "$FARO_MODEL_EVAL_SET" \
+            --json target/model-eval/results.json
+      - name: Gate against the baseline
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          if [ ! -f models/eval-baseline.json ]; then
+            echo "::warning::No models/eval-baseline.json yet: nothing to gate against. Check in this run's metrics artifact to start gating."
+            exit 0
+          fi
+          cargo run --release -p faro-detect --features onnx --example model-bench -- \
+            --results target/model-eval/results.json --baseline models/eval-baseline.json
+      # Metrics only: aggregate counts, ratios, timings and a digest of the
+      # set. This is what a new baseline is made from.
+      - if: always() && steps.check.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-eval-metrics-${{ github.sha }}
+          path: target/model-eval/results.json
+          if-no-files-found: ignore
+          retention-days: 30
