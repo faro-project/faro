@@ -591,7 +591,7 @@ It needs two settings, in `faro.env` (or the `[updates]` section of `faro.toml`)
 # The project's root of trust. The official image will include this file.
 FARO_UPDATES_ROOT=/usr/share/faro/update-root.json
 # Where the project publishes releases.
-FARO_UPDATES_UPSTREAM=https://…
+FARO_UPDATES_UPSTREAM=https://updates.faro-project.org/
 ```
 
 > Neither exists yet: the project hasn't published its first signed release. Until then the mirror stays off, and `doctor` says so with a `WARN` line.
@@ -604,7 +604,7 @@ Once it's on, the instance checks for a new release every hour (`FARO_UPDATES_RE
 - **One release behind** (`stable-1`): the newest release of the previous version. This suits managed computers, such as a college lab, that only take a release after it has been out for a while. Computers that already have a newer release keep it: Faro never moves a computer back.
 - **Beta**: releases before they are marked stable, for people who want to test them.
 
-**Check on it** with `sudo docker compose exec faro faro-server updates status`. It shows when the instance last checked, which release it has, and which files it holds. `doctor` warns when the latest check failed, or when the copy the instance holds is too old for computers to accept. The project re-signs its releases daily so that computers can tell an old copy from a current one.
+**Check on it** with `sudo docker compose exec faro faro-server updates status`. It shows when the instance last checked, which release it has, and which files it holds. `doctor` warns when the latest check failed, or when the copy the instance holds is too old for computers to accept. The project re-signs its releases every 8 hours, and each signature lasts a day, so that computers can tell an old copy from a current one.
 
 **An instance without internet access** (air-gapped) leaves `FARO_UPDATES_UPSTREAM` unset. Copy a release folder from the project onto the server, then copy it into the container and load it (from the `deploy` folder):
 
@@ -613,7 +613,7 @@ sudo docker compose cp release-2027-01 faro:/tmp/release
 sudo docker compose exec faro faro-server updates import --from /tmp/release
 ```
 
-The running server serves the new release within a minute. Because the project re-signs releases daily, an air-gapped instance needs a fresh copy at least that often, or computers will refuse it as too old.
+The running server serves the new release within a minute. Because each signature lasts a day, an air-gapped instance needs a fresh copy at least once a day, or computers will refuse it as too old.
 
 ---
 

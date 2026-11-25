@@ -6,8 +6,10 @@
 # Tags:
 #   main            latest commit on main (pre-alpha: can be broken)
 #   sha-<short>     a specific commit
-#   X.Y.Z, X.Y      a release tag vX.Y.Z
-#   latest          the newest non-prerelease release tag
+#
+# Release images (X.Y.Z, X.Y, latest) are built and tagged by release.yml,
+# after the release's update metadata is verified, so this workflow no
+# longer runs on v* tags.
 #
 # Each platform builds natively on its own runner (ubuntu-24.04 and
 # ubuntu-24.04-arm), so there is no slow QEMU emulation. Each job pushes its
@@ -19,15 +21,14 @@
 # publishes the platforms that built (with a warning naming the missing
 # one), so a broken amd64 build on GitHub's runners doesn't hold back the
 # arm64 image for Raspberry Pis. The tags then point at an image without
-# that platform until the next good build. Release tags (vX.Y.Z) still need
-# every platform: a release is never published half-built.
+# that platform until the next good build. (A release, in release.yml, needs
+# every platform: it is never published half-built.)
 
 name: Container image
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     paths:
       - deploy/Dockerfile
@@ -138,12 +139,11 @@ jobs:
   merge:
     name: publish multi-arch image
     # always(): run even when a build job failed (see the header). Never
-    # after a cancellation, and never for a release tag with a failed build.
+    # after a cancellation.
     if: >-
       always()
       && github.event_name != 'pull_request'
       && needs.build.result != 'cancelled'
-      && (needs.build.result == 'success' || !startsWith(github.ref, 'refs/tags/'))
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -196,8 +196,6 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
 
       - name: Create manifest list and push
         env:
