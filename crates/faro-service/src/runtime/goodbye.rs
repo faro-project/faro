@@ -15,7 +15,11 @@
 //!    so the goodbye reaches the member's current allies. If the instance
 //!    can't be reached or refuses the device, **nothing has been written**
 //!    ([`GoodbyeError::Unreachable`], [`GoodbyeError::Refused`]) and the
-//!    uninstaller can restart the service as if nothing happened.
+//!    uninstaller can restart the service as if nothing happened. If it
+//!    refuses the device because it already retired it (the member removed
+//!    it, or the account was deleted), allies were told back then and there
+//!    is nothing left to say ([`GoodbyeOutcome::AlreadyRetired`]): the
+//!    uninstaller goes ahead.
 //! 3. Write the `goodbye` event (urgent; its kind floor makes it so anyway).
 //! 4. Upload it, and anything still queued before it, until the deadline.
 //!    A goodbye that was written but not delivered is
@@ -30,7 +34,7 @@
 use super::net::{IdentityGate, ManifestRefresher, OutboxHandle, UploadStop, Uploader};
 use super::status::StatusTx;
 use crate::backoff::Backoff;
-use crate::client::{ClientError, ClientOptions};
+use crate::client::{ClientError, ClientOptions, Retired};
 use crate::config::Config;
 use crate::enroll::{self, EnrollError};
 use crate::state::{self, StateDir, StateError, StateLock};
@@ -87,6 +91,11 @@ pub enum GoodbyeOutcome {
     /// Enrolled but never endorsed by the member: allies were never told
     /// about this device, and nothing can be sealed to them.
     NotActivated,
+    /// The instance no longer accepts this device: its member removed it,
+    /// or the account it reported to was deleted. Allies were told when
+    /// that happened (`device_removed`, `account_deleted`); nothing was
+    /// written.
+    AlreadyRetired(Retired),
 }
 
 /// Why no goodbye was written. In every case the event chain is unchanged.
@@ -96,7 +105,7 @@ pub enum GoodbyeError {
     ServiceRunning { path: std::path::PathBuf },
     #[error("cannot reach the instance, so allies can't be told: {0}")]
     Unreachable(#[source] ClientError),
-    #[error("the instance refused this device ({0}); if the member removed it in the web app, allies already know")]
+    #[error("the instance refused this device ({0})")]
     Refused(#[source] ClientError),
     #[error(transparent)]
     State(#[from] StateError),
@@ -163,8 +172,20 @@ pub async fn say_goodbye(
         status: status.clone(),
         gate: gate.clone(),
     };
-    refresher.check_identity().await.map_err(before_write)?;
-    refresher.refresh().await.map_err(before_write)?;
+    let reached = async {
+        refresher.check_identity().await?;
+        refresher.refresh().await
+    };
+    if let Err(e) = reached.await {
+        if let Some(why) = e.retired() {
+            tracing::info!(
+                ?why,
+                "the instance already retired this device; allies know"
+            );
+            return Ok(GoodbyeOutcome::AlreadyRetired(why));
+        }
+        return Err(before_write(e));
+    }
     let recipients = outbox
         .recipients(&enrollment)
         .await?
