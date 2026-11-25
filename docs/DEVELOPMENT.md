@@ -42,7 +42,7 @@ These come from ARCHITECTURE.md §3.5, §4.3, §5 and §12. Reviewers check them
 1. **No unblurred image leaves memory.** `faro_platform::Frame` has no `Clone`, `Serialize` or pixel-printing `Debug`, and it is zeroized on drop. The only image type in any wire or storage format is `BlurredThumbnail`.
 2. **The instance only sees ciphertext and header metadata.** Nothing in `faro-server` can decrypt anything.
 3. **Devices encrypt only to member-endorsed keys,** checked against the member key pinned at enrollment.
-4. **Tamper can't be silenced.** The server floors urgency with `EventKind::min_urgency()`, and urgent tamper alerts can only be moved to the digest, never turned off.
+4. **Tamper can't be silenced.** The server floors urgency with `EventKind::min_urgency()`, and tamper-class alerts can only be moved to the digest, never turned off. `notify::policy::is_tamper_class` decides which alerts those are; ARCHITECTURE.md §5.4 lists them.
 5. **Clients trust project signatures for updates, never the instance.**
 6. **Disabling an account is never silent.** The person and every accountability partner are told, and the alerts can't be switched off (`account_disabled`, `ally_disabled`). Disabling stops sign-in, never monitoring.
 

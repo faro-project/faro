@@ -31,7 +31,7 @@ In scope: everything in this repository.
 The threat model is in [ARCHITECTURE.md §9](docs/ARCHITECTURE.md#9-security-considerations), with the instance operator's position in [§5.3](docs/ARCHITECTURE.md#53-trusting-the-instance-operator). Examples of what we treat as vulnerabilities:
 
 - **Defeating local monitoring silently.** Faro is tamper-evident, not tamper-proof: someone with admin rights on their own computer can stop it, but allies must find out. Any way to stop, blind, pause or downgrade monitoring, or to remove, reorder or hold back events, *without* an alert reaching allies is a vulnerability, even if it needs admin rights on that computer.
-- Silencing or delaying tamper alerts beyond what the notification design allows (urgent tamper alerts can only be moved to the digest, never turned off).
+- Silencing or delaying tamper alerts beyond what the notification design allows (tamper-class alerts can only be moved to the digest, never turned off; [ARCHITECTURE.md §5.4](docs/ARCHITECTURE.md#54-urgency-flags) lists them).
 - Anything that lets the instance operator, a server compromise or a network attacker read report contents, add a key that devices encrypt to, forge or downgrade an event's urgency, or push code to clients.
 - Any path by which an unblurred screen image is written to disk, sent over IPC beyond the classifier, or leaves the device.
 - Getting an ally key, member key, passphrase or recovery code out of the web app, other than by the operator changing the code it serves (below).

@@ -52,13 +52,16 @@ pub fn default_mode(u: Urgency) -> Mode {
 ///
 /// * device events of kind `tamper` and `goodbye` (uninstall / move);
 /// * server alerts `chain_gap`, `invalid_signature`, `missed_checkin` (when
-///   urgent; the normal-urgency "back online" follow-up is not tamper) and
-///   `ally_removed` (removing an ally is the most direct way to stop being
-///   watched, so the people affected are always told), and
+///   urgent; the normal-urgency "back online" follow-up is not tamper),
+///   `upload_stalled` (the device is alive but not uploading what it
+///   records), `ally_removed` (removing an ally is the most direct way to
+///   stop being watched, so the people affected are always told),
 ///   `device_removed` (retiring a monitored device stops its monitoring
 ///   just as directly), and `account_disabled` / `ally_disabled` (an admin
 ///   disabling an account is always told to that person and every
 ///   accountability partner).
+///
+/// ARCHITECTURE.md §5.4 lists the same kinds; keep the two in step.
 ///
 /// `source` is the alert row's source column (`device` / `server`).
 pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {

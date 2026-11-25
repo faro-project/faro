@@ -253,12 +253,16 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Agent repeatedly killed | Service | urgent | Alert with a count |
 | An interactive session (any OS account) with no connected agent for 90 s | Service | urgent | "Faro isn't running in the account *alex* on Laptop-X" |
 | Chain gap or invalid signature | Instance | urgent | Alert |
+| Heartbeats claim events the instance never received, for longer than the grace period | Instance (`upload_stalled`) | urgent | "Laptop-X isn't sending what it records" |
+| An active computer removed by its member | Instance (`device_removed`) | urgent | "Laptop-X was removed" |
 | Uninstall (`goodbye`) | Uninstaller | urgent | "Faro was uninstalled from Laptop-X" |
 | Binary or model integrity failure | Service | urgent | Alert |
 | Clock manipulation | Service | urgent | Alert |
 | Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
 | Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
+
+Every urgent signal in this table, and removing an ally, reaches people as a tamper-class alert: it can be moved to the digest but not switched off (§5.4). Settings changes and pauses can be switched off.
 
 **Instance downtime vs. device tamper.** On a self-hosted instance, the server itself can go down (a power cut, a Pi reboot). The liveness monitor records its own uptime. After an instance restart it waits for the grace period before judging any device, and it never treats a gap that overlaps its own downtime as device silence. Devices queue events offline and upload them later, and the hash chain shows whether anything is missing.
 
@@ -408,12 +412,28 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 | Urgency | Produced by | Default delivery |
 |---|---|---|
-| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, missed check-in past grace, an account disabled by an admin | **Immediate** email + Web Push |
+| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, invalid signature, missed check-in past grace, upload stall, a computer removed by its member, an account disabled by an admin | **Immediate** email + Web Push |
 | `normal` | `medium` flag, settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
 | `none` | Clean captures, heartbeats, low-rated flags, context signals | Only in the daily report |
 
 - Server-generated alerts (missed check-in, chain gap) set their own urgency.
-- **Allies choose** per member and urgency level: immediate, digest or off, with quiet hours. An exception: **urgent tamper alerts can't be turned off entirely, only moved to digest**, so tamper can't be silenced quietly.
+- **Allies choose** per member and urgency level: immediate, digest or off, with quiet hours. The member makes the same choice for their own alerts. The exception is **tamper-class alerts** (listed below): they **can't be turned off, only moved to the digest**, so tamper can't be silenced quietly.
+- **Tamper-class alerts** are the ones `notify::policy::is_tamper_class` picks out. If a recipient chose off for the alert's urgency, the server sends them in the hourly digest instead (`notify::policy::effective_mode`). Any other choice is kept. Quiet hours still hold them back, and the feed shows them at once. This applies to every recipient: the member and each ally. The list is:
+
+  | Kind | Source | Urgency | Why it can't be switched off |
+  |---|---|---|---|
+  | `tamper` | device | urgent (floor) | Something interfered with Faro: a permission revoked, the agent killed repeatedly, an integrity failure, the clock changed, an account in use with no agent, and the other §3.7 signals. Context-only signals (VPN, VM, remote desktop, browser without the extension) never become `tamper` events. |
+  | `goodbye` | device | urgent (floor) | Faro was uninstalled or moved to another instance. |
+  | `chain_gap` | server | urgent | Events are missing, were rewritten, or the device's history forked (§3.6, PROTOCOL.md §7). |
+  | `invalid_signature` | server | urgent | An event or report arrived that the device's key didn't sign. |
+  | `missed_checkin` | server | urgent only | The device went silent past the grace period. The normal-urgency "back online" alert of the same kind is not tamper-class. |
+  | `upload_stalled` | server | urgent | The device is alive but not uploading what it records (PROTOCOL.md §7). |
+  | `device_removed` | server | urgent | The member removed an active computer, which stops its monitoring. |
+  | `ally_removed` | server | normal | The member removed an ally, or an ally left. That is the most direct way to stop being watched. A removed ally is told too. |
+  | `account_disabled` | server | urgent | An admin disabled the account (§4.3). The person is told even though their account is disabled. |
+  | `ally_disabled` | server | urgent | An admin disabled the account of one of the member's allies (§4.3). |
+
+  In the table, "urgent (floor)" means the instance raises the event to urgent with `EventKind::min_urgency()`, whatever the device signed. The source is the alert's source: a device kind never counts as a server kind, or the other way round. Everything else can be switched off, including flags of any rating, `settings_change`, `paused`, `resumed`, `agent_restarted`, `ally_added`, `member_settings_changed`, `account_enabled` and `ally_enabled`.
 - The member chooses the threshold mapping, for example whether `medium` counts as urgent. Changing the mapping is itself a `normal` event that allies are told about.
 - Notification text is content-free: *"Urgent: new alert for Sam on Laptop-X. Open Faro to view."* Details only appear after decryption in the app.
 - **Privacy trade-off, accepted:** the operator can see *that* an urgent event happened and when, but not what it was. The operator privacy notice states this.

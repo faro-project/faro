@@ -184,9 +184,24 @@ These settings are for this one person. If you support more than one person, set
 
 ### Why some alerts can't be switched off
 
-If you choose **Off** for **Urgent** or **Normal**, Faro tells you: **"Tamper alerts (Faro stopped, removed or blocked) can't be switched off: they still arrive in the hourly digest."**
+If you choose **Off** for **Urgent** or **Normal**, Faro tells you: **"Some alerts can't be switched off: Faro being stopped, removed or interfered with, a computer that stops checking in or isn't sending what it records, missing or unverified records, a computer being removed, an ally being removed or leaving, and an account being disabled by an admin. With Off, they still arrive in the hourly digest."**
 
-That's on purpose. If tamper alerts could be switched off, Faro could be quietly silenced: by accident, or by someone talking you into it. So the most you can do is move them into the hourly digest. The same goes for an ally being removed, a computer being removed, and an account being disabled by an admin. You'll always hear about those.
+That's on purpose. If these alerts could be switched off, Faro could be quietly silenced: by accident, or by someone talking you into it. So the most you can do is move them into the hourly digest. These are the ones, by what they say in the list:
+
+| What it says | Urgent or normal |
+|---|---|
+| **Possible tampering** | Urgent |
+| **Faro stopped on a computer** | Urgent |
+| ***Computer* stopped checking in** | Urgent |
+| ***Computer* isn't sending what it records** | Urgent |
+| **Events from *computer* are missing** | Urgent |
+| ***Computer* sent something that didn't verify** | Urgent |
+| ***Computer* was removed** | Urgent |
+| ***Name* was removed as an ally**, or ***Name* stopped being an ally** | Normal |
+| **The account was disabled by an admin** | Urgent |
+| ***Name*'s account was disabled by an admin** | Urgent |
+
+You'll always hear about those, at least in the hourly digest. Everything else can be switched off, including flagged moments, **Faro kept restarting**, and ***Computer* is back online**. If Faro is stopped again and again, you get **Possible tampering**, which can't be switched off.
 
 ## 7. If you want to stop being an ally
 
