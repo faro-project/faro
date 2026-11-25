@@ -115,6 +115,18 @@ jobs:
           tool: cargo-deny
       - run: cargo deny --all-features check licenses bans sources advisories
 
+  # The release scripts (release/, docs/DEVELOPMENT.md "Releasing"), end to
+  # end: throwaway keys, fake artifacts and a local git repository standing
+  # in for the publishing location. No secrets.
+  release-scripts:
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p faro-update --example faro-release
+      - run: release/test-release.sh
+
   # The macOS installer: build the unsigned, universal (arm64 + x86_64)
   # development package (a release package needs the project's Developer ID)
   # and check its payload, scripts and installer options without installing
