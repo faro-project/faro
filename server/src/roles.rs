@@ -48,6 +48,33 @@ pub struct AdminRole {
     pub told: usize,
 }
 
+/// Inside `tx`: email admin log entry `entry` to `recipients`, at once.
+/// These are notification rows like any other, sent by the notifier, but
+/// not alerts: there is nothing to fan out, and no preference applies.
+pub(crate) async fn tell(
+    tx: &mut sqlx::AnyConnection,
+    entry: String,
+    recipients: &[UserId],
+    now: i64,
+) -> AppResult<()> {
+    let target = Target::AdminLog(entry);
+    for r in recipients {
+        notifications::insert(
+            &mut *tx,
+            &NewNotification {
+                target: &target,
+                recipient: r,
+                urgency: Urgency::Normal,
+                mode: Some(Mode::Immediate),
+                due_at_ms: now,
+                now_ms: now,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Grant (`admin: true`) or revoke the admin role of `target` (module docs).
 pub async fn set_admin(
     state: &AppState,
@@ -105,23 +132,9 @@ pub async fn set_admin(
         By::CommandLine => Via::CommandLine,
     };
     let entry = admin_log::insert(&mut *tx, action, target, actor, via, now).await?;
-    let target_log = Target::AdminLog(entry);
     let mut recipients = vec![target.clone()];
     recipients.extend(users::enabled_admin_ids_except(&mut *tx, target).await?);
-    for r in &recipients {
-        notifications::insert(
-            &mut *tx,
-            &NewNotification {
-                target: &target_log,
-                recipient: r,
-                urgency: Urgency::Normal,
-                mode: Some(Mode::Immediate),
-                due_at_ms: now,
-                now_ms: now,
-            },
-        )
-        .await?;
-    }
+    tell(&mut tx, entry, &recipients, now).await?;
     tx.commit().await?;
     tracing::info!(
         actor = actor.map(UserId::as_str),

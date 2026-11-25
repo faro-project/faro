@@ -172,6 +172,11 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/admin/api/users", get(admin::list_users))
         .route("/admin/api/users/{id}/disable", post(admin::disable_user))
         .route("/admin/api/users/{id}/enable", post(admin::enable_user))
+        .route("/admin/api/users/{id}", delete(admin::delete_user))
+        .route(
+            "/admin/api/users/{id}/deletion/cancel",
+            post(admin::cancel_user_deletion),
+        )
         .route("/admin/api/users/{id}/admin", put(admin::set_admin_role))
         .route("/admin/api/log", get(admin::log))
         .route(

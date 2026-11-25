@@ -40,6 +40,9 @@ pub struct PendingDeletion {
     pub purge_after_ms: i64,
     /// When the purge started (from then on it can't be cancelled).
     pub started_at_ms: Option<i64>,
+    /// An admin asked for it, not the person: then the person or any admin
+    /// may cancel it. Only the person may cancel their own request.
+    pub by_admin: bool,
 }
 
 /// The column list [`from_row`] reads, as a macro so queries can be built
@@ -47,7 +50,7 @@ pub struct PendingDeletion {
 macro_rules! columns {
     () => {
         "id, email, display_name, is_admin, is_member, is_ally, disabled, created_at,
-         deletion_requested_at, deletion_purge_after, deletion_started_at"
+         deletion_requested_at, deletion_purge_after, deletion_started_at, deletion_by_admin"
     };
 }
 
@@ -80,6 +83,7 @@ fn deletion_from_row(row: &AnyRow) -> Result<Option<PendingDeletion>, sqlx::Erro
         requested_at_ms,
         purge_after_ms,
         started_at_ms: row.try_get("deletion_started_at")?,
+        by_admin: row.try_get::<i64, _>("deletion_by_admin")? != 0,
     }))
 }
 
@@ -256,21 +260,24 @@ pub async fn grant_member<'e>(
     Ok(())
 }
 
-/// Record a deletion request (§12). False if one is already pending.
+/// Record a deletion request (§12), by the person or (`by_admin`) by an
+/// admin. False if one is already pending.
 pub async fn request_deletion<'e>(
     e: impl Executor<'e, Database = Any>,
     id: &UserId,
     now_ms: i64,
     purge_after_ms: i64,
+    by_admin: bool,
 ) -> Result<bool, sqlx::Error> {
     let r = sqlx::query(
         "UPDATE users SET deletion_requested_at = $1, deletion_purge_after = $2,
-                          deletion_started_at = NULL
+                          deletion_started_at = NULL, deletion_by_admin = $4
          WHERE id = $3 AND deletion_requested_at IS NULL",
     )
     .bind(now_ms)
     .bind(purge_after_ms)
     .bind(id.as_str())
+    .bind(flag(by_admin))
     .execute(e)
     .await?;
     Ok(r.rows_affected() == 1)
@@ -288,7 +295,8 @@ pub async fn cancel_deletion<'e>(
     requested_at_ms: i64,
 ) -> Result<bool, sqlx::Error> {
     let r = sqlx::query(
-        "UPDATE users SET deletion_requested_at = NULL, deletion_purge_after = NULL
+        "UPDATE users SET deletion_requested_at = NULL, deletion_purge_after = NULL,
+                          deletion_by_admin = 0
          WHERE id = $1 AND deletion_requested_at = $2 AND deletion_started_at IS NULL",
     )
     .bind(id.as_str())
@@ -391,9 +399,11 @@ pub struct AdminUserRow {
     pub disabled: bool,
     pub created_at_ms: i64,
     pub last_login_at_ms: Option<i64>,
-    /// The end of the hold, if the person asked for their account to be
-    /// deleted.
+    /// The end of the hold, if the account is being deleted.
     pub deletion_purge_after_ms: Option<i64>,
+    /// The deletion was asked for by an admin (any admin may cancel it),
+    /// not by the person.
+    pub deletion_by_admin: bool,
     /// Non-removed devices.
     pub device_count: i64,
     /// Most recent heartbeat of any of the user's devices.
@@ -406,7 +416,7 @@ pub async fn list_for_admin<'e>(
     let rows = sqlx::query(
         "SELECT u.id, u.email, u.display_name, u.is_admin, u.is_member, u.is_ally, u.disabled,
                 u.created_at, u.last_login_at, u.deletion_requested_at,
-                u.deletion_purge_after, u.deletion_started_at,
+                u.deletion_purge_after, u.deletion_started_at, u.deletion_by_admin,
                 (SELECT COUNT(*) FROM devices d
                   WHERE d.owner_user_id = u.id AND d.status <> 'removed') AS device_count,
                 (SELECT MAX(d.last_seen_at) FROM devices d
@@ -427,6 +437,7 @@ pub async fn list_for_admin<'e>(
                 created_at_ms: u.created_at_ms,
                 last_login_at_ms: r.try_get("last_login_at")?,
                 deletion_purge_after_ms: u.deletion.map(|d| d.purge_after_ms),
+                deletion_by_admin: u.deletion.is_some_and(|d| d.by_admin),
                 device_count: r.try_get("device_count")?,
                 devices_last_seen_at_ms: r.try_get("devices_last_seen")?,
             })
