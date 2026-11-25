@@ -35,11 +35,15 @@
 //! recipient told although their account is disabled. Deletion notices
 //! (`account_deleted` on the person, `ally_deleted` on each member they are
 //! an ally for, and `account_deletion_cancelled` on both) are worded the
-//! same way, with the dates taken from the alert's detail (§12).
+//! same way, with the dates taken from the alert's detail (§12). When an
+//! admin asked for the deletion (`requested_by=admin`), they say the
+//! account is "being deleted by the instance administrator", and a
+//! disabled person is told too: it is their data.
 //!
-//! **Admin role changes** are told the same way, in words, to the person
-//! and to every other admin ([`crate::roles`]). They are not alerts: no
-//! member's feed shows them and no ally hears of them. [`crate::roles`]
+//! **Admin log entries** are told the same way, in words: role changes to
+//! the person and every other admin ([`crate::roles`]), deletions an admin
+//! asked for and their cancellation to every admin. They are not alerts: no
+//! member's feed shows them and no ally hears of them. [`crate::roles::tell`]
 //! writes their notification rows itself, always immediate, so there is
 //! nothing to fan out.
 //!
@@ -1125,6 +1129,81 @@ mod tests {
             "Pat, also an ally for Sam, is deleting their Faro account"
         );
         assert!(t.contains("You still receive Sam's alerts"), "{t}");
+    }
+
+    #[test]
+    fn admin_deletion_notices_say_the_instance_administrator() {
+        let by = "deleted by the instance administrator";
+        let d = format!("purge_after={PURGE};requested_by=admin");
+        let mut n = due(ServerAlertKind::AccountDeleted, true, None, &d);
+        let (s, t) = text(&n);
+        assert_eq!(
+            s,
+            "Your Faro account on Faro Test is being deleted by the instance administrator"
+        );
+        assert!(t.contains("On 2 December 2026"), "{t}");
+        assert!(t.contains("sign in before 2 December 2026"), "{t}");
+        assert!(!t.contains("You asked"), "{t}");
+        // A disabled person can't sign in to cancel.
+        n.recipient_disabled = true;
+        let (_, t) = text(&n);
+        assert!(t.contains("Your account is disabled"), "{t}");
+        assert!(!t.contains("sign in before"), "{t}");
+        assert!(!undeliverable(&n), "a disabled person is told");
+
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, false, None, &d));
+        assert!(s.contains(by) && s.starts_with("Sam's"), "{s}");
+        assert!(t.contains("Until 2 December 2026 nothing changes"), "{t}");
+        let d = format!("ally=usr_a;purge_after={PURGE};requested_by=admin");
+        for to_member in [true, false] {
+            let (s, t) = text(&due(
+                ServerAlertKind::AllyDeleted,
+                to_member,
+                Some("Pat"),
+                &d,
+            ));
+            assert!(s.contains(by) && s.contains("Pat"), "{s}");
+            assert!(!t.contains("asked for their"), "{t}");
+        }
+
+        let k = ServerAlertKind::AccountDeletionCancelled;
+        let d = format!("requested={REQUESTED};requested_by=admin");
+        let (s, t) = text(&due(k, true, None, &d));
+        assert_eq!(
+            s,
+            "You cancelled the deletion of your Faro account on Faro Test"
+        );
+        assert!(
+            t.contains("On 25 November 2026 at 14:03 UTC, the instance administrator asked"),
+            "{t}"
+        );
+        let mut n = due(k, true, None, &format!("{d};cancelled_by=admin"));
+        let (s, t) = text(&n);
+        assert_eq!(
+            s,
+            "The deletion of your Faro account on Faro Test was cancelled"
+        );
+        assert!(
+            t.contains("The instance administrator cancelled it on 25 November 2026 at 15:03"),
+            "{t}"
+        );
+        n.recipient_disabled = true;
+        assert!(!undeliverable(&n), "a disabled person is told");
+        let (s, t) = text(&due(k, false, None, &d));
+        assert_eq!(s, "The deletion of Sam's Faro account was cancelled");
+        assert!(t.contains("Sam cancelled it on"), "{t}");
+        let d = format!("ally=usr_a;{d}");
+        let (s, t) = text(&due(k, true, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "The deletion of your ally Pat's Faro account was cancelled"
+        );
+        assert!(t.contains("Pat cancelled it on"), "{t}");
+
+        // Other notices still drop for a disabled recipient.
+        let mut n = due(ServerAlertKind::AllyDeleted, true, Some("Pat"), &d);
+        n.recipient_disabled = true;
+        assert!(undeliverable(&n));
     }
 
     #[test]
