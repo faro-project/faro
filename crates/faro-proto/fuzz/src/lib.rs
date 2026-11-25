@@ -20,8 +20,9 @@ use faro_proto::body::{
 use faro_proto::encoding::{b64, b64_decode, b64_encode, b64_opt, Canonical};
 use faro_proto::event::{EventHeader, EVENT_HEADER_VERSION};
 use faro_proto::keys::{
-    key_id, safety_code, AllyEndorsement, DeviceEndorsement, KeyRewrap, ManifestAlly, ManifestRef,
-    MemberEncKeyBinding, RecipientManifest, Signed, MAX_MANIFEST_ALLIES,
+    key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
+    ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
+    MAX_MANIFEST_ALLIES,
 };
 use faro_proto::report::{
     ActivityState, CountedItem, DailyReport, FlaggedMoment, HealthSummary, RatingCounts,
@@ -298,6 +299,7 @@ pub const API_TYPES: &[&str] = &[
     "FeedItem",
     "ApiError",
     "AllyKeyUpload",
+    "ProvenAllyKeyRewrap",
 ];
 
 /// `api`: the first byte picks one of [`API_TYPES`], the rest is its JSON.
@@ -347,7 +349,16 @@ pub fn api(data: &[u8]) -> bool {
         11 => roundtrip::<HeartbeatResponse>(json).is_some(),
         12 => roundtrip::<FeedItem>(json).is_some(),
         13 => roundtrip::<ApiError>(json).is_some(),
-        _ => roundtrip::<AllyKeyUpload>(json).is_some(),
+        14 => roundtrip::<AllyKeyUpload>(json).is_some(),
+        _ => roundtrip::<ProvenAllyKeyRewrap>(json)
+            .inspect(|r| {
+                assert!(r
+                    .body
+                    .proof_bytes()
+                    .starts_with(b"faro/ally-key-rewrap/v1\0"));
+                let _ = r.body.proof(&[0; 32]);
+            })
+            .is_some(),
     }
 }
 
@@ -867,6 +878,19 @@ pub fn seeds() -> Vec<(&'static str, String, Vec<u8>)> {
                 wrapped_privkey: serde_json::json!({"v": 1, "kdf": {"m": 65536, "t": 3}}),
             },
         ),
+        api("ProvenAllyKeyRewrap", &{
+            let body = AllyKeyRewrap {
+                instance_id: inst(),
+                ally_id: ally(),
+                enc_pubkey: EncPublicKey([2; 32]),
+                issued_at_ms: T0,
+                wrapped_privkey: r#"{"v":1}"#.into(),
+            };
+            ProvenAllyKeyRewrap {
+                proof: body.proof(&[7; 32]),
+                body,
+            }
+        }),
     ];
     for (name, bytes) in samples {
         add("api", &name.replace(['<', '>'], "-"), bytes);
