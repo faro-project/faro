@@ -217,10 +217,9 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 | Labels | Machine | Jobs |
 |---|---|---|
 | `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval` |
+| `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel` |
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
-
-The Intel Mac (`self-hosted, macOS, X64`) also runs `macos-pkg-intel`, which checks the universal package that `macos-pkg` built and starts its x86_64 programs.
 
 There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`.
 
