@@ -40,6 +40,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::connection::{AgentConnection, Connection, ServiceConnection};
 use crate::error::{IpcError, Result};
+use crate::messages::WireMessage;
 use crate::peer::{PeerInfo, PeerVerifier};
 
 /// The per-account socket a root service binds for `uid`, next to `base`:
@@ -215,6 +216,14 @@ impl IpcServer {
     /// error; callers running an accept loop should log it and continue
     /// rather than stop listening.
     pub async fn accept(&self) -> Result<ServiceConnection<UnixStream>> {
+        self.accept_typed().await
+    }
+
+    /// [`accept`](Self::accept) for a connection carrying other message
+    /// types (the enroll socket's [`EnrollServerConnection`](crate::EnrollServerConnection)).
+    pub async fn accept_typed<Out: WireMessage, In: WireMessage>(
+        &self,
+    ) -> Result<Connection<UnixStream, Out, In>> {
         let (stream, _addr) = self.listener.accept().await?;
         let peer = peer_credentials(&stream).map_err(IpcError::PeerCredentials)?;
         // On rejection `stream` is dropped here, closing the connection
@@ -242,9 +251,30 @@ impl IpcClient {
     /// Connect without checking who is listening. Prefer
     /// [`connect_verified`](Self::connect_verified) in production.
     pub async fn connect(path: impl AsRef<Path>) -> Result<AgentConnection<UnixStream>> {
+        Self::connect_typed(path).await
+    }
+
+    /// [`connect`](Self::connect) for a connection carrying other message
+    /// types (the enroll socket's [`EnrollClientConnection`](crate::EnrollClientConnection)).
+    pub async fn connect_typed<Out: WireMessage, In: WireMessage>(
+        path: impl AsRef<Path>,
+    ) -> Result<Connection<UnixStream, Out, In>> {
         let stream = UnixStream::connect(path.as_ref()).await?;
         let peer = peer_credentials(&stream).map_err(IpcError::PeerCredentials)?;
         Ok(Connection::with_peer(stream, Some(peer)))
+    }
+
+    /// [`connect_verified`](Self::connect_verified) for other message types.
+    pub async fn connect_verified_typed<Out: WireMessage, In: WireMessage>(
+        path: impl AsRef<Path>,
+        verifier: &dyn PeerVerifier,
+    ) -> Result<Connection<UnixStream, Out, In>> {
+        let conn = Self::connect_typed(path).await?;
+        let peer = conn
+            .peer()
+            .ok_or_else(|| IpcError::peer_rejected("server credentials unavailable"))?;
+        verifier.verify(peer)?;
+        Ok(conn)
     }
 
     /// Connect and require the listening process to pass `verifier`

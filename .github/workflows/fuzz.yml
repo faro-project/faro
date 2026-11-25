@@ -40,7 +40,7 @@ jobs:
           - crate: faro-proto
             targets: encoding event report api
           - crate: faro-ipc
-            targets: decode_agent_msg decode_service_msg stream_decoder
+            targets: decode_agent_msg decode_service_msg stream_decoder decode_enroll_msg
     defaults:
       run:
         working-directory: crates/${{ matrix.crate }}/fuzz
