@@ -1,0 +1,94 @@
+name: Fuzz
+
+# Every cargo-fuzz target (docs/DEVELOPMENT.md "Fuzzing"), for a bounded
+# time each, on the Linux runner. Scheduled and manual only, never on pull
+# requests: a run holds the runner for over an hour, and the self-hosted
+# runners must not take jobs that anyone with a branch can start more often
+# than CI already does (docs/DEVELOPMENT.md "CI runners").
+on:
+  schedule:
+    - cron: "17 2 * * *" # nightly, 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: "300"
+
+# Never two runs at once; a run that is still going finishes first.
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.crate }})
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - crate: faro-update
+            targets: envelope metadata client_flow signed_flow
+          - crate: faro-proto
+            targets: encoding event report api
+          - crate: faro-ipc
+            targets: decode_agent_msg decode_service_msg stream_decoder
+    defaults:
+      run:
+        working-directory: crates/${{ matrix.crate }}/fuzz
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      # Installed into the runner's own Cargo home, so later runs only check
+      # for a newer release.
+      - run: cargo install cargo-fuzz --locked
+      # Each run starts from the corpus the previous run grew.
+      - uses: actions/cache@v4
+        with:
+          path: crates/${{ matrix.crate }}/fuzz/corpus
+          key: fuzz-corpus-${{ matrix.crate }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.crate }}-
+      - name: Seed corpus
+        run: |
+          if [ -f examples/seed_corpus.rs ]; then
+            cargo run --release --example seed_corpus
+          fi
+      - name: Fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          case "$SECONDS_PER_TARGET" in
+            '' | *[!0-9]*) echo "::error::seconds must be a whole number"; exit 1 ;;
+          esac
+          status=0
+          for t in $TARGETS; do
+            echo "::group::$t"
+            if ! cargo fuzz run "$t" -- \
+                -max_total_time="$SECONDS_PER_TARGET" \
+                -timeout=30 -rss_limit_mb=2048 -print_final_stats=1; then
+              echo "::error::fuzz target $t of ${{ matrix.crate }} failed; see the crash artifact"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+      # Crashing inputs, to reproduce with
+      # `cargo +nightly fuzz run <target> <file>`. The repository is private,
+      # so only its members can download them; findings in the update
+      # metadata path are security issues and stay out of public places.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes-${{ matrix.crate }}-${{ github.run_id }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30

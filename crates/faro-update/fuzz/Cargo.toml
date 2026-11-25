@@ -1,0 +1,59 @@
+# cargo-fuzz harness for the faro-update metadata parsers and verifier
+# (ARCHITECTURE.md §9). See docs/DEVELOPMENT.md "Fuzzing".
+#
+# Requires a nightly toolchain and cargo-fuzz:
+#   cargo run --example seed_corpus      # writes corpus/<target>/seed-*
+#   cargo +nightly fuzz run client_flow
+# The empty [workspace] table keeps this crate out of the main workspace so
+# stable `cargo build`/`cargo test` never try to build it.
+
+[package]
+name = "faro-update-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `testing` gives the targets a toy project with deterministic keys to trust
+# and to sign with. This crate is never shipped.
+faro-update = { path = "..", features = ["testing"] }
+faro-proto = { path = "../../faro-proto" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[[example]]
+name = "seed_corpus"
+path = "examples/seed_corpus.rs"
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_flow"
+path = "fuzz_targets/client_flow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_flow"
+path = "fuzz_targets/signed_flow.rs"
+test = false
+doc = false
+bench = false
