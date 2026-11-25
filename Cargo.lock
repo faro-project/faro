@@ -1203,6 +1203,7 @@ name = "faro-service"
 version = "0.1.0-beta.1"
 dependencies = [
  "axum",
+ "blake3",
  "clap",
  "faro-agent",
  "faro-core",

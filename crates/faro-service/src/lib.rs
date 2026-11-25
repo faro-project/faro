@@ -16,6 +16,7 @@
 //! | [`client`] | the signed, size-bounded instance API client |
 //! | [`enroll`] | enrollment, endorsement verification, manifest bootstrap |
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
+//! | [`model`] | the image classifier: the packaged model, its checks, `model-check` |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
 //! | [`update`] | client self-update: verify against the project root, download, install |
 //! | [`cli`] | the command line |
@@ -50,6 +51,7 @@ pub mod client;
 pub mod config;
 pub mod enroll;
 pub mod link;
+pub mod model;
 pub mod runtime;
 pub mod source;
 pub mod state;

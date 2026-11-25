@@ -301,6 +301,12 @@ pub mod pkg_layout {
     /// The project's update root of trust (a signed root document), shipped
     /// in release packages (§3.8). Without it the service doesn't update.
     pub const UPDATE_ROOT: &str = "/Library/Faro/update-root.json";
+    /// The image model's manifest (`faro_detect::ModelInfo`); the model
+    /// file sits next to it. Built by `crates/faro-detect/models/opennsfw`.
+    pub const MODEL_MANIFEST: &str = "/Library/Faro/models/opennsfw/manifest.json";
+    /// Licences and attribution for the third-party parts of the package
+    /// (the image model, ONNX Runtime).
+    pub const NOTICES_DIR: &str = "/Library/Faro/notices";
 }
 
 /// The daemon job the `.pkg` installs ([`pkg_layout`]).
