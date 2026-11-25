@@ -65,6 +65,15 @@ jobs:
       - name: macOS leak-test measurements
         if: runner.os == 'macOS'
         run: cargo test -p faro-platform-macos --test autorelease_growth -- --nocapture
+      # The updater's package signature policy in the other kinds of build:
+      # a development build may skip the check, a build with a Team ID
+      # never does (crates/faro-service/src/update/signature.rs). The
+      # workspace run above covers a release build without one.
+      - name: Package signature policy (dev build, and with a Team ID)
+        if: runner.os == 'macOS'
+        run: |
+          cargo test -p faro-service --features dev --lib update::signature
+          FARO_TEAM_ID=ABCDE12345 cargo test -p faro-service --lib update::signature
       # The ONNX Runtime classifier and the model benchmark harness, run on
       # a synthetic set and a tiny graph the tests generate. The `onnx`
       # feature's build script downloads prebuilt ONNX Runtime binaries, so

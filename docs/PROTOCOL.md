@@ -315,9 +315,17 @@ A client trusts the root it shipped with, never the instance. On each check it:
 1. fetches `roots/<v+1>.json` until a 404, verifying each rotation against the previous root;
 2. fetches and verifies `timestamp.json`, then `targets.json`, which must match the timestamp's commitment byte for byte (a mirror that switches release between the two requests is retried later);
 3. selects for its platform, arch and OS version in the instance's channel, never below its installed version;
-4. downloads the artifact, reading at most the signed length plus one byte, and installs it only if length and BLAKE3 match.
+4. downloads the artifact, reading at most the signed length plus one byte, and keeps it only if length and BLAKE3 match;
+5. on macOS, checks the package's own signature before installing it: a Developer ID Installer certificate that chains to Apple's Developer ID CA, from the Team ID the installed client was built with, and notarized (Gatekeeper accepts it as "Notarized Developer ID").
 
 It persists its trust state after every step, including failed ones. The instance chooses the channel, so it can hold clients back or move them between channels, but it can't make them install anything the project didn't sign or go back to an older release.
+
+**Step 5 is a second layer.** The metadata (steps 1 to 4) decides what to install. The package signature only stops a package the metadata approved but Faro's Apple identity didn't sign, for example if the targets and timestamp keys leak (KEY-CEREMONY.md §4.2). The Team ID is compiled into the client (`FARO_TEAM_ID`, the value `ipc.agent_requirement` is built from), never read from the update, its metadata or the mirror. The checks are `pkgutil --check-signature` and `spctl --assess --type install` (`crates/faro-service/src/update/signature.rs`):
+
+- **Rejected** (unsigned, another team, not a Developer ID Installer certificate): not installed and never retried. The service reports it as a tamper-class `integrity_failure` (ARCHITECTURE.md §3.7), once each time it starts while the metadata still offers that package.
+- **Unconfirmed** (a tool failed, Gatekeeper didn't confirm notarization, or the client has no Team ID): not installed, and tried again at the next check.
+- **Offline:** release packages carry a stapled notarization ticket, so the check needs no connection to Apple. Without a ticket Gatekeeper asks Apple; offline that is unconfirmed, never a pass.
+- **Development builds** (the `dev` feature, no Team ID) skip step 5. A build without the `dev` feature never does: without a Team ID it installs nothing.
 
 ### 8.3 What the mirror does
 
