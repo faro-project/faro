@@ -22,6 +22,10 @@ pub enum TokenPurpose {
     Device,
     EnrollCode,
     Invite,
+    /// The challenge sealed to an ally's key before they re-wrap it
+    /// ([`crate::api::invites::ally_key_challenge`]). Never stored: the
+    /// instance recomputes it to check the answer.
+    AllyKeyChallenge,
     /// Not a secret: used to key rate-limit buckets by email without keeping
     /// plaintext addresses in memory.
     RateLimitEmail,
@@ -36,6 +40,7 @@ impl TokenPurpose {
             TokenPurpose::Device => b"device",
             TokenPurpose::EnrollCode => b"enroll-code",
             TokenPurpose::Invite => b"invite",
+            TokenPurpose::AllyKeyChallenge => b"ally-key-challenge",
             TokenPurpose::RateLimitEmail => b"rate-limit-email",
         }
     }
@@ -66,11 +71,17 @@ impl TokenHasher {
 
     /// Lowercase hex of `BLAKE3-keyed(key, tag || 0x00 || secret)`.
     pub fn hash(&self, purpose: TokenPurpose, secret: &str) -> String {
+        self.mac(purpose, secret).to_hex().to_string()
+    }
+
+    /// `BLAKE3-keyed(key, tag || 0x00 || secret)` itself. Comparing two
+    /// [`blake3::Hash`]es is constant-time.
+    pub fn mac(&self, purpose: TokenPurpose, secret: &str) -> blake3::Hash {
         let mut h = blake3::Hasher::new_keyed(&self.key);
         h.update(purpose.tag());
         h.update(&[0]);
         h.update(secret.as_bytes());
-        h.finalize().to_hex().to_string()
+        h.finalize()
     }
 }
 

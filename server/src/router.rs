@@ -115,6 +115,14 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             post(invites::accept.layer(limited)),
         )
         .route("/v1/me/ally-key", get(invites::get_my_ally_key))
+        .route(
+            "/v1/me/ally-key/challenge",
+            post(invites::ally_key_challenge),
+        )
+        .route(
+            "/v1/me/ally-key/wrapped",
+            put(invites::put_my_wrapped_ally_key),
+        )
         .route("/v1/me/allies", get(allies::list_my_allies))
         .route("/v1/me/allies/{ally_id}", delete(allies::remove))
         .route("/v1/me/allies/{ally_id}/approve", post(allies::approve))
