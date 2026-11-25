@@ -408,13 +408,22 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 | Urgency | Produced by | Default delivery |
 |---|---|---|
-| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, missed check-in past grace, an account disabled by an admin | **Immediate** email + Web Push |
-| `normal` | `medium` flag, settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
+| `urgent` | `high` rating flag, `medium` rating flag (by default), every tamper event, uninstall, chain gap, missed check-in past grace, an account disabled by an admin | **Immediate** email + Web Push |
+| `normal` | `medium` flag (if the member chooses), settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
 | `none` | Clean captures, heartbeats, low-rated flags, context signals | Only in the daily report |
 
 - Server-generated alerts (missed check-in, chain gap) set their own urgency.
 - **Allies choose** per member and urgency level: immediate, digest or off, with quiet hours. An exception: **urgent tamper alerts can't be turned off entirely, only moved to digest**, so tamper can't be silenced quietly.
-- The member chooses the threshold mapping, for example whether `medium` counts as urgent. Changing the mapping is itself a `normal` event that allies are told about.
+- The member chooses the threshold mapping within per-rating floors. The default and the floor are not always the same:
+
+  | Rating | Default | Floor (lowest the member may choose) |
+  |---|---|---|
+  | `low` | `none` | `none` |
+  | `medium` | `urgent` | `normal` |
+  | `high` | `urgent` | `urgent` |
+
+  Changing the mapping in either direction, including lowering `medium` flags to `normal`, is itself a `normal` event that allies are told about. The floors are enforced on the device: the instance can't see a flag's rating, so its own floor (`EventKind::min_urgency`) applies to event kinds, not ratings.
+- A device keeps the mapping it last announced to allies. Devices that started before `medium` defaulted to `urgent` stay at `normal` until the member changes it; only new devices start at the new default, so allies never see a mapping change the member didn't make.
 - Notification text is content-free: *"Urgent: new alert for Sam on Laptop-X. Open Faro to view."* Details only appear after decryption in the app.
 - **Privacy trade-off, accepted:** the operator can see *that* an urgent event happened and when, but not what it was. The operator privacy notice states this.
 
@@ -519,18 +528,23 @@ Institutions running instances (churches, colleges) make consent even more impor
 Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college).
 
 **Phase 2: Hardening, Linux, institutions**
-Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit.
+Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
 
 **Phase 3: Beyond**
 Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter), Helm chart, and possibly federation between instances.
 
 ---
 
-## 14. Open questions
+## 14. Open questions and decisions
 
-1. **Funding and stewardship of the project**: signing certificates, the Apple Developer account and the release infrastructure have small fixed costs and need a responsible owner (a nonprofit? fiscal sponsorship?).
-2. **Cross-instance allies**: is one account per instance enough, or is lightweight federation (an ally on instance A following a member on instance B) worth the complexity later?
-3. **Capture frequency default**: start at a 60 s mean?
-4. **Default urgency mapping**: should `medium` flags be `urgent` or `normal` by default?
-5. **Instance discovery**: should the project keep an opt-in public list of instances for people who don't want to host their own (for example a ministry offering a free shared instance)?
-6. **Mobile timing**: many users' main risk is the phone, so mobile shouldn't slip so far that the product isn't useful.
+### Open
+
+- **Funding and stewardship of the project**: signing certificates, the Apple Developer account and the release infrastructure have small fixed costs and need a responsible owner (a nonprofit? fiscal sponsorship?).
+- **Mobile timing**: many users' main risk is the phone, so mobile shouldn't slip so far that the product isn't useful.
+
+### Decisions
+
+- **Cross-instance allies: one account per instance is enough for v1.** An ally who supports members on two instances has an account on each. Lightweight federation (an ally on instance A following a member on instance B) stays out of v1 (§1) and is at most a Phase 3 possibility (§13).
+- **Capture frequency default: a 60 s mean** (§3.4), `MEAN_DEFAULT_SECS` in `faro-core`'s scheduler. Members can still choose 30–300 s, and allies are told when they do.
+- **Default urgency mapping: `medium` flags are `urgent` by default.** The floor stays `normal`, so a member may lower them, and allies are told when they do (§5.4). Devices that started before this default keep the mapping they already announced; only new devices start at `urgent`.
+- **Instance discovery: yes, an opt-in public list of instances, later.** It helps people who don't want to host their own (for example a ministry offering a free shared instance). It isn't needed for the beta and is on the Phase 2 roadmap (§13).
