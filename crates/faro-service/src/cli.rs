@@ -487,6 +487,10 @@ async fn cmd_run(
     capture: CaptureMode,
 ) -> Result<(), CliError> {
     let dir = StateDir::open(&config.state_dir)?;
+    // Up before the wait, for the life of the process: the agent can enroll
+    // the computer through it (an administrator approves), and ask whether
+    // it is enrolled.
+    let _enroll_server = start_enroll_server(&config);
     if !wait_for_enrollment(&dir, ENROLLMENT_POLL, shutdown_signal()).await? {
         return Ok(());
     }
@@ -503,6 +507,36 @@ async fn cmd_run(
     tracing::info!(device = %service.enrollment().device_id, instance = %service.enrollment().instance_url, "starting");
     service.run(shutdown_signal()).await?;
     Ok(())
+}
+
+/// Aborts the enroll server's task when dropped.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() {
+            t.abort();
+        }
+    }
+}
+
+/// The enroll sockets (`crate::enroll_server`). Approval always goes
+/// through [`SystemApprover`](crate::enroll_server::SystemApprover): there
+/// is deliberately no option to use another.
+fn start_enroll_server(config: &Config) -> AbortOnDrop {
+    #[cfg(unix)]
+    {
+        use crate::enroll_server::{EnrollServer, EnrollService, SystemApprover};
+        let service = EnrollService::from_config(config, Arc::new(SystemApprover));
+        AbortOnDrop(Some(tokio::spawn(
+            EnrollServer::new(service, config).run(),
+        )))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        AbortOnDrop(None)
+    }
 }
 
 #[cfg(target_os = "macos")]
