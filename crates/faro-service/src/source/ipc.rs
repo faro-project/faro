@@ -1249,7 +1249,13 @@ mod tests {
 
     impl Harness {
         async fn start(logins: &Logins, capture_window: Duration) -> Harness {
-            let dir = tempfile::tempdir().unwrap();
+            // Private, whatever the umask: the socket checks refuse a group-writable
+            // directory, and tempfile leaves the mode to the umask (002 on many Linux
+            // accounts).
+            let dir = tempfile::Builder::new()
+                .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+                .tempdir()
+                .unwrap();
             let sock = dir.path().join("run").join("agent.sock");
             let mut src = IpcFrameSource::new(&sock, [])
                 .with_ping(Duration::from_millis(50), Duration::from_secs(60))

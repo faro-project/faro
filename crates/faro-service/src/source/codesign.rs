@@ -229,7 +229,13 @@ mod tests {
 
     /// The credentials of a real socket peer: this test process.
     async fn own_peer_info() -> PeerInfo {
-        let dir = tempfile::tempdir().unwrap();
+        // Private, whatever the umask: the socket checks refuse a group-writable
+        // directory, and tempfile leaves the mode to the umask (002 on many Linux
+        // accounts).
+        let dir = tempfile::Builder::new()
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let sock = dir.path().join("cs.sock");
         let seen = Arc::new(Mutex::new(None));
         let seen2 = seen.clone();
