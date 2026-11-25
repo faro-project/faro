@@ -738,3 +738,100 @@ async fn goodbye_writes_nothing_when_it_cannot_be_delivered() {
         .await;
     dev.shutdown().await;
 }
+
+/// Records the packages the service asks it to install.
+#[derive(Debug, Default)]
+struct RecordingInstaller {
+    calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl faro_service::update::install::Installer for RecordingInstaller {
+    fn install(
+        &self,
+        package: &std::path::Path,
+        target: &faro_update::TargetInfo,
+    ) -> Result<(), faro_service::update::install::InstallError> {
+        let bytes = std::fs::read(package).expect("package on disk");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((target.name.clone(), bytes));
+        Ok(())
+    }
+}
+
+/// The running service checks its instance's mirror on its own, verifies
+/// the release against the project root it ships with, and hands the
+/// package to the installer. It does this before its member has endorsed
+/// it, too: a computer waiting for activation still gets fixes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_service_installs_an_update_from_its_instance() {
+    use faro_update::testing::{Artifact, ToyProject, DAY_MS};
+    use faro_update::TargetKind;
+    let now = faro_core::Clock::wall_ms(&faro_core::SystemClock::new());
+    let project_dir = tempfile::tempdir().unwrap();
+    let mut project = ToyProject::new(now + 365 * DAY_MS);
+    let root_file = project_dir.path().join("root.json");
+    std::fs::write(&root_file, project.first_root()).unwrap();
+    let release = project_dir.path().join("release");
+    let pkg = "client/macos/aarch64/Faro-99.0.0.pkg";
+    project
+        .publish(
+            &release,
+            &[Artifact::new(
+                pkg,
+                TargetKind::Client,
+                "macos",
+                "aarch64",
+                "99.0.0",
+                b"new faro",
+            )],
+            now + 7 * DAY_MS,
+        )
+        .unwrap();
+
+    let w = World::with_server_config(move |c| c.updates.root = Some(root_file)).await;
+    w.state()
+        .updates()
+        .expect("mirror configured")
+        .refresh_from(
+            &faro_server::updates::upstream::Upstream::Dir(release),
+            now,
+            &faro_update::Channel::stable(),
+            faro_server::updates::Prefetch::All,
+        )
+        .await
+        .unwrap();
+
+    let mut dev = w.enroll_device().await;
+    let installer = std::sync::Arc::new(RecordingInstaller::default());
+    dev.updates = faro_service::UpdateOverrides {
+        root: Some(project.first_root()),
+        installer: Some(installer.clone()),
+        spec: Some(faro_service::update::ClientSpec {
+            platform: "macos".into(),
+            arch: "aarch64".into(),
+            os_version: None,
+            installed: faro_update::Version::new(1, 0, 0),
+        }),
+        first_check: Some(Duration::ZERO),
+    };
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while installer.calls.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no install within 30 s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        *installer.calls.lock().unwrap(),
+        vec![(pkg.to_owned(), b"new faro".to_vec())]
+    );
+    dev.shutdown().await;
+}

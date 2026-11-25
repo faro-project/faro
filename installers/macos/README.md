@@ -11,3 +11,5 @@
 | `resources/` | The Installer's welcome and conclusion pages |
 | `test-uninstall.sh` | Checks `faro-uninstall`'s decisions on a fake `/Library` with stubbed `launchctl` and `faro-service` (CI runs it) |
 | `scripts/` | `preinstall` stops a running Faro before an upgrade; `postinstall` sets ownership, installs the default `service.toml`, and starts the service and an agent in every logged-in account |
+
+**Updates.** The service installs updates with this same package, through the launchd job `org.faro.update` (`crates/faro-platform-macos/src/update_job.rs`). The job runs `installer`, then starts the service and agents again if a failed install left them stopped. A release package must ship the project's update root of trust (`FARO_UPDATE_ROOT`, installed as `/Library/Faro/update-root.json`). `check-pkg.sh` fails a release package without it.

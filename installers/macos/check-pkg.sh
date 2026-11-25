@@ -54,6 +54,15 @@ expect "Library/Faro/Faro Agent.app/Contents/Info.plist" 100644
 expect "Library/Faro/service.toml.default" 100644
 expect "Library/LaunchDaemons/org.faro.service.plist" 100644
 expect "Library/LaunchAgents/org.faro.agent.plist" 100644
+# The update root of trust: required in a release package (without it the
+# service never updates), optional in a development one.
+update_root="$work/payload/Library/Faro/update-root.json"
+if [[ -e "$update_root" ]]; then
+    expect "Library/Faro/update-root.json" 100644
+    grep -q '"application/vnd.faro.root+json"' "$update_root" || fail "update-root.json is not a signed root document"
+elif [[ "$(basename "$pkg")" != *-dev.pkg ]]; then
+    fail "a release package must ship /Library/Faro/update-root.json"
+fi
 
 bash -n "$work/payload/Library/Faro/bin/faro-uninstall" || fail "faro-uninstall does not parse"
 
