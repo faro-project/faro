@@ -249,7 +249,7 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 - **A release package** needs `FARO_SIGN_IDENTITY` (Developer ID Application), `FARO_INSTALLER_IDENTITY` (Developer ID Installer) and `FARO_TEAM_ID`. The package's default `service.toml` sets `ipc.agent_requirement` from the team ID. `FARO_NOTARY_PROFILE` (a `notarytool` keychain profile) also notarizes and staples it.
 - **The layout is fixed:** programs in `/Library/Faro` (the agent inside `Faro Agent.app`, bundle id `org.faro.agent`), the daemon in `/Library/LaunchDaemons` and the **global** LaunchAgent in `/Library/LaunchAgents`, which launchd starts in every account's session. The paths live in `faro_platform_macos::pkg_layout`.
 - **The launchd plists are checked in** under `installers/macos/payload`, and a test keeps them equal to the generator. After changing `pkg_daemon_job` or `pkg_agent_job`, run `FARO_BLESS=1 cargo test -p faro-platform-macos --test installer_plists`.
-- **After installing,** the service waits for enrollment. `sudo /Library/Faro/bin/faro-service enroll --link '…'` lists the computer's accounts, enrolls it, and leaves activation to the running service.
+- **After installing,** the service waits for enrollment. Members enroll from the agent: opening a `faro://enroll` link (the web app's **Open in Faro**, or **Enroll this computer…** in the menu-bar icon) shows the instance and the accounts to confirm, and an administrator approves in macOS's own password dialog ([Enrolling from the agent](#enrolling-from-the-agent)). `sudo /Library/Faro/bin/faro-service enroll --link '…'` still works: it lists the computer's accounts, enrolls it, and leaves activation to the running service.
 - **Uninstalling:** `sudo /Library/Faro/bin/faro-uninstall` stops the service, runs `faro-service goodbye` so allies get an urgent "Faro was uninstalled" (§3.7), then stops every session's agent and removes the programs, the launchd jobs, the state directory and the package receipt. If the instance can't be reached, `goodbye` writes nothing, so the uninstaller restarts the service and removes nothing. If the instance has already retired the computer (`403 device_removed` or `403 account_deleted`), allies were told then: `goodbye` writes nothing, exits 0, and the uninstall goes ahead. `--force` removes Faro anyway, and allies then see a missed check-in instead. A goodbye that is written but not delivered (exit status 3) never backs out: a service running again after its own goodbye would contradict it.
 - **One writer per chain:** `run` and `goodbye` both hold an exclusive lock on `service.lock` in the state directory (`StateDir::try_lock`), so a second `faro-service run`, or a `goodbye` while the service runs, is refused instead of forking the event chain.
 - **Updates:** `FARO_UPDATE_ROOT` (a signed root document, for example from `cargo run -p faro-update --example faro-release -- sign-root …`) is installed as `/Library/Faro/update-root.json`. A release package requires it; a `--dev` one may have it. With it, the service checks its instance's mirror about every 6 hours (`[updates] check_secs`) and installs newer client packages through the one-shot launchd job `org.faro.update` (`faro_platform_macos::update_job`). It runs as its own job because the package's preinstall stops the service, which would kill an `installer` running as its child. Only the packaged service, run as root from `/Library/Faro/bin/faro-service`, installs anything. A development build checks and logs, nothing more. The job's output goes to `update-install.log` in the state directory, and `update-attempts.json` there records the pending install and failed packages.
@@ -395,6 +395,31 @@ The image copies `release/update-root.json` to `/usr/share/faro/update-root.json
 cargo build --release --locked -p faro-update --example faro-release
 release/test-release.sh
 ```
+
+## Enrolling from the agent
+
+Enrolling changes a root service, so the agent can only ask: an administrator approves every enrollment (issue #62).
+
+```text
+agent (user session)                       faro-service (root)
+  faro://enroll link or menu item
+  Preview(link) ──── enroll.<uid>.sock ──▶ parse (link.rs), GET /.well-known/faro
+  ◀── name, address, identity key, accounts
+  person confirms
+  empty AuthorizationRef, external form
+  Enroll(link, confirmed identity, auth) ─▶ discover again, same identity?
+                                          check the org.faro.enroll rule
+                                          AuthorizationCopyRights ─▶ macOS admin dialog
+                                          enroll::enroll (the CLI's code)
+  ◀── device fingerprint, member key checked?
+                                          wait_for_enrollment sees enrollment.json
+```
+
+- **The enroll socket** (`faro_service::enroll_server`) is up before the service waits for enrollment and for as long as it runs. A root service binds `enroll.<uid>.sock` next to the agent sockets for each account with a GUI session (owner that account, mode 0600); a non-root development service binds `enroll.sock`. Peers are checked like agents (`source::ipc::peer_policy`): the socket's uid, and the code signature when `ipc.agent_requirement` is set. One request per connection, one enrollment at a time. The messages are `faro_ipc::enroll`, separate from the agent's session protocol.
+- **Approval** is Authorization Services (`faro_platform_macos::authorization`), as in Apple's EvenBetterAuthorizationSample: the agent sends the external form of an empty authorization, and the service asks for the right `org.faro.enroll` with `ExtendRights | InteractionAllowed` and a prompt it writes itself, naming the instance it discovered. Faro's rule is `class user, group admin, shared false, timeout 0, allow-root false, authenticate-user true, session-owner false`, so an administrator types their name and password every time. Before every prompt the service reads the rule and accepts only exactly that (`definition_ok`); a root service rewrites it otherwise and reads it back, a non-root service refuses. It also refuses if a more specific `config.*` right for it exists, or if the agent's authorization already carries the right.
+- **Testing.** The approver is a trait (`enroll_server::Approver`) so `tests/enroll_gui.rs` can fake the administrator; the binary always uses `SystemApprover`, and nothing (no flag, no setting, not the `dev` feature) swaps it. The `dev` feature only changes who may connect. `authorization.rs` has the no-dialog checks of the real mechanism; the test that writes the rule is `#[ignore]`d (run it as root on a test Mac only). AppKit can't be driven from `cargo test`, so the screens are tested as text (`faro_agent::enroll`) and the flow against a fake service (`crates/faro-agent/tests/enroll_flow.rs`).
+- **By hand,** on a test Mac with a `--dev` package installed: create a code on the web app's **Computers** page, click **Open in Faro**, and check the confirm window, the macOS password dialog (its text names the instance), and the result. Then try **Enroll this computer…** from the menu (paste the link, or the address and the code), Cancel at each step, a wrong password, and an already enrolled computer. `security authorizationdb read org.faro.enroll` shows the rule the service wrote.
+- **Not covered:** if the agent isn't running when a link is opened, LaunchServices starts a second copy with no arguments, which exits. The member then uses the menu item, or logs out and in. A fake password dialog drawn by another app is outside what Faro can prevent.
 
 ## CI runners
 

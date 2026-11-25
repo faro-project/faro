@@ -24,6 +24,7 @@ There is no central Faro service. A church, a college, a small group or one pers
 - [Wire protocol](docs/PROTOCOL.md): byte-level signing, hashing and encryption formats.
 - [Development](docs/DEVELOPMENT.md): building, testing, crate map and the invariants every change must keep.
 - [Ally guide](docs/ALLY-GUIDE.md): a plain-language guide for allies, from accepting an invitation to having the conversation.
+- [Adding your Mac](docs/MEMBER-GUIDE.md): a plain-language guide for members, from the enrollment link to approving the computer.
 - [Key ceremony](docs/KEY-CEREMONY.md): the maintainer's runbook for creating and rotating the update signing keys.
 - [Security policy](SECURITY.md): how to report a vulnerability, and what's in scope.
 
