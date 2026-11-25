@@ -5,6 +5,8 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import icon from '$brand/faro-icon.svg';
+	import { describeError } from '#lib/api.ts';
+	import { date } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
@@ -14,6 +16,22 @@
 	let { children }: LayoutProps = $props();
 
 	let signOutError = $state('');
+	let cancelBusy = $state(false);
+	let cancelError = $state('');
+	let cancelled = $state(false);
+
+	async function cancelDeletion() {
+		cancelBusy = true;
+		cancelError = '';
+		try {
+			await session.cancelDeletion();
+			cancelled = true;
+		} catch (e) {
+			cancelError = describeError(e);
+		} finally {
+			cancelBusy = false;
+		}
+	}
 
 	// The sign-in pages show their own state; a "Sign in" link there is noise.
 	let onSignInPage = $derived(/\/(signin|auth\/verify)$/.test(page.url.pathname));
@@ -122,6 +140,39 @@
 <main id="main" class:narrow>
 	{#if signOutError}
 		<div class="notice error" role="alert">{signOutError}</div>
+	{/if}
+	{#if session.user && session.deletion}
+		<div class="notice warn" role="status">
+			<p>
+				<strong>Your account will be deleted on {date(session.deletion.purge_after_ms)}.</strong>
+				{#if session.deletion.started_at_ms}
+					The deletion has started and can no longer be cancelled.
+				{:else}
+					Until then nothing changes, and you can cancel. Everyone who was told about the deletion
+					is told if you cancel.
+				{/if}
+			</p>
+			{#if !session.deletion.started_at_ms}
+				<div class="actions">
+					<button
+						class="secondary small"
+						type="button"
+						onclick={cancelDeletion}
+						disabled={cancelBusy}
+					>
+						{cancelBusy ? 'Cancelling…' : 'Cancel deletion'}
+					</button>
+				</div>
+			{/if}
+			{#if cancelError}<p class="field-error" role="alert">{cancelError}</p>{/if}
+		</div>
+	{:else if cancelled && session.user}
+		<div class="notice ok" role="status">
+			<p>
+				✓ Your account will not be deleted. Everyone who was told about the deletion is being told
+				it was cancelled.
+			</p>
+		</div>
 	{/if}
 	{#if (keyring.memberRecovered || keyring.allyRecovered) && !page.url.pathname.endsWith('/settings')}
 		<div class="notice warn" role="status">

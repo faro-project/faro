@@ -58,6 +58,9 @@ pub struct LinkView {
     /// allies, the member's when listing an ally's members).
     pub other_display_name: String,
     pub other_email: String,
+    /// The end of the hold, if the other party asked for their account to
+    /// be deleted (§12).
+    pub other_deletion_purge_after_ms: Option<i64>,
     /// The ally's live encryption key, if any.
     pub ally_enc_pubkey: Option<EncPublicKey>,
     /// The member's signing key, if set.
@@ -69,7 +72,7 @@ pub struct LinkView {
 macro_rules! view_select {
     () => {
         "SELECT l.id, l.member_id, l.ally_id, l.state, l.created_at,
-            l.activated_at, o.display_name, o.email,
+            l.activated_at, o.display_name, o.email, o.deletion_purge_after,
             (SELECT k.enc_pubkey FROM ally_keys k
               WHERE k.user_id = l.ally_id AND k.revoked_at IS NULL
               ORDER BY k.created_at DESC LIMIT 1) AS ally_enc_pubkey,
@@ -89,6 +92,7 @@ fn view_from_row(r: &sqlx::any::AnyRow) -> Result<LinkView, sqlx::Error> {
         activated_at_ms: r.try_get("activated_at")?,
         other_display_name: r.try_get("display_name")?,
         other_email: r.try_get("email")?,
+        other_deletion_purge_after_ms: r.try_get("deletion_purge_after")?,
         ally_enc_pubkey: super::parse_opt_col(r, "ally_enc_pubkey", EncPublicKey::from_b64)?,
         member_sign_pubkey: super::parse_opt_col(r, "member_sign_pubkey", SignPublicKey::from_b64)?,
     })
@@ -347,6 +351,30 @@ pub async fn active_member_ids<'e>(
     .await?;
     rows.iter()
         .map(|r| Ok(UserId::new(r.try_get::<String, _>("member_id")?)))
+        .collect()
+}
+
+/// Every live (pending or active) link `user` is part of, as member or as
+/// ally: `(member, ally)` pairs.
+pub async fn live_links_of<'e>(
+    e: impl Executor<'e, Database = Any>,
+    user: &UserId,
+) -> Result<Vec<(UserId, UserId)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT member_id, ally_id FROM ally_links
+         WHERE (member_id = $1 OR ally_id = $1) AND state <> 'removed'
+         ORDER BY created_at, id",
+    )
+    .bind(user.as_str())
+    .fetch_all(e)
+    .await?;
+    rows.iter()
+        .map(|r| {
+            Ok((
+                UserId::new(r.try_get::<String, _>("member_id")?),
+                UserId::new(r.try_get::<String, _>("ally_id")?),
+            ))
+        })
         .collect()
 }
 

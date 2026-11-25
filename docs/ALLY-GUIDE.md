@@ -166,6 +166,7 @@ A missed check-in often just means the laptop was closed, switched off or away f
 ### Other items you might see
 
 - **"The account was disabled by an admin"**: the person who runs the server stopped the member signing in. Their computers keep reporting to you. Faro always tells the person and their allies when an admin does this, and the same if an admin disables an ally's account.
+- **"The account is being deleted"**: the member asked for their account to be deleted. The item gives the date. Until then nothing changes: their computers keep reporting to you, you can open what they sent, and they can still cancel. After that date, everything about them is removed from the server. **"*Name* is deleting their account"** means the same thing for one of their other allies, who stops being an ally on that date. If someone cancels, you see **"…cancelled deleting their account"**. You're emailed about all of these.
 - **"The details are no longer stored"**: the item is older than the instance (or the member) keeps things for.
 - **"The details couldn't be decrypted"**: the item may have been damaged or tampered with. Worth mentioning to the member.
 
@@ -207,6 +208,9 @@ That's on purpose. If these alerts could be switched off, Faro could be quietly 
 | ***Name* was removed as an ally**, or ***Name* stopped being an ally** | Normal |
 | **The account was disabled by an admin** | Urgent |
 | ***Name*'s account was disabled by an admin** | Urgent |
+| **The account is being deleted** | Urgent |
+| ***Name* is deleting their account** | Normal |
+| **The account deletion was cancelled**, or ***Name* cancelled deleting their account** | Normal |
 
 You'll always hear about those, at least in the hourly digest. Everything else can be switched off, including flagged moments, **Faro kept restarting**, and ***Computer* is back online**. If Faro is stopped again and again, you get **Possible tampering**, which can't be switched off.
 
@@ -225,6 +229,8 @@ What happens:
 - They're asked to confirm their updated list of allies. Until they do, their computer still locks new items for you, but the server won't give you anything.
 
 If they invite you again later, you can accept with your existing passphrase.
+
+**Deleting your Faro account** ends all of this at once: open **Settings** (your name, top right) and use **Delete your account** at the bottom. You need to have signed in within the last 10 minutes (it offers to send you a sign-in link), and you type your email address to confirm. Everyone you support, and their other allies, are emailed straight away. For 7 days nothing else changes, you can still sign in, and every page has a **Cancel deletion** button. After that you stop being anyone's ally and your account, your ally key and your settings are deleted.
 
 If the member removes you as an ally, Faro tells you, and their page says **"You aren't an ally for this person (any more)"**. A member can't remove an ally without the other allies being told either.
 

@@ -475,5 +475,40 @@ async fn check_database(cfg: &Config, key_path: &Path, r: &mut Report) {
             format!("cannot read settings: {e}"),
         ),
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    match crate::db::repo::users::deletion_counts(db.pool(), now_ms).await {
+        Ok(c) => check_deletions(c, r),
+        Err(e) => r.push(
+            "deletions",
+            Level::Fail,
+            format!("cannot read pending deletions: {e}"),
+        ),
+    }
     db.close().await;
+}
+
+/// Account deletions (§12): a purge waits until every deletion notice has
+/// been delivered, so one held up long past its hold means mail is failing.
+pub fn check_deletions(c: crate::db::repo::users::DeletionCounts, r: &mut Report) {
+    if c.overdue > 0 {
+        r.push(
+            "deletions",
+            Level::Warn,
+            format!(
+                "{} account deletion(s) have waited more than 7 days past their hold because \
+                 their notices can't be delivered; once email works again they go ahead",
+                c.overdue
+            ),
+        );
+    } else if c.pending > 0 {
+        r.push(
+            "deletions",
+            Level::Ok,
+            format!("{} account deletion(s) pending", c.pending),
+        );
+    } else {
+        r.push("deletions", Level::Ok, "no account deletions pending");
+    }
 }

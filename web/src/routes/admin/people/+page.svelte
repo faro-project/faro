@@ -233,6 +233,11 @@
 						<span class="label">Roles</span>
 						{#each rolesOf(u) as r (r)}<span class="chip">{r}</span>{/each}
 						{#if u.disabled}<span class="chip off">disabled</span>{/if}
+						{#if u.deletion_purge_after_ms}
+							<span class="chip off" title="The person asked for their account to be deleted">
+								being deleted {date(u.deletion_purge_after_ms)}
+							</span>
+						{/if}
 					</span>
 					<span class="when">
 						<span class="label">Signed in</span>
@@ -261,6 +266,8 @@
 					<span class="action">
 						{#if u.id === session.user?.id}
 							<span class="chip">you</span>
+						{:else if u.deletion_purge_after_ms}
+							<!-- The person may still cancel; the server refuses changes meanwhile. -->
 						{:else if u.disabled}
 							<button class="secondary small" type="button" onclick={() => confirmStatus(u, false)}>
 								Enable…

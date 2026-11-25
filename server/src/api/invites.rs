@@ -77,6 +77,10 @@ pub(crate) async fn create(
     kind: InviteKind,
     email: &str,
 ) -> AppResult<InviteCreated> {
+    // Nobody new joins through someone whose account is being deleted.
+    if inviter.deletion.is_some() {
+        return Err(crate::auth::session::account_being_deleted());
+    }
     let now = state.now_ms();
     if invites::count_live_by_inviter(state.db().pool(), &inviter.id, now).await?
         >= MAX_LIVE_INVITES
@@ -207,7 +211,9 @@ async fn live_invite(state: &AppState, token: &str) -> AppResult<InviteRow> {
 }
 
 /// `GET /v1/invites/{token}` (unauthenticated; rate-limited). Unknown, used
-/// and expired tokens are indistinguishable (404).
+/// and expired tokens are indistinguishable (404), and so are invitations
+/// from an account that is disabled or being deleted (usable again if the
+/// deletion is cancelled).
 pub async fn get_invite(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -215,7 +221,7 @@ pub async fn get_invite(
     let inv = live_invite(&state, &token).await?;
     let inviter = users::by_id(state.db().pool(), &inv.inviter_id)
         .await?
-        .filter(|u| !u.disabled)
+        .filter(|u| !u.disabled && u.deletion.is_none())
         .ok_or(AppError::NotFound)?;
     Ok(Json(InviteInfo {
         kind: inv.kind.as_str().to_owned(),
@@ -241,6 +247,7 @@ pub async fn accept(
     s: SessionUser,
     ApiJson(up): ApiJson<AllyKeyUpload>,
 ) -> AppResult<(StatusCode, Json<InviteAccepted>)> {
+    s.require_not_being_deleted()?;
     if faro_crypto::validate_enc_pubkey(&up.enc_pubkey).is_err() {
         return Err(AppError::bad_request(
             "invalid_enc_pubkey",
@@ -272,7 +279,13 @@ pub async fn accept(
 
     let mut tx = state.db().begin_write().await?;
     // Validate everything before consuming the invite, so a mistake (a
-    // freshly generated key on a second device) does not burn it.
+    // freshly generated key on a second device) does not burn it. Neither
+    // side may be on the way out: the member was not told about a new ally
+    // in their deletion notice, nor the ally about a new member.
+    if users::is_being_deleted(&mut *tx, &member).await? {
+        return Err(AppError::NotFound);
+    }
+    super::account::refuse_if_being_deleted(&mut *tx, &s.user.id).await?;
     if allies::live_state(&mut *tx, &member, &s.user.id)
         .await?
         .is_some()

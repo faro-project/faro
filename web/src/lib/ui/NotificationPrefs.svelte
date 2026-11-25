@@ -124,8 +124,9 @@
 			<p class="notice warn small">
 				Some alerts can't be switched off: Faro being stopped, removed or interfered with, a
 				computer that stops checking in or isn't sending what it records, missing or unverified
-				records, a computer being removed, an ally being removed or leaving, and an account being
-				disabled by an admin. With Off, they still arrive in the hourly digest.
+				records, a computer being removed, an ally being removed or leaving, an account being
+				disabled by an admin, and an account being deleted or its deletion cancelled. With Off,
+				they still arrive in the hourly digest.
 			</p>
 		{/if}
 		<label class="check">

@@ -8,10 +8,11 @@
 //! ```
 //!
 //! `goodbye` exits 0 once allies have been told (or there was nobody to
-//! tell), 1 if nothing was written (the service may be restarted safely),
+//! tell, or they were told already because the instance retired this
+//! device), 1 if nothing was written (the service may be restarted safely),
 //! and [`EXIT_GOODBYE_QUEUED`] if the goodbye was written but not delivered.
 
-use crate::client::ClientOptions;
+use crate::client::{ClientOptions, Retired};
 use crate::config::Config;
 use crate::enroll::{self, EnrollParams, InstanceInfo};
 use crate::link::{self, EnrollCode};
@@ -307,6 +308,20 @@ async fn cmd_goodbye(config: &Config, opts: GoodbyeOptions) -> Result<(), CliErr
             println!(
                 "This device was never approved by its member; no ally was told about it, \
                  so there is nobody to tell."
+            );
+            Ok(())
+        }
+        GoodbyeOutcome::AlreadyRetired(Retired::DeviceRemoved) => {
+            println!(
+                "This computer was removed from Faro by its member, and their allies were told \
+                 then. There is nobody left to tell."
+            );
+            Ok(())
+        }
+        GoodbyeOutcome::AlreadyRetired(Retired::AccountDeleted) => {
+            println!(
+                "The Faro account this computer reported to was deleted, and its allies were \
+                 told then. There is nobody left to tell."
             );
             Ok(())
         }

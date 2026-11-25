@@ -268,6 +268,16 @@ faro-signature: <base64url Ed25519 over request_signing_bytes>
 
 The instance rejects requests whose timestamp is more than 5 minutes off its own clock.
 
+Refusals a device can act on (every other credential failure is a plain `401 unauthorized`):
+
+| Response | Meaning |
+|---|---|
+| `403 device_pending_endorsement` | Enrolled, but the member hasn't approved it yet. Only heartbeats and key and status fetches are allowed. |
+| `403 device_removed` | The member removed this device. Sent only when the token **and** the signature check out. |
+| `403 account_deleted` | The account this device reported to was deleted. Sent on the token alone, because the device's key was deleted with the account. The instance keeps the token's keyed hash for 365 days. |
+
+The last two are final. Allies were told when each happened (`device_removed`, `account_deleted`), so `faro-service goodbye` writes nothing and lets an uninstall go ahead.
+
 ## 7. Heartbeats
 
 Heartbeats are **not** chain events, so 288 pings a day don't grow the chain. A `Heartbeat` carries `{instance_id, device_id, ts_ms, mono_ms, boot_id, state, last_seq?, last_hash?}` and is signed under `faro/heartbeat/v1`. `state` is one of `active`, `idle`, `locked`, `paused`, `sleeping` or `shutting_down`.
