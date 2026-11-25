@@ -47,7 +47,11 @@
 //!   and the [`ScriptedClassifier`] test double are available, and
 //!   [`classifier::preprocess`]/[`classifier::postprocess`] remain usable and
 //!   tested.
+//! * The [`bench`](mod@bench) harness (test-set layout, metrics, regression gate) is
+//!   always built; its command line, the `model-bench` example, needs
+//!   `onnx`.
 
+pub mod bench;
 pub mod classifier;
 pub mod context;
 pub mod dhash;
@@ -65,8 +69,9 @@ mod privacy_tests;
 #[cfg(feature = "onnx")]
 pub use classifier::onnx::OnnxClassifier;
 pub use classifier::{
-    load_model, ChannelOrder, Classifier, ImageScores, InputSize, ModelInfo, NullClassifier,
-    OutputActivation, ScriptedClassifier, TensorLayout, VerifiedModel, ALLOWED_MODEL_LICENSES,
+    load_model, load_model_at, ChannelOrder, Classifier, ImageScores, InputSize, ModelInfo,
+    NullClassifier, OutputActivation, ScriptedClassifier, TensorLayout, VerifiedModel,
+    ALLOWED_MODEL_LICENSES,
 };
 pub use context::{AppRule, ContextAnalyzer, ContextConfig, ContextFinding, ContextSignals};
 pub use dhash::{dhash, hamming, DedupeDecision, Deduper, DEFAULT_DEDUPE_THRESHOLD};

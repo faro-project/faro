@@ -105,6 +105,60 @@ Without `web/build`, `faro-server` still builds and its API works; page requests
 
 On macOS the agent binary shows a menu-bar icon and the service's notices, which needs a GUI session. `cargo run -p faro-platform-macos --example session_ui` shows that UI with a sample notice and no service. A `dev` agent started outside a GUI session (over SSH, for example) can skip it with `--no-ui`. AppKit's main thread can't be driven from `cargo test`, so the UI has no automated tests.
 
+## Model benchmark
+
+`faro_detect::bench` and the `model-bench` example measure a candidate image classifier the way the service uses it, and gate regressions against a baseline (ARCHITECTURE.md §3.5). Build it with `--release`: an unoptimized build says so in its output, and its latency means nothing.
+
+```sh
+B="cargo run --release -p faro-detect --features onnx --example model-bench --"
+$B --manifest m.json --set /Volumes/FaroEval/set --json results.json      # run
+$B --manifest m.json --model candidate.onnx --set … --json results.json   # weights elsewhere
+$B --manifest m.json --set … --baseline models/eval-baseline.json         # run and gate
+$B --results results.json --baseline models/eval-baseline.json            # gate only
+$B --help                                                                 # every option
+```
+
+The manifest is the same `ModelInfo` JSON the update channel ships, and the same checks apply: the licence must be on `ALLOWED_MODEL_LICENSES` and `blake3` must match the weights (`b3sum candidate.onnx`). `--policy policy.json` benchmarks other thresholds (a partial `PolicyConfig`; the default is the built-in policy).
+
+**Test-set layout.** One folder per true class, PNG files only:
+
+```text
+<set>/
+  explicit/       *.png, subfolders allowed
+  suggestive/
+  neutral/
+  gambling/ …     optional: any of the policy's other_labels (gambling, violence, gore)
+```
+
+Classes are the policy's kinds, not a model's labels, so one set measures models with different label sets (`porn`, `hentai` and `explicit` all count as `explicit`). Convert other formats first (`sips -s format png in.jpg --out out.png`). Hidden files are skipped and files at the top level are ignored; an unknown folder, an empty class or any other file is an error.
+
+**What it reports**, as text on stdout and, with `--json`, as JSON:
+
+- *Predicted class:* `neutral` if the policy rates the image clean, otherwise the kind of its top reason (`explicit`, `suggestive` or the other label). So "predicted explicit" means an explicit label crossed a policy threshold (`any_low` or above) and was the strongest reason: what allies would see.
+- *Per-class precision and recall*, from the *confusion matrix* (true class × predicted class).
+- *Ratings per class* (clean, low, medium, high): the operating point, e.g. how many explicit images reach `medium`, where thumbnails and alerts start.
+- *Latency:* p50, p95, mean and max of `Classifier::classify` (preprocessing and inference on ONNX Runtime's CPU provider, one intra-op thread) per frame, after 3 untimed warm-up runs. Images are downscaled to 768 px first, as `Detector::process` does.
+
+**The gate** exits 1 when recall on `explicit` drops by more than `--max-recall-drop` (absolute, default 0.02) or p95 latency rises by more than `--max-p95-increase` (relative, default 0.25). It exits 2 when the reports can't be compared: the set's digest differs (an image was added, removed, edited or moved to another class) or a report has no explicit images. A different model, policy or machine is printed as a note. Latency only compares on the same machine and build, so the baseline comes from the CI runner.
+
+**The baseline** is `models/eval-baseline.json`: a results file from the macOS runner, metrics only, so it is safe to commit. There is none until the maintainer picks a model and the set is on the runner; until then the CI job warns and passes. To create or update it, download the `model-eval-metrics-<sha>` artifact of the run you accept and commit its `results.json` as the baseline, in the same pull request that changes the model, the set or the policy (or accepts a regression), and say why.
+
+**In CI.** The harness itself is tested on every pull request against a synthetic set the tests generate (solid colours and UI-like windows) and a tiny ONNX graph they encode by hand (`classifier/test_onnx.rs`), so no model or image is downloaded or committed: `cargo test -p faro-detect` on every runner uses a pure-Rust stand-in for the graph, and the macOS `test` job also runs `cargo test -p faro-detect --features onnx` (the `onnx` feature's build script downloads ONNX Runtime). The `model-eval` job runs the gate on the real set on the macOS runner, only when the runner's `.env` sets:
+
+| Variable | Value |
+|---|---|
+| `FARO_MODEL_EVAL_SET` | the set's directory; unset, the job is skipped |
+| `FARO_MODEL_EVAL_MANIFEST` | the manifest of the model under test, with the model next to it |
+
+It uploads `results.json` and nothing else.
+
+**Handling the real set.** It contains explicit imagery, so:
+
+- **Never commit it,** and never copy it into the repository, a worktree, `target/`, an issue, a pull request or a CI artifact. Keep it on an encrypted volume outside the repository, readable by no account but yours and the runner's.
+- **Adults only, obtained lawfully.** Anything that might depict a minor stays out of the set, without exception.
+- **The tool writes metrics only.** Images enter through `Frame`, one at a time, and are zeroized when dropped (`privacy_tests::benchmark_frames_are_zeroized`); no image, thumbnail or per-image result is written, and the set appears only as a digest. It deliberately doesn't list which images were missed. File names can appear in error messages, and so in CI logs: name files neutrally (`0001.png`).
+- **The runner can read it.** Anyone who can push a branch can run code on the macOS runner (see CI runners), and so read the set. Keep push access to maintainers, and remove `FARO_MODEL_EVAL_SET` from the runner if that changes.
+
 ## The macOS installer
 
 `installers/macos/build-pkg.sh` builds the `.pkg` and `installers/macos/check-pkg.sh` checks one without installing it. CI builds and checks the development package on every pull request and keeps it for 14 days as the `faro-dev-pkg-arm64-<sha>` artifact of the `macos-pkg` job (Apple Silicon only).
@@ -130,7 +184,7 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 
 | Labels | Machine | Jobs |
 |---|---|---|
-| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)`, `macos-pkg` |
+| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval` |
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
 

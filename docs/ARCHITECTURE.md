@@ -212,7 +212,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 - Baseline: an open NSFW classifier exported to ONNX and quantized to int8, chosen in a Phase 0 benchmark. **Every candidate needs to be compatible with Apache-2.0.** OpenNSFW is BSD. Avoid AGPL or non-commercial weights, and check NudeNet's terms specifically.
 - Long term: **a small CLIP-style encoder (MobileCLIP or OpenCLIP, permissively licensed) with linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head.
 - Runtime: `ort` with CoreML, DirectML and CPU execution providers. Target under 80 ms per frame on CPU.
-- **Screenshot domain gap**: `models/` includes a screenshot-specific eval set, and CI fails on regressions.
+- **Screenshot domain gap**: a screenshot-specific eval set, curated by the maintainer and kept outside the repository because it contains explicit imagery. `models/eval-baseline.json` holds its metrics (never images), and CI fails on regressions (DEVELOPMENT.md "Model benchmark").
 - Later: on-device OCR (Apple Vision, `Windows.Media.Ocr`) combined with keyword lists.
 
 **Context signals.** Domain categorization uses open blocklists (check licenses: StevenBlack/hosts is MIT; review OISD and UT1 terms) compiled into an FST or Bloom filter and shipped as a signed bundle. The browser extension reports `{url, title, incognito}` over native messaging. A browser in use without the extension is reported as context.
