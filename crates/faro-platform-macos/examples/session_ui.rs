@@ -23,6 +23,42 @@ fn main() {
         std::process::exit(0);
     });
     let handle = ui.handle();
+    // "Enroll this computer…" shows the enrollment windows with sample
+    // text (no service, nothing is enrolled), to check their layout.
+    ui.on_enroll(move |link| {
+        std::thread::spawn(move || {
+            let fields = handle.ask_enroll_target(&faro_platform_macos::ui::TwoFields {
+                title: "Enroll this computer".into(),
+                body: "Paste the enrollment link from the Computers page of your Faro web app. \
+                       Or type your Faro address and the code shown there."
+                    .into(),
+                first_label: "Enrollment link or Faro address".into(),
+                first_placeholder: "faro://enroll?\u{2026}  or  faro.example.org".into(),
+                second_label: "Code (not needed with a link)".into(),
+                second_placeholder: "ABCD-1234".into(),
+                ok: "Continue".into(),
+                cancel: "Cancel".into(),
+            });
+            eprintln!("link {link:?}, fields {fields:?}");
+            if fields.is_none() && link.is_none() {
+                return;
+            }
+            let yes = handle.confirm(
+                "Enroll this computer with \u{201c}Example Instance\u{201d}?",
+                "Address: https://faro.example.org/\n\nFaro will monitor every account on \
+                 this computer, including accounts created later.\nAccounts: alex, sam",
+                "Enroll",
+                "Cancel",
+            );
+            if yes {
+                handle.message(
+                    "This computer is enrolled",
+                    "Sample only: nothing was enrolled.",
+                    false,
+                );
+            }
+        });
+    });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(1));
         handle.show_notice(

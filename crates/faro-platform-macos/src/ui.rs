@@ -17,6 +17,18 @@
 //! notices wait behind it, and one that arrives anyway (the menu's "Show
 //! the monitoring notice…") is shown again after it closes.
 //!
+//! # Enrolling
+//!
+//! The agent can also enroll the computer (issue #62). The bundle registers
+//! the `faro` URL scheme, so opening a `faro://enroll` link reaches
+//! `application:openURLs:`, and the menu has "Enroll this computer…". Both
+//! call the handler set with [`SessionUi::on_enroll`], on the main thread;
+//! the agent runs the flow on a worker thread of its own and shows each
+//! screen through the blocking [`UiHandle::ask_enroll_target`],
+//! [`UiHandle::confirm`] and [`UiHandle::message`], which run an `NSAlert`
+//! on the main queue and wait for it. They must never be called from the
+//! main thread (they return at once there instead of deadlocking).
+//!
 //! # Quitting
 //!
 //! As an `NSApplication`, the agent receives a Quit Apple Event at logout.
@@ -39,11 +51,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply, NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSFloatingWindowLevel, NSImage, NSMenu,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
 };
-use objc2_foundation::{ns_string, NSNotification, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{
+    ns_string, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString, NSURL,
+};
 
 pub use objc2::MainThreadMarker;
 
@@ -62,6 +77,16 @@ const ICON_SYMBOL: &str = "eye";
 /// What the menu shows for "Show the monitoring notice…".
 const SHOW_NOTICE: &str = "Show the monitoring notice\u{2026}";
 
+/// What the menu shows for enrolling.
+const ENROLL: &str = "Enroll this computer\u{2026}";
+
+/// The agent's bundle identifier: only the real bundle registers itself
+/// with LaunchServices for `faro://` links.
+const BUNDLE_ID: &str = "org.faro.agent";
+
+/// Called on the main thread with a `faro:` link, or `None` from the menu.
+type EnrollHandler = Box<dyn Fn(Option<String>)>;
+
 struct Ivars {
     /// The latest notice: shown again from the menu.
     notice: RefCell<(String, String)>,
@@ -70,6 +95,7 @@ struct Ivars {
     /// Show the notice again when the open alert closes.
     again: Cell<bool>,
     on_quit: Box<dyn Fn()>,
+    on_enroll: OnceCell<EnrollHandler>,
     status_item: OnceCell<Retained<NSStatusItem>>,
 }
 
@@ -92,6 +118,23 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
             self.install_status_item();
+            if self.ivars().on_enroll.get().is_some() {
+                register_url_scheme();
+            }
+        }
+
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
+            // One enrollment at a time; the first `faro:` link wins.
+            let link = urls.iter().find_map(|u| {
+                let s = u.absoluteString()?.to_string();
+                s.get(..5)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("faro:"))
+                    .then_some(s)
+            });
+            if let (Some(link), Some(f)) = (link, self.ivars().on_enroll.get()) {
+                f(Some(link));
+            }
         }
 
         #[unsafe(method(applicationShouldTerminate:))]
@@ -107,6 +150,14 @@ define_class!(
         fn show_notice_action(&self, _sender: Option<&AnyObject>) {
             self.present();
         }
+
+        // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(enroll:))]
+        fn enroll_action(&self, _sender: Option<&AnyObject>) {
+            if let Some(f) = self.ivars().on_enroll.get() {
+                f(None);
+            }
+        }
     }
 );
 
@@ -117,6 +168,7 @@ impl Delegate {
             showing: Cell::new(false),
             again: Cell::new(false),
             on_quit,
+            on_enroll: OnceCell::new(),
             status_item: OnceCell::new(),
         });
         // SAFETY: NSObject's `init` has this signature.
@@ -154,6 +206,13 @@ impl Delegate {
         // item's use of it.
         unsafe { show.setTarget(Some(self.as_ref())) };
         menu.addItem(&show);
+        if self.ivars().on_enroll.get().is_some() {
+            let enroll = menu_item(mtm, ENROLL, Some(sel!(enroll:)));
+            // SAFETY: as for `show`: `self` implements `enroll:` and
+            // outlives the menu.
+            unsafe { enroll.setTarget(Some(self.as_ref())) };
+            menu.addItem(&enroll);
+        }
         item.setMenu(Some(&menu));
 
         // Set once, from the one `applicationDidFinishLaunching:`.
@@ -206,6 +265,118 @@ fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retaine
     }
 }
 
+/// Register this bundle with LaunchServices, so `faro://` links open it.
+/// The installer may not have registered an app outside /Applications for
+/// every account; doing it at launch covers each account's first login.
+/// Only the real bundle does it, never a development binary.
+fn register_url_scheme() {
+    let bundle = NSBundle::mainBundle();
+    let is_agent = bundle
+        .bundleIdentifier()
+        .is_some_and(|id| id.to_string() == BUNDLE_ID);
+    if !is_agent {
+        return;
+    }
+    let url = bundle.bundleURL();
+    #[link(name = "CoreServices", kind = "framework")]
+    extern "C" {
+        fn LSRegisterURL(url: *const std::ffi::c_void, update: u8) -> i32;
+    }
+    // SAFETY: NSURL is toll-free bridged to CFURL, and `url` outlives the
+    // call.
+    let status = unsafe { LSRegisterURL(Retained::as_ptr(&url).cast(), 0) };
+    if status != 0 {
+        eprintln!("faro-agent: LSRegisterURL failed (OSStatus {status})");
+    }
+}
+
+/// An alert in front of every window, as the notice is.
+fn alert(mtm: MainThreadMarker, title: &str, body: &str, warning: bool) -> Retained<NSAlert> {
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(if warning {
+        NSAlertStyle::Warning
+    } else {
+        NSAlertStyle::Informational
+    });
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(body));
+    alert
+}
+
+/// Run `alert` in front of every window; `true` if its first button was
+/// pressed.
+fn run_in_front(mtm: MainThreadMarker, alert: &NSAlert) -> bool {
+    alert.window().setLevel(NSFloatingWindowLevel);
+    // `activate` is macOS 14+; this one works on 13 as well.
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    alert.runModal() == NSAlertFirstButtonReturn
+}
+
+/// The words of a two-field window (see [`UiHandle::ask_enroll_target`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwoFields {
+    pub title: String,
+    pub body: String,
+    pub first_label: String,
+    pub first_placeholder: String,
+    pub second_label: String,
+    pub second_placeholder: String,
+    pub ok: String,
+    pub cancel: String,
+}
+
+fn two_field_alert(mtm: MainThreadMarker, t: &TwoFields) -> Option<(String, String)> {
+    let alert = alert(mtm, &t.title, &t.body, false);
+    alert.addButtonWithTitle(&NSString::from_str(&t.ok));
+    alert.addButtonWithTitle(&NSString::from_str(&t.cancel));
+    let rect = |x: f64, y: f64, w: f64, h: f64| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+    let width = 340.0;
+    let view = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, width, 112.0));
+    let label = |text: &str, y: f64| {
+        let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+        l.setFrame(rect(0.0, y, width, 18.0));
+        view.addSubview(&l);
+    };
+    let field = |placeholder: &str, y: f64| {
+        let f = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(0.0, y, width, 24.0));
+        f.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+        view.addSubview(&f);
+        f
+    };
+    label(&t.first_label, 90.0);
+    let first = field(&t.first_placeholder, 64.0);
+    label(&t.second_label, 32.0);
+    let second = field(&t.second_placeholder, 6.0);
+    // SAFETY: both fields live in `view` for as long as the alert does.
+    unsafe { first.setNextKeyView(Some(&second)) };
+    alert.setAccessoryView(Some(&view));
+    alert.window().setInitialFirstResponder(Some(&first));
+    if !run_in_front(mtm, &alert) {
+        return None;
+    }
+    Some((
+        first.stringValue().to_string(),
+        second.stringValue().to_string(),
+    ))
+}
+
+/// Run `f` on the main thread and wait for it. `None` if called from the
+/// main thread itself, which would deadlock.
+fn on_main_and_wait<T: Send>(f: impl FnOnce(MainThreadMarker) -> T + Send) -> Option<T> {
+    if MainThreadMarker::new().is_some() {
+        return None;
+    }
+    let mut out = None;
+    let slot = &mut out;
+    DispatchQueue::main().exec_sync(move || {
+        if let Some(mtm) = MainThreadMarker::new() {
+            *slot = Some(f(mtm));
+        }
+    });
+    out
+}
+
 thread_local! {
     /// The UI, on the main thread, for work queued by a [`UiHandle`].
     static UI: OnceCell<Retained<Delegate>> = const { OnceCell::new() };
@@ -242,6 +413,18 @@ impl SessionUi {
         UiHandle { _private: () }
     }
 
+    /// Offer enrollment: register for `faro://` links, add "Enroll this
+    /// computer…" to the menu, and call `handler` on the main thread with
+    /// the link (or `None` from the menu). Call before [`run`](Self::run);
+    /// later calls are ignored.
+    pub fn on_enroll(&self, handler: impl Fn(Option<String>) + 'static) {
+        UI.with(|ui| {
+            if let Some(ui) = ui.get() {
+                let _ = ui.ivars().on_enroll.set(Box::new(handler));
+            }
+        });
+    }
+
     /// Run AppKit's event loop. It does not return in normal operation: the
     /// agent thread ends the process.
     pub fn run(self) {
@@ -256,6 +439,34 @@ pub struct UiHandle {
 }
 
 impl UiHandle {
+    /// Ask for a link, or an address and a code (two fields). `None` if
+    /// cancelled. Blocks; never call it from the main thread.
+    pub fn ask_enroll_target(&self, text: &TwoFields) -> Option<(String, String)> {
+        on_main_and_wait(|mtm| two_field_alert(mtm, text)).flatten()
+    }
+
+    /// Ask a yes-or-no question: `true` for `ok`. Blocks; never call it
+    /// from the main thread.
+    pub fn confirm(&self, title: &str, body: &str, ok: &str, cancel: &str) -> bool {
+        on_main_and_wait(|mtm| {
+            let a = alert(mtm, title, body, false);
+            a.addButtonWithTitle(&NSString::from_str(ok));
+            a.addButtonWithTitle(&NSString::from_str(cancel));
+            run_in_front(mtm, &a)
+        })
+        .unwrap_or(false)
+    }
+
+    /// Show a message with one button. Blocks until it is closed; never
+    /// call it from the main thread.
+    pub fn message(&self, title: &str, body: &str, warning: bool) {
+        on_main_and_wait(|mtm| {
+            let a = alert(mtm, title, body, warning);
+            a.addButtonWithTitle(ns_string!("OK"));
+            run_in_front(mtm, &a);
+        });
+    }
+
     /// Show `title` and `body` in an alert now, and from the menu later.
     pub fn show_notice(&self, title: &str, body: &str) {
         let (title, body) = (title.to_owned(), body.to_owned());

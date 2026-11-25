@@ -184,25 +184,45 @@ impl IpcFrameSource {
         self
     }
 
-    /// How peers will be verified, or why no agent can be accepted.
-    ///
-    /// A root service must verify the agent's code signature: otherwise any
-    /// program the member runs could stand in for the agent and report a
-    /// sleeping or locked screen forever. Only a `dev` build may skip it.
+    /// How peers will be verified, or why no agent can be accepted. See
+    /// [`peer_policy`].
     pub fn peer_policy(&self) -> Result<PeerPolicy, String> {
-        if let Some(r) = &self.code_requirement {
-            codesign::check_requirement(r).map_err(|e| format!("ipc.agent_requirement: {e}"))?;
-            return Ok(PeerPolicy::CodeRequirement(r.clone()));
-        }
-        if euid() != 0 || cfg!(feature = "dev") {
-            return Ok(PeerPolicy::UidOnly);
-        }
-        Err(
-            "a root service needs `ipc.agent_requirement` (the agent's code-signing \
-             requirement) to tell the real agent from any program the user runs; \
-             only builds with the `dev` feature accept agents by uid alone"
-                .into(),
-        )
+        peer_policy(self.code_requirement.as_deref())
+    }
+}
+
+/// How the agent is verified beyond its uid, or why it can't be. The agent
+/// sockets and the enroll socket (`crate::enroll_server`) use the same rule.
+///
+/// A root service must verify the agent's code signature: otherwise any
+/// program the member runs could stand in for the agent and report a
+/// sleeping or locked screen forever. Only a `dev` build may skip it.
+pub fn peer_policy(code_requirement: Option<&str>) -> Result<PeerPolicy, String> {
+    if let Some(r) = code_requirement {
+        codesign::check_requirement(r).map_err(|e| format!("ipc.agent_requirement: {e}"))?;
+        return Ok(PeerPolicy::CodeRequirement(r.to_owned()));
+    }
+    if euid() != 0 || cfg!(feature = "dev") {
+        return Ok(PeerPolicy::UidOnly);
+    }
+    Err(
+        "a root service needs `ipc.agent_requirement` (the agent's code-signing \
+         requirement) to tell the real agent from any program the user runs; \
+         only builds with the `dev` feature accept agents by uid alone"
+            .into(),
+    )
+}
+
+/// Check `peer` against `policy` (after its uid was checked).
+pub(crate) fn check_policy(
+    peer: &PeerInfo,
+    policy: &Result<PeerPolicy, String>,
+) -> faro_ipc::Result<()> {
+    match policy {
+        Ok(PeerPolicy::UidOnly) => Ok(()),
+        Ok(PeerPolicy::CodeRequirement(r)) => codesign::verify_peer(peer, r)
+            .map_err(|e| IpcError::peer_rejected(format!("pid {:?}: {e}", peer.pid))),
+        Err(why) => Err(IpcError::peer_rejected(why.clone())),
     }
 }
 
@@ -248,16 +268,12 @@ fn verifier(
                 peer.uid
             )));
         }
-        match &policy {
-            Ok(PeerPolicy::UidOnly) => Ok(()),
-            Ok(PeerPolicy::CodeRequirement(r)) => codesign::verify_peer(peer, r)
-                .map_err(|e| IpcError::peer_rejected(format!("pid {:?}: {e}", peer.pid))),
-            Err(why) => Err(IpcError::peer_rejected(why.clone())),
-        }
+        check_policy(peer, &policy)
     }
 }
 
-fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
+/// Create the socket's directory (0755) if it is missing.
+pub(crate) fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         if !dir.exists() {
             let mut b = std::fs::DirBuilder::new();

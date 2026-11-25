@@ -18,6 +18,9 @@
 //!   kernel peer credentials and a pluggable [`PeerVerifier`].
 //! * [`handshake`] — `Hello`/`Welcome` with a deadline, and ping/pong
 //!   liveness for detecting a hung agent.
+//! * [`enroll`] — the separate request/response protocol on the enroll
+//!   socket, with which the agent asks the service to enroll the computer
+//!   (an administrator approves it).
 //!
 //! ## Privacy invariant
 //!
@@ -38,6 +41,7 @@
 
 pub mod codec;
 pub mod connection;
+pub mod enroll;
 pub mod error;
 pub mod handshake;
 pub mod messages;
@@ -51,6 +55,13 @@ pub use codec::{
     MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 pub use connection::{AgentConnection, Connection, ServiceConnection};
+#[cfg(unix)]
+pub use enroll::resolve_enroll_socket;
+pub use enroll::{
+    enroll_socket_path, EnrollClientConnection, EnrollDone, EnrollPreview, EnrollRequest,
+    EnrollResponse, EnrollServerConnection, EnrollStatus, EnrollTarget, FailureKind,
+    AUTHORIZATION_LEN,
+};
 pub use error::{IpcError, Result, WireFrameError};
 pub use handshake::{
     accept_agent, accept_agent_with_version, hello, ping, read_agent_hello, welcome_agent,

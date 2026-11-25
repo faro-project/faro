@@ -82,6 +82,7 @@ fn run_with_ui(args: RunArgs) -> ExitCode {
         })
     };
     let handle = ui.handle();
+    offer_enrollment(&ui, &args);
     let notices = move |title: &str, body: &str| {
         tracing::info!(title, "showing a service notice");
         tracing::debug!(title, body, "service notice body");
@@ -100,6 +101,104 @@ fn run_with_ui(args: RunArgs) -> ExitCode {
     ui.run();
     // AppKit's loop doesn't return on its own; the agent thread exits.
     ExitCode::FAILURE
+}
+
+/// `faro://enroll` links and "Enroll this computer…" (issue #62): each runs
+/// `faro_agent::enroll::run_flow` on a worker thread, one at a time, which
+/// reaches the UI through blocking calls on the main queue.
+#[cfg(target_os = "macos")]
+fn offer_enrollment(ui: &faro_platform_macos::ui::SessionUi, args: &RunArgs) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let handle = ui.handle();
+    let base = args.socket.clone();
+    let trust = service_trust(args);
+    let open = Arc::new(AtomicBool::new(false));
+    ui.on_enroll(move |link| {
+        if open.swap(true, Ordering::SeqCst) {
+            tracing::info!("an enrollment is already open");
+            return;
+        }
+        // The link carries a one-time code: never logged.
+        tracing::info!(from_link = link.is_some(), "starting enrollment");
+        let (open2, base) = (open.clone(), base.clone());
+        let spawned = std::thread::Builder::new()
+            .name("faro-enroll".to_owned())
+            .spawn(move || {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                let uid = unsafe { libc::geteuid() };
+                let socket = faro_ipc::resolve_enroll_socket(&base, uid);
+                faro_agent::enroll::run_flow(
+                    &MacEnrollUi(handle),
+                    &MacAuthorizer,
+                    &socket,
+                    trust,
+                    link,
+                );
+                open2.store(false, Ordering::SeqCst);
+            });
+        if let Err(e) = spawned {
+            tracing::error!(error = %e, "could not start the enrollment thread");
+            open.store(false, Ordering::SeqCst);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+struct MacEnrollUi(faro_platform_macos::ui::UiHandle);
+
+#[cfg(target_os = "macos")]
+impl faro_agent::enroll::EnrollUi for MacEnrollUi {
+    fn ask_target(&self, s: &faro_agent::enroll::PasteScreen) -> Option<(String, String)> {
+        self.0
+            .ask_enroll_target(&faro_platform_macos::ui::TwoFields {
+                title: s.title.clone(),
+                body: s.body.clone(),
+                first_label: s.first_label.clone(),
+                first_placeholder: s.first_placeholder.clone(),
+                second_label: s.second_label.clone(),
+                second_placeholder: s.second_placeholder.clone(),
+                ok: s.ok.clone(),
+                cancel: s.cancel.clone(),
+            })
+    }
+
+    fn confirm(&self, s: &faro_agent::enroll::Screen, ok: &str, cancel: &str) -> bool {
+        self.0.confirm(&s.title, &s.body, ok, cancel)
+    }
+
+    fn show(&self, s: &faro_agent::enroll::Screen, problem: bool) {
+        self.0.message(&s.title, &s.body, problem);
+    }
+}
+
+/// An empty authorization for the service to ask an administrator with.
+#[cfg(target_os = "macos")]
+struct MacAuthorizer;
+
+#[cfg(target_os = "macos")]
+impl faro_agent::enroll::Authorizer for MacAuthorizer {
+    fn create(
+        &self,
+    ) -> Result<(Box<dyn std::any::Any>, [u8; faro_ipc::AUTHORIZATION_LEN]), String> {
+        use faro_platform_macos::authorization::Authorization;
+        let auth = Authorization::new_empty().map_err(|e| e.to_string())?;
+        let ext = auth.external_form().map_err(|e| e.to_string())?;
+        Ok((Box::new(auth), ext))
+    }
+}
+
+/// Who the agent accepts as the service: root, unless a `dev` build was
+/// told to trust its own uid.
+#[cfg(unix)]
+#[allow(unused_variables)] // `args` is only read in `dev` builds
+fn service_trust(args: &RunArgs) -> faro_agent::ServiceTrust {
+    #[cfg(feature = "dev")]
+    if args.trust_same_uid_service {
+        return faro_agent::ServiceTrust::SameUid;
+    }
+    faro_agent::ServiceTrust::Root
 }
 
 /// Run the agent until it stops. `quit`, if given, stops it like SIGTERM.

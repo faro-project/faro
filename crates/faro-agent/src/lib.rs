@@ -15,6 +15,11 @@
 //!   they change;
 //! * answers liveness pings, shows service notices, and exits when told to.
 //!
+//! On macOS it also opens `faro://enroll` links ([`enroll`]): it shows
+//! the instance to confirm and asks the service to enroll the computer,
+//! which happens only once an administrator approves in the system's own
+//! dialog.
+//!
 //! It holds no keys, no event log and no schedule. Everything it knows is
 //! either about to be sent or is the last value it sent (so it can report
 //! changes), plus a small bounded queue of session edges and tamper signals
@@ -59,6 +64,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod enroll;
 pub mod frames;
 pub mod identity;
 pub mod notice;

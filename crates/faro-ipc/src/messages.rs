@@ -344,10 +344,14 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for super::AgentMsg {}
     impl Sealed for super::ServiceMsg {}
+    impl Sealed for crate::enroll::EnrollRequest {}
+    impl Sealed for crate::enroll::EnrollResponse {}
 }
 
 /// A message type the codec can carry. Sealed: only [`AgentMsg`] and
-/// [`ServiceMsg`] go on this wire.
+/// [`ServiceMsg`] go on the agent's session wire, and
+/// [`EnrollRequest`](crate::EnrollRequest) and
+/// [`EnrollResponse`](crate::EnrollResponse) on the enroll socket.
 pub trait WireMessage:
     Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + sealed::Sealed
 {

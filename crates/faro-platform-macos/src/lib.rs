@@ -11,8 +11,10 @@
 //! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN (edge-triggered) | agent |
 //! | `ServiceHost` | [`MacServiceHost`]: launchd plists, `SMAppService`, console sessions | service |
 //!
-//! [`ui`] is the agent's menu-bar icon and monitoring notice (§12); it has no
-//! `faro-platform` trait because only the macOS agent binary drives it.
+//! [`ui`] is the agent's menu-bar icon, monitoring notice (§12) and
+//! enrollment screens; it has no `faro-platform` trait because only the
+//! macOS agent binary drives it. [`authorization`] is how an administrator
+//! approves enrolling the computer (Authorization Services).
 //!
 //! On every other OS this crate compiles to an empty library, so the
 //! workspace builds everywhere and only macOS binaries depend on it for real.
@@ -37,6 +39,8 @@
 
 #![cfg_attr(not(target_os = "macos"), allow(unused))]
 
+#[cfg(target_os = "macos")]
+pub mod authorization;
 #[cfg(target_os = "macos")]
 mod bridge;
 #[cfg(target_os = "macos")]

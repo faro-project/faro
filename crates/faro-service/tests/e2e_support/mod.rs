@@ -399,6 +399,26 @@ impl World {
         })
     }
 
+    /// A device enrolled some other way (the agent's enroll socket,
+    /// `tests/enroll_gui.rs`) into `state_dir`, which lives in `tmp`.
+    // Only tests/enroll_gui.rs uses it; tests/e2e.rs compiles this module too.
+    #[allow(dead_code)]
+    pub fn adopt_device(&self, tmp: tempfile::TempDir, state_dir: PathBuf) -> Device {
+        let dir = StateDir::open(&state_dir).expect("state dir");
+        let enrollment = dir.enrollment().expect("enrolled");
+        Device {
+            state_dir,
+            dir,
+            enrollment,
+            clock: DeviceClock::new(self.t.clock_ms(), 10_000_000),
+            script: Script::new(),
+            utc_offset_minutes: 0,
+            updates: faro_service::UpdateOverrides::default(),
+            handle: None,
+            _tmp: tmp,
+        }
+    }
+
     /// The member's browser endorses the pending device: it lists the
     /// member's devices, checks the key fingerprint against the one the
     /// device shows, and signs a `DeviceEndorsement` anchored to the

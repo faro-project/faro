@@ -15,6 +15,7 @@
 //! | [`link`] | `faro://enroll` links and enrollment codes |
 //! | [`client`] | the signed, size-bounded instance API client |
 //! | [`enroll`] | enrollment, endorsement verification, manifest bootstrap |
+//! | [`enroll_server`] | enrolling from the agent: the enroll socket, an administrator's approval |
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
 //! | [`update`] | client self-update: verify against the project root, download, install |
@@ -49,6 +50,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod enroll;
+pub mod enroll_server;
 pub mod link;
 pub mod runtime;
 pub mod source;
