@@ -116,3 +116,24 @@ installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
 - **The launchd plists are checked in** under `installers/macos/payload`, and a test keeps them equal to the generator. After changing `pkg_daemon_job` or `pkg_agent_job`, run `FARO_BLESS=1 cargo test -p faro-platform-macos --test installer_plists`.
 - **After installing,** the service waits for enrollment. `sudo /Library/Faro/bin/faro-service enroll --link '…'` lists the computer's accounts, enrolls it, and leaves activation to the running service.
 - **Not there yet:** an uninstaller (it must send `goodbye`, §3.7), universal (arm64 + x86_64) binaries, and the tray app. Until the uninstaller exists, removing Faro shows up to allies as missed heartbeats.
+
+## CI runners
+
+CI runs on the project's self-hosted runners, registered to the `faro-project` org and matched by label:
+
+| Labels | Machine | Jobs |
+|---|---|---|
+| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)`, `macos-pkg` |
+| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build |
+| `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
+
+There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`.
+
+Each runner runs one job at a time, and a new push to a pull request cancels its older CI run. The workflows install Rust (`dtolnay/rust-toolchain`) and Node (`actions/setup-node`) themselves. Each machine needs:
+
+- **All:** `git`, `curl`, and a C compiler and linker for the crates with C code.
+- **Linux:** `build-essential` and `pkg-config`. Docker with Buildx for the container build. If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
+- **Windows:** Git for Windows in its default location (the `test` job puts `C:\Program Files\Git\bin` first on `PATH`, ahead of WSL's `bash`, for the toolchain action's bash steps), and the Visual Studio Build Tools C++ workload for the MSVC linker.
+- **macOS:** Xcode Command Line Tools. On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
+
+Jobs aren't sandboxed: anyone who can push a branch can run code on these machines as the runner's user, and files stay between jobs. Keep the runners in an account with nothing else on it where you can, and never let them take jobs from a public repository.

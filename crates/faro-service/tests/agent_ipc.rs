@@ -171,7 +171,13 @@ struct Setup {
 async fn setup_with(logins: Logins, classifier: Box<dyn faro_detect::Classifier>) -> Setup {
     let w = World::new().await;
     let mut dev = w.enroll_device().await;
-    let sock_dir = tempfile::tempdir().expect("socket dir");
+    // Private, whatever the umask: the socket checks refuse a group-writable
+    // directory, and tempfile leaves the mode to the umask (002 on many Linux
+    // accounts).
+    let sock_dir = tempfile::Builder::new()
+        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .expect("socket dir");
     let socket = sock_dir.path().join("agent.sock");
     dev.start_with(classifier, Box::new(ipc_source(&socket, &logins)));
     dev.wait("awaiting endorsement", |s| {
