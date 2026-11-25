@@ -637,6 +637,8 @@ In short:
 Responsibilities that come with running an instance:
 
 - You are the **data controller** for your instance (for example under GDPR, or FERPA considerations at a US college). The project gives no legal advice.
+- **Publish your own privacy notice.** The notice at `/privacy` says what Faro does, but not who you are, how to contact you, your email and hosting providers, how long you keep backups, or what rights people have. Start from the [privacy notice template](operators/PRIVACY-NOTICE.md), fill it in, and have a lawyer check it before you publish it.
+- **Know what to do about illegal material.** If an ally tells you they saw what looks like child sexual abuse material, follow [the guidance for apparently illegal material](operators/ILLEGAL-MATERIAL.md): never ask for or accept a copy, point them to the right hotline, and check with the police and your lawyer before you disable the account, which always emails the member and their allies. Give that guidance to your allies before anything happens.
 - **Do not enroll minors.** That's outside what Faro v1 is designed for.
 - Keep the server updated (`sudo apt-get update && sudo apt-get upgrade`), keep backups, and keep `faro.env` and backup files private.
 

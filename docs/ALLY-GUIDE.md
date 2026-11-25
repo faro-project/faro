@@ -138,6 +138,8 @@ The small pictures (**Blurred screenshot**) are blurred on the member's computer
 
 This protects you as well as the member. You will never be shown explicit images by Faro.
 
+**If something looks like child sexual abuse material** (a sexual picture of someone who might be under 18, or a website name or window title that points to it), don't download it, save it, screenshot it, photograph it or send it to anyone, not even the person who runs the server. Click **Lock**, close the page, and read [what to do if you see apparently illegal material](operators/ILLEGAL-MATERIAL.md): it says how to report it and what Faro keeps.
+
 ### Tamper alerts
 
 Anyone who controls their own computer can switch Faro off. Faro can't prevent that, but it makes sure you find out. These are the alerts you may see:
@@ -253,7 +255,7 @@ Someone runs the Faro instance your invitation came from: maybe your church's IT
 
 **One honest limit:** the web page you use to read reports comes from that server. If the person running it changed that page on purpose, they could in principle capture your passphrase. So it matters that the server is run by someone you trust. A separate desktop app for allies, which wouldn't depend on the server for this, is planned.
 
-Every instance publishes its own notice saying exactly what its operator can see. Click **What this instance can see** at the bottom of any Faro page to read it.
+Every instance publishes its own notice saying exactly what its operator can see. Click **What this instance can see** at the bottom of any Faro page to read it. The people who run your instance may also publish a longer privacy notice of their own, saying who they are, how long they keep backups and how to contact them (the Faro project gives them [a template](operators/PRIVACY-NOTICE.md)). Ask them for it if you can't find it.
 
 ## 9. Having the conversation
 
@@ -263,6 +265,6 @@ Faro's real goal is honest conversation, not policing. The person you support ch
 - **Ask before you assume.** Flags can be mistakes, and tamper alerts and missed check-ins often have ordinary explanations. Start with a question: "I saw something come up on Tuesday evening. What was going on?"
 - **Stay calm.** If you react with shock or anger, honesty gets harder next time. Thank them for being open, even when the news is bad.
 - **Remember they see the same thing.** Everything you see, they can see on their own page. There are no secrets about what you were shown.
-- **Keep it between you.** Don't share what you see with other people unless they've agreed to it.
+- **Keep it between you.** Don't share what you see with other people unless they've agreed to it. The one exception is what looks like child sexual abuse material: report it, without copying it ([what to do](operators/ILLEGAL-MATERIAL.md)).
 - **Look after yourself.** You're not responsible for their choices, and you don't have to read every report the day it arrives. If this becomes too much, say so; it's fine to [step back](#7-if-you-want-to-stop-being-an-ally).
 - **Get help when it's beyond you.** If you're ever worried about someone's safety, contact people who can help, such as a pastor, a counsellor or, in an emergency, the emergency services. Faro isn't an emergency service.
