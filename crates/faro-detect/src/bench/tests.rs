@@ -4,6 +4,7 @@
 //! enough to exercise every metric. It runs in pure Rust in every build and,
 //! with the `onnx` feature, as a real ONNX graph through `OnnxClassifier`.
 
+use super::synthetic::write_synthetic_set;
 use super::*;
 use crate::classifier::TensorLayout;
 use crate::classifier::{postprocess, preprocess, ChannelOrder, ModelInfo, OutputActivation};
@@ -59,181 +60,6 @@ impl Classifier for DominantColour {
             .map(|c| c.iter().sum::<f32>() / n as f32)
             .collect();
         postprocess(&means, &self.0)
-    }
-}
-
-/// Deterministic xorshift, for UI noise.
-struct Rng(u32);
-
-impl Rng {
-    fn next(&mut self) -> u32 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 17;
-        self.0 ^= self.0 << 5;
-        self.0
-    }
-    fn below(&mut self, n: u32) -> u32 {
-        self.next() % n
-    }
-}
-
-/// An RGB image description.
-struct Img {
-    w: u32,
-    h: u32,
-    px: Vec<[u8; 3]>,
-}
-
-impl Img {
-    fn solid(w: u32, h: u32, c: [u8; 3]) -> Self {
-        Img {
-            w,
-            h,
-            px: vec![c; (w * h) as usize],
-        }
-    }
-
-    fn rect(&mut self, x0: u32, y0: u32, x1: u32, y1: u32, c: [u8; 3]) {
-        for y in y0..y1.min(self.h) {
-            for x in x0..x1.min(self.w) {
-                self.px[(y * self.w + x) as usize] = c;
-            }
-        }
-    }
-
-    /// A window: `bg`, a toolbar, a sidebar, lines of "text" and a content
-    /// panel of `accent` covering about `accent_frac` of the window, plus
-    /// a little per-pixel noise.
-    fn ui(bg: [u8; 3], accent: [u8; 3], accent_frac: f32, seed: u32) -> Self {
-        let (w, h) = (160u32, 100u32);
-        let mut img = Img::solid(w, h, bg);
-        let mut rng = Rng(seed | 1);
-        let shade = |c: [u8; 3], d: i32| c.map(|v| (i32::from(v) + d).clamp(0, 255) as u8);
-        img.rect(0, 0, w, 10, shade(bg, -30)); // toolbar
-        img.rect(0, 10, 24, h, shade(bg, -15)); // sidebar
-        for line in 0..8 {
-            let y = 16 + line * 10;
-            let len = 30 + rng.below(90);
-            img.rect(30, y, 30 + len, y + 3, shade(bg, -90)); // text
-        }
-        let side = ((accent_frac * (w * h) as f32).sqrt()) as u32;
-        let (x0, y0) = (w - side.min(w), h - side.min(h));
-        img.rect(x0, y0, w, h, accent);
-        for p in &mut img.px {
-            let n = rng.below(9) as i32 - 4;
-            *p = shade(*p, n);
-        }
-        img
-    }
-
-    fn save(&self, path: &Path, color: image::ExtendedColorType) {
-        let data: Vec<u8> = match color {
-            image::ExtendedColorType::Rgb8 => self.px.iter().flatten().copied().collect(),
-            image::ExtendedColorType::Rgba8 => self
-                .px
-                .iter()
-                .flat_map(|&[r, g, b]| [r, g, b, 255])
-                .collect(),
-            image::ExtendedColorType::L8 => self.px.iter().map(|p| p[0]).collect(),
-            other => panic!("{other:?}"),
-        };
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut out = Vec::new();
-        image::ImageEncoder::write_image(
-            image::codecs::png::PngEncoder::new(&mut out),
-            &data,
-            self.w,
-            self.h,
-            color,
-        )
-        .unwrap();
-        std::fs::write(path, out).unwrap();
-    }
-}
-
-/// Write the synthetic set: 6 explicit, 6 neutral, 3 suggestive images.
-pub(crate) fn write_synthetic_set(root: &Path) {
-    use image::ExtendedColorType::{Rgb8, Rgba8, L8};
-    let grey = [190, 190, 190];
-    let red = [230, 20, 20];
-    let blue = [40, 60, 210];
-    let green = [40, 180, 60];
-    let images: [(&str, Img, image::ExtendedColorType); 15] = [
-        (
-            "explicit/solid.png",
-            Img::solid(96, 64, [220, 30, 30]),
-            Rgba8,
-        ),
-        (
-            "explicit/ui-red-panel.png",
-            Img::ui(grey, red, 0.7, 1),
-            Rgb8,
-        ),
-        // Larger than MAX_FRAME_SIDE: downscaled first, as in production.
-        (
-            "explicit/big/dark-red.png",
-            Img::solid(1000, 600, [140, 25, 25]),
-            Rgba8,
-        ),
-        (
-            "explicit/magenta.png",
-            Img::solid(64, 64, [200, 40, 170]),
-            Rgba8,
-        ),
-        // Missed: a mostly grey window with a tiny red patch.
-        (
-            "explicit/ui-tiny-patch.png",
-            Img::ui(grey, red, 0.01, 2),
-            Rgba8,
-        ),
-        // Confused: more blue than red.
-        (
-            "explicit/violet.png",
-            Img::solid(64, 64, [150, 30, 230]),
-            Rgba8,
-        ),
-        ("neutral/grey.png", Img::solid(64, 64, [128, 128, 128]), L8),
-        (
-            "neutral/ui-light.png",
-            Img::ui([235, 235, 235], green, 0.2, 3),
-            Rgba8,
-        ),
-        (
-            "neutral/ui-dark.png",
-            Img::ui([40, 40, 40], [90, 90, 90], 0.3, 4),
-            Rgb8,
-        ),
-        (
-            "neutral/green.png",
-            Img::solid(64, 64, [30, 200, 60]),
-            Rgba8,
-        ),
-        (
-            "neutral/white.png",
-            Img::solid(64, 64, [255, 255, 255]),
-            Rgba8,
-        ),
-        // False positive: orange reads as red.
-        (
-            "neutral/orange.png",
-            Img::solid(64, 64, [230, 90, 40]),
-            Rgba8,
-        ),
-        ("suggestive/blue.png", Img::solid(64, 64, blue), Rgba8),
-        (
-            "suggestive/ui-blue-panel.png",
-            Img::ui(grey, blue, 0.7, 5),
-            Rgba8,
-        ),
-        // Missed: just a grey window.
-        (
-            "suggestive/ui-plain.png",
-            Img::ui([150, 150, 150], [150, 150, 150], 0.0, 6),
-            Rgba8,
-        ),
-    ];
-    for (rel, img, color) in images {
-        img.save(&root.join(rel), color);
     }
 }
 
@@ -295,7 +121,7 @@ pub(crate) fn tree(root: &Path) -> Vec<String> {
 #[test]
 fn synthetic_set_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
-    write_synthetic_set(dir.path());
+    write_synthetic_set(dir.path()).unwrap();
     let before = tree(dir.path());
     let set = open(dir.path());
     let policy = PolicyEngine::default();
@@ -415,7 +241,7 @@ fn latency_percentiles_are_nearest_rank() {
 
 fn sample_report() -> BenchReport {
     let dir = tempfile::tempdir().unwrap();
-    write_synthetic_set(dir.path());
+    write_synthetic_set(dir.path()).unwrap();
     let mut r = run(
         &mut DominantColour::new(),
         &PolicyEngine::default(),
@@ -554,7 +380,7 @@ mod onnx {
     fn real_onnx_graph_on_the_synthetic_set() {
         let models = tempfile::tempdir().unwrap();
         let set_dir = tempfile::tempdir().unwrap();
-        write_synthetic_set(set_dir.path());
+        write_synthetic_set(set_dir.path()).unwrap();
         let mut c = OnnxClassifier::new(load_model(write_model(models.path())).unwrap()).unwrap();
         let r = run(
             &mut c,
@@ -582,7 +408,7 @@ mod onnx {
         let models = tempfile::tempdir().unwrap();
         let set_dir = tempfile::tempdir().unwrap();
         let out_dir = tempfile::tempdir().unwrap();
-        write_synthetic_set(set_dir.path());
+        write_synthetic_set(set_dir.path()).unwrap();
         let manifest = write_model(models.path());
         let s = |p: &Path| p.to_str().unwrap().to_owned();
         let (manifest, set) = (s(&manifest), s(set_dir.path()));
@@ -670,5 +496,31 @@ mod onnx {
         let (code, _, err) = cli(&["--manifest", &manifest, "--model", &s(&junk), "--set", &set]);
         assert_eq!(code, 2);
         assert!(err.contains("integrity"), "{err}");
+    }
+
+    #[test]
+    fn command_line_writes_the_synthetic_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = |p: &Path| p.to_str().unwrap().to_owned();
+        let set = dir.path().join("set");
+        let (code, out, err) = cli(&["--write-synthetic-set", &s(&set)]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("wrote the synthetic set"), "{out}");
+        let theirs = tempfile::tempdir().unwrap();
+        write_synthetic_set(theirs.path()).unwrap();
+        assert_eq!(tree(&set), tree(theirs.path()));
+        assert_eq!(open(&set).images().len(), 15);
+        // Never into a folder that already holds files, or with other options.
+        let (code, _, err) = cli(&["--write-synthetic-set", &s(&set)]);
+        assert_eq!(code, 2);
+        assert!(err.contains("new or empty folder"), "{err}");
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert_eq!(cli(&["--write-synthetic-set", &s(&empty)]).0, 0);
+        let other = s(&dir.path().join("other"));
+        assert_eq!(
+            cli(&["--write-synthetic-set", &other, "--set", &other]).0,
+            2
+        );
     }
 }

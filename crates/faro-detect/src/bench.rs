@@ -53,6 +53,7 @@ use std::time::Instant;
 pub mod cli;
 mod gate;
 pub mod set;
+pub mod synthetic;
 
 pub use gate::{gate, GateCheck, GateConfig, GateOutcome};
 pub use set::{EvalImage, EvalSet};

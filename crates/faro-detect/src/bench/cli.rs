@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 pub const USAGE: &str = "\
 usage: model-bench --manifest M.json [--model M.onnx] --set DIR [options]
        model-bench --results R.json --baseline B.json [gate options]
+       model-bench --write-synthetic-set DIR
 
 Benchmark an ONNX image classifier on a labelled set of PNG screenshots
 (DIR/explicit, DIR/suggestive, DIR/neutral, ...) and print per-class
@@ -29,6 +30,12 @@ ratings per class and CPU latency. Nothing but metrics is ever written.
   --warmup N             untimed runs before timing (default 3)
   --baseline PATH        gate the results against this baseline report
   --results PATH         gate an existing report instead of running
+  --write-synthetic-set DIR
+                         write the synthetic set (15 solid colours and
+                         UI-like windows, labelled by colour) into DIR, a
+                         new or empty folder, and exit. For measuring
+                         latency without any real image: its precision and
+                         recall mean nothing for a real model.
 
 gate options:
   --recall-label NAME    class whose recall is gated (default explicit)
@@ -47,6 +54,7 @@ struct Args {
     json: Option<PathBuf>,
     baseline: Option<PathBuf>,
     results: Option<PathBuf>,
+    write_synthetic_set: Option<PathBuf>,
     warmup: Option<usize>,
     gate: GateConfig,
     help: bool,
@@ -74,6 +82,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--json" => a.json = path(value()?),
             "--baseline" => a.baseline = path(value()?),
             "--results" => a.results = path(value()?),
+            "--write-synthetic-set" => a.write_synthetic_set = path(value()?),
             "--warmup" => {
                 let v = value()?;
                 a.warmup = Some(v.parse().map_err(|_| format!("--warmup: {v:?}"))?);
@@ -145,6 +154,27 @@ pub fn main(
 /// `Ok(false)` is a regression.
 fn execute(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> Result<bool, DetectError> {
     let usage = |m: &str| DetectError::Bench(format!("{m} (see --help)"));
+    if let Some(dir) = &a.write_synthetic_set {
+        if a.manifest.is_some() || a.set.is_some() || a.results.is_some() || a.baseline.is_some() {
+            return Err(usage("--write-synthetic-set takes no other option"));
+        }
+        let io = |source| DetectError::Io {
+            path: dir.clone(),
+            source,
+        };
+        match std::fs::read_dir(dir) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return Err(usage("--write-synthetic-set needs a new or empty folder"));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(e)),
+        }
+        super::synthetic::write_synthetic_set(dir)?;
+        let _ = writeln!(out, "wrote the synthetic set to {}", dir.display());
+        return Ok(true);
+    }
     let report = if let Some(results) = &a.results {
         if a.manifest.is_some() || a.set.is_some() || a.json.is_some() {
             return Err(usage(
