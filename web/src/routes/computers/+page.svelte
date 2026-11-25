@@ -1,0 +1,540 @@
+<script lang="ts">
+	// The member's computers (ARCHITECTURE.md §7 "Member" steps 2 and 3).
+	//
+	// 1. "Add a computer" creates a one-time code (10 minutes) and shows the
+	//    enrollment link, with `m`, the fingerprint of the member key, taken
+	//    from the *unlocked* key so a server can't swap in its own.
+	// 2. The computer enrolls and shows its own key's fingerprint. It appears
+	//    here as waiting; the member compares the fingerprints and approves,
+	//    which signs a device endorsement anchored to the current recipient
+	//    list (`min_manifest`).
+	// 3. Removing an active computer stops its monitoring, so the server
+	//    alerts the member's allies (urgent, can't be switched off).
+
+	import { onDestroy } from 'svelte';
+	import { resolve } from '$app/paths';
+	import { api, ApiError, describeError, seg } from '#lib/api.ts';
+	import { unb64 } from '#lib/crypto/bytes.ts';
+	import { keyId } from '#lib/crypto/keys.ts';
+	import { deviceEndorsementSigningBytes, manifestRef, signWith } from '#lib/crypto/proto.ts';
+	import { ago, date, dateTime } from '#lib/format.ts';
+	import { instance } from '#lib/instance.svelte.ts';
+	import { keyring } from '#lib/keys/keyring.svelte.ts';
+	import { ensureManifest, latestManifest } from '#lib/keys/member.ts';
+	import { session } from '#lib/session.svelte.ts';
+	import type { DeviceSummary, EnrollCode, MyAllies, Platform } from '#lib/types.ts';
+	import Gate from '#lib/ui/Gate.svelte';
+	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
+
+	let devices = $state<DeviceSummary[] | null>(null);
+	let loadError = $state('');
+	let loadedFor = '';
+
+	let adding = $state(false);
+	let code = $state<EnrollCode | null>(null);
+	let codeBusy = $state(false);
+	let codeError = $state('');
+	let now = $state(Date.now());
+
+	let approving = $state<DeviceSummary | null>(null);
+	let matches = $state(false);
+	let approveBusy = $state(false);
+	let approveError = $state('');
+	let done = $state('');
+
+	let removeDialog = $state<HTMLDialogElement | null>(null);
+	let removing = $state<DeviceSummary | null>(null);
+	let removeBusy = $state(false);
+	let removeError = $state('');
+
+	const PLATFORM: Record<Platform, string> = { macos: 'Mac', windows: 'Windows', linux: 'Linux' };
+
+	async function load() {
+		loadError = '';
+		try {
+			devices = await api.get<DeviceSummary[]>('/v1/me/devices');
+		} catch (e) {
+			loadError = describeError(e);
+		}
+	}
+
+	$effect(() => {
+		const u = session.user;
+		if (u?.roles.member && u.id !== loadedFor) {
+			loadedFor = u.id;
+			void load();
+		}
+	});
+
+	// While a code is showing, tick the clock and look for the new computer.
+	let ticks = 0;
+	const tick = setInterval(() => {
+		now = Date.now();
+		if (code && now < code.expires_at_ms && ++ticks % 5 === 0) void load();
+	}, 1000);
+	onDestroy(() => clearInterval(tick));
+
+	let pending = $derived(devices?.filter((d) => d.status === 'pending_endorsement') ?? []);
+	let active = $derived(
+		(devices?.filter((d) => d.status === 'active') ?? []).sort((a, b) =>
+			a.name.localeCompare(b.name)
+		)
+	);
+
+	async function activeAllies() {
+		const mine = await api.get<MyAllies>('/v1/me/allies');
+		return mine.allies
+			.filter((a) => a.state === 'active' && a.ally_enc_pubkey)
+			.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey! }));
+	}
+
+	async function newCode() {
+		const keys = keyring.memberFor(session.user?.id);
+		const inst = instance.info;
+		if (!keys || !inst) return;
+		codeBusy = true;
+		codeError = '';
+		try {
+			// A computer can't start without a recipient list to bootstrap from.
+			await ensureManifest(keys, inst.instance_id, activeAllies);
+			code = await api.post<EnrollCode>('/v1/me/enroll-codes');
+			now = Date.now();
+		} catch (e) {
+			if (e instanceof ApiError && e.code === 'too_many_codes') {
+				codeError = 'You have 5 unused codes. Wait 10 minutes for them to expire.';
+			} else {
+				codeError = e instanceof Error && !(e instanceof ApiError) ? e.message : describeError(e);
+			}
+		} finally {
+			codeBusy = false;
+		}
+	}
+
+	/** The link with the member key fingerprint, from the unlocked key. */
+	let link = $derived.by(() => {
+		const keys = keyring.member;
+		if (!code || !keys) return '';
+		return `${code.enroll_url}&m=${keyId(keys.signPk)}`;
+	});
+
+	let remaining = $derived(code ? Math.max(0, code.expires_at_ms - now) : 0);
+	let remainingText = $derived(
+		`${Math.floor(remaining / 60000)}:${String(Math.floor((remaining % 60000) / 1000)).padStart(2, '0')}`
+	);
+
+	let copied = $state('');
+	async function copy(text: string, what: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			copied = what;
+			setTimeout(() => (copied = ''), 2500);
+		} catch {
+			copied = '';
+		}
+	}
+
+	function startApprove(d: DeviceSummary) {
+		approving = d;
+		matches = false;
+		approveError = '';
+		done = '';
+	}
+
+	async function approve() {
+		const d = approving;
+		const keys = keyring.memberFor(session.user?.id);
+		const inst = instance.info;
+		if (!d || !keys || !inst) return;
+		approveBusy = true;
+		approveError = '';
+		try {
+			for (let attempt = 0; ; attempt++) {
+				const m = await latestManifest(keys, inst.instance_id);
+				if (!m) throw new Error('Sign your recipient list first (Your keys page).');
+				const body = signWith(
+					keys.signSeed,
+					{
+						instance_id: inst.instance_id,
+						member_id: keys.userId,
+						device_id: d.device_id,
+						device_sign_pubkey: d.sign_pubkey,
+						endorsed_at_ms: Date.now(),
+						min_manifest: manifestRef(m)
+					},
+					deviceEndorsementSigningBytes
+				);
+				try {
+					await api.post(`/v1/devices/${seg(d.device_id)}/endorse`, body);
+					break;
+				} catch (e) {
+					// The list changed between reading and approving: once more.
+					if (e instanceof ApiError && e.code === 'stale_min_manifest' && attempt === 0) continue;
+					throw e;
+				}
+			}
+			done = `${d.name} is approved. It starts monitoring within a minute.`;
+			approving = null;
+			await load();
+		} catch (e) {
+			if (e instanceof ApiError && e.code === 'already_endorsed') {
+				approving = null;
+				await load();
+			} else {
+				approveError =
+					e instanceof Error && !(e instanceof ApiError) ? e.message : describeError(e);
+			}
+		} finally {
+			approveBusy = false;
+		}
+	}
+
+	function confirmRemove(d: DeviceSummary) {
+		removing = d;
+		removeError = '';
+		removeDialog?.showModal();
+	}
+
+	async function remove() {
+		const d = removing;
+		if (!d) return;
+		removeBusy = true;
+		removeError = '';
+		try {
+			await api.delete(`/v1/me/devices/${seg(d.device_id)}`);
+			done =
+				d.status === 'active'
+					? `${d.name} was removed. Your allies are being told.`
+					: `${d.name} was removed.`;
+			removeDialog?.close();
+			if (approving?.device_id === d.device_id) approving = null;
+			await load();
+		} catch (e) {
+			removeError = describeError(e);
+		} finally {
+			removeBusy = false;
+		}
+	}
+
+	function seen(d: DeviceSummary): { text: string; stale: boolean } {
+		if (!d.last_seen_at_ms) return { text: 'Has not checked in yet', stale: true };
+		const stale = now - d.last_seen_at_ms > 30 * 60 * 1000;
+		return { text: `Checked in ${ago(d.last_seen_at_ms, now)}`, stale };
+	}
+</script>
+
+<svelte:head>
+	<title>Computers · Faro</title>
+</svelte:head>
+
+<Gate role="member">
+	{#snippet children(user)}
+		<div class="page-head">
+			<h1>Your computers</h1>
+			<p>
+				Each computer you add monitors every account on it, and reports to you and your allies.
+				Everyone who uses it is told.
+			</p>
+		</div>
+
+		{#if done}<div class="notice ok" role="status"><p>✓ {done}</p></div>{/if}
+
+		{#if !session.hasMemberKeys}
+			<div class="notice info">
+				<p>
+					Before adding a computer, <a href={resolve('/keys')}>set up your keys</a>. They approve
+					your computers.
+				</p>
+			</div>
+		{/if}
+
+		{#if pending.length}
+			<section class="section" aria-labelledby="waiting">
+				<h2 id="waiting">Waiting for your approval</h2>
+				<ul class="rows">
+					{#each pending as d (d.device_id)}
+						<li>
+							<div class="row-main">
+								<div>
+									<div class="row-title">
+										<strong>{d.name}</strong>
+										<span class="chip pending">Waiting</span>
+										<span class="chip">{PLATFORM[d.platform]}</span>
+									</div>
+									<div class="row-meta">
+										Enrolled <span title={dateTime(d.enrolled_at_ms)}>
+											{ago(d.enrolled_at_ms, now)}
+										</span>
+									</div>
+								</div>
+								<div class="row-actions">
+									{#if approving?.device_id !== d.device_id}
+										<button class="primary small" type="button" onclick={() => startApprove(d)}>
+											Review and approve
+										</button>
+									{/if}
+									<button class="secondary small" type="button" onclick={() => confirmRemove(d)}>
+										Not mine
+									</button>
+								</div>
+							</div>
+							{#if approving?.device_id === d.device_id}
+								<div class="approve">
+									{#if !keyring.memberFor(user.id)}
+										<UnlockKeys kind="member" {user}>
+											{#snippet intro()}
+												<h3>Unlock your keys to approve {d.name}</h3>
+												<p class="muted">
+													Approving signs this computer's key with your member key.
+												</p>
+											{/snippet}
+										</UnlockKeys>
+									{:else}
+										<p>
+											On <strong>{d.name}</strong>, Faro showed a <em>device key fingerprint</em> when
+											it enrolled. Check that it is exactly:
+										</p>
+										<p class="code-display">{keyId(unb64(d.sign_pubkey))}</p>
+										<p class="muted small">
+											If it's different, or you didn't just set up this computer, don't approve it:
+											choose "Not mine".
+										</p>
+										<label class="check">
+											<input type="checkbox" bind:checked={matches} />
+											The fingerprint on the computer is the same
+										</label>
+										{#if approveError}<div class="notice error" role="alert">
+												<p>{approveError}</p>
+											</div>{/if}
+										<div class="actions">
+											<button
+												class="primary"
+												type="button"
+												disabled={!matches || approveBusy}
+												onclick={approve}
+											>
+												{approveBusy ? 'Approving…' : `Approve ${d.name}`}
+											</button>
+											<button class="secondary" type="button" onclick={() => (approving = null)}>
+												Cancel
+											</button>
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			</section>
+		{/if}
+
+		<section class="section" aria-labelledby="add">
+			<div class="section-head">
+				<h2 id="add">Add a computer</h2>
+				{#if !adding && session.hasMemberKeys}
+					<button class="primary small" type="button" onclick={() => (adding = true)}>
+						Add a computer
+					</button>
+				{/if}
+			</div>
+			{#if adding}
+				<div class="card">
+					{#if !keyring.memberFor(user.id)}
+						<UnlockKeys kind="member" {user}>
+							{#snippet intro()}
+								<h3>Unlock your keys</h3>
+								<p class="muted">
+									The enrollment link carries your key's fingerprint, so the computer can check it
+									is joining your account. It is read from your unlocked key.
+								</p>
+							{/snippet}
+						</UnlockKeys>
+					{:else}
+						<ol class="steps">
+							<li>
+								<strong>Install Faro</strong> on the computer from the official, project-signed installer.
+								The installer explains what is monitored.
+							</li>
+							<li>
+								<strong>Enroll it</strong> with a one-time code.
+								{#if !code || remaining === 0}
+									{#if codeError}<div class="notice error" role="alert">
+											<p>{codeError}</p>
+										</div>{/if}
+									<div class="actions inline">
+										<button class="primary" type="button" onclick={newCode} disabled={codeBusy}>
+											{codeBusy
+												? 'Creating…'
+												: code
+													? 'Create a new code'
+													: 'Create an enrollment code'}
+										</button>
+									</div>
+									{#if code}<p class="muted small">The last code expired.</p>{/if}
+								{:else}
+									<p class="code-display big">{code.code}</p>
+									<p class="muted small">Works once, for the next {remainingText}.</p>
+									<p>On a Mac, run this in Terminal on that computer:</p>
+									<pre class="command"><code
+											>sudo /Library/Faro/bin/faro-service enroll --link '{link}'</code
+										></pre>
+									<div class="actions inline">
+										<button
+											class="secondary small"
+											type="button"
+											onclick={() =>
+												copy(
+													`sudo /Library/Faro/bin/faro-service enroll --link '${link}'`,
+													'command'
+												)}
+										>
+											{copied === 'command' ? '✓ Copied' : 'Copy command'}
+										</button>
+										<button
+											class="secondary small"
+											type="button"
+											onclick={() => copy(link, 'link')}
+										>
+											{copied === 'link' ? '✓ Copied' : 'Copy link only'}
+										</button>
+									</div>
+								{/if}
+							</li>
+							<li>
+								<strong>Approve it here.</strong> It appears above as waiting, with a fingerprint to compare.
+							</li>
+						</ol>
+						<button
+							class="link"
+							type="button"
+							onclick={() => {
+								adding = false;
+								code = null;
+							}}
+						>
+							Done
+						</button>
+					{/if}
+				</div>
+			{/if}
+		</section>
+
+		<section class="section" aria-labelledby="active">
+			<h2 id="active">Monitored computers</h2>
+			{#if loadError}
+				<div class="notice error" role="alert"><p>{loadError}</p></div>
+				<button class="secondary" type="button" onclick={load}>Try again</button>
+			{:else if !devices}
+				<p class="muted" role="status">Loading…</p>
+			{:else if active.length === 0}
+				<div class="empty"><p>No computers yet.</p></div>
+			{:else}
+				<ul class="rows">
+					{#each active as d (d.device_id)}
+						{@const s = seen(d)}
+						<li>
+							<div class="row-main">
+								<div>
+									<div class="row-title">
+										<strong>{d.name}</strong>
+										<span class="chip">{PLATFORM[d.platform]}</span>
+										{#if s.stale}<span class="chip normal">Quiet</span>{:else}<span
+												class="chip good"
+											>
+												Online
+											</span>{/if}
+									</div>
+									<div class="row-meta">
+										<span title={d.last_seen_at_ms ? dateTime(d.last_seen_at_ms) : undefined}>
+											{s.text}
+										</span>
+										· added {date(d.enrolled_at_ms)} · key
+										<code>{keyId(unb64(d.sign_pubkey))}</code>
+									</div>
+								</div>
+								<button class="secondary small" type="button" onclick={() => confirmRemove(d)}>
+									Remove…
+								</button>
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+	{/snippet}
+</Gate>
+
+<dialog bind:this={removeDialog} onclose={() => (removing = null)} aria-labelledby="remove-title">
+	{#if removing}
+		<h2 id="remove-title">Remove {removing.name}?</h2>
+		{#if removing.status === 'active'}
+			<p>
+				It stops reporting, and its key stops working on this server. Your allies get an urgent
+				alert that a computer was removed.
+			</p>
+			<p class="muted">To stop monitoring for good, also uninstall Faro on that computer.</p>
+		{:else}
+			<p>
+				It was never approved, so it never monitored anything. Removing it cancels its enrollment.
+				If you don't recognise it, removing it is the right thing to do.
+			</p>
+		{/if}
+		{#if removeError}<div class="notice error" role="alert"><p>{removeError}</p></div>{/if}
+		<div class="actions">
+			<button class="danger" type="button" onclick={remove} disabled={removeBusy}>
+				{removeBusy ? 'Removing…' : 'Remove'}
+			</button>
+			<button class="secondary" type="button" onclick={() => removeDialog?.close()}>Cancel</button>
+		</div>
+	{/if}
+</dialog>
+
+<style>
+	.section-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 0.75rem;
+	}
+
+	.section-head h2 {
+		margin: 0;
+	}
+
+	.row-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.approve {
+		margin-top: 1rem;
+		padding-top: 1rem;
+		border-top: 1px dashed var(--border);
+	}
+
+	.big {
+		font-size: 1.8rem;
+		width: fit-content;
+		margin: 0.6rem 0 0.25rem;
+	}
+
+	.command {
+		background: var(--surface-2);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		padding: 0.75rem;
+		margin: 0;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	.command code {
+		background: none;
+		padding: 0;
+	}
+
+	.actions.inline {
+		margin-top: 0.75rem;
+	}
+</style>

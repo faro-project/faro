@@ -11,8 +11,10 @@
 //! | Passphrase / recovery-code wrapping | Argon2id → XChaCha20-Poly1305 |
 //! | Hashing | BLAKE3 |
 //!
-//! Sealed boxes and Argon2id (p = 1) are byte-compatible with libsodium, so the
-//! ally web app can use `libsodium.js` to open what devices produce.
+//! Sealed boxes and Argon2id (p = 1) are byte-compatible with libsodium. The
+//! web app has a TypeScript port of what browsers need (`web/src/lib/crypto`,
+//! pure JS, since the page CSP has no `'wasm-unsafe-eval'`), held to this
+//! crate by the shared vectors in `tests/data/web-vectors.json`.
 
 pub mod chain;
 mod keycheck;

@@ -80,9 +80,10 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             post(auth::verify_link.layer(limited.clone())),
         )
         .route("/v1/auth/logout", post(auth::logout))
-        .route("/v1/me", get(auth::me))
+        .route("/v1/me", get(auth::me).patch(auth::update_me))
         // Member keys and the key directory.
         .route("/v1/me/keys", get(keys::get_my_keys).put(keys::put_my_keys))
+        .route("/v1/me/keys/wrapped", put(keys::put_my_wrapped_keys))
         .route("/v1/members/{id}/keys", get(keys::member_keys_directory))
         // The member-signed recipient list devices encrypt to (PROTOCOL §5.1).
         .route("/v1/me/recipient-manifest", put(manifests::put_my_manifest))

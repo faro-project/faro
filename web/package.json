@@ -19,7 +19,9 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check .",
-		"format": "prettier --write ."
+		"format": "prettier --write .",
+		"test": "node --test 'src/lib/crypto/*.test.ts'",
+		"vectors": "node scripts/web-vectors.ts"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^4.0.1",
@@ -32,5 +34,10 @@
 		"svelte-check": "^4.7.8",
 		"typescript": "^6.0.3",
 		"vite": "^8.3.8"
+	},
+	"dependencies": {
+		"@noble/ciphers": "^2.4.0",
+		"@noble/curves": "^2.4.0",
+		"@noble/hashes": "^2.4.0"
 	}
 }

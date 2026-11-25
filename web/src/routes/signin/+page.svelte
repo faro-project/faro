@@ -8,6 +8,7 @@
 
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
+	import Logo from '#lib/ui/Logo.svelte';
 	import { api, ApiError, describeError } from '#lib/api.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { MagicLinkResponse, WellKnown } from '#lib/types.ts';
@@ -71,6 +72,8 @@
 	<title>Sign in · Faro</title>
 </svelte:head>
 
+<div class="brand-mark"><Logo height={56} /></div>
+
 <h1>Sign in{instanceName ? ` to ${instanceName}` : ''}</h1>
 
 {#if error}
@@ -131,3 +134,11 @@
 		</div>
 	</form>
 {/if}
+
+<style>
+	.brand-mark {
+		display: flex;
+		justify-content: center;
+		margin: 0.5rem 0 2rem;
+	}
+</style>

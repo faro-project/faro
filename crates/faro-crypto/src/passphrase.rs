@@ -5,7 +5,8 @@
 //! devices. The server stores the [`WrappedSecret`] opaquely.
 //!
 //! Argon2id with `p = 1` matches libsodium's `crypto_pwhash_ALG_ARGON2ID13`,
-//! so the browser (libsodium.js) and Rust derive identical keys.
+//! so the browser (the web app's port, `web/src/lib/crypto/passphrase.ts`)
+//! and Rust derive identical keys.
 
 use crate::CryptoError;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};

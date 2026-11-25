@@ -38,6 +38,8 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json web/.npmrc ./
 RUN --mount=type=cache,target=/root/.npm,sharing=locked npm ci
 COPY web/ ./
+# The logo files, which the web app imports from ../assets/brand.
+COPY assets/brand/ /assets/brand/
 RUN npm run build
 
 # Builder: Rust 1.99.1 on Debian 13 (trixie). The workspace needs Rust >= 1.94.

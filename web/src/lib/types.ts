@@ -1,3 +1,16 @@
+import type { WrappedSecret } from './crypto/passphrase.ts';
+import type {
+	AllyEndorsement,
+	DeviceEndorsement,
+	ManifestRef,
+	MemberEncKeyBinding,
+	RecipientManifest,
+	Signed
+} from './crypto/proto.ts';
+import type { EncryptedItem } from './crypto/seal.ts';
+
+export type { EncryptedItem, ManifestRef, RecipientManifest, Signed };
+
 // Wire types for the JSON API the web app uses. Hand-written for now; they
 // mirror the serde types in server/src/api and crates/faro-proto (the plan in
 // docs/ARCHITECTURE.md is to generate them with typeshare).
@@ -146,9 +159,12 @@ export interface InviteInfo {
 /** `GET /v1/privacy-notice` (the fields the web app reads). */
 export interface PrivacyNotice {
 	instance_name: string;
+	public_url: string;
 	operator_can_see: string[];
 	operator_cannot_see: string[];
 	caveats: string[];
+	retention: { event_header_days: number; blob_days: number; alert_days: number };
+	registration_mode: string;
 }
 
 /** `POST /admin/api/smtp-test` */
@@ -179,6 +195,344 @@ export interface VerifyResponse {
 
 /** `GET /.well-known/faro` (the fields the web app reads). */
 export interface WellKnown {
+	instance_id: string;
 	name: string;
+	identity_pubkey: string;
 	server_version: string;
+	protocol: number;
+}
+
+// ---- Member keys (`/v1/me/keys`) ----------------------------------------
+
+/**
+ * How the web app stores the recovery copy of member keys: each secret
+ * wrapped under the recovery code. Opaque to the server.
+ */
+export interface RecoveryWrapped {
+	sign: WrappedSecret;
+	enc: WrappedSecret;
+}
+
+/** `PUT /v1/me/keys` body. */
+export interface PutMemberKeys {
+	sign_pubkey: string;
+	enc_binding: Signed<MemberEncKeyBinding>;
+	wrapped_sign_key: WrappedSecret;
+	wrapped_enc_key: WrappedSecret;
+	recovery_wrapped: RecoveryWrapped;
+}
+
+/** `GET /v1/me/keys` */
+export interface MemberKeysBlob {
+	sign_pubkey: string;
+	enc_binding: Signed<MemberEncKeyBinding>;
+	wrapped_sign_key: unknown;
+	wrapped_enc_key: unknown;
+	recovery_wrapped: unknown;
+	created_at_ms: number;
+}
+
+/**
+ * An ally's wrapped private key as the web app uploads it: a
+ * `WrappedSecret` under the passphrase, with the same secret wrapped under
+ * the recovery code alongside (Rust readers ignore the extra field).
+ */
+export type AllyWrappedKey = WrappedSecret & { recovery?: WrappedSecret };
+
+/** `GET /v1/me/ally-key` */
+export interface AllyKeyBlob {
+	enc_pubkey: string;
+	key_id: string;
+	wrapped_privkey: unknown;
+	created_at_ms: number;
+}
+
+// ---- Devices -------------------------------------------------------------
+
+export type Platform = 'macos' | 'windows' | 'linux';
+
+/** `GET /v1/me/devices` row. */
+export interface DeviceSummary {
+	device_id: string;
+	name: string;
+	platform: Platform;
+	status: 'pending_endorsement' | 'active' | 'removed';
+	sign_pubkey: string;
+	key_id: string;
+	enrolled_at_ms: number;
+	last_seen_at_ms: number | null;
+}
+
+/** `POST /v1/me/enroll-codes` */
+export interface EnrollCode {
+	code: string;
+	expires_at_ms: number;
+	enroll_url: string;
+}
+
+export type DeviceEndorseRequest = Signed<DeviceEndorsement>;
+
+// ---- Allies --------------------------------------------------------------
+
+export type LinkState = 'pending' | 'active' | 'removed';
+
+/** One of the member's allies (`GET /v1/me/allies`). */
+export interface AllyLink {
+	ally_id: string;
+	display_name: string;
+	email: string;
+	state: LinkState;
+	created_at_ms: number;
+	activated_at_ms: number | null;
+	ally_enc_pubkey: string | null;
+	ally_key_id: string | null;
+	member_sign_pubkey: string | null;
+}
+
+export interface ManifestStatus {
+	current: ManifestRef;
+	needs_update: boolean;
+	departed: string[];
+}
+
+export interface MyAllies {
+	allies: AllyLink[];
+	manifest: ManifestStatus | null;
+}
+
+export interface ApproveAlly {
+	endorsement: Signed<AllyEndorsement>;
+	manifest: Signed<RecipientManifest>;
+}
+
+export interface LinkStatus {
+	ally_id: string;
+	state: LinkState;
+	manifest: ManifestRef;
+}
+
+/** A member the caller is an ally for (`GET /v1/ally/members`). */
+export interface SupportedMember {
+	member_id: string;
+	display_name: string;
+	state: LinkState;
+	created_at_ms: number;
+	activated_at_ms: number | null;
+	member_sign_pubkey: string | null;
+	ally_enc_pubkey: string | null;
+}
+
+/** `POST /v1/invites/{token}/accept` */
+export interface InviteAccepted {
+	member_id: string;
+	state: LinkState;
+	ally_key_id: string;
+}
+
+// ---- Feed ----------------------------------------------------------------
+
+export type Urgency = 'none' | 'normal' | 'urgent';
+
+export type EventKind =
+	| 'capture'
+	| 'flag'
+	| 'tamper'
+	| 'settings_change'
+	| 'agent_restarted'
+	| 'paused'
+	| 'resumed'
+	| 'goodbye'
+	| 'boot'
+	| 'shutdown';
+
+export type ServerAlertKind =
+	| 'missed_checkin'
+	| 'chain_gap'
+	| 'invalid_signature'
+	| 'clock_skew'
+	| 'device_removed'
+	| 'ally_removed'
+	| 'ally_added'
+	| 'member_settings_changed'
+	| 'upload_stalled'
+	| 'account_disabled'
+	| 'account_enabled'
+	| 'ally_disabled'
+	| 'ally_enabled';
+
+export type FeedItem =
+	| {
+			type: 'event';
+			member_id: string;
+			device_id: string;
+			seq: number;
+			ts_ms: number;
+			kind: EventKind;
+			urgency: Urgency;
+			blob_id: string | null;
+	  }
+	| {
+			type: 'report';
+			member_id: string;
+			device_id: string;
+			report_id: string;
+			period_start_ms: number;
+			period_end_ms: number;
+			blob_id: string;
+	  }
+	| {
+			type: 'alert';
+			member_id: string;
+			device_id: string | null;
+			alert_id: string;
+			kind: ServerAlertKind;
+			urgency: Urgency;
+			ts_ms: number;
+			detail: string | null;
+	  };
+
+export type FeedEntry = FeedItem & { received_at_ms: number };
+
+/** `GET /v1/ally/feed` */
+export interface FeedResponse {
+	member_id: string;
+	items: FeedEntry[];
+	next_cursor: string | null;
+	has_more: boolean;
+}
+
+// ---- Decrypted bodies (faro_proto::body, faro_proto::report) --------------
+
+export type Rating = 'clean' | 'low' | 'medium' | 'high';
+
+export interface Reason {
+	source: 'image' | 'domain' | 'title' | 'app' | 'ocr' | 'context';
+	label: string;
+	score?: number;
+}
+
+export interface BlurredThumbnail {
+	width: number;
+	height: number;
+	transform: string;
+	/** base64url PNG, blurred on the device before encryption. */
+	png: string;
+}
+
+export interface AppInfo {
+	id: string;
+	name?: string;
+}
+
+export type TamperSignal =
+	| { signal: 'permission_revoked'; permission: string }
+	| { signal: 'agent_killed_repeatedly'; count: number; window_secs: number }
+	| { signal: 'integrity_failure'; component: string }
+	| { signal: 'clock_manipulation'; wall_delta_ms: number; mono_delta_ms: number }
+	| { signal: 'wayland_token_lost' }
+	| { signal: 'capture_failing'; consecutive_failures: number }
+	| { signal: 'unmonitored_user_session'; user: string }
+	| { signal: 'browser_without_extension'; browser: string }
+	| { signal: 'vpn_active' }
+	| { signal: 'virtual_machine' }
+	| { signal: 'remote_desktop' };
+
+export type EventBody =
+	| { type: 'capture'; rating: Rating; count: number }
+	| {
+			type: 'flag';
+			rating: Rating;
+			reasons: Reason[];
+			app?: AppInfo;
+			window_title?: string;
+			browser?: { url?: string; title?: string; incognito?: boolean };
+			thumbnail?: BlurredThumbnail;
+			burst?: boolean;
+			account?: string;
+	  }
+	| { type: 'tamper'; signal: TamperSignal; account?: string }
+	| { type: 'settings_change'; changes: { key: string; old?: string; new?: string }[] }
+	| { type: 'agent_restarted'; count_last_hour: number }
+	| { type: 'paused'; reason?: string; until_ms?: number }
+	| { type: 'resumed' }
+	| {
+			type: 'goodbye';
+			reason: 'uninstalled' | 'account_deleted' | { moved_instance: { new_instance_host: string } };
+	  }
+	| { type: 'boot'; os: string; client_version: string }
+	| { type: 'shutdown' };
+
+export type ActivityState =
+	'active' | 'idle' | 'locked' | 'asleep' | 'paused' | 'off' | 'unmonitored';
+
+export interface TamperRecord {
+	seq: number | null;
+	ts_ms: number;
+	signal: TamperSignal;
+	account?: string;
+}
+
+export interface DailyReport {
+	v: number;
+	device_id: string;
+	device_name: string;
+	period_start_ms: number;
+	period_end_ms: number;
+	first_seq: number | null;
+	last_seq: number | null;
+	timeline: { start_ms: number; end_ms: number; state: ActivityState; account?: string }[];
+	counts: { clean: number; low: number; medium: number; high: number };
+	flagged: {
+		seq: number;
+		ts_ms: number;
+		rating: Rating;
+		reasons: Reason[];
+		app?: AppInfo;
+		thumbnail?: BlurredThumbnail;
+		member_note?: string;
+		account?: string;
+	}[];
+	top_domains?: { name: string; count: number }[];
+	top_apps?: { name: string; count: number }[];
+	health: {
+		tamper: TamperRecord[];
+		context: TamperRecord[];
+		agent_restarts: number;
+		capture_failures: number;
+		unmonitored_secs: number;
+	};
+}
+
+// ---- Preferences ---------------------------------------------------------
+
+export type DeliveryMode = 'immediate' | 'digest' | 'off';
+
+export interface QuietHours {
+	start_min: number;
+	end_min: number;
+	tz_offset_min: number;
+}
+
+/** `GET /v1/me/notification-prefs?member_id=` */
+export interface NotificationPrefs {
+	member_id: string;
+	urgent: DeliveryMode;
+	normal: DeliveryMode;
+	none: DeliveryMode;
+	quiet_hours: QuietHours | null;
+	tamper_minimum: DeliveryMode;
+}
+
+export interface RetentionWindows {
+	event_header_days: number;
+	blob_days: number;
+	alert_days: number;
+}
+
+/** `GET /v1/me/retention` */
+export interface RetentionView {
+	instance: RetentionWindows;
+	chosen: { event_header_days: number | null; blob_days: number | null; alert_days: number | null };
+	effective: RetentionWindows;
+	min_days: number;
 }

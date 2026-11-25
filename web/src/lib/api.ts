@@ -73,8 +73,14 @@ export const api = {
 	get: <T>(path: string) => request<T>('GET', path),
 	/** For a `204 No Content` answer, use `T = void`. */
 	post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
-	patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body)
+	patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),
+	put: <T>(path: string, body: unknown) => request<T>('PUT', path, body),
+	/** For a `204 No Content` answer, use `T = void`. */
+	delete: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body)
 };
+
+/** `encodeURIComponent` for one path segment. */
+export const seg = encodeURIComponent;
 
 /** A sentence for an error the page has no specific wording for. */
 export function describeError(e: unknown): string {

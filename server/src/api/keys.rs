@@ -23,7 +23,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use faro_proto::api::MemberKeysResponse;
-use faro_proto::keys::{key_id, MemberEncKeyBinding, Signed};
+use faro_proto::api::REQUEST_MAX_SKEW_MS;
+use faro_proto::keys::{key_id, KeyRewrap, MemberEncKeyBinding, Signed};
 use faro_proto::{EncPublicKey, SignPublicKey, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -158,6 +159,85 @@ pub async fn put_my_keys(
             enc_key_id: key_id(row.enc_pubkey.as_bytes()),
         }),
     ))
+}
+
+/// Parse one signed wrapped-key text into the object that is stored.
+fn parse_wrapped(name: &'static str, text: &str) -> Result<serde_json::Value, AppError> {
+    if text.len() > MAX_WRAPPED_BYTES {
+        return Err(AppError::bad_request(
+            "invalid_wrapped_key",
+            format!("{name} is too large"),
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|_| AppError::bad_request("invalid_wrapped_key", format!("{name} is not JSON")))?;
+    check_wrapped(name, &v)?;
+    Ok(v)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RewrapResponse {
+    pub updated_at_ms: i64,
+}
+
+/// `PUT /v1/me/keys/wrapped`: replace the wrapped copies of the member's
+/// private keys (a new passphrase, or a new recovery code), signed by the
+/// member key itself ([`KeyRewrap`]). The keys themselves never change, so
+/// no device or ally is affected.
+pub async fn put_my_wrapped_keys(
+    State(state): State<AppState>,
+    s: SessionUser,
+    ApiJson(req): ApiJson<Signed<KeyRewrap>>,
+) -> AppResult<Json<RewrapResponse>> {
+    s.require_member()?;
+    let r = &req.body;
+    if &r.instance_id != state.instance_id() || r.member_id != s.user.id {
+        return Err(AppError::bad_request(
+            "rewrap_mismatch",
+            "the request must name this instance and your account",
+        ));
+    }
+    let now = state.now_ms();
+    if (now - r.issued_at_ms).abs() > REQUEST_MAX_SKEW_MS {
+        return Err(AppError::bad_request(
+            "stale_request",
+            "issued_at_ms is too far from the server's clock",
+        ));
+    }
+    let wrapped_sign_key = parse_wrapped("wrapped_sign_key", &r.wrapped_sign_key)?;
+    let wrapped_enc_key = parse_wrapped("wrapped_enc_key", &r.wrapped_enc_key)?;
+    let recovery_wrapped = parse_wrapped("recovery_wrapped", &r.recovery_wrapped)?;
+    let stored = member_keys::sign_pubkey(state.db().pool(), &s.user.id)
+        .await?
+        .ok_or_else(|| {
+            AppError::conflict("member_keys_required", "set up your member keys first")
+        })?;
+    if stored != r.sign_pubkey || faro_crypto::verify_signed(&stored, &req).is_err() {
+        return Err(AppError::bad_request(
+            "bad_rewrap_signature",
+            "the request is not signed by your member key",
+        ));
+    }
+    let updated = member_keys::update_wrapped(
+        state.db().pool(),
+        &s.user.id,
+        &stored,
+        &wrapped_sign_key,
+        &wrapped_enc_key,
+        &recovery_wrapped,
+        r.issued_at_ms,
+    )
+    .await?;
+    if !updated {
+        return Err(AppError::conflict(
+            "stale_request",
+            "your keys were changed more recently than this request",
+        ));
+    }
+    tracing::info!(member = %s.user.id, "member re-wrapped their keys");
+    Ok(Json(RewrapResponse {
+        updated_at_ms: r.issued_at_ms,
+    }))
 }
 
 /// `GET /v1/me/keys`

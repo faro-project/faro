@@ -1061,6 +1061,7 @@ dependencies = [
  "crypto_box",
  "ed25519-dalek",
  "faro-proto",
+ "hex",
  "proptest",
  "rand_core 0.6.4",
  "serde",
