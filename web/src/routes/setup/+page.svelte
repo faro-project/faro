@@ -11,8 +11,9 @@
 
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
-	import Logo from '#lib/ui/Logo.svelte';
+	import BrandMark from '#lib/ui/BrandMark.svelte';
 	import { api, describeError } from '#lib/api.ts';
+	import { branding } from '#lib/branding.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import AccountStep from '#lib/setup/AccountStep.svelte';
 	import EmailCheck from '#lib/admin/EmailCheck.svelte';
@@ -78,14 +79,19 @@
 		step = 'done';
 	}
 
-	onMount(load);
+	onMount(() => {
+		void load();
+		void branding.load().catch(() => {});
+	});
 </script>
 
 <svelte:head>
 	<title>Set up Faro</title>
 </svelte:head>
 
-<div class="brand-mark"><Logo height={56} /></div>
+<div class="brand-mark">
+	<BrandMark size="large" logo={branding.info?.logo} name={branding.info?.instance_name} />
+</div>
 
 <h1>Set up this Faro instance</h1>
 {#if overview}

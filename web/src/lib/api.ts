@@ -12,6 +12,11 @@ function apiBase(): string {
 	return resolve('/').replace(/\/$/, '');
 }
 
+/** The full URL of an API path on this instance, e.g. for an `<img>`. */
+export function apiUrl(path: string): string {
+	return `${apiBase()}${path}`;
+}
+
 export class ApiError extends Error {
 	constructor(
 		/** HTTP status, or 0 when the server could not be reached. */
@@ -27,14 +32,29 @@ export class ApiError extends Error {
 	}
 }
 
+/** A raw request body with its own content type (a file upload). */
+class RawBody {
+	constructor(
+		readonly data: Blob,
+		readonly contentType: string
+	) {}
+}
+
+function encodeBody(body: unknown): { headers: Record<string, string>; body?: BodyInit } {
+	if (body === undefined) return { headers: {} };
+	if (body instanceof RawBody) {
+		return { headers: { 'content-type': body.contentType }, body: body.data };
+	}
+	return { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(`${apiBase()}${path}`, {
 			method,
 			credentials: 'same-origin',
-			headers: body === undefined ? {} : { 'content-type': 'application/json' },
-			body: body === undefined ? undefined : JSON.stringify(body)
+			...encodeBody(body)
 		});
 	} catch {
 		throw new ApiError(0, 'network', 'Could not reach the Faro server.');
@@ -75,6 +95,9 @@ export const api = {
 	post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
 	patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),
 	put: <T>(path: string, body: unknown) => request<T>('PUT', path, body),
+	/** `PUT` a file as the raw body, with its own `Content-Type`. */
+	putFile: <T>(path: string, data: Blob, contentType: string) =>
+		request<T>('PUT', path, new RawBody(data, contentType)),
 	/** For a `204 No Content` answer, use `T = void`. */
 	delete: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body)
 };
