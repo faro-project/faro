@@ -5,7 +5,7 @@
 //! | `device.key` | 32-byte Ed25519 seed of the device key | 0600 |
 //! | `enrollment.json` | [`Enrollment`]: pinned instance and member keys, device token | 0600 |
 //! | `endorsement.json` | the member-signed `DeviceEndorsement`, once verified | 0600 |
-//! | `settings.json` | the member settings last announced to allies | 0600 |
+//! | `settings.json` | the member settings last announced to allies; in effect when `service.toml` sets none ([`settings_in_effect`]) | 0600 |
 //! | `outbox.sqlite3` | `faro_core::Outbox` (ciphertext only) | 0600 |
 //! | `service.lock` | empty; [`StateDir::try_lock`] holds an exclusive lock on it | 0600 |
 //!
@@ -286,6 +286,30 @@ pub fn store_device_key(dir: &StateDir) -> Result<SigningKey, StateError> {
     Ok(key)
 }
 
+/// The member settings the service runs with.
+///
+/// Settings set in `service.toml` win. Without them the device keeps the
+/// settings it last announced to allies, so a default that changes in a new
+/// release (`medium` flags became `urgent`) applies to new devices only and
+/// never moves an existing device's mapping behind the member's back. A
+/// device that has announced nothing yet, or whose `settings.json` can't be
+/// read, starts from the defaults; startup then announces any difference.
+pub fn settings_in_effect(
+    dir: &StateDir,
+    configured: Option<&faro_core::MemberSettings>,
+) -> faro_core::MemberSettings {
+    if let Some(s) = configured {
+        return s.clone();
+    }
+    match dir.read_json(SETTINGS_FILE) {
+        Ok(stored) => stored.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(error = %e, "stored settings unreadable; using the defaults");
+            faro_core::MemberSettings::default()
+        }
+    }
+}
+
 /// Load the device key.
 pub fn load_device_key(dir: &StateDir) -> Result<SigningKey, StateError> {
     let bytes = dir
@@ -380,6 +404,37 @@ mod tests {
     fn mode(p: &Path) -> u32 {
         use std::os::unix::fs::MetadataExt;
         fs::metadata(p).unwrap().mode() & 0o7777
+    }
+
+    #[test]
+    fn stored_settings_outlive_a_new_default() {
+        use faro_core::{MemberSettings, UrgencyPolicy};
+        use faro_proto::Urgency;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = StateDir::open(tmp.path().join("state")).unwrap();
+        // A new device starts from the defaults: medium flags are urgent.
+        let fresh = settings_in_effect(&dir, None);
+        assert_eq!(fresh, MemberSettings::default());
+        assert_eq!(fresh.urgency().medium(), Urgency::Urgent);
+        // A device that announced the old default (medium = normal) keeps it.
+        dir.write_secret(
+            SETTINGS_FILE,
+            br#"{"capture_mean_secs":60,"urgency":{"low":"none","medium":"normal","high":"urgent"}}"#,
+        )
+        .unwrap();
+        let kept = settings_in_effect(&dir, None);
+        assert_eq!(kept.urgency().medium(), Urgency::Normal);
+        // `service.toml` still wins when it sets the member settings.
+        let configured =
+            MemberSettings::new(90, UrgencyPolicy::default(), false, false, None).unwrap();
+        assert_eq!(settings_in_effect(&dir, Some(&configured)), configured);
+        // Unreadable (here: below the floor) falls back to the defaults.
+        dir.write_secret(
+            SETTINGS_FILE,
+            br#"{"capture_mean_secs":60,"urgency":{"low":"none","medium":"none","high":"urgent"}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings_in_effect(&dir, None), MemberSettings::default());
     }
 
     #[test]

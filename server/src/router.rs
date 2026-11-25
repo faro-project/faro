@@ -28,8 +28,8 @@
 //!
 
 use crate::api::{
-    admin, allies, auth, devices, events, feed, heartbeat, invites, keys, manifests, prefs,
-    privacy, reports, setup, well_known,
+    account, admin, allies, auth, devices, events, feed, heartbeat, invites, keys, manifests,
+    prefs, privacy, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -79,7 +79,13 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             post(auth::verify_link.layer(limited.clone())),
         )
         .route("/v1/auth/logout", post(auth::logout))
-        .route("/v1/me", get(auth::me).patch(auth::update_me))
+        .route(
+            "/v1/me",
+            get(auth::me)
+                .patch(auth::update_me)
+                .delete(account::delete_me),
+        )
+        .route("/v1/me/deletion/cancel", post(account::cancel_deletion))
         // Member keys and the key directory.
         .route("/v1/me/keys", get(keys::get_my_keys).put(keys::put_my_keys))
         .route("/v1/me/keys/wrapped", put(keys::put_my_wrapped_keys))
@@ -115,6 +121,14 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             post(invites::accept.layer(limited)),
         )
         .route("/v1/me/ally-key", get(invites::get_my_ally_key))
+        .route(
+            "/v1/me/ally-key/challenge",
+            post(invites::ally_key_challenge),
+        )
+        .route(
+            "/v1/me/ally-key/wrapped",
+            put(invites::put_my_wrapped_ally_key),
+        )
         .route("/v1/me/allies", get(allies::list_my_allies))
         .route("/v1/me/allies/{ally_id}", delete(allies::remove))
         .route("/v1/me/allies/{ally_id}/approve", post(allies::approve))

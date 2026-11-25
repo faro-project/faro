@@ -48,6 +48,9 @@ pub struct Overview {
     pub storage: StorageBytes,
     /// Notification delivery, counts only.
     pub notifications: DeliveryCounts,
+    /// Accounts waiting to be deleted, and purges held up for more than 7
+    /// days past their hold because their notices can't be delivered.
+    pub deletions: users::DeletionCounts,
     pub smtp_configured: bool,
     pub settings: InstanceSettings,
 }
@@ -64,6 +67,7 @@ pub async fn overview(State(state): State<AppState>, s: SessionUser) -> AppResul
         last_seen: stats::last_seen(pool, state.now_ms()).await?,
         storage: stats::storage(pool, state.db().backend()).await?,
         notifications: notifications::delivery_counts(pool).await?,
+        deletions: users::deletion_counts(pool, state.now_ms()).await?,
         smtp_configured: state.config().smtp.is_configured(),
         settings: state.settings(),
     }))
@@ -212,6 +216,14 @@ async fn set_account_disabled(
     let user = users::by_id(&mut *tx, &target)
         .await?
         .ok_or(AppError::NotFound)?;
+    // The person may still cancel, or the purge settles it: either way,
+    // not a moment to change who can sign in.
+    if user.deletion.is_some() {
+        return Err(AppError::conflict(
+            "account_deleting",
+            "this account is being deleted",
+        ));
+    }
     if disabled
         && user.roles.admin
         && users::count_enabled_admins_except(&mut *tx, &target).await? == 0

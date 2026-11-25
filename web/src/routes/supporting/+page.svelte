@@ -104,6 +104,16 @@
 										<div class="row-meta">
 											Ally since {date(m.activated_at_ms ?? m.created_at_ms)}
 										</div>
+										{#if m.deletion_purge_after_ms}
+											<div class="notice warn small deleting">
+												<p>
+													{m.display_name} is deleting their account. Until {date(
+														m.deletion_purge_after_ms
+													)} nothing changes: their computers are still monitored and you can open their
+													alerts and reports. Then everything about them is removed from this server.
+												</p>
+											</div>
+										{/if}
 									</div>
 									<a
 										class="button secondary small"
@@ -129,5 +139,9 @@
 	.name {
 		font-weight: 700;
 		font-size: 1.05rem;
+	}
+
+	.deleting {
+		margin: 0.6rem 0 0;
 	}
 </style>

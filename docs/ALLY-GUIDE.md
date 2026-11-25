@@ -26,7 +26,7 @@ That last part is the point. Faro exists to make honest conversations easier, no
 - **Ally:** you. Someone a member trusts to see their reports and alerts.
 - **Instance:** the Faro server your invitation came from. A church, a college, a small group or one person runs it. Its name is at the top of each page.
 - **Passphrase:** like a password, but longer, for example a few unrelated words strung together. You choose it. It unlocks what the member shares with you.
-- **Recovery code:** a long code Faro makes for you, as a spare key. If you forget your passphrase, the recovery code unlocks things instead.
+- **Recovery code:** a long code Faro makes for you, as a spare key. If you forget your passphrase, the recovery code unlocks things instead. You can get a new one in **Settings**.
 - **Safety code:** a set of numbers you and the member compare, to make sure the member is approving *you* and not an impostor.
 
 ## 2. Accepting the invitation
@@ -72,9 +72,16 @@ What the member shares with you is locked on their computer before it is sent, a
 
 You type your passphrase on the **Supporting** pages whenever Faro needs to show you details. It stays unlocked in that browser tab until you click **Lock** (top of the page), sign out, close or reload the tab, or leave it alone for 30 minutes. On a shared computer, click **Lock** and **Sign out** when you're done.
 
-**If you forget your passphrase:** on any unlock screen, click **Forgot it? Use the recovery code** and type the recovery code instead.
+**If you forget your passphrase:** on any unlock screen, click **Forgot it? Use the recovery code** and type the recovery code instead. Faro then offers to set a new passphrase: click **Choose a new passphrase** in the note at the top of the page. Your recovery code keeps working afterwards.
 
-Today the web app has no way for an ally to choose a new passphrase or get a new recovery code, so if you forget your passphrase you'll need the recovery code every time. If you lose both, Faro can't get your key back. Tell the member, so they know you can't read their reports.
+**Changing your passphrase or recovery code:** open **Settings** (your name, top right). Under **Your keys**:
+
+- **Change my passphrase…** sets a new passphrase. Tick **Also make a new recovery code** if you want a new code too.
+- **Get a new recovery code…** replaces your recovery code and keeps your passphrase. Use it if you lost the code, or think someone else has seen it. The old code stops working, and the new one is shown once, so save it.
+
+Faro may ask you to unlock first. Nothing changes for the members you support: your safety code stays the same, they aren't told, and you can still read everything they share.
+
+If you lose both your passphrase and your recovery code, Faro can't get your key back. Tell the member, so they know you can't read their reports.
 
 ## 4. Comparing the safety code
 
@@ -159,6 +166,7 @@ A missed check-in often just means the laptop was closed, switched off or away f
 ### Other items you might see
 
 - **"The account was disabled by an admin"**: the person who runs the server stopped the member signing in. Their computers keep reporting to you. Faro always tells the person and their allies when an admin does this, and the same if an admin disables an ally's account.
+- **"The account is being deleted"**: the member asked for their account to be deleted. The item gives the date. Until then nothing changes: their computers keep reporting to you, you can open what they sent, and they can still cancel. After that date, everything about them is removed from the server. **"*Name* is deleting their account"** means the same thing for one of their other allies, who stops being an ally on that date. If someone cancels, you see **"…cancelled deleting their account"**. You're emailed about all of these.
 - **"The details are no longer stored"**: the item is older than the instance (or the member) keeps things for.
 - **"The details couldn't be decrypted"**: the item may have been damaged or tampered with. Worth mentioning to the member.
 
@@ -184,9 +192,27 @@ These settings are for this one person. If you support more than one person, set
 
 ### Why some alerts can't be switched off
 
-If you choose **Off** for **Urgent** or **Normal**, Faro tells you: **"Tamper alerts (Faro stopped, removed or blocked) can't be switched off: they still arrive in the hourly digest."**
+If you choose **Off** for **Urgent** or **Normal**, Faro tells you: **"Some alerts can't be switched off: Faro being stopped, removed or interfered with, a computer that stops checking in or isn't sending what it records, missing or unverified records, a computer being removed, an ally being removed or leaving, and an account being disabled by an admin. With Off, they still arrive in the hourly digest."**
 
-That's on purpose. If tamper alerts could be switched off, Faro could be quietly silenced: by accident, or by someone talking you into it. So the most you can do is move them into the hourly digest. The same goes for an ally being removed, a computer being removed, and an account being disabled by an admin. You'll always hear about those.
+That's on purpose. If these alerts could be switched off, Faro could be quietly silenced: by accident, or by someone talking you into it. So the most you can do is move them into the hourly digest. These are the ones, by what they say in the list:
+
+| What it says | Urgent or normal |
+|---|---|
+| **Possible tampering** | Urgent |
+| **Faro stopped on a computer** | Urgent |
+| ***Computer* stopped checking in** | Urgent |
+| ***Computer* isn't sending what it records** | Urgent |
+| **Events from *computer* are missing** | Urgent |
+| ***Computer* sent something that didn't verify** | Urgent |
+| ***Computer* was removed** | Urgent |
+| ***Name* was removed as an ally**, or ***Name* stopped being an ally** | Normal |
+| **The account was disabled by an admin** | Urgent |
+| ***Name*'s account was disabled by an admin** | Urgent |
+| **The account is being deleted** | Urgent |
+| ***Name* is deleting their account** | Normal |
+| **The account deletion was cancelled**, or ***Name* cancelled deleting their account** | Normal |
+
+You'll always hear about those, at least in the hourly digest. Everything else can be switched off, including flagged moments, **Faro kept restarting**, and ***Computer* is back online**. If Faro is stopped again and again, you get **Possible tampering**, which can't be switched off.
 
 ## 7. If you want to stop being an ally
 
@@ -203,6 +229,8 @@ What happens:
 - They're asked to confirm their updated list of allies. Until they do, their computer still locks new items for you, but the server won't give you anything.
 
 If they invite you again later, you can accept with your existing passphrase.
+
+**Deleting your Faro account** ends all of this at once: open **Settings** (your name, top right) and use **Delete your account** at the bottom. You need to have signed in within the last 10 minutes (it offers to send you a sign-in link), and you type your email address to confirm. Everyone you support, and their other allies, are emailed straight away. For 7 days nothing else changes, you can still sign in, and every page has a **Cancel deletion** button. After that you stop being anyone's ally and your account, your ally key and your settings are deleted.
 
 If the member removes you as an ally, Faro tells you, and their page says **"You aren't an ally for this person (any more)"**. A member can't remove an ally without the other allies being told either.
 

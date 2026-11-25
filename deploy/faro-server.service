@@ -36,7 +36,8 @@ Description=Faro self-hosted accountability instance
 Documentation=https://github.com/faro-project/faro/blob/main/docs/SELF-HOSTING.md
 Wants=network-online.target
 After=network-online.target
-# Using a local Postgres? Uncomment so the database starts first:
+# Using a local Postgres (experimental, not supported in this release)?
+# Uncomment so the database starts first:
 # After=network-online.target postgresql.service
 # Wants=network-online.target postgresql.service
 

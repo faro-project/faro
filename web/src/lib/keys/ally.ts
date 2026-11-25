@@ -7,7 +7,7 @@
 // code (PROTOCOL.md §4.3). Rust readers parse it as a plain WrappedSecret.
 
 import { api, ApiError } from '../api.ts';
-import { b64, equal, unb64Fixed, wipe } from '../crypto/bytes.ts';
+import { b64, equal, unb64, unb64Fixed, wipe, type Bytes } from '../crypto/bytes.ts';
 import { encPublicKey, newEncryptionSecret } from '../crypto/keys.ts';
 import {
 	deriveWrapKey,
@@ -17,8 +17,11 @@ import {
 	wrapWithKey,
 	type Progress
 } from '../crypto/passphrase.ts';
-import type { AllyKeyBlob, AllyWrappedKey } from '../types.ts';
+import { proveAllyKeyRewrap } from '../crypto/proto.ts';
+import { DecryptError, sealOpen } from '../crypto/seal.ts';
+import type { AllyKeyBlob, AllyKeyChallenge, AllyWrappedKey } from '../types.ts';
 import type { AllyKey } from './keyring.svelte.ts';
+import { rewrapAllyWrapped, type RewrapChoice } from './wrapping.ts';
 
 export function getAllyKey(): Promise<AllyKeyBlob | null> {
 	return api.get<AllyKeyBlob>('/v1/me/ally-key').catch((e) => {
@@ -80,6 +83,60 @@ export async function unlockAllyKey(
 		);
 	}
 	return { userId, encSecret, encPk };
+}
+
+/**
+ * Re-wrap the unlocked ally key under a new passphrase and/or a new
+ * recovery code (`PUT /v1/me/ally-key/wrapped`, PROTOCOL.md §4.3). The key
+ * itself doesn't change, so members see no new safety code. An X25519 key
+ * can't sign, so the request is proven with a challenge the instance seals
+ * to the key: it is opened here and only a MAC keyed with it is sent back.
+ * Returns the new recovery code, if one was made.
+ */
+export async function rewrapAllyKey(
+	key: AllyKey,
+	instanceId: string,
+	choice: RewrapChoice,
+	onProgress?: Progress
+): Promise<string | null> {
+	const current = await getAllyKey();
+	if (!current || !equal(unb64Fixed(current.enc_pubkey, 32), key.encPk)) {
+		throw new UnwrapError('unsupported', 'The key on the server is not the one you unlocked.');
+	}
+	const { wrapped, recoveryCode } = await rewrapAllyWrapped(
+		key.encSecret,
+		key.encPk,
+		current.wrapped_privkey,
+		choice,
+		onProgress
+	);
+	const c = await api.post<AllyKeyChallenge>('/v1/me/ally-key/challenge');
+	if (!equal(unb64Fixed(c.enc_pubkey, 32), key.encPk)) {
+		throw new UnwrapError('unsupported', 'The server asked about a different key.');
+	}
+	let challenge: Bytes | null = null;
+	try {
+		challenge = sealOpen(unb64(c.sealed_challenge), key.encSecret);
+		const body = proveAllyKeyRewrap(
+			{
+				instance_id: instanceId,
+				ally_id: key.userId,
+				enc_pubkey: b64(key.encPk),
+				issued_at_ms: c.issued_at_ms,
+				wrapped_privkey: wrapped
+			},
+			challenge
+		);
+		await api.put('/v1/me/ally-key/wrapped', body);
+	} catch (e) {
+		if (e instanceof DecryptError) {
+			throw new UnwrapError('unsupported', "The server's challenge isn't for your key.");
+		}
+		throw e;
+	} finally {
+		wipe(challenge);
+	}
+	return recoveryCode;
 }
 
 export { b64 };

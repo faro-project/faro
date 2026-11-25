@@ -27,7 +27,8 @@ pub enum Backend {
 }
 
 impl Backend {
-    fn from_url(url: &str) -> Option<Self> {
+    /// The backend a database URL names, or `None` for any other scheme.
+    pub fn from_url(url: &str) -> Option<Self> {
         if url.starts_with("sqlite:") {
             Some(Backend::Sqlite)
         } else if url.starts_with("postgres://") || url.starts_with("postgresql://") {
@@ -37,6 +38,12 @@ impl Backend {
         }
     }
 }
+
+/// What `doctor` and `serve` say about a Postgres database. The beta
+/// supports SQLite only: the Postgres code paths are kept and compile-checked
+/// ([`migrations`], [`repo`]), but nothing runs them in CI.
+pub const POSTGRES_UNSUPPORTED: &str =
+    "experimental, not supported in this release (the beta supports SQLite only)";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {

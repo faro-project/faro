@@ -102,6 +102,7 @@ pub async fn create_admin(
         },
         disabled: false,
         created_at_ms: now,
+        deletion: None,
     };
     users::insert(&mut *tx, &user).await?;
     users::touch_login(&mut *tx, &user.id, now).await?;

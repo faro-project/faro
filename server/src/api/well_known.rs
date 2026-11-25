@@ -11,7 +11,7 @@ use axum::Json;
 use faro_proto::api::{WellKnown, PROTOCOL_VERSION};
 
 /// Oldest client release this server still accepts.
-pub const MIN_CLIENT_VERSION: &str = "0.1.0";
+pub const MIN_CLIENT_VERSION: &str = "0.1.0-beta.1";
 
 pub async fn get(State(state): State<AppState>) -> Response {
     let body = WellKnown {

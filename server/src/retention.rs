@@ -6,6 +6,7 @@
 //! | event and report ciphertext (blob files + `blobs` rows), and report rows | `blob_days` (30) |
 //! | alerts (and their notifications), closed liveness episodes, removed ally links, old uptime rows | `alert_days` (90) |
 //! | expired sessions, magic links, setup tokens, enroll codes, invites | at expiry |
+//! | token hashes of a deleted account's computers (`deleted_device_tokens`) | 365 days |
 //! | orphan blob files (no `blobs` row, older than a day) | immediately |
 //!
 //! **Per-member windows.** Members may choose *shorter* retention, never
@@ -450,6 +451,37 @@ async fn purge_scope(
     Ok(())
 }
 
+impl Plan {
+    /// Everything, whenever it was received (account deletion).
+    fn everything() -> Plan {
+        let all = vec![(i64::MIN, i64::MAX)];
+        Plan {
+            events: all.clone(),
+            blobs: all.clone(),
+            alerts: all,
+        }
+    }
+}
+
+/// Delete all of one member's content through the same statements a
+/// retention pass uses (blob rows, then their files; reports; events;
+/// alerts; closed liveness episodes; removed links), whatever its age. The
+/// first stage of the account-deletion purge ([`crate::deletion`]).
+pub async fn purge_member(state: &AppState, member: &UserId) -> Result<RetentionSummary, AppError> {
+    let mut s = RetentionSummary::default();
+    purge_scope(
+        state,
+        &Plan::everything(),
+        Scope::Member(member.as_str()),
+        &mut s,
+    )
+    .await?;
+    Ok(s)
+}
+
+/// Device tombstones of deleted accounts are kept this long (§12).
+pub const DEVICE_TOMBSTONE_DAYS: u32 = 365;
+
 /// One full retention pass.
 pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
     let now = state.now_ms();
@@ -512,6 +544,11 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             .execute(pool)
             .await?
             .rows_affected();
+    s.other += crate::db::repo::deletion::sweep_device_tombstones(
+        pool,
+        cutoff(now, DEVICE_TOMBSTONE_DAYS),
+    )
+    .await?;
     for sql in [
         "DELETE FROM sessions WHERE expires_at < $1",
         "DELETE FROM magic_links WHERE expires_at < $1",

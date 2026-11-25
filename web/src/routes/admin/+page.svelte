@@ -88,6 +88,19 @@
 			</p>
 		</div>
 	{/if}
+	{#if overview.deletions.overdue > 0}
+		<div class="notice error" role="status">
+			<p>
+				<span aria-hidden="true">⚠</span>
+				<strong>
+					{plural(overview.deletions.overdue, 'account deletion')} waiting more than a week
+				</strong>
+				past {overview.deletions.overdue === 1 ? 'its' : 'their'} 7-day hold. An account is only deleted
+				after everyone has been emailed about it, and those emails aren't getting through.
+				<a href={resolve('/admin/email')}>Test email</a>
+			</p>
+		</div>
+	{/if}
 
 	<div class="tiles">
 		<section class="tile" aria-labelledby="t-people">
@@ -98,6 +111,9 @@
 				<li>{plural(overview.users.allies, 'ally', 'allies')}</li>
 				<li>{plural(overview.users.admins, 'admin')}</li>
 				{#if overview.users.disabled}<li>{count(overview.users.disabled)} disabled</li>{/if}
+				{#if overview.deletions.pending}
+					<li>{count(overview.deletions.pending)} being deleted</li>
+				{/if}
 			</ul>
 			<a class="more" href={resolve('/admin/people')}>People and invitations</a>
 		</section>

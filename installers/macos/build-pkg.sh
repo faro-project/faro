@@ -65,6 +65,15 @@ fi
 
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -n1)"
 [[ -n "$version" ]] || { echo "cannot read the workspace version" >&2; exit 1; }
+# Bundle versions must be plain integers (CFBundleShortVersionString and
+# CFBundleVersion), so the app gets the version without its pre-release or
+# build suffix: 0.1.0-beta.1 -> 0.1.0. The package and the updater use the
+# full semver, which orders pre-releases correctly.
+bundle_version="${version%%[-+]*}"
+[[ "$bundle_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "cannot derive a bundle version from $version" >&2
+    exit 1
+}
 
 if (( dev )); then
     name="Faro-$version-dev"
@@ -137,7 +146,7 @@ fi
 app="$root/Library/Faro/Faro Agent.app"
 install -d -m 755 "$app/Contents/MacOS"
 install -m 755 "$bin/faro-agent" "$app/Contents/MacOS/faro-agent"
-sed "s/@VERSION@/$version/g" "$here/Info.plist.in" > "$app/Contents/Info.plist"
+sed "s/@BUNDLE_VERSION@/$bundle_version/g" "$here/Info.plist.in" > "$app/Contents/Info.plist"
 plutil -lint -s "$app/Contents/Info.plist"
 
 # The default service config. Only the agent requirement differs from the

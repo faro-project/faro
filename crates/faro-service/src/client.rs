@@ -96,6 +96,16 @@ pub enum ClientError {
     },
 }
 
+/// Why the instance no longer accepts a device (see
+/// [`ClientError::retired`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retired {
+    /// Its member removed it in the web app.
+    DeviceRemoved,
+    /// The account it reported to was deleted.
+    AccountDeleted,
+}
+
 impl ClientError {
     /// Worth retrying later with backoff (network trouble, overload, server
     /// errors, clock skew that a `Date` header can fix).
@@ -116,6 +126,22 @@ impl ClientError {
     pub fn is_pending_endorsement(&self) -> bool {
         matches!(self, ClientError::Api { status, code, .. }
             if *status == StatusCode::FORBIDDEN && code == "device_pending_endorsement")
+    }
+
+    /// The instance retired this device for good, and its allies were told
+    /// when that happened: the member removed it (`403 device_removed`), or
+    /// the account it reported to was deleted (`403 account_deleted`).
+    pub fn retired(&self) -> Option<Retired> {
+        match self {
+            ClientError::Api { status, code, .. } if *status == StatusCode::FORBIDDEN => {
+                match code.as_str() {
+                    "device_removed" => Some(Retired::DeviceRemoved),
+                    "account_deleted" => Some(Retired::AccountDeleted),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     pub fn status(&self) -> Option<StatusCode> {
@@ -538,6 +564,17 @@ mod tests {
         assert!(!api(401, "unauthorized").is_transient());
         assert!(!api(400, "bad").is_transient());
         assert!(api(403, "device_pending_endorsement").is_pending_endorsement());
+        assert_eq!(
+            api(403, "device_removed").retired(),
+            Some(Retired::DeviceRemoved)
+        );
+        assert_eq!(
+            api(403, "account_deleted").retired(),
+            Some(Retired::AccountDeleted)
+        );
+        assert!(!api(403, "account_deleted").is_transient());
+        assert_eq!(api(401, "unauthorized").retired(), None);
+        assert_eq!(api(400, "account_deleted").retired(), None);
         assert!(!ClientError::TooLarge { limit: 1 }.is_transient());
     }
 

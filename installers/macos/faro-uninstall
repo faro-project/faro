@@ -13,7 +13,9 @@
 #      If the instance can't be reached, nothing is written: the service is
 #      started again and nothing is removed, so you can retry when online.
 #      --force removes Faro anyway; allies then see a missed check-in
-#      instead of the goodbye.
+#      instead of the goodbye. If the instance already retired this
+#      computer (its member removed it, or the account was deleted), allies
+#      were told then: goodbye says so and the uninstall goes ahead.
 #   3. Stop the agent in every account's session, then remove the programs,
 #      the launchd jobs, the state directory (device key and outbox) and the
 #      package receipt.
