@@ -1,0 +1,145 @@
+# Blocklist sources for the domain category bundle (ARCHITECTURE.md §3.5
+# "Context signals", §11). Compiled by the `domains-compile` example; see
+# docs/DEVELOPMENT.md "The domain category bundle".
+#
+# Every source names its category, format, SPDX licence and the BLAKE3 of
+# the exact file to use, so a build is reproducible and an upstream change
+# can't alter the bundle without a reviewed change to this file. URLs point
+# at a fixed commit, never a branch.
+#
+# Only `approved = true` sources go into shipped bundles, and an approved
+# source must have an Apache-2.0-compatible licence (the tool checks it
+# against faro_detect::ALLOWED_MODEL_LICENSES). Approving a source is the
+# maintainer's call. The downloaded lists are never committed.
+#
+# To move to a newer upstream revision: change the commit in the URLs and run
+# `domains-compile fetch`. It stops at the first file whose hash changed and
+# prints the new hash. Check what changed upstream (and that the licence
+# hasn't), update that `blake3` pin, and repeat until fetch passes.
+version = 1
+
+# --- StevenBlack/hosts --------------------------------------------------
+#
+# https://github.com/StevenBlack/hosts, MIT
+# (https://github.com/StevenBlack/hosts/blob/master/license.txt).
+# Its porn and gambling extensions are merges of upstream lists with their
+# own licences (extensions/*/*/update.json). Only the MIT ones are approved
+# here; the two CC BY 4.0 ones further down wait for sign-off. Each upstream
+# list is used separately, from StevenBlack's copy at commit 81f6c19b.
+# Sinfonietta's snuff list (extensions/porn/sinfonietta-snuff, MIT) is left
+# out: it is violence, not adult content, and violence is not in scope yet.
+
+[[source]]
+name = "stevenblack-porn-sinfonietta"
+category = "adult"
+format = "hosts"
+license = "MIT"
+approved = true
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/porn/sinfonietta/hosts"
+blake3 = "57a29e9322d5b162e13d02950a1bea8f7a881c6d662b2f1df44c299136f415a1"
+# MIT: https://github.com/Sinfonietta/hostfiles/blob/master/LICENSE
+homepage = "https://github.com/Sinfonietta/hostfiles"
+
+[[source]]
+name = "stevenblack-porn-clefspeare13"
+category = "adult"
+format = "hosts"
+license = "MIT"
+approved = true
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/porn/clefspeare13/hosts"
+blake3 = "06d078763fb0fdf9f8b49aa3a40c633346298408b6d9908664aa6a093c49ce77"
+# MIT according to StevenBlack's update.json. The upstream repository
+# (github.com/Clefspeare13/pornhosts) is no longer available, so
+# StevenBlack/hosts keeps and serves this copy itself.
+homepage = "https://github.com/Clefspeare13/pornhosts"
+
+[[source]]
+name = "stevenblack-porn-bigdargon"
+category = "adult"
+format = "hosts"
+license = "MIT"
+approved = true
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/porn/bigdargon/hosts"
+blake3 = "acdec5827e052c79ea61739fe85c092fd04457bf860e09d12bddccd66a285e55"
+# MIT: https://github.com/bigdargon/hostsVN/blob/master/LICENSE
+homepage = "https://github.com/bigdargon/hostsVN"
+
+[[source]]
+name = "stevenblack-gambling-sinfonietta"
+category = "gambling"
+format = "hosts"
+license = "MIT"
+approved = true
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/gambling/sinfonietta/hosts"
+blake3 = "1f2fc473207496c211d589379c776885cf749510b833f30ddfe7be88532019f4"
+homepage = "https://github.com/Sinfonietta/hostfiles"
+
+[[source]]
+name = "stevenblack-gambling-bigdargon"
+category = "gambling"
+format = "hosts"
+license = "MIT"
+approved = true
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/gambling/bigdargon/hosts"
+blake3 = "cb00b7671d6c0a45f77a9eb2e65d696f7e4a71b6bedae24332f325cda2e2a52f"
+homepage = "https://github.com/bigdargon/hostsVN"
+
+# --- Pending the maintainer's sign-off ----------------------------------
+
+[[source]]
+name = "stevenblack-porn-tiuxo"
+category = "adult"
+format = "hosts"
+license = "CC-BY-4.0"
+approved = false
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/porn/tiuxo/hosts"
+blake3 = "c33af21d31c596d8e58938e40cc76a9ea43a2e6cdb53cddde38646c0332d9b70"
+homepage = "https://github.com/tiuxo/hosts"
+terms = "CC BY 4.0 (https://github.com/tiuxo/hosts/blob/master/LICENSE): redistribution allowed with attribution. Permissive, but not the MIT that StevenBlack/hosts was approved under, and shipping it means carrying the attribution."
+
+[[source]]
+name = "stevenblack-porn-brijrajparmar27"
+category = "adult"
+format = "hosts"
+license = "NOASSERTION"
+approved = false
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/81f6c19b6ae322732879d119e5cbdd8f8bf6c52c/extensions/porn/brijrajparmar27/hosts"
+blake3 = "5a34ff29d3c0f0a3de0b36d58515b3c4bdaacc257f772e52b72e3d2f19cef3ae"
+homepage = "https://github.com/brijrajparmar27/host-sources"
+terms = "StevenBlack's update.json says CC BY 4.0, but the upstream repository (https://github.com/brijrajparmar27/host-sources) has no licence file and its README states no terms."
+
+# OISD (https://oisd.nl). Its FAQ (https://oisd.nl/faq) answers "Under which
+# license are the oisd lists distributed?" with the GNU GPL v3.0
+# (https://github.com/sjhgvr/oisd/blob/main/LICENSE), and each list's header
+# links the same file. OISD has no gambling list; its NSFW list maps to
+# `adult`. Pinned to sjhgvr/oisd commit d1024579 (the list changes hourly).
+[[source]]
+name = "oisd-nsfw"
+category = "adult"
+format = "domains"
+license = "GPL-3.0-only"
+approved = false
+url = "https://raw.githubusercontent.com/sjhgvr/oisd/d1024579962a54177612e304b5bb46a3c8df50b3/domainswild2_nsfw.txt"
+blake3 = "41926164f1ad7ed4be07f01dcc5744d0cffca4ef82da87a44bada86251ce3ae9"
+homepage = "https://oisd.nl"
+terms = "GPL-3.0 (https://oisd.nl/faq, https://github.com/sjhgvr/oisd/blob/main/LICENSE). Copyleft: a bundle built from it would have to be distributed under the GPL, which is not Apache-2.0 compatible (ARCHITECTURE.md §11)."
+
+# UT1, the Université Toulouse Capitole blacklists
+# (https://dsi.ut-capitole.fr/blacklists/index_en.php). The project's GitHub
+# mirror (https://github.com/olbat/ut1-blacklists#readme) says "the lists are
+# available to download and use under the condition of the Creative Commons
+# BY-SA license" (https://creativecommons.org/licenses/by-sa/4.0/). Pinned to
+# olbat/ut1-blacklists commit 03501c64. UT1's adult list is published as
+# byte-split parts (blacklists/adult/domains.0, .1, .2) that cut lines in
+# half, so it can't be listed as separate sources; add it as one file if UT1
+# is ever approved. Some UT1 lines start with "." and are skipped.
+[[source]]
+name = "ut1-gambling"
+category = "gambling"
+format = "domains"
+license = "CC-BY-SA-4.0"
+approved = false
+url = "https://raw.githubusercontent.com/olbat/ut1-blacklists/03501c64d230df9d84124176558d758351027be1/blacklists/gambling/domains"
+blake3 = "087d1c023d42f007c75c261904dc1a425984834a3e6f40e54d7de4d99a6215f0"
+homepage = "https://dsi.ut-capitole.fr/blacklists/index_en.php"
+terms = "CC BY-SA 4.0 (https://github.com/olbat/ut1-blacklists#readme). Share-alike: a bundle built from it would have to be distributed under BY-SA with attribution, which needs the maintainer's decision under ARCHITECTURE.md §11."
