@@ -290,6 +290,19 @@ pub enum ServerAlertKind {
     AllyDisabled,
     /// An admin re-enabled the account of one of the member's allies.
     AllyEnabled,
+    /// The person asked for their account to be deleted. Nothing is removed
+    /// during a 7-day hold (they can cancel, and their computers keep
+    /// reporting); after it, everything about them is purged. Raised on
+    /// that person and told to them and their allies. Tamper-class.
+    AccountDeleted,
+    /// One of the member's allies asked for their account to be deleted:
+    /// when the hold ends they stop being an ally. Raised on the member;
+    /// the alert names the ally. Tamper-class.
+    AllyDeleted,
+    /// A requested deletion was cancelled during the hold. Raised and told
+    /// exactly like the deletion notice it follows (on the person, and on
+    /// each member they are an ally for, naming them). Tamper-class.
+    AccountDeletionCancelled,
 }
 
 impl ServerAlertKind {
@@ -308,10 +321,13 @@ impl ServerAlertKind {
             ServerAlertKind::AccountEnabled => "account_enabled",
             ServerAlertKind::AllyDisabled => "ally_disabled",
             ServerAlertKind::AllyEnabled => "ally_enabled",
+            ServerAlertKind::AccountDeleted => "account_deleted",
+            ServerAlertKind::AllyDeleted => "ally_deleted",
+            ServerAlertKind::AccountDeletionCancelled => "account_deletion_cancelled",
         }
     }
 
-    pub const ALL: [ServerAlertKind; 13] = [
+    pub const ALL: [ServerAlertKind; 16] = [
         ServerAlertKind::MissedCheckin,
         ServerAlertKind::ChainGap,
         ServerAlertKind::InvalidSignature,
@@ -325,6 +341,9 @@ impl ServerAlertKind {
         ServerAlertKind::AccountEnabled,
         ServerAlertKind::AllyDisabled,
         ServerAlertKind::AllyEnabled,
+        ServerAlertKind::AccountDeleted,
+        ServerAlertKind::AllyDeleted,
+        ServerAlertKind::AccountDeletionCancelled,
     ];
 
     /// Inverse of [`Self::as_str`].
@@ -341,12 +360,15 @@ impl ServerAlertKind {
             | ServerAlertKind::DeviceRemoved
             | ServerAlertKind::UploadStalled
             | ServerAlertKind::AccountDisabled
-            | ServerAlertKind::AllyDisabled => Urgency::Urgent,
+            | ServerAlertKind::AllyDisabled
+            | ServerAlertKind::AccountDeleted => Urgency::Urgent,
             ServerAlertKind::AllyRemoved
             | ServerAlertKind::AllyAdded
             | ServerAlertKind::MemberSettingsChanged
             | ServerAlertKind::AccountEnabled
-            | ServerAlertKind::AllyEnabled => Urgency::Normal,
+            | ServerAlertKind::AllyEnabled
+            | ServerAlertKind::AllyDeleted
+            | ServerAlertKind::AccountDeletionCancelled => Urgency::Normal,
         }
     }
 }

@@ -220,6 +220,7 @@ pub async fn verify_link(
                     },
                     disabled: false,
                     created_at_ms: now,
+                    deletion: None,
                 };
                 users::insert(&mut *tx, &u).await?;
                 (u, true)
