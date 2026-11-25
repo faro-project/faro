@@ -261,6 +261,11 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppRes
 pub struct MeResponse {
     pub user: users::User,
     pub has_member_keys: bool,
+    /// When this session signed in: deleting the account needs a sign-in
+    /// within the last [`super::account::REAUTH_WINDOW_MS`].
+    pub session_started_at_ms: i64,
+    /// The pending deletion of this account, if the person asked for one.
+    pub deletion: Option<users::PendingDeletion>,
 }
 
 /// `PATCH /v1/me` body: the fields a person may change about themself.
@@ -294,8 +299,10 @@ pub async fn update_me(
         .await?
         .is_some();
     Ok(Json(MeResponse {
+        deletion: user.deletion,
         user,
         has_member_keys,
+        session_started_at_ms: s.session_started_at_ms,
     }))
 }
 
@@ -308,7 +315,9 @@ pub async fn me(
         .await?
         .is_some();
     Ok(Json(MeResponse {
+        deletion: s.user.deletion,
         user: s.user,
         has_member_keys,
+        session_started_at_ms: s.session_started_at_ms,
     }))
 }

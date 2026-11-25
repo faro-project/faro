@@ -1,5 +1,6 @@
 //! HTTP handlers, one module per area of §4.5.
 
+pub mod account;
 pub mod admin;
 pub mod allies;
 pub mod auth;

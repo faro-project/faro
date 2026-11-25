@@ -359,7 +359,7 @@ async fn security_headers_and_uniform_errors() {
         assert!(r.headers.get("strict-transport-security").is_none());
     }
 
-    let r = t.call(Method::DELETE, "/v1/me", None, None).await;
+    let r = t.call(Method::PUT, "/v1/me", None, None).await;
     assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(r.error_code(), "method_not_allowed");
 }

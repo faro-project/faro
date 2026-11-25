@@ -58,7 +58,9 @@ pub fn default_mode(u: Urgency) -> Mode {
 ///   `device_removed` (retiring a monitored device stops its monitoring
 ///   just as directly), and `account_disabled` / `ally_disabled` (an admin
 ///   disabling an account is always told to that person and every
-///   accountability partner).
+///   accountability partner), and `account_deleted` / `ally_deleted` /
+///   `account_deletion_cancelled` (deleting an account, or cancelling the
+///   deletion, is told to the same people).
 ///
 /// `source` is the alert row's source column (`device` / `server`).
 pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
@@ -75,7 +77,10 @@ pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
                 | ServerAlertKind::DeviceRemoved
                 | ServerAlertKind::UploadStalled
                 | ServerAlertKind::AccountDisabled
-                | ServerAlertKind::AllyDisabled,
+                | ServerAlertKind::AllyDisabled
+                | ServerAlertKind::AccountDeleted
+                | ServerAlertKind::AllyDeleted
+                | ServerAlertKind::AccountDeletionCancelled,
             ) => true,
             _ => false,
         },
@@ -256,6 +261,23 @@ mod tests {
             Urgency::Normal
         ));
         assert!(!is_tamper_class("server", "ally_enabled", Urgency::Normal));
+        // Deleting an account is never silent, and neither is cancelling it.
+        assert!(is_tamper_class(
+            "server",
+            "account_deleted",
+            Urgency::Urgent
+        ));
+        assert!(is_tamper_class("server", "ally_deleted", Urgency::Normal));
+        assert!(is_tamper_class(
+            "server",
+            "account_deletion_cancelled",
+            Urgency::Normal
+        ));
+        assert!(!is_tamper_class(
+            "device",
+            "account_deleted",
+            Urgency::Urgent
+        ));
         // A device cannot smuggle a server kind (or vice versa).
         assert!(!is_tamper_class("device", "chain_gap", Urgency::Urgent));
         assert!(!is_tamper_class("server", "tamper", Urgency::Urgent));

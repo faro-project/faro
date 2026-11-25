@@ -231,7 +231,10 @@ pub async fn delete_rows(
     // like the others.
     insert_device_tombstones(&mut *conn, user, now_ms).await?;
     for &sql in PURGE_BY_ID {
-        sqlx::query(sql).bind(user.as_str()).execute(&mut *conn).await?;
+        sqlx::query(sql)
+            .bind(user.as_str())
+            .execute(&mut *conn)
+            .await?;
     }
     for &sql in PURGE_BY_EMAIL {
         sqlx::query(sql).bind(email).execute(&mut *conn).await?;
