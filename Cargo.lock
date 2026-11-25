@@ -1136,6 +1136,7 @@ dependencies = [
  "objc2-service-management",
  "objc2-system-configuration",
  "plist",
+ "tempfile",
  "thiserror",
  "zeroize",
 ]
@@ -1207,6 +1208,7 @@ dependencies = [
  "faro-platform-macos",
  "faro-proto",
  "faro-server",
+ "faro-update",
  "hex",
  "hostname",
  "httpdate",
@@ -1222,6 +1224,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",

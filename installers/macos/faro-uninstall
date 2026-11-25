@@ -102,6 +102,11 @@ else
 fi
 
 # ---- 3. remove --------------------------------------------------------------
+# An update install job left from an earlier update (its plist is in the
+# state directory, removed below).
+if launchctl print "system/org.faro.update" >/dev/null 2>&1; then
+    launchctl bootout "system/org.faro.update" 2>/dev/null || true
+fi
 for uid in $(gui_uids); do
     if launchctl print "gui/$uid/$AGENT_LABEL" >/dev/null 2>&1; then
         launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
