@@ -98,63 +98,8 @@ mod tests {
     use crate::classifier::{ChannelOrder, InputSize, OutputActivation};
     use faro_platform::PixelFormat;
 
-    // Minimal protobuf writer, enough to hand-encode a weightless ONNX graph
-    // so the runtime path is tested without shipping any model file.
-    fn varint(mut v: u64, out: &mut Vec<u8>) {
-        while v >= 0x80 {
-            out.push((v as u8) | 0x80);
-            v >>= 7;
-        }
-        out.push(v as u8);
-    }
-    fn int(field: u64, v: u64, out: &mut Vec<u8>) {
-        varint(field << 3, out);
-        varint(v, out);
-    }
-    fn bytes(field: u64, b: &[u8], out: &mut Vec<u8>) {
-        varint((field << 3) | 2, out);
-        varint(b.len() as u64, out);
-        out.extend_from_slice(b);
-    }
-
-    fn tensor_value_info(name: &str, dims: &[u64]) -> Vec<u8> {
-        let mut shape = Vec::new();
-        for &d in dims {
-            let mut dim = Vec::new();
-            int(1, d, &mut dim); // Dimension.dim_value
-            bytes(1, &dim, &mut shape); // TensorShapeProto.dim
-        }
-        let mut tensor = Vec::new();
-        int(1, 1, &mut tensor); // elem_type = FLOAT
-        bytes(2, &shape, &mut tensor);
-        let mut ty = Vec::new();
-        bytes(1, &tensor, &mut ty); // TypeProto.tensor_type
-        let mut vi = Vec::new();
-        bytes(1, name.as_bytes(), &mut vi);
-        bytes(2, &ty, &mut vi);
-        vi
-    }
-
-    /// `y = GlobalAveragePool(x)`: x `[1,3,8,8]` → y `[1,3,1,1]`, i.e. the
-    /// mean of each normalised input channel.
     fn mean_pool_model() -> Vec<u8> {
-        let mut node = Vec::new();
-        bytes(1, b"x", &mut node);
-        bytes(2, b"y", &mut node);
-        bytes(4, b"GlobalAveragePool", &mut node);
-        let mut graph = Vec::new();
-        bytes(1, &node, &mut graph);
-        bytes(2, b"mean_pool", &mut graph);
-        bytes(11, &tensor_value_info("x", &[1, 3, 8, 8]), &mut graph);
-        bytes(12, &tensor_value_info("y", &[1, 3, 1, 1]), &mut graph);
-        let mut opset = Vec::new();
-        bytes(1, b"", &mut opset);
-        int(2, 13, &mut opset);
-        let mut model = Vec::new();
-        int(1, 8, &mut model); // ir_version
-        bytes(8, &opset, &mut model);
-        bytes(7, &graph, &mut model);
-        model
+        crate::classifier::test_onnx::mean_pool_model(8)
     }
 
     fn info(bytes: &[u8], order: ChannelOrder) -> ModelInfo {

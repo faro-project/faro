@@ -22,8 +22,8 @@ use faro_crypto::{
 };
 use faro_proto::encoding::{b64_decode, b64_encode};
 use faro_proto::keys::{
-    key_id, safety_code, AllyEndorsement, DeviceEndorsement, KeyRewrap, ManifestAlly, ManifestRef,
-    MemberEncKeyBinding, RecipientManifest, Signed,
+    key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
+    ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
 };
 use faro_proto::{event, DeviceId, EncryptedItem, InstanceId, Signature, UserId};
 use serde_json::{json, Value};
@@ -126,6 +126,19 @@ fn key_rewrap() -> KeyRewrap {
     }
 }
 
+fn ally_key_rewrap() -> AllyKeyRewrap {
+    AllyKeyRewrap {
+        instance_id: InstanceId::new(INSTANCE),
+        ally_id: UserId::new(ALLY_A),
+        enc_pubkey: ally_a().public(),
+        issued_at_ms: 1_790_000_400_000,
+        wrapped_privkey: r#"{"v":1,"note":"pässwörd ✓","recovery":{}}"#.into(),
+    }
+}
+
+/// The challenge the ally key re-wrap vector is proven with.
+const REWRAP_CHALLENGE: [u8; 32] = [0x55; 32];
+
 const EVENT_PLAINTEXT: &str = r#"{"type":"flag","rating":"high","reasons":[{"source":"image","label":"explicit","score":0.93}],"app":{"id":"com.apple.Safari","name":"Safari"},"burst":false,"account":"sam"}"#;
 const REPORT_PLAINTEXT: &str = r#"{"v":1,"device_id":"dev_laptop01","device_name":"Sam's MacBook","period_start_ms":1790000000000,"period_end_ms":1790086400000,"first_seq":10,"last_seq":42,"timeline":[{"start_ms":1790000000000,"end_ms":1790003600000,"state":"active"}],"counts":{"clean":30,"low":1,"medium":1,"high":0},"flagged":[],"health":{"tamper":[],"context":[],"agent_restarts":0,"capture_failures":0,"unmonitored_secs":0}}"#;
 
@@ -141,6 +154,7 @@ fn generate() -> Value {
     let ae = ally_endorsement();
     let mb = member_binding();
     let kr = key_rewrap();
+    let akr = ally_key_rewrap();
     let recips = |pairs: &[(&str, &EncryptionKeypair)]| -> Vec<Recipient> {
         pairs
             .iter()
@@ -248,6 +262,11 @@ fn generate() -> Value {
             "signed": signed_json(kr.clone(), ms.sign(&kr)),
             "signing_bytes_hex": hex::encode(kr.signing_bytes()),
         },
+        "ally_key_rewrap": {
+            "challenge_hex": hex::encode(REWRAP_CHALLENGE),
+            "proven": ProvenAllyKeyRewrap { proof: akr.proof(&REWRAP_CHALLENGE), body: akr.clone() },
+            "proof_bytes_hex": hex::encode(akr.proof_bytes()),
+        },
     })
 }
 
@@ -307,6 +326,7 @@ fn web_vectors() {
         "/ally_endorsement",
         "/member_binding",
         "/key_rewrap",
+        "/ally_key_rewrap",
     ] {
         assert_eq!(v.pointer(ptr), fresh.pointer(ptr), "{ptr} is stale");
     }
@@ -369,4 +389,8 @@ fn web_vectors() {
     verify_signed(&pk, &mb).unwrap();
     let kr: Signed<KeyRewrap> = serde_json::from_value(web["key_rewrap"].clone()).unwrap();
     verify_signed(&pk, &kr).unwrap();
+    let akr: ProvenAllyKeyRewrap =
+        serde_json::from_value(web["ally_key_rewrap"]["proven"].clone()).unwrap();
+    let challenge: [u8; 32] = h(web, "/ally_key_rewrap/challenge_hex").try_into().unwrap();
+    assert_eq!(akr.proof, akr.body.proof(&challenge));
 }

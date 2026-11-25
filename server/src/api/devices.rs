@@ -60,6 +60,7 @@ pub async fn create_enroll_code(
     s: SessionUser,
 ) -> AppResult<(StatusCode, Json<EnrollCodeResponse>)> {
     s.require_member()?;
+    s.require_not_being_deleted()?;
     let pool = state.db().pool();
     if member_keys::sign_pubkey(pool, &s.user.id).await?.is_none() {
         // Without a member key nothing could endorse the device.
@@ -154,6 +155,15 @@ pub async fn enroll(
     let member = enroll_codes::consume(&mut tx, &code_hash, now)
         .await?
         .ok_or(AppError::AuthFailed("invalid_enroll_code"))?;
+    // A code made before its member asked for their account to be deleted
+    // can't add a computer the purge would then have to stop (the code
+    // stays unused: this transaction is rolled back).
+    if crate::db::repo::users::is_being_deleted(&mut *tx, &member).await? {
+        return Err(AppError::conflict(
+            "account_deleting",
+            "the member's account is being deleted",
+        ));
+    }
     let member_sign_pubkey = member_keys::sign_pubkey(&mut *tx, &member)
         .await?
         .ok_or_else(|| AppError::conflict("member_keys_required", "the member has no keys"))?;
@@ -311,12 +321,14 @@ pub async fn endorse(
     ApiJson(req): ApiJson<Signed<DeviceEndorsement>>,
 ) -> AppResult<Json<EndorseResponse>> {
     s.require_member()?;
+    s.require_not_being_deleted()?;
     let id = DeviceId::new(id);
     if !id.is_well_formed() {
         return Err(AppError::NotFound);
     }
     let now = state.now_ms();
     let mut tx = state.db().begin_write().await?;
+    super::account::refuse_if_being_deleted(&mut *tx, &s.user.id).await?;
     // Someone else's device is indistinguishable from a missing one.
     let device = devices::by_id(&mut *tx, &id)
         .await?

@@ -32,7 +32,10 @@
 //! server about an account, nothing a device recorded, and the people
 //! affected must understand it from the email alone (the disabled person
 //! cannot sign in to read the feed). The disabled person is the one
-//! recipient told although their account is disabled.
+//! recipient told although their account is disabled. Deletion notices
+//! (`account_deleted` on the person, `ally_deleted` on each member they are
+//! an ally for, and `account_deletion_cancelled` on both) are worded the
+//! same way, with the dates taken from the alert's detail (§12).
 //!
 //! **Delivery.** A failure about one recipient (an unknown mailbox, a full
 //! one) is charged to that notification: retried with exponential backoff
@@ -185,8 +188,152 @@ fn account_status(n: &DueNotification) -> Option<ServerAlertKind> {
                 | ServerAlertKind::AccountEnabled
                 | ServerAlertKind::AllyDisabled
                 | ServerAlertKind::AllyEnabled
+                | ServerAlertKind::AccountDeleted
+                | ServerAlertKind::AllyDeleted
+                | ServerAlertKind::AccountDeletionCancelled
         )
     })
+}
+
+/// A millisecond value from an alert's `key=value;…` detail code.
+fn detail_ms(n: &DueNotification, key: &str) -> Option<i64> {
+    n.alert_detail
+        .as_deref()?
+        .split(';')
+        .find_map(|part| part.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| v.parse().ok())
+}
+
+fn utc(ms: i64) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).ok()
+}
+
+/// `2 December 2026` (UTC).
+pub fn utc_date(ms: i64) -> String {
+    utc(ms).map_or_else(
+        || "an unknown date".to_owned(),
+        |t| format!("{} {} {}", t.day(), t.month(), t.year()),
+    )
+}
+
+/// `25 November 2026 at 14:03 UTC`.
+pub fn utc_time(ms: i64) -> String {
+    utc(ms).map_or_else(
+        || "an unknown time".to_owned(),
+        |t| {
+            format!(
+                "{} {} {} at {:02}:{:02} UTC",
+                t.day(),
+                t.month(),
+                t.year(),
+                t.hour(),
+                t.minute()
+            )
+        },
+    )
+}
+
+/// Subject and text of a deletion notice: `account_deleted`,
+/// `ally_deleted` or `account_deletion_cancelled` (§12). The dates come
+/// from the alert itself, so a notice still says what was decided when it
+/// was raised, whatever happened since.
+fn deletion_text(instance: &str, n: &DueNotification, k: ServerAlertKind) -> (String, String) {
+    let member = &n.member_name;
+    let to_member = n.recipient_id == n.member_id;
+    let ally = n.about_name.as_deref().unwrap_or("an ally");
+    let date = detail_ms(n, "purge_after").map_or_else(|| "in 7 days".to_owned(), utc_date);
+    let requested = detail_ms(n, "requested").map_or_else(|| "earlier".to_owned(), utc_time);
+    let cancelled = n
+        .alert_created_at_ms
+        .map_or_else(|| "later".to_owned(), utc_time);
+    let about_ally = n.about_name.is_some();
+    match (k, about_ally, to_member) {
+        (ServerAlertKind::AccountDeleted, _, true) => (
+            format!("Your Faro account on {instance} will be deleted on {date}"),
+            format!(
+                "You asked for your Faro account on {instance} to be deleted. On {date}, \
+                 everything this server stores about you is permanently deleted: your \
+                 computers, activity, alerts, reports, keys, allies and settings. Until then \
+                 nothing changes: your computers are still monitored and your allies still \
+                 receive alerts. Everyone in an accountability partnership with you has been \
+                 told. You can cancel until then: sign in and choose Cancel deletion. After \
+                 {date}, {instance} no longer accepts anything from your computers, so \
+                 uninstall Faro from them. Copies in the operator's backups last until those \
+                 backups are rotated out. If you didn't ask for this, sign in, cancel the \
+                 deletion and contact the people who run {instance}."
+            ),
+        ),
+        (ServerAlertKind::AccountDeleted, _, false) => (
+            format!("{member} is deleting their Faro account on {instance}"),
+            format!(
+                "{member} asked for their Faro account on {instance} to be deleted. Until \
+                 {date} nothing changes: their computers are still monitored, you still \
+                 receive alerts about them, and {member} can still cancel. On {date}, \
+                 everything about {member} is permanently deleted from this server, and their \
+                 computers are no longer monitored through {instance}, even if Faro is still \
+                 installed on them."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, true) => (
+            format!("Your ally {ally} is deleting their Faro account"),
+            format!(
+                "{ally}, one of your allies on {instance}, asked for their Faro account to be \
+                 deleted. Until {date} they are still your ally, and they can still cancel. On \
+                 {date} they stop being your ally and can no longer see anything about you. \
+                 Then open Faro and confirm your updated ally list: until you do, your \
+                 computers keep encrypting new items to a key that no longer exists."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, false) => (
+            format!("{ally}, also an ally for {member}, is deleting their Faro account"),
+            format!(
+                "{ally}, who is also an ally for {member} on {instance}, asked for their Faro \
+                 account to be deleted. On {date} they stop being an ally for {member}. You \
+                 still receive {member}'s alerts."
+            ),
+        ),
+        (_, false, true) => (
+            format!("You cancelled the deletion of your Faro account on {instance}"),
+            format!(
+                "You asked for your Faro account on {instance} to be deleted on {requested} \
+                 and cancelled it on {cancelled}. Nothing will be deleted. Everyone in an \
+                 accountability partnership with you has been told. If you didn't do this, \
+                 contact the people who run {instance}."
+            ),
+        ),
+        (_, false, false) => (
+            format!("{member} cancelled the deletion of their Faro account"),
+            format!(
+                "{member} asked for their Faro account on {instance} to be deleted on \
+                 {requested} and cancelled it on {cancelled}. Nothing will be deleted, and you \
+                 still receive alerts about them."
+            ),
+        ),
+        (_, true, true) => (
+            format!("Your ally {ally} cancelled the deletion of their Faro account"),
+            format!(
+                "{ally}, one of your allies, asked for their Faro account on {instance} to be \
+                 deleted on {requested} and cancelled it on {cancelled}. They stay your ally."
+            ),
+        ),
+        (_, true, false) => (
+            format!("{ally}, also an ally for {member}, cancelled the deletion of their account"),
+            format!(
+                "{ally}, who is also an ally for {member}, asked for their Faro account on \
+                 {instance} to be deleted on {requested} and cancelled it on {cancelled}. They \
+                 stay an ally for {member}."
+            ),
+        ),
+    }
+}
+
+fn is_deletion_notice(k: ServerAlertKind) -> bool {
+    matches!(
+        k,
+        ServerAlertKind::AccountDeleted
+            | ServerAlertKind::AllyDeleted
+            | ServerAlertKind::AccountDeletionCancelled
+    )
 }
 
 /// Subject and text of an account-status notification (see the module docs).
@@ -195,6 +342,9 @@ fn account_status_text(
     n: &DueNotification,
     k: ServerAlertKind,
 ) -> (String, String) {
+    if is_deletion_notice(k) {
+        return deletion_text(instance, n, k);
+    }
     let member = &n.member_name;
     let to_member = n.recipient_id == n.member_id;
     let ally = n.about_name.as_deref().unwrap_or("an ally");
@@ -524,8 +674,14 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
         let c = per.entry(n.member_id.as_str()).or_default();
         c.name.clone_from(&n.member_name);
         if let Some(k) = account_status(n) {
-            let (subject, _) = account_status_text(&cfg.instance.name, n, k);
-            c.status.push(subject);
+            let (subject, line) = account_status_text(&cfg.instance.name, n, k);
+            // A deletion notice's dates and what to do are the point of
+            // it, so the digest carries its whole text.
+            c.status.push(if is_deletion_notice(k) {
+                format!("{subject}. {line}")
+            } else {
+                format!("{subject}.")
+            });
         } else if n.to_extra_recipient {
             c.removed = true;
         } else if n.alert.is_none() {
@@ -549,7 +705,7 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
             lines.push(format!("- You are no longer an ally for {}.", c.name));
         }
         for s in &c.status {
-            lines.push(format!("- {s}."));
+            lines.push(format!("- {s}"));
         }
         let mut parts = Vec::new();
         if c.urgent > 0 {
@@ -606,4 +762,113 @@ pub fn send_notice(state: &AppState, to_user: &UserId, subject: String, line: St
             tracing::warn!(code = e.code(), "could not send notice");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-11-25T14:03:00Z and seven days later.
+    const REQUESTED: i64 = 1_795_615_380_000;
+    const PURGE: i64 = REQUESTED + 7 * 24 * 3600 * 1000;
+
+    fn due(
+        kind: ServerAlertKind,
+        to_member: bool,
+        about: Option<&str>,
+        detail: &str,
+    ) -> DueNotification {
+        DueNotification {
+            id: "n".into(),
+            recipient_id: UserId::new(if to_member { "usr_m" } else { "usr_r" }),
+            recipient_email: "r@example.org".into(),
+            recipient_disabled: false,
+            entitled: true,
+            member_id: UserId::new("usr_m"),
+            member_name: "Sam".into(),
+            device_id: None,
+            device_name: None,
+            urgency: kind.urgency(),
+            attempts: 0,
+            created_at_ms: REQUESTED,
+            alert: Some(("server".into(), kind.as_str().into())),
+            to_extra_recipient: false,
+            about_name: about.map(str::to_owned),
+            alert_detail: Some(detail.to_owned()),
+            alert_created_at_ms: Some(REQUESTED + 3600 * 1000),
+        }
+    }
+
+    fn text(n: &DueNotification) -> (String, String) {
+        let k = account_status(n).expect("an account-status kind");
+        account_status_text("Faro Test", n, k)
+    }
+
+    #[test]
+    fn dates_are_utc_words() {
+        assert_eq!(utc_date(REQUESTED), "25 November 2026");
+        assert_eq!(utc_time(REQUESTED), "25 November 2026 at 14:03 UTC");
+        assert_eq!(utc_date(PURGE), "2 December 2026");
+    }
+
+    #[test]
+    fn deletion_notices_name_the_date_and_who() {
+        let d = format!("purge_after={PURGE}");
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, true, None, &d));
+        assert_eq!(
+            s,
+            "Your Faro account on Faro Test will be deleted on 2 December 2026"
+        );
+        assert!(t.contains("Cancel deletion"), "{t}");
+        assert!(t.contains("still monitored"), "{t}");
+        assert!(t.contains("backups"), "{t}");
+
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, false, None, &d));
+        assert_eq!(s, "Sam is deleting their Faro account on Faro Test");
+        assert!(t.contains("Until 2 December 2026 nothing changes"), "{t}");
+
+        let d = format!("ally=usr_a;purge_after={PURGE}");
+        let (s, t) = text(&due(ServerAlertKind::AllyDeleted, true, Some("Pat"), &d));
+        assert_eq!(s, "Your ally Pat is deleting their Faro account");
+        assert!(t.contains("confirm your updated ally list"), "{t}");
+        let (s, t) = text(&due(ServerAlertKind::AllyDeleted, false, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "Pat, also an ally for Sam, is deleting their Faro account"
+        );
+        assert!(t.contains("You still receive Sam's alerts"), "{t}");
+    }
+
+    #[test]
+    fn cancellation_notices_give_both_times() {
+        let k = ServerAlertKind::AccountDeletionCancelled;
+        let d = format!("requested={REQUESTED}");
+        let (s, t) = text(&due(k, true, None, &d));
+        assert_eq!(
+            s,
+            "You cancelled the deletion of your Faro account on Faro Test"
+        );
+        assert!(
+            t.contains("deleted on 25 November 2026 at 14:03 UTC"),
+            "{t}"
+        );
+        assert!(
+            t.contains("cancelled it on 25 November 2026 at 15:03 UTC"),
+            "{t}"
+        );
+        let (s, _) = text(&due(k, false, None, &d));
+        assert_eq!(s, "Sam cancelled the deletion of their Faro account");
+        let d = format!("ally=usr_a;requested={REQUESTED}");
+        let (s, t) = text(&due(k, true, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "Your ally Pat cancelled the deletion of their Faro account"
+        );
+        assert!(t.contains("They stay your ally"), "{t}");
+        let (s, _) = text(&due(k, false, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "Pat, also an ally for Sam, cancelled the deletion of their account"
+        );
+    }
 }

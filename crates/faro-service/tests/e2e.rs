@@ -25,6 +25,7 @@ use faro_platform::synthetic::Scene;
 use faro_platform::PermissionState;
 use faro_proto::body::{EventBody, GoodbyeReason, Rating, TamperSignal};
 use faro_proto::{EventHeader, EventKind, Urgency};
+use faro_service::client::Retired;
 use faro_service::{GoodbyeError, GoodbyeOutcome, Phase};
 use std::time::Duration;
 
@@ -834,4 +835,74 @@ async fn the_service_installs_an_update_from_its_instance() {
         vec![(pkg.to_owned(), b"new faro".to_vec())]
     );
     dev.shutdown().await;
+}
+
+/// 12. A computer the instance already retired has nothing left to tell:
+///     its member removed it (allies got `device_removed`), or the account
+///     it reported to was deleted (allies got `account_deleted`). `goodbye`
+///     writes nothing and reports that allies know, so the uninstaller goes
+///     ahead instead of backing out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goodbye_from_a_retired_device_writes_nothing_and_lets_the_uninstall_go_on() {
+    let w = World::new().await;
+    let mut removed = w.active_device(quiet_classifier()).await;
+    let mut deleted = w.active_device(quiet_classifier()).await;
+    removed.shutdown().await;
+    deleted.shutdown().await;
+    let head = |dev: &Device| {
+        faro_core::Outbox::open(
+            dev.dir.path(),
+            &dev.enrollment.instance_id,
+            &dev.enrollment.device_id,
+        )
+        .expect("outbox")
+        .head()
+        .expect("head")
+        .next_seq
+    };
+
+    // The member removes one computer in the web app.
+    let r =
+        w.t.call(
+            axum::http::Method::DELETE,
+            &format!("/v1/me/devices/{}", removed.enrollment.device_id),
+            None,
+            Some(&w.member_session),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
+    let next = head(&removed);
+    assert_eq!(
+        removed.goodbye(Duration::ZERO).await.expect("goodbye"),
+        GoodbyeOutcome::AlreadyRetired(Retired::DeviceRemoved)
+    );
+    assert_eq!(head(&removed), next, "nothing was written");
+
+    // The member deletes their account; once it is purged, the other
+    // computer is refused too.
+    let r =
+        w.t.call(
+            axum::http::Method::DELETE,
+            "/v1/me",
+            Some(serde_json::json!({ "confirm_email": MEMBER_EMAIL })),
+            Some(&w.member_session),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    // Skip the hold (the server tests cover it and the notice gate).
+    sqlx::query("UPDATE users SET deletion_purge_after = $1 WHERE id = $2")
+        .bind(w.t.clock_ms())
+        .bind(w.member.as_str())
+        .execute(w.state().db().pool())
+        .await
+        .expect("end the hold");
+    assert!(faro_server::deletion::purge(w.state(), &w.member)
+        .await
+        .expect("purge"));
+    let next = head(&deleted);
+    assert_eq!(
+        deleted.goodbye(Duration::ZERO).await.expect("goodbye"),
+        GoodbyeOutcome::AlreadyRetired(Retired::AccountDeleted)
+    );
+    assert_eq!(head(&deleted), next, "nothing was written");
 }

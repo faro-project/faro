@@ -47,7 +47,7 @@ use super::{ApiJson, OptionalApiJson};
 use crate::auth::session::SessionUser;
 use crate::db::repo::alerts::{self, AlertSource, NewAlert};
 use crate::db::repo::allies::{self, LinkState, LinkView};
-use crate::db::repo::{member_keys, notifications};
+use crate::db::repo::{member_keys, notifications, users};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -72,6 +72,9 @@ pub struct AllyLink {
     pub ally_key_id: Option<String>,
     /// … and the member's signing key.
     pub member_sign_pubkey: Option<SignPublicKey>,
+    /// When the ally's account will be deleted, if they asked for that
+    /// (§12): they stop being an ally then.
+    pub deletion_purge_after_ms: Option<i64>,
 }
 
 /// `GET /v1/me/allies` response.
@@ -96,6 +99,7 @@ impl From<LinkView> for AllyLink {
             activated_at_ms: v.activated_at_ms,
             ally_enc_pubkey: v.ally_enc_pubkey,
             member_sign_pubkey: v.member_sign_pubkey,
+            deletion_purge_after_ms: v.other_deletion_purge_after_ms,
         }
     }
 }
@@ -156,10 +160,20 @@ pub async fn approve(
     ApiJson(req): ApiJson<ApproveAlly>,
 ) -> AppResult<Json<LinkStatus>> {
     s.require_member()?;
+    s.require_not_being_deleted()?;
     let ally = parse_user(ally)?;
     let member = &s.user.id;
     let now = state.now_ms();
     let mut tx = state.db().begin_write().await?;
+    super::account::refuse_if_being_deleted(&mut *tx, member).await?;
+    // The ally's deletion notice went to the members they already
+    // supported: a new one would not have been told.
+    if users::is_being_deleted(&mut *tx, &ally).await? {
+        return Err(AppError::conflict(
+            "ally_deleting",
+            "this person's account is being deleted",
+        ));
+    }
     match allies::live_state(&mut *tx, member, &ally).await? {
         Some(LinkState::Pending) => {}
         Some(LinkState::Active) => {
@@ -257,21 +271,34 @@ pub async fn approve(
     }))
 }
 
-/// Inside `tx`: end the live link and, if it was active, raise the
-/// `ally_removed` alert. `by_member`: the member removed the ally (the ally
-/// is the extra recipient, because they are no longer an ally but must be
-/// told); otherwise the ally left (the member is told anyway).
-async fn end_link(
+/// Why a link ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndReason {
+    /// The member removed the ally.
+    RemovedByMember,
+    /// The ally left.
+    Left,
+    /// The purge of one side's account (§12). Nobody is alerted again: the
+    /// deletion notices told everyone, with the date, when it was asked.
+    AccountDeleted,
+}
+
+/// Inside `tx`: end the live link and, if it was active and the reason
+/// calls for it, raise the `ally_removed` alert. Removed by the member: the
+/// ally is the extra recipient, because they are no longer an ally but must
+/// be told. Left: the member is told anyway.
+pub(crate) async fn end_link(
     tx: &mut sqlx::AnyConnection,
     member: &UserId,
     ally: &UserId,
-    by_member: bool,
+    reason: EndReason,
     now: i64,
 ) -> AppResult<LinkState> {
     let prev = allies::remove(&mut *tx, member, ally, now)
         .await?
         .ok_or(AppError::NotFound)?;
-    if prev == LinkState::Active {
+    let by_member = reason == EndReason::RemovedByMember;
+    if prev == LinkState::Active && reason != EndReason::AccountDeleted {
         let kind = ServerAlertKind::AllyRemoved;
         let verb = if by_member { "removed" } else { "left" };
         alerts::insert_with_extra_recipient(
@@ -335,7 +362,7 @@ pub async fn remove(
         }
         (Some(LinkState::Removed) | None, _) => return Err(AppError::NotFound),
     };
-    end_link(&mut tx, member, &ally, true, now).await?;
+    end_link(&mut tx, member, &ally, EndReason::RemovedByMember, now).await?;
     tx.commit().await?;
     tracing::info!(member = %member, ally = %ally, ?version, "ally removed by member");
     Ok(StatusCode::NO_CONTENT)
@@ -352,6 +379,9 @@ pub struct SupportedMember {
     /// Safety-code inputs, as on the member side.
     pub member_sign_pubkey: Option<SignPublicKey>,
     pub ally_enc_pubkey: Option<EncPublicKey>,
+    /// When the member's account will be deleted, if they asked for that
+    /// (§12). Their items can be opened until then.
+    pub deletion_purge_after_ms: Option<i64>,
 }
 
 /// `GET /v1/ally/members`
@@ -370,6 +400,7 @@ pub async fn list_my_members(
                 activated_at_ms: v.activated_at_ms,
                 member_sign_pubkey: v.member_sign_pubkey,
                 ally_enc_pubkey: v.ally_enc_pubkey,
+                deletion_purge_after_ms: v.other_deletion_purge_after_ms,
             })
             .collect(),
     ))
@@ -389,7 +420,7 @@ pub async fn leave(
     let ally = &s.user.id;
     let now = state.now_ms();
     let mut tx = state.db().begin_write().await?;
-    let prev = end_link(&mut tx, &member, ally, false, now).await?;
+    let prev = end_link(&mut tx, &member, ally, EndReason::Left, now).await?;
     tx.commit().await?;
     tracing::info!(member = %member, ally = %ally, "ally left");
     if prev == LinkState::Active {

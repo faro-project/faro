@@ -31,7 +31,25 @@ hex.workspace = true
 # Pinned exactly: the 2.0 release candidates change API between rcs.
 ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["std", "download-binaries", "copy-dylibs"] }
 
+[[example]]
+# The model benchmark and regression gate (docs/DEVELOPMENT.md "Model benchmark").
+name = "model-bench"
+path = "examples/model-bench.rs"
+required-features = ["onnx"]
+
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
 base64.workspace = true
+# For the domains-compile example only.
+anyhow.workspace = true
+clap.workspace = true
+toml.workspace = true
+
+# Builds the domain category bundle from domains/sources.toml (see
+# docs/DEVELOPMENT.md). A project tool, never part of a shipped client.
+# `test = true` runs its tests with `cargo test -p faro-detect`.
+[[example]]
+name = "domains-compile"
+path = "examples/domains-compile/main.rs"
+test = true

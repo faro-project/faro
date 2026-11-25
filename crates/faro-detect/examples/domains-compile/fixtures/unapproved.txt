@@ -1,0 +1,2 @@
+# Hand-written fixture for the domains-compile tests. Not a real blocklist.
+unapproved-fixture.test

@@ -92,6 +92,8 @@ pub struct SessionUser {
     pub user: User,
     /// Keyed hash of the session id (for logout).
     pub session_hash: String,
+    /// When this session was created, i.e. when the person signed in.
+    pub session_started_at_ms: i64,
 }
 
 impl SessionUser {
@@ -105,6 +107,18 @@ impl SessionUser {
         }
     }
 
+    /// Refuse actions that would start something the pending deletion of
+    /// this account would then have to undo (§12): inviting, enrolling or
+    /// approving. Everything else keeps working during the hold, so a
+    /// cancelled deletion leaves no gap.
+    pub fn require_not_being_deleted(&self) -> Result<(), AppError> {
+        if self.user.deletion.is_some() {
+            Err(account_being_deleted())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Instance admins configure the instance and see aggregate metadata.
     /// The role grants nothing over any member's keys, devices, allies or
     /// content (§4.3, §12).
@@ -115,6 +129,14 @@ impl SessionUser {
             Err(AppError::Forbidden("not_an_admin"))
         }
     }
+}
+
+/// `409 account_deleting`: the caller's account is being deleted.
+pub fn account_being_deleted() -> AppError {
+    AppError::conflict(
+        "account_deleting",
+        "your account is being deleted; cancel the deletion first",
+    )
 }
 
 /// Resolve the session (if any) from request headers.
@@ -139,6 +161,7 @@ pub async fn from_headers(
     Ok(Some(SessionUser {
         user: live.user,
         session_hash: hash,
+        session_started_at_ms: live.created_at_ms,
     }))
 }
 

@@ -1,8 +1,8 @@
 <script lang="ts">
 	// How the viewer hears about one member (§5.4): per urgency, immediately,
 	// in the hourly digest, or not at all, with optional quiet hours.
-	// Tamper alerts can't be switched off: with "off" they still arrive in
-	// the digest, and the form says so.
+	// Tamper-class alerts (ARCHITECTURE.md §5.4) can't be switched off: with
+	// "off" they still arrive in the digest, and the form says so.
 	import { onMount } from 'svelte';
 	import { api, describeError } from '../api.ts';
 	import type { DeliveryMode, NotificationPrefs, QuietHours } from '../types.ts';
@@ -98,7 +98,7 @@
 	<form onsubmit={save} novalidate>
 		<fieldset>
 			<legend class="visually-hidden">Email notifications about {about}</legend>
-			{#each [{ id: 'urgent', label: 'Urgent', hint: 'Tamper, missed check-ins, high flags' }, { id: 'normal', label: 'Normal', hint: 'Medium flags, settings and ally changes' }, { id: 'none', label: 'Everything else', hint: 'Low-rated items' }] as row (row.id)}
+			{#each [{ id: 'urgent', label: 'Urgent', hint: 'Tamper, missed check-ins, high flags, medium flags by default' }, { id: 'normal', label: 'Normal', hint: 'Settings and ally changes, medium flags if the member chose normal' }, { id: 'none', label: 'Everything else', hint: 'Low-rated items' }] as row (row.id)}
 				<div class="pref">
 					<label for="pref-{row.id}-{memberId}">
 						{row.label}
@@ -122,8 +122,11 @@
 		</fieldset>
 		{#if urgent === 'off' || normal === 'off'}
 			<p class="notice warn small">
-				Tamper alerts (Faro stopped, removed or blocked) can't be switched off: they still arrive in
-				the hourly digest.
+				Some alerts can't be switched off: Faro being stopped, removed or interfered with, a
+				computer that stops checking in or isn't sending what it records, missing or unverified
+				records, a computer being removed, an ally being removed or leaving, an account being
+				disabled by an admin, and an account being deleted or its deletion cancelled. With Off,
+				they still arrive in the hourly digest.
 			</p>
 		{/if}
 		<label class="check">

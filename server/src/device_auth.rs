@@ -23,9 +23,17 @@
 //! this through [`DeviceBody::ALLOW_PENDING`], so the policy is enforced here
 //! once rather than in every handler.
 //!
+//! **Retired devices** get a refusal they can act on. A device its member
+//! removed gets `403 device_removed` (only after its signature checks out).
+//! A device whose account was deleted gets `403 account_deleted` from the
+//! purge on, by its token alone (`deleted_device_tokens`), because its key
+//! is gone with the account. Both mean allies were already told, so the
+//! uninstaller's `goodbye` can go ahead (PROTOCOL.md §6).
+//!
 //! The signed `path_and_query` is the URL as the device sent it, so a reverse
 //! proxy must forward paths unchanged.
 
+use crate::db::repo::deletion;
 use crate::db::repo::devices::{self, DeviceRow, DeviceStatus};
 use crate::error::AppError;
 use crate::state::AppState;
@@ -116,19 +124,36 @@ pub async fn authenticate(
         return Err(AppError::AuthFailed("clock_skew"));
     }
 
-    let device = devices::by_token_hash(
-        state.db().pool(),
-        &state.hasher().hash(TokenPurpose::Device, token),
-    )
-    .await?
-    .ok_or(AppError::Unauthorized)?;
+    let pool = state.db().pool();
+    let token_hash = state.hasher().hash(TokenPurpose::Device, token);
+    let Some(device) = devices::by_token_hash(pool, &token_hash).await? else {
+        // Purged with its account: nothing is left to check a signature
+        // against, and the token alone reveals no more than "deleted".
+        return Err(
+            if deletion::is_deleted_device_token(pool, &token_hash).await? {
+                AppError::Forbidden("account_deleted")
+            } else {
+                AppError::Unauthorized
+            },
+        );
+    };
     // The token must belong to the device named in the header: device A's
     // token can never be used to act as device B.
-    if device.id != claimed || device.status == DeviceStatus::Removed {
+    if device.id != claimed {
         return Err(AppError::Unauthorized);
+    }
+    if device.status == DeviceStatus::Removed
+        && deletion::is_deleted_device_token(pool, &token_hash).await?
+    {
+        return Err(AppError::Forbidden("account_deleted"));
     }
     let msg = request_signing_bytes(method.as_str(), path_and_query, &device.id, ts, body);
     faro_crypto::verify(&device.sign_pubkey, &msg, &sig).map_err(|_| AppError::Unauthorized)?;
+    if device.status == DeviceStatus::Removed {
+        // Only the device itself (token and key) learns that it was retired,
+        // so `goodbye` can tell its allies already know.
+        return Err(AppError::Forbidden("device_removed"));
+    }
 
     if device.status == DeviceStatus::PendingEndorsement && !allow_pending {
         return Err(AppError::Forbidden("device_pending_endorsement"));

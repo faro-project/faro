@@ -6,7 +6,7 @@
 
 import { api, ApiError } from './api.ts';
 import { keyring } from './keys/keyring.svelte.ts';
-import type { Me, User } from './types.ts';
+import type { DeletionCancelled, Me, PendingDeletion, User } from './types.ts';
 
 class Session {
 	/** The signed-in user, or null. */
@@ -15,6 +15,10 @@ class Session {
 	loaded = $state(false);
 	/** Whether the user has set up member keys (from `/v1/me`). */
 	hasMemberKeys = $state(false);
+	/** The pending deletion of this account, if any (from `/v1/me`). */
+	deletion = $state<PendingDeletion | null>(null);
+	/** When this session signed in (from `/v1/me`; 0 until known). */
+	startedAt = $state(0);
 
 	private pending: Promise<User | null> | null = null;
 	/** Bumped by sign-in and sign-out, so an older answer can't undo them. */
@@ -30,11 +34,14 @@ class Session {
 					if (me.user.id !== this.user?.id) keyring.lock();
 					this.user = me.user;
 					this.hasMemberKeys = me.has_member_keys;
+					this.deletion = me.deletion;
+					this.startedAt = me.session_started_at_ms;
 				}
 			} catch (e) {
 				if (!(e instanceof ApiError && e.status === 401)) throw e;
 				if (gen === this.generation) {
 					this.user = null;
+					this.deletion = null;
 					keyring.lock();
 				}
 			} finally {
@@ -64,6 +71,14 @@ class Session {
 		this.generation++;
 		this.user = null;
 		this.hasMemberKeys = false;
+		this.deletion = null;
+	}
+
+	/** Cancel this account's pending deletion; the same people are told. */
+	async cancelDeletion() {
+		await api.post<DeletionCancelled>('/v1/me/deletion/cancel', {});
+		this.deletion = null;
+		await this.refresh();
 	}
 }
 

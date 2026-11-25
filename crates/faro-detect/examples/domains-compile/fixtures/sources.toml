@@ -1,0 +1,59 @@
+# Fixture config for the domains-compile tests. The lists next to it are
+# hand-written; `.gitattributes` keeps their bytes (and so their pins) the
+# same on every platform.
+version = 1
+
+[license_texts]
+MIT = "Permission is hereby granted, free of charge (fixture text)."
+
+[[source]]
+name = "fixture-adult"
+category = "adult"
+format = "hosts"
+license = "MIT"
+approved = true
+path = "adult.hosts"
+blake3 = "6d017fb2bb55e9108f9d7bb770cdf0e76fbe5e11e04bb31a642c177c26212fe1"
+homepage = "https://example.invalid/adult"
+
+[source.attribution]
+author = "Fixture Author"
+copyright = ["Copyright (c) 2026 Fixture Author"]
+source_url = "https://example.invalid/adult/hosts"
+license_url = "https://example.invalid/adult/LICENSE"
+changes = "Converted to Faro's domain category bundle format."
+
+[[source]]
+name = "fixture-gambling"
+category = "gambling"
+format = "domains"
+license = "CC-BY-4.0"
+approved = true
+path = "gambling.txt"
+blake3 = "6810c109f38414f11b7009b690e46424c07195f7dd103b113c0cecae00e83ac9"
+
+[source.attribution]
+author = "Fixture Collective"
+source_url = "https://example.invalid/gambling.txt"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
+changes = "Converted to Faro's domain category bundle format."
+
+[[source]]
+name = "fixture-unapproved"
+category = "adult"
+format = "domains"
+license = "GPL-3.0-only"
+approved = false
+path = "unapproved.txt"
+blake3 = "b1366f39eb1087a66b86e315f74d4a730a08eb1f95b4d423bdc0fccff3ff4d19"
+terms = "Copyleft; not Apache-2.0 compatible."
+
+[[source]]
+name = "fixture-refused"
+category = "adult"
+format = "domains"
+license = "MIT"
+approved = false
+refused = "Turned down in review."
+path = "refused.txt"
+blake3 = "e334319cd1152a40875ec92b9a80cbaca9243b6c9a69dc5ed63e8753401a0f6c"

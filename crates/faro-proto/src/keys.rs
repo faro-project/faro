@@ -23,6 +23,7 @@ const TAG_MEMBER_SELF: &str = "faro/member-enc-key/v1";
 const TAG_KEY_ID: &str = "faro/key-id/v1";
 const TAG_SAFETY: &str = "faro/safety-code/v1";
 const TAG_KEY_REWRAP: &str = "faro/key-rewrap/v1";
+const TAG_ALLY_KEY_REWRAP: &str = "faro/ally-key-rewrap/v1";
 
 /// Short, stable identifier for a public key: first 8 bytes of a tagged
 /// BLAKE3 hash, lowercase hex (16 chars).
@@ -265,6 +266,51 @@ impl KeyRewrap {
     }
 }
 
+/// "Ally A on instance I replaces the wrapped copy of their key with this",
+/// after a passphrase change or for a new recovery code (PROTOCOL.md §4.3).
+///
+/// The ally's key is X25519 and can't sign, so possession is proven another
+/// way: the instance seals a 32-byte challenge to `enc_pubkey`, and the
+/// ally's browser opens it and sends [`AllyKeyRewrap::proof`], a BLAKE3 MAC
+/// over this request keyed with the challenge. The browser never returns
+/// the challenge itself, so the instance can't use it to open other sealed
+/// boxes (such as item keys) addressed to the ally. `wrapped_privkey` is
+/// the exact JSON text that was MACed, as in [`KeyRewrap`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllyKeyRewrap {
+    pub instance_id: InstanceId,
+    pub ally_id: UserId,
+    pub enc_pubkey: EncPublicKey,
+    /// The challenge's time, as the instance issued it.
+    pub issued_at_ms: i64,
+    pub wrapped_privkey: String,
+}
+
+impl AllyKeyRewrap {
+    pub fn proof_bytes(&self) -> Vec<u8> {
+        Canonical::new(TAG_ALLY_KEY_REWRAP)
+            .str(self.instance_id.as_str())
+            .str(self.ally_id.as_str())
+            .fixed(self.enc_pubkey.as_bytes())
+            .i64(self.issued_at_ms)
+            .str(&self.wrapped_privkey)
+            .finish()
+    }
+
+    /// `BLAKE3-keyed(challenge, proof_bytes)`.
+    pub fn proof(&self, challenge: &[u8; 32]) -> Hash32 {
+        Hash32(*blake3::keyed_hash(challenge, &self.proof_bytes()).as_bytes())
+    }
+}
+
+/// An [`AllyKeyRewrap`] with its proof, flattened like [`Signed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvenAllyKeyRewrap {
+    #[serde(flatten)]
+    pub body: AllyKeyRewrap,
+    pub proof: Hash32,
+}
+
 /// Any endorsement plus the member's signature over its `signing_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signed<T> {
@@ -455,5 +501,46 @@ mod tests {
         assert!(v.get("member_id").is_some() && v.get("sig").is_some());
         let back: Signed<MemberEncKeyBinding> = serde_json::from_value(v).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn ally_rewrap_proof_covers_the_challenge_and_every_field() {
+        let r = AllyKeyRewrap {
+            instance_id: InstanceId::new("inst_a"),
+            ally_id: UserId::new("usr_a"),
+            enc_pubkey: EncPublicKey([1; 32]),
+            issued_at_ms: 5,
+            wrapped_privkey: "{}".into(),
+        };
+        let p = r.proof(&[7; 32]);
+        assert_eq!(p, r.proof(&[7; 32]));
+        assert_ne!(p, r.proof(&[8; 32]));
+        let changed = [
+            AllyKeyRewrap {
+                instance_id: InstanceId::new("inst_b"),
+                ..r.clone()
+            },
+            AllyKeyRewrap {
+                ally_id: UserId::new("usr_b"),
+                ..r.clone()
+            },
+            AllyKeyRewrap {
+                enc_pubkey: EncPublicKey([2; 32]),
+                ..r.clone()
+            },
+            AllyKeyRewrap {
+                issued_at_ms: 6,
+                ..r.clone()
+            },
+            AllyKeyRewrap {
+                wrapped_privkey: "{ }".into(),
+                ..r.clone()
+            },
+        ];
+        for c in changed {
+            assert_ne!(c.proof(&[7; 32]), p, "{c:?}");
+        }
+        let v = serde_json::to_value(ProvenAllyKeyRewrap { body: r, proof: p }).unwrap();
+        assert!(v.get("ally_id").is_some() && v.get("proof").is_some());
     }
 }

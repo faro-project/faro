@@ -44,6 +44,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "account_status_alerts",
                     include_str!("../../migrations/0005_account_status_alerts.sql"),
                 ),
+                (
+                    6,
+                    "account_deletion",
+                    include_str!("../../migrations/0006_account_deletion.sql"),
+                ),
             ]
         }
     }
