@@ -111,27 +111,59 @@ jobs:
           tool: cargo-deny
       - run: cargo deny --all-features check licenses bans sources advisories
 
-  # The macOS installer: build the unsigned development package (a release
-  # package needs the project's Developer ID) and check its payload, scripts
-  # and installer options without installing it.
+  # The macOS installer: build the unsigned, universal (arm64 + x86_64)
+  # development package (a release package needs the project's Developer ID)
+  # and check its payload, scripts and installer options without installing
+  # it. `macos-pkg-intel` then checks the same package on the Intel Mac.
   macos-pkg:
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
       - run: installers/macos/test-uninstall.sh
-      # For installing on a test machine. Unsigned, built for the runner's
-      # architecture (Apple Silicon), and its service accepts any program
-      # running as a logged-in user as the agent: never use it on anyone.
+      # For installing on a test machine. Unsigned, universal, and its
+      # service accepts any program running as a logged-in user as the
+      # agent: never use it on anyone.
       - uses: actions/upload-artifact@v4
         with:
-          name: faro-dev-pkg-arm64-${{ github.sha }}
+          name: faro-dev-pkg-universal-${{ github.sha }}
           path: target/pkg/Faro-*-dev.pkg
           if-no-files-found: error
           retention-days: 14
+
+  # The universal package on the Intel Mac: check it, then expand it (never
+  # install it) and start the x86_64 slice of each program with `--version`,
+  # which shows the Intel slices load and run.
+  macos-pkg-intel:
+    needs: macos-pkg
+    runs-on: [self-hosted, macOS, X64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: faro-dev-pkg-universal-${{ github.sha }}
+          path: pkg-intel
+      - run: installers/macos/check-pkg.sh pkg-intel/Faro-*-dev.pkg
+      - name: Start the x86_64 programs
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          pkgutil --expand-full pkg-intel/Faro-*-dev.pkg pkg-intel/expanded
+          faro=pkg-intel/expanded/faro-component.pkg/Payload/Library/Faro
+          for bin in "$faro/bin/faro-service" "$faro/Faro Agent.app/Contents/MacOS/faro-agent"; do
+            out="$(arch -x86_64 "$bin" --version)"
+            echo "$out"
+            if [[ "$out" != "$(basename "$bin") $version" ]]; then
+              echo "::error::$(basename "$bin") --version printed \"$out\" (want $version)"
+              exit 1
+            fi
+          done
+      - if: always()
+        run: rm -rf pkg-intel
 
   # The model regression gate on the real, maintainer-curated test set
   # (docs/DEVELOPMENT.md "Model benchmark"). The set holds explicit imagery

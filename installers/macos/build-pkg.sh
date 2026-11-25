@@ -2,6 +2,7 @@
 # Build the macOS installer package (ARCHITECTURE.md §3.3, §3.8).
 #
 #   installers/macos/build-pkg.sh --dev            # unsigned development package
+#   installers/macos/build-pkg.sh --dev --arch arm64   # one architecture only
 #   FARO_SIGN_IDENTITY="Developer ID Application: …" \
 #   FARO_INSTALLER_IDENTITY="Developer ID Installer: …" \
 #   FARO_TEAM_ID=ABCDE12345 \
@@ -10,6 +11,14 @@
 #   installers/macos/build-pkg.sh                  # release package
 #
 # Output: target/pkg/Faro-<version>[-dev].pkg
+#
+# The programs are universal (arm64 + x86_64) binaries: cargo builds each
+# architecture and `lipo` joins them. `--arch arm64` or `--arch x86_64`
+# builds for one architecture only, which is faster for local testing.
+# A universal build needs both Rust targets
+# (`rustup target add aarch64-apple-darwin x86_64-apple-darwin`).
+# MACOSX_DEPLOYMENT_TARGET is set from the minimum macOS version in
+# Distribution.xml.in, so every slice runs on that version.
 #
 # What it installs (faro_platform_macos::pkg_layout):
 #   /Library/Faro/bin/faro-service              the privileged service
@@ -31,13 +40,23 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 dev=0
-for arg in "$@"; do
-    case "$arg" in
+arch=universal
+while (( $# )); do
+    case "$1" in
         --dev) dev=1 ;;
+        --arch) arch="${2:-}"; shift ;;
+        --arch=*) arch="${1#--arch=}" ;;
         -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
+    shift
 done
+case "$arch" in
+    universal) triples=(aarch64-apple-darwin x86_64-apple-darwin) ;;
+    arm64) triples=(aarch64-apple-darwin) ;;
+    x86_64) triples=(x86_64-apple-darwin) ;;
+    *) echo "--arch must be universal, arm64 or x86_64" >&2; exit 2 ;;
+esac
 
 if [[ "$(uname -s)" != Darwin ]]; then
     echo "build-pkg.sh runs on macOS only" >&2
@@ -77,16 +96,40 @@ else
     fi
 fi
 
+# Every slice is built for the oldest macOS the package installs on.
+min_os="$(sed -n 's/.*<os-version min="\([0-9.]*\)".*/\1/p' "$here/Distribution.xml.in")"
+[[ -n "$min_os" ]] || { echo "cannot read the minimum macOS version from Distribution.xml.in" >&2; exit 1; }
+export MACOSX_DEPLOYMENT_TARGET="$min_os"
+
+sysroot="$(rustc --print sysroot)"
+for t in "${triples[@]}"; do
+    if [[ ! -d "$sysroot/lib/rustlib/$t/lib" ]]; then
+        echo "the Rust target $t is not installed: run \`rustup target add $t\`," >&2
+        echo "or build for one architecture with --arch" >&2
+        exit 1
+    fi
+done
+
 out="$repo/target/pkg"
 work="$out/work"
 root="$work/root"
 rm -rf "$work"
 mkdir -p "$root" "$out"
 
-echo "==> building faro-service and faro-agent ($version)"
+echo "==> building faro-service and faro-agent ($version; ${triples[*]}; macOS $min_os+)"
 cargo build --manifest-path "$repo/Cargo.toml" --release --locked \
-    -p faro-service -p faro-agent "${features[@]+"${features[@]}"}"
-bin="$repo/target/release"
+    -p faro-service -p faro-agent "${features[@]+"${features[@]}"}" \
+    "${triples[@]/#/--target=}"
+# One binary per program, with a slice for each architecture.
+bin="$work/bin"
+mkdir -p "$bin"
+for b in faro-service faro-agent; do
+    slices=()
+    for t in "${triples[@]}"; do
+        slices+=("$repo/target/$t/release/$b")
+    done
+    lipo -create -output "$bin/$b" "${slices[@]}"
+done
 
 echo "==> staging the payload"
 # Launchd plists, checked in and kept equal to the generator by
@@ -159,9 +202,11 @@ COPYFILE_DISABLE=1 pkgbuild --root "$root" \
     --ownership recommended \
     "$work/faro-component.pkg" >/dev/null
 
-# Claim only the architectures the binaries were built for.
-archs="$(lipo -archs "$bin/faro-agent" | tr ' ' ',')"
-[[ "$archs" == "$(lipo -archs "$bin/faro-service" | tr ' ' ',')" ]] || {
+# Claim only the architectures the binaries were built for, as a sorted
+# list: arm64,x86_64 for a universal package.
+slice_archs() { lipo -archs "$1" | tr ' ' '\n' | sort | paste -sd, -; }
+archs="$(slice_archs "$bin/faro-agent")"
+[[ "$archs" == "$(slice_archs "$bin/faro-service")" ]] || {
     echo "faro-service and faro-agent were built for different architectures" >&2
     exit 1
 }
