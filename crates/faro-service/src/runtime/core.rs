@@ -43,6 +43,7 @@ use super::status::StatusTx;
 use super::supervisor::Supervisor;
 use crate::source::{CaptureTarget, SessionStatus, SourceCommand, SourceEvent};
 use crate::state::{Enrollment, StateDir, PERMISSIONS_FILE, SETTINGS_FILE};
+use crate::update::artifacts::Swaps;
 use faro_core::clock::{Clock, ClockGuard, SystemClock};
 use faro_core::{
     route_signal, seal_report, CaptureCause, CaptureInfo, Decision, EventWriter, MemberSettings,
@@ -209,6 +210,8 @@ pub struct CoreParts {
     pub hb_state: watch::Sender<DeviceState>,
     pub upload_poke: Arc<Notify>,
     pub status: StatusTx,
+    /// New models and domain lists from the update task.
+    pub swaps: Arc<Swaps>,
 }
 
 pub struct Core {
@@ -262,6 +265,7 @@ pub struct Core {
     hb_state: watch::Sender<DeviceState>,
     upload_poke: Arc<Notify>,
     status: StatusTx,
+    swaps: Arc<Swaps>,
 }
 
 fn capture_reason(cause: CaptureCause) -> CaptureReason {
@@ -348,6 +352,7 @@ impl Core {
             hb_state: p.hb_state,
             upload_poke: p.upload_poke,
             status: p.status,
+            swaps: p.swaps,
         }
     }
 
@@ -844,6 +849,7 @@ impl Core {
     }
 
     pub async fn tick(&mut self) {
+        self.apply_swaps();
         let mono = self.clock.mono_ms();
         let wall = self.clock.wall_ms();
         let awake = self
@@ -999,7 +1005,33 @@ impl Core {
         }
     }
 
+    /// Hand a model or domain list the update task installed to the
+    /// detector. Between captures only: never while frames are being
+    /// classified, and no frame is involved.
+    fn apply_swaps(&mut self) {
+        let model = self.swaps.take_model();
+        let domains = self.swaps.take_blocklist();
+        if model.is_none() && domains.is_none() {
+            return;
+        }
+        let Some(det) = self.detector.as_mut() else {
+            tracing::warn!("no detector to take the update; it applies at the next start");
+            return;
+        };
+        if let Some(m) = model {
+            tracing::info!(model = %m.label, "image model switched");
+            det.set_classifier(m.value);
+            self.status.update(|s| s.model = Some(m.label));
+        }
+        if let Some(d) = domains {
+            tracing::info!(list = %d.label, "domain list switched");
+            det.set_domains(Some(d.value));
+            self.status.update(|s| s.blocklist = Some(d.label));
+        }
+    }
+
     async fn on_frames(&mut self, frames: Vec<Frame>) {
+        self.apply_swaps();
         let now = self.clock.mono_ms();
         let (info, continuation) = match self.capture_in_flight.take() {
             Some((_, info)) => {

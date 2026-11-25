@@ -44,6 +44,8 @@ use crate::source::{FrameSource, SourceCommand, SourceEvent, SourceIo};
 use crate::state::{self, Enrollment, StateDir, StateError, ENDORSEMENT_FILE};
 use crate::update::fetch::{FetchError, UpdateFetcher};
 use crate::update::install::{platform_installer, Installer};
+use crate::model::ModelRuntime;
+use crate::update::artifacts::{self, ArtifactConfig, Artifacts, Swaps};
 use crate::update::{CheckError, ClientSpec, ClientUpdater};
 use faro_core::clock::{Clock, SystemClock};
 use faro_core::{
@@ -115,6 +117,12 @@ pub struct UpdateOverrides {
     pub spec: Option<ClientSpec>,
     /// Delay before the first check.
     pub first_check: Option<Duration>,
+    /// What runs models from the update channel, instead of this build's
+    /// ([`crate::model::default_runtime`]).
+    pub model_runtime: Option<Arc<dyn ModelRuntime>>,
+    /// Where notices of installed models and blocklists go, instead of
+    /// [`artifacts::default_notices_dir`].
+    pub notices_dir: Option<PathBuf>,
 }
 
 /// The packaged root of trust, if this platform ships one and it exists.
@@ -295,8 +303,11 @@ impl ServiceBuilder {
             Some(s) => s,
             None => default_source(&self.config)?,
         };
-        let (classifier, model_tamper) = match self.classifier {
-            Some(c) => (c, None),
+        let packaged_model = match self.classifier {
+            Some(classifier) => crate::model::ModelLoad {
+                classifier,
+                tamper: None,
+            },
             None => {
                 let (path, required) = match self.model_manifest {
                     Some(p) => (Some(p), true),
@@ -305,11 +316,43 @@ impl ServiceBuilder {
                         crate::model::model_required(),
                     ),
                 };
-                let l = crate::model::load_classifier(path.as_deref(), required);
-                (l.classifier, l.tamper)
+                crate::model::load_classifier(path.as_deref(), required)
             }
         };
-        let detector = Detector::new(&DetectorConfig::default(), classifier, self.domains)?;
+        let (packaged_domains, domains_tamper) = match self.domains {
+            Some(categorizer) => (
+                Some(artifacts::PackagedDomains {
+                    categorizer,
+                    version: None,
+                }),
+                None,
+            ),
+            None => match artifacts::packaged_domains_manifest() {
+                Some(p) => artifacts::load_packaged_domains(&p),
+                None => (None, None),
+            },
+        };
+        let start = Artifacts::start(
+            ArtifactConfig {
+                dir: dir.clone(),
+                notices: self
+                    .updates
+                    .notices_dir
+                    .clone()
+                    .unwrap_or_else(|| artifacts::default_notices_dir(dir.path())),
+                runtime: self
+                    .updates
+                    .model_runtime
+                    .clone()
+                    .or_else(crate::model::default_runtime),
+            },
+            packaged_model,
+            packaged_domains,
+        );
+        let mut model_tamper = start.tamper;
+        model_tamper.extend(domains_tamper);
+        let detector = Detector::new(&DetectorConfig::default(), start.classifier, start.domains)?;
+        let artifacts = start.artifacts;
         let settings = state::settings_in_effect(&dir, self.config.member_settings.as_ref());
         let rng = match self.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
@@ -330,6 +373,10 @@ impl ServiceBuilder {
             clock.clone(),
         );
         let (status, status_rx) = StatusTx::new();
+        status.update(|s| {
+            s.model = Some(start.model_label);
+            s.blocklist = start.blocklist_label;
+        });
         let (control_tx, control_rx) = mpsc::channel(64);
         Ok(Service {
             config: self.config,
@@ -354,6 +401,7 @@ impl ServiceBuilder {
             updater,
             update_first_check,
             model_tamper,
+            artifacts,
             lock,
         })
     }
@@ -412,9 +460,12 @@ pub struct Service {
     pokes: Pokes,
     updater: Option<ClientUpdater>,
     update_first_check: Option<Duration>,
-    /// The image model is missing, altered or unusable
-    /// ([`crate::model::ModelLoad::tamper`]); reported at start.
-    model_tamper: Option<TamperSignal>,
+    /// The image model or domain list is missing, altered or unusable
+    /// ([`crate::model::ModelLoad::tamper`], [`Artifacts::start`]);
+    /// reported at start.
+    model_tamper: Vec<TamperSignal>,
+    /// Models and blocklists from the update channel.
+    artifacts: Artifacts,
     /// Held until `run` returns ([`StateDir::try_lock`]).
     lock: state::StateLock,
 }
@@ -455,8 +506,10 @@ impl Service {
             updater,
             update_first_check,
             model_tamper,
+            artifacts,
             lock: _lock,
         } = self;
+        let swaps: Arc<Swaps> = artifacts.swaps();
         tokio::pin!(shutdown);
         let (stop_tx, stop_rx) = watch::channel(false);
         let gate = IdentityGate::new_open();
@@ -497,6 +550,7 @@ impl Service {
         if let Some(updater) = updater {
             tasks.spawn(updates::update_loop(
                 updater,
+                artifacts,
                 update_first_check.unwrap_or_else(updates::default_first_check),
                 config.updates.check_interval(),
                 control_tx.clone(),
@@ -622,9 +676,10 @@ impl Service {
             hb_state: hb_state_tx,
             upload_poke: pokes.upload.clone(),
             status: status.clone(),
+            swaps,
         });
         core.startup().await;
-        if let Some(sig) = model_tamper {
+        for sig in model_tamper {
             core.signal(sig).await;
         }
         pokes.upload.notify_one();

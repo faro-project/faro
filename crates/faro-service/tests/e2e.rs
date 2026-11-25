@@ -885,6 +885,7 @@ fn update_overrides(
             installed: faro_update::Version::new(1, 0, 0),
         }),
         first_check: Some(Duration::ZERO),
+        ..Default::default()
     }
 }
 

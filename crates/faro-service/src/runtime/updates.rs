@@ -1,6 +1,8 @@
-//! The update task: [`ClientUpdater::check`] on a jittered timer.
+//! The update task: [`ClientUpdater::check`], then
+//! [`ClientUpdater::check_artifacts`], on a jittered timer.
 
 use super::core::Control;
+use crate::update::artifacts::{ArtifactOutcome, Artifacts};
 use crate::update::{ClientUpdater, Outcome, Settled};
 use faro_proto::body::TamperSignal;
 use rand::Rng;
@@ -36,8 +38,13 @@ pub fn rejected_package_signal(version: &faro_update::Version, reason: &str) -> 
 /// once per run of the service: a report lost to a restart before
 /// activation is made again, and a lasting attack is reported again after
 /// each restart.
+///
+/// After the client package, models and blocklists: what installs goes to
+/// the core through `artifacts`' swaps, unless a client install has just
+/// started (the service stops soon, and the new one checks again).
 pub async fn update_loop(
     updater: ClientUpdater,
+    artifacts: Artifacts,
     first: Duration,
     every: Duration,
     control: mpsc::Sender<Control>,
@@ -63,7 +70,11 @@ pub async fn update_loop(
         if *stop.borrow() {
             return;
         }
-        match updater.check().await {
+        let outcome = updater.check().await;
+        if !matches!(outcome, Ok(Outcome::Installing { .. })) {
+            check_artifacts(&updater, &artifacts).await;
+        }
+        match outcome {
             Ok(Outcome::Installing { version }) => {
                 // The install job stops this service shortly; until it
                 // does, carry on as normal.
@@ -88,5 +99,30 @@ pub async fn update_loop(
             Err(e) => tracing::warn!(error = %e, "update check failed; will retry"),
         }
         wait = jitter(every);
+    }
+}
+
+/// Models and blocklists. A signed one that fails its checks is a broken
+/// release, not an attack on this computer: it is logged and skipped, and
+/// the copy in use stays.
+async fn check_artifacts(updater: &ClientUpdater, artifacts: &Artifacts) {
+    match updater.check_artifacts(artifacts).await {
+        Ok(results) => {
+            for (kind, r) in results {
+                match r {
+                    Ok(ArtifactOutcome::Installed { version }) => {
+                        tracing::info!(?kind, %version, "update installed; switching to it");
+                    }
+                    Ok(ArtifactOutcome::Rejected { version, reason }) => {
+                        tracing::error!(?kind, %version, %reason, "update refused");
+                    }
+                    Ok(o) => tracing::debug!(?kind, outcome = ?o, "update check"),
+                    Err(e) => {
+                        tracing::warn!(?kind, error = %e, "update check failed; will retry")
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "update check failed; will retry"),
     }
 }
