@@ -687,13 +687,11 @@ mod tests {
             let signers: Vec<&SigningKey> = std::iter::once(&self.root)
                 .chain(old.map(|o| &o.root))
                 .collect();
-            MetadataSigner::new(signers.into_iter())
-                .sign_to_bytes(&root)
-                .unwrap()
+            MetadataSigner::new(signers).sign_to_bytes(&root).unwrap()
         }
 
         fn sign_targets(&self, t: &Targets) -> Vec<u8> {
-            MetadataSigner::new([&self.targets].into_iter())
+            MetadataSigner::new([&self.targets])
                 .sign_to_bytes(t)
                 .unwrap()
         }
@@ -704,7 +702,7 @@ mod tests {
                 expires_ms: NOW + 3 * DAY,
                 targets_meta: TargetsMeta::describe(targets, targets_version),
             };
-            MetadataSigner::new([&self.timestamp].into_iter())
+            MetadataSigner::new([&self.timestamp])
                 .sign_to_bytes(&ts)
                 .unwrap()
         }
@@ -787,7 +785,6 @@ mod tests {
 
     #[test]
     fn invalid_entries_are_refused_and_not_kept() {
-        let keys = Keys::new();
         let mut t = first_release();
         let mut bad = entry(b"x", "1.0.0", &["stable"]);
         bad.custom.channels = vec!["stable-1".into()];
