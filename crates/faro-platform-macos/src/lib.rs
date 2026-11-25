@@ -55,6 +55,8 @@ pub mod session;
 pub mod tamper;
 #[cfg(target_os = "macos")]
 pub mod ui;
+#[cfg(target_os = "macos")]
+pub mod update_job;
 
 #[cfg(target_os = "macos")]
 pub use bridge::{BridgeError, DEFAULT_TIMEOUT as CAPTURE_TIMEOUT};

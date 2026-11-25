@@ -6,6 +6,7 @@
 #   FARO_INSTALLER_IDENTITY="Developer ID Installer: …" \
 #   FARO_TEAM_ID=ABCDE12345 \
 #   [FARO_NOTARY_PROFILE=faro-notary] \
+#   FARO_UPDATE_ROOT=path/to/1.root.json \
 #   installers/macos/build-pkg.sh                  # release package
 #
 # Output: target/pkg/Faro-<version>[-dev].pkg
@@ -15,6 +16,8 @@
 #   /Library/Faro/bin/faro-uninstall            removes Faro, telling allies first
 #   /Library/Faro/Faro Agent.app                the session agent (org.faro.agent)
 #   /Library/Faro/service.toml.default          copied to the state dir if absent
+#   /Library/Faro/update-root.json              the project's update root of trust
+#                                               (FARO_UPDATE_ROOT; optional for --dev)
 #   /Library/LaunchDaemons/org.faro.service.plist
 #   /Library/LaunchAgents/org.faro.agent.plist  global: every account's session
 #
@@ -60,7 +63,9 @@ if (( dev )); then
 else
     name="Faro-$version"
     features=()
-    for v in FARO_SIGN_IDENTITY FARO_INSTALLER_IDENTITY FARO_TEAM_ID; do
+    # Without the root of trust the service never updates itself, so a
+    # release package must ship it.
+    for v in FARO_SIGN_IDENTITY FARO_INSTALLER_IDENTITY FARO_TEAM_ID FARO_UPDATE_ROOT; do
         if [[ -z "${!v:-}" ]]; then
             echo "a release package needs $v (or build an unsigned one with --dev)" >&2
             exit 1
@@ -90,6 +95,10 @@ cp -R "$here/payload/." "$root/"
 install -d -m 755 "$root/Library/Faro/bin"
 install -m 755 "$bin/faro-service" "$root/Library/Faro/bin/faro-service"
 install -m 755 "$here/faro-uninstall" "$root/Library/Faro/bin/faro-uninstall"
+if [[ -n "${FARO_UPDATE_ROOT:-}" ]]; then
+    [[ -f "$FARO_UPDATE_ROOT" ]] || { echo "FARO_UPDATE_ROOT: no such file $FARO_UPDATE_ROOT" >&2; exit 1; }
+    install -m 644 "$FARO_UPDATE_ROOT" "$root/Library/Faro/update-root.json"
+fi
 
 app="$root/Library/Faro/Faro Agent.app"
 install -d -m 755 "$app/Contents/MacOS"

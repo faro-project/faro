@@ -258,8 +258,14 @@ pub struct World {
 
 impl World {
     pub async fn new() -> World {
+        Self::with_server_config(|_| {}).await
+    }
+
+    /// As [`World::new`], with the instance's config adjusted first (for
+    /// example to run its update mirror).
+    pub async fn with_server_config(tweak: impl FnOnce(&mut faro_server::config::Config)) -> World {
         init_logging();
-        let t = TestApp::new().await;
+        let t = TestApp::with_config(tweak).await;
         let started_ms = t.clock_ms();
         let backend = Backend::serve(t.state.clone()).await;
         let gate = Gate::start(backend.addr).await;
@@ -387,6 +393,7 @@ impl World {
             clock,
             script: Script::new(),
             utc_offset_minutes: 0,
+            updates: faro_service::UpdateOverrides::default(),
             handle: None,
             _tmp: tmp,
         })
@@ -595,6 +602,10 @@ pub struct Device {
     pub script: Script,
     /// `report.utc_offset_minutes` for the next [`Device::start`].
     pub utc_offset_minutes: i32,
+    /// Update task overrides for the next [`Device::start`]. By default no
+    /// root of trust is injected, so the service doesn't check for updates
+    /// (no packaged root exists in tests).
+    pub updates: faro_service::UpdateOverrides,
     handle: Option<ServiceHandle>,
     _tmp: tempfile::TempDir,
 }
@@ -636,6 +647,7 @@ impl Device {
             .classifier(classifier)
             .tick_interval(Duration::from_millis(10))
             .scheduler_seed(7)
+            .updates(self.updates.clone())
             .build()
             .expect("service builds");
         self.handle = Some(service.spawn());
