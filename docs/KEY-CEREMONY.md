@@ -27,7 +27,7 @@ There are three roles. Each key is an Ed25519 key in a small JSON file made by `
 |---|---|---|---|---|---|
 | `root` | 3 (A, B, C) | 2 | the list of every role's keys, including its own | offline, on encrypted USB drives in three places | 1 year |
 | `targets` | 1 | 1 | `targets.json`: the list of release files, with their length and BLAKE3 | online, read by the release workflow (#58) | a few weeks |
-| `timestamp` | 1 | 1 | `timestamp.json`: which `targets.json` is current | online, read by the daily re-signing job (#58) | about 1 day |
+| `timestamp` | 1 | 1 | `timestamp.json`: which `targets.json` is current | online, read by the re-signing job (#58, every 8 hours) | about 1 day |
 
 What each threshold means:
 
@@ -388,7 +388,7 @@ First, what a leak costs:
 
 The keys are stored as encrypted Actions secrets and given to the workflow jobs that sign.
 
-- **How #58 reads it:** the job maps the secret to an environment variable, writes it to a file only it can read, signs, and deletes the file. For example, in a step: `umask 077; printf '%s' "$FARO_TARGETS_KEY" > "$RUNNER_TEMP/targets.key.json"`, then `faro-release sign-targets … --key "$RUNNER_TEMP/targets.key.json"`. The daily job does the same with `FARO_TIMESTAMP_KEY` and `sign-timestamp`.
+- **How #58 reads it:** the job maps the secret to an environment variable, writes it to a file only it can read, signs, and deletes the file. For example, in a step: `umask 077; printf '%s' "$FARO_TARGETS_KEY" > "$RUNNER_TEMP/targets.key.json"`, then `faro-release sign-targets … --key "$RUNNER_TEMP/targets.key.json"`. The timestamp job (`update-timestamp.yml`) does the same with `FARO_TIMESTAMP_KEY` and `sign-timestamp`.
 - **Risks:**
   - On the current GitHub Free plan, a private repository has only repository secrets. **Every workflow on every branch can read them.** So anyone, or any tool, that can push a branch can change a workflow to print them. That includes coding agents that push with your token.
   - Environment secrets fix this: they can be limited to `v*` tags and `main`, and the targets one can require your approval. They need the repository to be public or a paid plan. Check GitHub's plans page for which protection rules your plan allows on a private repository.
@@ -432,7 +432,7 @@ Keep the risk small:
 5. Keep no other copy of the online keys. If one is lost, rotate it ([6.3](#63-rotate-the-targets-or-timestamp-key)).
 6. Later, open an issue for hardware-key signing and move the targets key to option C.
 
-The timestamp re-signing schedule belongs to #58, but note one thing: instances fetch at most every 6 hours (`updates.refresh_secs`) and clients check about every 6 hours. A timestamp that expires 1 day after signing should therefore be re-signed at least every 12 hours. Otherwise clients see an expired one for part of each day.
+The timestamp re-signing schedule belongs to #58, but note one thing: instances fetch at most every 6 hours (`updates.refresh_secs`) and clients check about every 6 hours. A timestamp that expires 1 day after signing should therefore be re-signed at least every 12 hours. Otherwise clients see an expired one for part of each day. `update-timestamp.yml` re-signs it every 8 hours, and renews `targets.json` (42 days) when it has under 21 days left (DEVELOPMENT.md, "Releasing").
 
 ### 4.3 Upload the online keys (option A)
 
@@ -472,13 +472,15 @@ diskutil eraseDisk APFS TRANSFER GPT diskN
    cd ~/Github/faro-project/faro
    git switch -c release-root-1 origin/main
    mkdir -p release
+   mkdir -p release/roots
    cp ~/faro-ceremony-public/1.root.json release/update-root.json
+   cp ~/faro-ceremony-public/1.root.json release/roots/1.json
    shasum -a 256 release/update-root.json
-   git add release/update-root.json
+   git add release/update-root.json release/roots/1.json
    git commit -m "Release: update root 1"
    ```
 
-   The checksum must match the one in the log. Push and open a pull request as usual.
+   The checksum must match the one in the log. Push and open a pull request as usual. `release/roots/1.json` is never published. It lets the release workflow walk the whole chain from root 1, as an old client does, which it needs to carry the published `targets.json` forward after an online key is replaced.
 
 2. **The macOS package.** `build-pkg.sh` installs the file named by `FARO_UPDATE_ROOT` as `/Library/Faro/update-root.json`. A release package can't be built without it, and `check-pkg.sh` fails a release package that lacks it. The release workflow (#58) sets it:
 
@@ -495,7 +497,7 @@ diskutil eraseDisk APFS TRANSFER GPT diskN
    FARO_UPDATES_UPSTREAM=https://…
    ```
 
-   - The container image must copy the file to that path. `deploy/Dockerfile` doesn't do this yet. It needs a line like `COPY release/update-root.json /usr/share/faro/update-root.json` (#58 or a follow-up).
+   - The container image copies `release/update-root.json` to that path (`deploy/Dockerfile`), once the file exists.
    - `updates.upstream` is the publishing location #58 sets up (it recommends `https://updates.faro-project.org/`).
    - An instance without the image (the binary and systemd) downloads `update-root.json` and points `FARO_UPDATES_ROOT` at it.
    - Admins can check their copy with `shasum -a 256 update-root.json`. Publish the checksum from the log in SELF-HOSTING.md and the release notes so they have something to compare with.
@@ -576,7 +578,7 @@ The steps below make root 2. For a later root, use its number in place of `2` ev
    git commit -m "Release: update root 2"
    ```
 
-   Publish `roots/2.json` with the next run of #58's workflow. When an online key changed, update its secret first, so that the same run re-signs `targets.json` and `timestamp.json` with the new key. Clients that see the new root before the new timestamp fail that one check and retry later. Never remove an old root from the layout: clients still on an old package walk through every one.
+   Publish `roots/2.json` with the next run of `update-timestamp.yml` (every 8 hours, or `gh workflow run update-timestamp.yml`) or the next release. When an online key changed, update its secret first, so that the same run re-signs `targets.json` and `timestamp.json` with the new key: when `release/update-root.json` names a targets key that didn't sign the published `targets.json`, the job renews it. Clients that see the new root before the new timestamp fail that one check and retry later. Never remove an old root from the layout: clients still on an old package walk through every one.
 8. Write a log entry ([8](#8-ceremony-log-template)).
 
 ### 6.2 Renew the root every year

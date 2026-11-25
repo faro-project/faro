@@ -81,7 +81,7 @@ magic_links_per_email_per_hour = 5
 # root = "/usr/share/faro/update-root.json"
 # Where the project publishes releases. Leave unset on an air-gapped instance FARO_UPDATES_UPSTREAM
 # and load releases with `faro-server updates import --from DIR`.
-# upstream = "https://updates.example.org/faro"
+# upstream = "https://updates.faro-project.org/"
 # Seconds between upstream checks (300 to 21600).                             FARO_UPDATES_REFRESH_SECS
 refresh_secs = 3600
 # stable, beta, ... or stable-1 (the previous version's newest release, for   FARO_UPDATES_CHANNEL

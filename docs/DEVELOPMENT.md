@@ -255,23 +255,164 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 - **Updates:** `FARO_UPDATE_ROOT` (a signed root document, for example from `cargo run -p faro-update --example faro-release -- sign-root …`) is installed as `/Library/Faro/update-root.json`. A release package requires it; a `--dev` one may have it. With it, the service checks its instance's mirror about every 6 hours (`[updates] check_secs`) and installs newer client packages through the one-shot launchd job `org.faro.update` (`faro_platform_macos::update_job`). It runs as its own job because the package's preinstall stops the service, which would kill an `installer` running as its child. Only the packaged service, run as root from `/Library/Faro/bin/faro-service`, installs anything. A development build checks and logs, nothing more. The job's output goes to `update-install.log` in the state directory, and `update-attempts.json` there records the pending install and failed packages.
 - **Not there yet:** the tray app.
 
+## Releasing
+
+A release is built, signed and published by `.github/workflows/release.yml`, from a `vX.Y.Z` or `vX.Y.Z-pre` tag on `main`. `.github/workflows/update-timestamp.yml` keeps the published metadata fresh after that. The scripts both use are in `release/`, and the signing tool is `faro-release` (`crates/faro-update/examples/faro-release.rs`). The keys come from the key ceremony ([KEY-CEREMONY.md](KEY-CEREMONY.md)). Root keys never touch CI.
+
+### Where a release goes
+
+- **The update layout** (PROTOCOL.md §8.1) goes to `https://updates.faro-project.org/`, as plain files: `timestamp.json`, `targets.json`, `roots/<n>.json` and `targets/<name>`. Instances mirror it from there (`updates.upstream`). It is served by GitHub Pages from the public repository `faro-project/updates`. `release/publish-layout.sh` is the only code that knows this: to move the layout, change that script.
+- **The GitHub Release** (`vX.Y.Z` in this repository) is for people: release notes, the `.pkg`, the `faro-server` binaries and `SHA256SUMS`. While this repository is private, only its collaborators can download from it.
+- **The container image** `ghcr.io/faro-project/faro-server` gets the tags `X.Y.Z`, plus `X.Y` and `latest` for a release that isn't a pre-release. `container.yml` no longer runs on tags.
+
+Every publish only adds files. Older releases stay listed in `targets.json` (so `stable-1` has something to select) and their artifacts stay served. A published artifact name never gets new bytes.
+
+#### Why GitHub Pages on a separate public repository
+
+A GitHub Release is a flat list of files, so it can't serve the layout's paths. The options:
+
+| | Pages on this repository | Public `faro-project/updates` with Pages (chosen) | Object storage behind a CDN (Cloudflare R2) |
+|---|---|---|---|
+| Works now | No: Pages on a private repository needs a paid plan | Yes | Yes |
+| New accounts | None | None | Cloudflare, and the domain's DNS moves to it |
+| Largest file | 100 MB (Git) | 100 MB (Git) | 5 GB |
+| Total size | 1 GB site | 1 GB site | 10 GB free, then paid per GB |
+| Traffic | about 100 GB a month (soft limit) | about 100 GB a month (soft limit) | no traffic fees |
+| Credential in CI | | a deploy key for that one repository | an API token for that one bucket |
+
+The numbers that matter: the universal `.pkg` with ONNX Runtime and the OpenNSFW model (#45: about 6 MB int8, 23 MB fp32) should be well under 100 MB, and each release adds it plus two `faro-server` binaries. An instance downloads each client release once, whatever its number of members, so 100 instances take about 100 times one package per release. `publish-layout.sh` refuses a file over 100 MB and warns above 50 MB. The site will fill 1 GB after a few dozen releases: then old releases must be pruned (not automated yet), or the layout moves to R2.
+
+Pages caches files for about 10 minutes. That is fine: the timestamp is re-signed every 8 hours and lasts 24.
+
+### What to set up before the first real release
+
+1. **The keys** (KEY-CEREMONY.md). Commit root 1 as `release/update-root.json`, and also as `release/roots/1.json` (never published; it lets a release carry `targets.json` forward after the targets or timestamp key is replaced). Add the Actions secrets `FARO_TARGETS_KEY` and `FARO_TIMESTAMP_KEY`.
+2. **The publishing location.**
+   - Create the public repository `faro-project/updates`, empty. In its Settings → Pages, serve the `main` branch, root folder. Set the custom domain `updates.faro-project.org` and tick "Enforce HTTPS" once the certificate is ready. The first publish writes `CNAME` and `.nojekyll`.
+   - DNS: a `CNAME` record `updates.faro-project.org` → `faro-project.github.io`. Verify `faro-project.org` for the org (org Settings → Pages), so nobody else can claim the name.
+   - A deploy key: `ssh-keygen -t ed25519 -N '' -C faro-release -f updates-deploy`. Add `updates-deploy.pub` to `faro-project/updates` as a deploy key **with write access**, and `updates-deploy` as the Actions secret `FARO_UPDATES_DEPLOY_KEY` of this repository. Delete both files.
+3. **Apple signing**, on the Apple Silicon runner (the Mac whose account runs it):
+   - The Developer ID Application and Developer ID Installer certificates in a keychain, and a notary profile: `xcrun notarytool store-credentials faro-notary --apple-id … --team-id … --password <app-specific password>`.
+   - The Actions variables (not secrets: they are names) `FARO_SIGN_IDENTITY` (`Developer ID Application: … (TEAMID)`), `FARO_INSTALLER_IDENTITY` (`Developer ID Installer: … (TEAMID)`), `FARO_TEAM_ID` and `FARO_NOTARY_PROFILE` (`faro-notary`).
+   - Recommended: keep the certificates in their own keychain, locked except while a release builds. Any job on that runner runs as that account and could otherwise sign with them. Create it with `security create-keychain -p <password> faro-release.keychain-db`, import both certificates into it, allow `codesign` to use them without a prompt (`security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k <password> faro-release.keychain-db`), add it to the search list (`security list-keychains -d user -s login.keychain-db faro-release.keychain-db`) and lock it (`security lock-keychain faro-release.keychain-db`). Then set the variable `FARO_MACOS_KEYCHAIN` to its path and the secret `FARO_MACOS_KEYCHAIN_PASSWORD` to its password.
+4. **Runners.** Jobs that read a signing key run on GitHub's `ubuntu-24.04` (KEY-CEREMONY.md §4.2), and so does the amd64 server build. **Those can't start while the org's Actions spending limit is reached**, so a real release and the timestamp job are blocked until it is raised. The variable `FARO_SIGNING_RUNNER` (JSON, for example `["self-hosted", "Linux", "ARM64"]`) moves the signing jobs to a self-hosted runner instead. That works today, but a self-hosted runner isn't sandboxed, so a job from any branch could have left something there that reads the key (see [CI runners](#ci-runners)). The signing jobs build `faro-release` with a fresh `CARGO_HOME` and delete the key files, which narrows this but doesn't close it. `FARO_LINUX_X64_RUNNER` does the same for the amd64 build, once there is an x86_64 Linux runner.
+5. **Tags.** Add a tag ruleset so only you can create `v*` tags: a tag push is what starts a release.
+6. **Later, when the plan allows environments:** move the secrets into environments and set `FARO_RELEASE_ENVIRONMENT` (for example `release`, limited to `v*` tags and `main`, with your approval) and `FARO_TIMESTAMP_ENVIRONMENT` (for example `timestamp`, limited to `main`). The jobs that read each key then run in its environment. `main` must be allowed for the targets key, because the scheduled job renews `targets.json` from it (about once every three weeks).
+
+| Secret | What it is | Read by |
+|---|---|---|
+| `FARO_TARGETS_KEY` | the targets key file (`faro-release keygen`) | `layout` in `release.yml`; `renew-targets` in `update-timestamp.yml` |
+| `FARO_TIMESTAMP_KEY` | the timestamp key file | the same, and `timestamp` in `update-timestamp.yml` |
+| `FARO_UPDATES_DEPLOY_KEY` | SSH key with write access to `faro-project/updates` | every job that publishes the layout |
+| `FARO_MACOS_KEYCHAIN_PASSWORD` | (optional) the signing keychain's password | `macos-pkg` |
+
+| Variable | Default |
+|---|---|
+| `FARO_SIGN_IDENTITY`, `FARO_INSTALLER_IDENTITY`, `FARO_TEAM_ID`, `FARO_NOTARY_PROFILE` | none: a real release fails without them |
+| `FARO_MACOS_KEYCHAIN` | none (use the default keychains) |
+| `FARO_SIGNING_RUNNER` | `"ubuntu-24.04"` |
+| `FARO_LINUX_X64_RUNNER` | `"ubuntu-24.04"` |
+| `FARO_UPDATES_URL` | `https://updates.faro-project.org/` |
+| `FARO_RELEASE_ENVIRONMENT`, `FARO_TIMESTAMP_ENVIRONMENT` | none |
+
+A dry run needs none of this.
+
+### A dry run
+
+```sh
+gh workflow run release.yml --ref main -f dry_run=true
+```
+
+It builds everything from `main`, but:
+
+- the package is the unsigned development package (`--dev`, with a warning in the run): never install it on anyone;
+- it signs with throwaway keys made in the job, never the real ones, and as if nothing were published yet;
+- it publishes no layout and no image. It makes a **draft** GitHub Release named `dry-run-<version>-<run>` with the artifacts, `SHA256SUMS` and `update-layout.tar.gz` (the verified layout and its throwaway root, `dry-run-root.json`). It deletes the previous dry-run draft. Never publish it.
+
+While GitHub's runners can't start, the amd64 build fails and the dry run goes on without that binary, with a warning.
+
+### Cutting a release
+
+1. Set the version in the root `Cargo.toml` (the workspace version and the internal dependencies, see [Dependency notes](#dependency-notes)), and merge it to `main`.
+2. Run a dry run of `main` and look at the draft.
+3. Tag the commit on `main` and push the tag:
+
+   ```sh
+   git tag -s v0.1.0-beta.1 -m "Faro 0.1.0-beta.1" <commit>
+   git push origin v0.1.0-beta.1
+   ```
+
+The workflow then:
+
+1. **prepare:** checks that the tag is `v` plus the workspace version and that the commit is on `main`. A pre-release (`0.1.0-beta.1`) goes to the `beta` channel only. A release (`0.1.0`) goes to `stable` and `beta`.
+2. **macos-pkg:** builds the universal `.pkg` with `FARO_UPDATE_ROOT=release/update-root.json`, signs and notarizes it, and checks it (`check-pkg.sh`, `pkgutil --check-signature`, `stapler validate`, `spctl`). It fails if an identity is missing: an unsigned package is never published.
+3. **server:** builds the container image natively on each architecture, pushes it by digest only, and takes the `faro-server` binary out of it. Both architectures are required.
+4. **layout:** fetches what is published, builds `targets.json` from it plus this release's artifacts (`release/build-layout.sh`), signs it and a timestamp, and checks the whole set with `faro-release verify` the way an up-to-date client would see it. Nothing is published before this passes.
+5. **publish-layout:** checks the layout again against what is published at that moment, publishes it (`release/publish-layout.sh push`), then waits until `https://updates.faro-project.org/` serves it and verifies what is served (`release/check-served.sh`).
+6. **publish:** tags the image, then creates the GitHub Release.
+
+If a job fails, use **Re-run failed jobs**, which keeps the artifacts already built. A full re-run after the layout was published fails on purpose: the new build has different bytes, and a published name never changes. Then cut the next version instead.
+
+**Channels.** An instance chooses its channel (`stable` by default). Until there is a `0.1.0`, only `beta` has anything, so pilot instances must choose `beta` to get `0.1.0-beta.1`.
+
+### Re-signing (update-timestamp.yml)
+
+- **Every 8 hours** it re-signs `timestamp.json`, which expires 24 hours after it is signed. It reads only `FARO_TIMESTAMP_KEY`.
+- **When `targets.json` has under 21 days left** (it lasts 42), or when `release/update-root.json` names a targets key that didn't sign it, the `renew-targets` job re-signs `targets.json` with the same entries instead, and a timestamp for it.
+- Either run also publishes any root added to `release/roots/`.
+
+Before the first release it finds nothing published and stops. Run it by hand with `gh workflow run update-timestamp.yml`.
+
+#### If the timestamp job fails
+
+It opens an issue, "Update metadata re-signing failed" (or comments on the open one), and GitHub emails you about the failed run. A timestamp is good for 24 hours from the last good run, so there are usually two more tries before it expires.
+
+1. Open the run linked in the issue and find the failed step.
+   - **The job didn't start:** GitHub's runners are blocked (spending limit). Raise the limit, or set `FARO_SIGNING_RUNNER`.
+   - **No timestamp key / no deploy key:** a secret is missing or was replaced. Set it again (KEY-CEREMONY.md §4.3).
+   - **verify failed:** read its error. A timestamp version that went backwards means a runner clock is wrong. A threshold error right after a root rotation means the secret still holds the old key.
+   - **check-served timed out:** the files were pushed, but the site doesn't serve them. Look at the Pages build in `faro-project/updates` and at the DNS record.
+2. Fix it, run `gh workflow run update-timestamp.yml`, and close the issue once a run passes.
+
+If the timestamp does expire, nothing breaks for good: instances and computers keep running, they just take no update until the next good run.
+
+### Instances
+
+An instance uses the published layout with (SELF-HOSTING.md, "Updates for members' computers"):
+
+```sh
+FARO_UPDATES_ROOT=/usr/share/faro/update-root.json   # in the official image
+FARO_UPDATES_UPSTREAM=https://updates.faro-project.org/
+```
+
+The image copies `release/update-root.json` to `/usr/share/faro/update-root.json` once it exists. An instance without the image downloads that file and points `FARO_UPDATES_ROOT` at it.
+
+### Testing the scripts
+
+`release/test-release.sh` runs the scripts end to end with throwaway keys, fake artifacts and a local Git repository standing in for `faro-project/updates`: a first release, re-signing, renewal, a root rotation that replaces the online keys, a second release, and the refusals. CI runs it in the `release-scripts` job. Locally:
+
+```sh
+cargo build --release --locked -p faro-update --example faro-release
+release/test-release.sh
+```
+
 ## CI runners
 
 CI runs on the project's self-hosted runners, registered to the `faro-project` org and matched by label:
 
 | Labels | Machine | Jobs |
 |---|---|---|
-| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval` |
+| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
 | `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel` |
-| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build, the nightly `fuzz` workflow |
+| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the arm64 container build, the nightly `fuzz` workflow; in `release.yml` the arm64 server build, a dry run's signing, and the image tags and GitHub Release; the `check` and `alert` jobs of `update-timestamp.yml` |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
 
-There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`.
+There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`. So do the jobs that read the update signing keys ([Releasing](#releasing)).
 
 Each runner runs one job at a time, and a new push to a pull request cancels its older CI run. The workflows install Rust (`dtolnay/rust-toolchain`) and Node (`actions/setup-node`) themselves. Each machine needs:
 
 - **All:** `git`, `curl`, and a C compiler and linker for the crates with C code.
-- **Linux:** `build-essential` and `pkg-config`. Docker with Buildx for the container build. If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
+- **Linux:** `build-essential`, `pkg-config` and `jq` (for the release scripts). Docker with Buildx for the container build. If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
 - **Windows:** Git for Windows in its default location (the `test` job puts `C:\Program Files\Git\bin` first on `PATH`, ahead of WSL's `bash`, for the toolchain action's bash steps), and the Visual Studio Build Tools C++ workload for the MSVC linker.
 - **macOS:** Xcode Command Line Tools. On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
 
