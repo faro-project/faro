@@ -81,6 +81,11 @@ pub fn build(
          always emails the person and everyone in an accountability partnership with them, \
          and their computers keep being monitored and alerting their allies."
             .to_owned(),
+        "Anyone can delete their account. Faro first emails everyone in an accountability \
+         partnership with them, keeps everything for 7 days (they can cancel until then), \
+         and then removes their data from this server. The operator's backups keep a copy \
+         until they are rotated out."
+            .to_owned(),
     ];
     let mode_text = match mode {
         RegistrationMode::InviteOnly => "by invitation only",

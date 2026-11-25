@@ -288,7 +288,7 @@ sudo docker compose exec faro faro-server init
 **3. Use the admin console** at `https://faro.yourchurch.org/admin` (the **Admin** link at the top of every page, once you're signed in as the admin):
 
 - **Overview:** how many people and computers there are, when computers last checked in, storage use and email delivery, plus the notice members see of what you can and cannot see as the operator.
-- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own.
+- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. People can delete their own accounts from Settings. The People page then shows "being deleted" with the date, and while the deletion waits you can't disable or re-enable that account. As the only admin you can't delete your own account.
 - **Settings:** registration, retention and the missed check-in grace period.
 - **Email:** send yourself a test message.
 
@@ -453,6 +453,7 @@ faro-server doctor
 [OK  ] database       sqlite reachable, schema up to date (4 migrations)
 [OK  ] identity       instance inst_… matches identity.key
 [OK  ] settings       registration invite-only, retention 90/30/90 days (headers/blobs/alerts), liveness grace 10800 s
+[OK  ] deletions      no account deletions pending
 [OK  ] smtp           smtp.example.org reachable
 [OK  ] disk           18.2 GiB free
 [OK  ] updates        release metadata version 12 (4 artifacts cached)
@@ -461,7 +462,7 @@ faro-server doctor
 0 failure(s), 0 warning(s)
 ```
 
-`FAIL` lines need fixing; `WARN` lines work but deserve a look. Add `--no-smtp-check` to skip connecting to the mail server. `doctor` only reads; it never changes anything.
+`FAIL` lines need fixing; `WARN` lines work but deserve a look. A `WARN` on `deletions` means an account deletion has waited more than a week past its 7-day hold: Faro deletes an account only after everyone has been emailed about it, so fix email (§7) and it goes ahead. Add `--no-smtp-check` to skip connecting to the mail server. `doctor` only reads; it never changes anything.
 
 ---
 
@@ -497,6 +498,8 @@ Open root's scheduled tasks with `sudo crontab -e` and add this line, replacing 
 
 **Why delete old backups:** Faro deletes old data on schedule (attachments after 30 days by default). Backups kept much longer than that would keep deleted data alive. Keep backups no longer than your retention period, both on the server and wherever you copy them.
 
+**Deleted accounts stay in older backups.** When someone deletes their account (Settings → Delete your account), Faro waits 7 days, makes sure everyone was emailed, and then removes everything about them from the server. Backups made before that still hold their data until you delete those backups. The account page tells people this.
+
 ### Restore a backup
 
 This replaces the instance's current data with the backup. Use the name of your backup file.
@@ -520,6 +523,8 @@ This replaces the instance's current data with the backup. Use the name of your 
    sudo docker compose up -d
    sudo docker compose exec faro faro-server doctor
    ```
+
+**Restoring brings deleted accounts back.** A backup made before someone's account was deleted still has their account, data and computers. Their computers would be accepted again if Faro is still installed on them. After a restore, check the People page in the admin console. If someone who deleted their account is listed again, tell them and ask them to delete it again. Their allies are told again when they do.
 
 After a restore the log says "previous run did not shut down cleanly". That's expected: the backup was taken while Faro was running. Attachments uploaded after the backup was made, which the restored database doesn't know about, are cleaned up automatically after a day.
 

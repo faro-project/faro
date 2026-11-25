@@ -321,12 +321,12 @@ Per device: about 288 heartbeats a day (~90 KB) plus a 20–200 KB daily report,
 | Role | Can | Cannot |
 |---|---|---|
 | **Instance admin** | Configure the instance (SMTP, domain, retention, registration mode, update channel), invite people, disable or re-enable accounts, see **operational metadata** (device counts, last-seen, storage use, delivery failures) | Read any report, thumbnail, URL or rating. Enroll devices for someone else. Add themselves as anyone's ally. Disable an account silently, or disable their own |
-| **Member** | Enroll their own devices, invite and approve allies, see everything their allies see | Hide events from allies, delete sent reports early (retention is the same for everyone) |
-| **Ally** | Read reports and alerts for members who approved them, set notification preferences | Change a member's settings or devices |
+| **Member** | Enroll their own devices, invite and approve allies, see everything their allies see, delete their account (§12) | Hide events from allies, delete sent reports early (retention is the same for everyone, and a deleted account's data stays for a 7-day hold) |
+| **Ally** | Read reports and alerts for members who approved them, set notification preferences, delete their account (§12) | Change a member's settings or devices |
 
 **Admins are users.** The admin role is an extra on an ordinary account, not a separate kind of account: an admin can be a member or an ally like anyone else, and one admin can disable another admin's account. Nobody can disable their own account, and the last enabled admin can't be disabled.
 
-**Disabling an account is never silent.** A disabled account can't sign in and its sessions end. Faro always tells, by email, the person themself and everyone in an accountability partnership with them: their allies (`account_disabled`), and each member they are an ally for, with that member's other allies (`ally_disabled`). These alerts are urgent and tamper-class, so they can't be switched off, only moved to the digest. Disabling stops sign-in, not monitoring: the account's devices keep reporting and alerting its allies. Re-enabling tells the same people (`account_enabled`, `ally_enabled`, normal urgency).
+**Disabling or deleting an account is never silent.** Deleting is in §12. A disabled account can't sign in and its sessions end. Faro always tells, by email, the person themself and everyone in an accountability partnership with them: their allies (`account_disabled`), and each member they are an ally for, with that member's other allies (`ally_disabled`). These alerts are urgent and tamper-class, so they can't be switched off, only moved to the digest. Disabling stops sign-in, not monitoring: the account's devices keep reporting and alerting its allies. Re-enabling tells the same people (`account_enabled`, `ally_enabled`, normal urgency).
 
 **Registration modes** (admin setting): `invite-only` (default), `open` with an email-domain allowlist (for example `@college.edu`), or `closed`.
 
@@ -366,6 +366,8 @@ GET  /v1/ally/feed                metadata list of reports and alerts
 GET  /v1/blobs/{id}               ciphertext (served directly or via presigned S3 URL)
 GET  /v1/updates/...              mirrored, project-signed update metadata + artifacts
 POST /v1/invites, /accept         ally invitations
+DELETE /v1/me                     ask for your account to be deleted (§12): recent sign-in + your address
+POST /v1/me/deletion/cancel       cancel it during the 7-day hold
 /admin/*                          admin console (instance admins only, metadata only)
 ```
 
@@ -408,8 +410,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 | Urgency | Produced by | Default delivery |
 |---|---|---|
-| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, missed check-in past grace, an account disabled by an admin | **Immediate** email + Web Push |
-| `normal` | `medium` flag, settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
+| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, missed check-in past grace, an account disabled by an admin, a member asking for their account to be deleted | **Immediate** email + Web Push |
+| `normal` | `medium` flag, settings change, ally added or removed, pause or resume, an account re-enabled, an ally deleting their account, a deletion cancelled | Bundled into the **next hourly digest** |
 | `none` | Clean captures, heartbeats, low-rated flags, context signals | Only in the daily report |
 
 - Server-generated alerts (missed check-in, chain gap) set their own urgency.
@@ -451,6 +453,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 - Configurable per instance by the admin. Members can choose **shorter** retention, never longer.
 - Defaults: event headers 90 days, report and thumbnail blobs 30 days, alerts 90 days.
 - A retention worker hard-deletes expired rows and blobs. Backups follow the same windows (the docs explain backup rotation).
+- Deleting an account (§12) removes everything about the person through the same code path, after a 7-day hold. **Older backups still hold it until they are rotated out**, and restoring a backup taken before a deletion brings that account back, including its computers' tokens (SELF-HOSTING.md §9).
 - Unblurred frames are never stored anywhere (§3.5), so retention only ever applies to ciphertext and metadata.
 
 ---
@@ -497,7 +500,12 @@ Institutions running instances (churches, colleges) make consent even more impor
 - **Everyone who uses the computer is told.** Monitoring covers every OS account (§3.1), so the tray icon and a login notice appear in every account's session: "This computer is monitored by Faro for *member*. Screenshots are blurred and shared with *allies*." Faro is meant for a computer the member controls. On a shared computer, everyone is monitored and everyone is told; the installer warns about this up front.
 - **The monitored person holds the account and keys.** Instance admins **cannot** enroll devices for someone else, become someone's ally on their own, or read content. A college or church can host the service but can't use it to monitor people who haven't opted in themselves.
 - **Full transparency**: the member sees everything allies see.
-- **Members can always leave**: uninstalling is allowed but never silent. Members can also delete their account. Their data is then removed after allies are told.
+- **Members can always leave**: uninstalling is allowed but never silent. Members and allies can also delete their account, and that is never silent either:
+  - **Asking.** Settings → "Delete your account" needs a sign-in within the last 10 minutes and the account's address typed out (`DELETE /v1/me`). The passphrase isn't used: the server can't check it, allies and admins may have none, and a forgotten passphrase must not stop anyone leaving. The instance's only admin can't delete their account.
+  - **Telling.** At once, by email, with alerts that can't be switched off: the person and their allies (`account_deleted`), and each member they are an ally for, with that member's other allies (`ally_deleted`). The emails give the date.
+  - **A 7-day hold, for every account.** Nothing else changes: their computers keep reporting and alerting allies, allies can still open what was sent, and the person can still sign in. Only what the purge would have to undo is refused: inviting allies, adding computers, approving new ones. Every page offers **Cancel deletion**. Cancelling tells the same people (`account_deletion_cancelled`, with both times), and a later request starts a new hold.
+  - **The purge.** After the hold, and only once every notice has been delivered (an email outage makes it wait; the admin is told after a week), the instance stops accepting the person's computers (`403 account_deleted`; the uninstaller's `goodbye` then goes ahead, since allies were told), ends their links (members re-sign their ally list, as after a leave), and deletes their ciphertext, rows and keys through the retention code path, then the account.
+  - **What remains** after a purge: the person's opaque user id and public keys inside *other* members' signed event headers and recipient-manifest history (signed data can't be edited), alert detail codes on other members' alerts that name the id (for example `ally=usr_…`), the keyed hashes of their computers' tokens for 365 days (so the computers get a clear refusal), server log lines with the id, and older backups until they are rotated out.
 - **No unblurred images anywhere**, which limits harm if devices, outboxes or instances are compromised.
 - **Operator privacy notice**: the setup wizard generates a plain-language notice of what the operator can and cannot see, and members are shown it at signup.
 - **Minors**: out of scope for v1, and the docs say colleges should not enroll minors without a separate design and legal review.
