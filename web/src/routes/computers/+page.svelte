@@ -382,30 +382,42 @@
 								{:else}
 									<p class="code-display big">{code.code}</p>
 									<p class="muted small">Works once, for the next {remainingText}.</p>
-									<p>On a Mac, run this in Terminal on that computer:</p>
-									<pre class="command"><code
-											>sudo /Library/Faro/bin/faro-service enroll --link '{link}'</code
-										></pre>
+									<p>On the Mac, with Faro installed, open the enrollment link:</p>
 									<div class="actions inline">
-										<button
-											class="secondary small"
-											type="button"
-											onclick={() =>
-												copy(
-													`sudo /Library/Faro/bin/faro-service enroll --link '${link}'`,
-													'command'
-												)}
-										>
-											{copied === 'command' ? '✓ Copied' : 'Copy command'}
-										</button>
+										<a class="button primary small" href={link}>Open in Faro</a>
 										<button
 											class="secondary small"
 											type="button"
 											onclick={() => copy(link, 'link')}
 										>
-											{copied === 'link' ? '✓ Copied' : 'Copy link only'}
+											{copied === 'link' ? '✓ Copied' : 'Copy link'}
 										</button>
 									</div>
+									<p class="muted small">
+										Using another device? Copy the link and send it to the Mac. There, click the eye
+										icon in the menu bar, choose <strong>Enroll this computer…</strong> and paste it.
+										An administrator of the Mac approves with their name and password.
+									</p>
+									<details>
+										<summary>Or use Terminal</summary>
+										<p>Run this in Terminal on that computer:</p>
+										<pre class="command"><code
+												>sudo /Library/Faro/bin/faro-service enroll --link '{link}'</code
+											></pre>
+										<div class="actions inline">
+											<button
+												class="secondary small"
+												type="button"
+												onclick={() =>
+													copy(
+														`sudo /Library/Faro/bin/faro-service enroll --link '${link}'`,
+														'command'
+													)}
+											>
+												{copied === 'command' ? '✓ Copied' : 'Copy command'}
+											</button>
+										</div>
+									</details>
 								{/if}
 							</li>
 							<li>
