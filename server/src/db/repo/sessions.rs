@@ -43,7 +43,7 @@ pub async fn lookup<'e>(
     let row = sqlx::query(
         "SELECT u.id, u.email, u.display_name, u.is_admin, u.is_member, u.is_ally,
                 u.disabled, u.created_at, u.deletion_requested_at, u.deletion_purge_after,
-                u.deletion_started_at, s.created_at AS session_created_at, s.last_seen_at
+                u.deletion_started_at, u.deletion_by_admin, s.created_at AS session_created_at, s.last_seen_at
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.id_hash = $1 AND s.expires_at > $2 AND u.disabled = 0",
     )

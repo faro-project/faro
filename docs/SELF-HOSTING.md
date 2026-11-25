@@ -288,7 +288,7 @@ sudo docker compose exec faro faro-server init
 **3. Use the admin console** at `https://faro.yourchurch.org/admin` (the **Admin** link at the top of every page, once you're signed in as the admin):
 
 - **Overview:** how many people and computers there are, when computers last checked in, storage use and email delivery, plus the notice members see of what you can and cannot see as the operator.
-- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. You can also make someone an admin (see below). People can delete their own accounts from Settings. The People page then shows "being deleted" with the date, and while the deletion waits you can't change that account. As the only admin you can't delete your own account.
+- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. You can also make someone an admin (see below), or **delete** an account ([Deleting someone's account](#deleting-someones-account)). People can delete their own accounts from Settings. The People page then shows "being deleted" with the date and who asked, and while the deletion waits you can't change that account. As the only admin you can't delete your own account.
 - **Settings:** registration, retention and the missed check-in grace period.
 - **Branding:** your logo and a few things to show or hide (see below).
 - **Email:** send yourself a test message.
@@ -303,7 +303,7 @@ An instance can have several admins. Two is a good idea: if one admin loses acce
 
 - Nobody can change their own admin role, and the last enabled admin can't lose it.
 - A disabled account can't be made an admin. Nothing can be changed on an account that is being deleted.
-- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when.
+- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
 - Being an admin gives no access to anyone's reports, alerts or screenshots.
 
 **If nobody can sign in as an admin** (for example, the only admin lost access to their email address), make another account an admin from the server itself:
@@ -314,10 +314,38 @@ sudo docker compose exec faro faro-server admin grant --email jordan@example.org
 
 Without Docker: `sudo -u faro faro-server admin grant --config /etc/faro/faro.toml --email jordan@example.org`.
 
-- The account must already exist: the person must have signed in at least once.
-- Disabled accounts and accounts being deleted are refused.
+- The account must already exist: the person must have signed in at least once. If they haven't, add `--create`:
+
+  ```sh
+  sudo docker compose exec faro faro-server admin grant --email jordan@example.org --create --name "Jordan Lee"
+  ```
+
+  This creates the account and makes it an admin. It starts like a new account at setup: a member, with no keys yet. `--name` is optional; without it the name is the part of the address before the @, as when someone signs up. Registration settings don't apply, because you are on the server. Faro emails Jordan that an account was created and how to sign in. They sign in at `/signin` with an email link, which also proves the address is theirs, and set up keys as usual. If the address already has an account, `--create` changes nothing and the account is simply made an admin. Running the command again changes nothing.
+- Disabled accounts and accounts being deleted are refused, with or without `--create`.
 - Faro emails the person and every other admin, as for a change in the console. The admin log shows it as done "from the command line". If Faro isn't running, the emails go out when it starts.
 - Anyone who can run commands on your server can do this. Keep access to the server as safe as access to an admin account.
+
+### Deleting someone's account
+
+Use this for an erasure request (for example under GDPR or FERPA) from someone who can no longer sign in, or to remove a disabled account. People who can sign in can delete their own account in Settings, and that is better: it is their choice and needs nothing from you.
+
+**To delete an account,** open **Admin → People** and choose **Delete…** next to it. Type the account's email address to confirm. If you signed in more than 10 minutes ago, Faro first asks you to confirm it's you with a new sign-in link.
+
+It works exactly like someone deleting their own account:
+
+- **Everyone is told at once.** Faro emails the person and everyone in an accountability partnership with them. The emails say the account is "being deleted by the instance administrator". They don't name you. These emails can't be switched off. A disabled person is emailed too, and told to contact you if they want to keep the account.
+- **Nothing changes for 7 days.** Their computers are still monitored and their allies still get alerts. If they can sign in, every page shows that the instance administrator asked for the deletion, with a **Cancel deletion** button.
+- **Either the person or any admin can cancel** during those 7 days: the person from the banner, an admin with **Cancel deletion…** on the People page. Cancelling tells the same people. A disabled account stays disabled; to re-enable it, cancel the deletion first. If the person asked for the deletion themself, only they can cancel it.
+- **Then everything about them is deleted,** once every email has gone out. Copies in your backups remain until you delete those backups ([section 9](#9-backups-and-restore)).
+
+Every admin is emailed when an admin asks for a deletion or one is cancelled, and the admin log lists both, with who did it. You can't delete your own account this way (use Settings), and nobody can delete the last admin.
+
+**Handling an erasure request:**
+
+1. Check who is asking. Faro can't do this for you. If they can still sign in, ask them to delete the account themselves.
+2. Delete the account on the People page. Tell the person it takes effect after 7 days, and that they can cancel until then.
+3. After the 7 days, check the People page: the account is gone. If it's still there and the Overview warns that a deletion is waiting, email isn't getting through: fix it ([section 7](#7-email-smtp)), because Faro only deletes once everyone has been told.
+4. Remove the person from your backups as your backup schedule allows, and tell them when that happens. Your privacy notice should say how long backups are kept.
 
 ### Branding your instance
 
@@ -540,7 +568,7 @@ Open root's scheduled tasks with `sudo crontab -e` and add this line, replacing 
 
 **Why delete old backups:** Faro deletes old data on schedule (attachments after 30 days by default). Backups kept much longer than that would keep deleted data alive. Keep backups no longer than your retention period, both on the server and wherever you copy them.
 
-**Deleted accounts stay in older backups.** When someone deletes their account (Settings → Delete your account), Faro waits 7 days, makes sure everyone was emailed, and then removes everything about them from the server. Backups made before that still hold their data until you delete those backups. The account page tells people this.
+**Deleted accounts stay in older backups.** When someone deletes their account (Settings → Delete your account), or an admin deletes it, Faro waits 7 days, makes sure everyone was emailed, and then removes everything about them from the server. Backups made before that still hold their data until you delete those backups. The account page tells people this.
 
 ### Restore a backup
 

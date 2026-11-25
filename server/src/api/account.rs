@@ -1,4 +1,5 @@
-//! Deleting your own account (§12), for members and allies alike.
+//! Deleting an account (§12), for members and allies alike: your own, or
+//! (from the admin console) someone else's.
 //!
 //! * `DELETE /v1/me` with `{"confirm_email": …}` asks for the deletion. It
 //!   needs a session signed in within [`REAUTH_WINDOW_MS`] and the
@@ -20,12 +21,31 @@
 //! * After the hold, [`crate::deletion`] purges the account once every
 //!   notice has been delivered.
 //!
-//! The only admin may not delete their account: the instance would have
-//! nobody to run it.
+//! **An admin may ask too** (`DELETE /admin/api/users/{id}`, in
+//! [`super::admin`]): for an erasure request from someone who can't sign
+//! in, or to remove a disabled account. It is the same request, hold,
+//! notices and purge ([`start`], [`cancel`]), with these differences:
+//!
+//! * The admin types the account's address and needs the same recent
+//!   sign-in. Never their own account (they use `DELETE /v1/me`).
+//! * The notices say the account is "being deleted by the instance
+//!   administrator" (`requested_by=admin` in their detail). A disabled
+//!   person is emailed too, though they hear nothing else.
+//! * The person keeps their sessions, so they see the banner and can
+//!   cancel. During the hold either the person or any admin may cancel
+//!   (`POST /admin/api/users/{id}/deletion/cancel`); the cancellation tells
+//!   the same people. An admin can't cancel a deletion the person asked
+//!   for themself.
+//! * The request and its cancellation are written to the admin log and
+//!   emailed to every admin.
+//!
+//! The only admin's account may not be deleted, by anyone: the instance
+//! would have nobody to run it.
 
 use super::ApiJson;
 use crate::auth::normalize_email;
 use crate::auth::session::SessionUser;
+use crate::db::repo::admin_log::{self, Action, Via};
 use crate::db::repo::alerts::{self, AlertSource, NewAlert};
 use crate::db::repo::users::{self, PendingDeletion};
 use crate::db::repo::{allies, sessions};
@@ -86,10 +106,32 @@ pub struct DeletionCancelled {
     pub told: Told,
 }
 
+/// Who asks for a deletion, or cancels one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum By<'a> {
+    /// The person themself, in Settings or the banner.
+    Person,
+    /// An admin, under Admin → People ([`super::admin::delete_user`]).
+    Admin(&'a UserId),
+}
+
+impl By<'_> {
+    fn is_admin(self) -> bool {
+        matches!(self, By::Admin(_))
+    }
+}
+
 /// The notice raised on the person and on each member they are an ally for.
 enum Notice {
-    Requested { purge_after_ms: i64 },
-    Cancelled { requested_at_ms: i64 },
+    Requested {
+        purge_after_ms: i64,
+        by_admin: bool,
+    },
+    Cancelled {
+        requested_at_ms: i64,
+        requested_by_admin: bool,
+        by_admin: bool,
+    },
 }
 
 impl Notice {
@@ -106,11 +148,31 @@ impl Notice {
         }
     }
 
-    /// The `key=value` detail the email takes its date or time from.
+    /// The `key=value;…` detail the email takes its wording from: the date
+    /// or time, and `requested_by=admin` / `cancelled_by=admin` when an
+    /// admin asked or cancelled (absent: the person did).
     fn detail(&self) -> String {
-        match self {
-            Notice::Requested { purge_after_ms } => format!("purge_after={purge_after_ms}"),
-            Notice::Cancelled { requested_at_ms } => format!("requested={requested_at_ms}"),
+        match *self {
+            Notice::Requested {
+                purge_after_ms,
+                by_admin,
+            } => {
+                let by = if by_admin { ";requested_by=admin" } else { "" };
+                format!("purge_after={purge_after_ms}{by}")
+            }
+            Notice::Cancelled {
+                requested_at_ms,
+                requested_by_admin,
+                by_admin,
+            } => {
+                let asked = if requested_by_admin {
+                    ";requested_by=admin"
+                } else {
+                    ""
+                };
+                let by = if by_admin { ";cancelled_by=admin" } else { "" };
+                format!("requested={requested_at_ms}{asked}{by}")
+            }
         }
     }
 }
@@ -184,6 +246,135 @@ pub(crate) async fn refuse_if_being_deleted<'e>(
     }
 }
 
+/// Inside `tx`: start the hold for `user` and tell everyone (module docs).
+/// Refuses an account already being deleted, and the instance's last
+/// enabled admin. An admin's request is also written to the admin log and
+/// emailed to every admin. The caller checks who may ask.
+pub(crate) async fn start(
+    tx: &mut sqlx::AnyConnection,
+    user: &users::User,
+    by: By<'_>,
+    now: i64,
+) -> AppResult<DeletionRequested> {
+    let id = &user.id;
+    let already = || {
+        AppError::conflict(
+            "already_deleting",
+            match by {
+                By::Person => "your account is already being deleted",
+                By::Admin(_) => "this account is already being deleted",
+            },
+        )
+    };
+    if user.deletion.is_some() {
+        return Err(already());
+    }
+    if user.roles.admin && users::count_enabled_admins_except(&mut *tx, id).await? == 0 {
+        return Err(AppError::conflict(
+            "last_admin",
+            match by {
+                By::Person => "you are the instance's only admin, so your account can't be deleted",
+                By::Admin(_) => "the instance must keep at least one enabled admin",
+            },
+        ));
+    }
+    let purge_after_ms = now.saturating_add(HOLD_MS);
+    let by_admin = by.is_admin();
+    if !users::request_deletion(&mut *tx, id, now, purge_after_ms, by_admin).await? {
+        return Err(already());
+    }
+    let notice = Notice::Requested {
+        purge_after_ms,
+        by_admin,
+    };
+    let told = raise(tx, id, &notice, now).await?;
+    if let By::Admin(admin) = by {
+        log(tx, Action::DeletionRequested, id, admin, now).await?;
+    }
+    Ok(DeletionRequested {
+        deletion: PendingDeletion {
+            requested_at_ms: now,
+            purge_after_ms,
+            started_at_ms: None,
+            by_admin,
+        },
+        told,
+    })
+}
+
+/// Inside `tx`: cancel the pending deletion of `user` before its purge
+/// starts, and tell the same people again. The person may cancel any
+/// deletion of their account. An admin may cancel only one an admin asked
+/// for, never the person's own request. Cancelling a deletion an admin
+/// asked for is written to the admin log and emailed to every admin,
+/// whoever cancels it.
+pub(crate) async fn cancel(
+    tx: &mut sqlx::AnyConnection,
+    user: &users::User,
+    by: By<'_>,
+    now: i64,
+) -> AppResult<DeletionCancelled> {
+    let id = &user.id;
+    let Some(pending) = user.deletion else {
+        return Err(AppError::conflict(
+            "not_deleting",
+            match by {
+                By::Person => "your account is not being deleted",
+                By::Admin(_) => "this account is not being deleted",
+            },
+        ));
+    };
+    if by.is_admin() && !pending.by_admin {
+        return Err(AppError::conflict(
+            "not_admin_deletion",
+            "this person asked for their account to be deleted; only they can cancel it",
+        ));
+    }
+    if pending.started_at_ms.is_some()
+        || !users::cancel_deletion(&mut *tx, id, pending.requested_at_ms).await?
+    {
+        return Err(AppError::conflict(
+            "deletion_in_progress",
+            match by {
+                By::Person => "your account is already being deleted and can no longer be kept",
+                By::Admin(_) => "this account is already being deleted and can no longer be kept",
+            },
+        ));
+    }
+    let notice = Notice::Cancelled {
+        requested_at_ms: pending.requested_at_ms,
+        requested_by_admin: pending.by_admin,
+        by_admin: by.is_admin(),
+    };
+    let told = raise(tx, id, &notice, now).await?;
+    if pending.by_admin {
+        let actor = match by {
+            By::Admin(admin) => admin,
+            By::Person => id,
+        };
+        log(tx, Action::DeletionCancelled, id, actor, now).await?;
+    }
+    Ok(DeletionCancelled {
+        requested_at_ms: pending.requested_at_ms,
+        cancelled_at_ms: now,
+        told,
+    })
+}
+
+/// Write `action` about `user` to the admin log and email it to every
+/// enabled admin but `user`, who hears from their own notice.
+async fn log(
+    tx: &mut sqlx::AnyConnection,
+    action: Action,
+    user: &UserId,
+    actor: &UserId,
+    now: i64,
+) -> AppResult<()> {
+    let entry = admin_log::insert(&mut *tx, action, user, Some(actor), Via::Console, now).await?;
+    let admins = users::enabled_admin_ids_except(&mut *tx, user).await?;
+    crate::roles::tell(tx, entry, &admins, now).await
+}
+
 /// `DELETE /v1/me`: ask for your account to be deleted (module docs).
 pub async fn delete_me(
     State(state): State<AppState>,
@@ -205,46 +396,22 @@ pub async fn delete_me(
     let user = users::by_id(&mut *tx, id)
         .await?
         .ok_or(AppError::Unauthorized)?;
-    if user.deletion.is_some() {
-        return Err(AppError::conflict(
-            "already_deleting",
-            "your account is already being deleted",
-        ));
-    }
-    if user.roles.admin && users::count_enabled_admins_except(&mut *tx, id).await? == 0 {
-        return Err(AppError::conflict(
-            "last_admin",
-            "you are the instance's only admin, so your account can't be deleted",
-        ));
-    }
-    let purge_after_ms = now.saturating_add(HOLD_MS);
-    if !users::request_deletion(&mut *tx, id, now, purge_after_ms).await? {
-        return Err(AppError::conflict(
-            "already_deleting",
-            "your account is already being deleted",
-        ));
-    }
+    let r = start(&mut tx, &user, By::Person, now).await?;
     // Anyone else signed in as this person is signed out; this session
     // stays, so they can cancel.
     sessions::delete_others_for_user(&mut *tx, id, &s.session_hash).await?;
-    let told = raise(&mut tx, id, &Notice::Requested { purge_after_ms }, now).await?;
     tx.commit().await?;
-    tracing::info!(user = %id, purge_after_ms, "account deletion requested");
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(DeletionRequested {
-            deletion: PendingDeletion {
-                requested_at_ms: now,
-                purge_after_ms,
-                started_at_ms: None,
-            },
-            told,
-        }),
-    ))
+    tracing::info!(
+        user = %id,
+        purge_after_ms = r.deletion.purge_after_ms,
+        "account deletion requested"
+    );
+    Ok((StatusCode::ACCEPTED, Json(r)))
 }
 
-/// `POST /v1/me/deletion/cancel`: cancel a pending deletion before the
-/// purge starts (module docs). Needs only a signed-in session.
+/// `POST /v1/me/deletion/cancel`: cancel a pending deletion of your
+/// account before the purge starts, whoever asked for it (module docs).
+/// Needs only a signed-in session.
 pub async fn cancel_deletion(
     State(state): State<AppState>,
     s: SessionUser,
@@ -256,34 +423,8 @@ pub async fn cancel_deletion(
     let user = users::by_id(&mut *tx, id)
         .await?
         .ok_or(AppError::Unauthorized)?;
-    let Some(pending) = user.deletion else {
-        return Err(AppError::conflict(
-            "not_deleting",
-            "your account is not being deleted",
-        ));
-    };
-    if pending.started_at_ms.is_some()
-        || !users::cancel_deletion(&mut *tx, id, pending.requested_at_ms).await?
-    {
-        return Err(AppError::conflict(
-            "deletion_in_progress",
-            "your account is already being deleted and can no longer be kept",
-        ));
-    }
-    let told = raise(
-        &mut tx,
-        id,
-        &Notice::Cancelled {
-            requested_at_ms: pending.requested_at_ms,
-        },
-        now,
-    )
-    .await?;
+    let r = cancel(&mut tx, &user, By::Person, now).await?;
     tx.commit().await?;
     tracing::info!(user = %id, "account deletion cancelled");
-    Ok(Json(DeletionCancelled {
-        requested_at_ms: pending.requested_at_ms,
-        cancelled_at_ms: now,
-        told,
-    }))
+    Ok(Json(r))
 }

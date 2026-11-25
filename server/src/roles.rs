@@ -3,7 +3,9 @@
 //! An admin grants or revokes the role for another account in the admin
 //! console (`PUT /admin/api/users/{id}/admin`). Someone with access to the
 //! server can grant it from the command line (`faro-server admin grant`),
-//! the way back in when nobody can sign in as an admin any more.
+//! the way back in when nobody can sign in as an admin any more. With
+//! `--create`, the command line also creates the account if no account
+//! has the address ([`create_admin`]).
 //!
 //! The rules:
 //!
@@ -48,6 +50,33 @@ pub struct AdminRole {
     pub told: usize,
 }
 
+/// Inside `tx`: email admin log entry `entry` to `recipients`, at once.
+/// These are notification rows like any other, sent by the notifier, but
+/// not alerts: there is nothing to fan out, and no preference applies.
+pub(crate) async fn tell(
+    tx: &mut sqlx::AnyConnection,
+    entry: String,
+    recipients: &[UserId],
+    now: i64,
+) -> AppResult<()> {
+    let target = Target::AdminLog(entry);
+    for r in recipients {
+        notifications::insert(
+            &mut *tx,
+            &NewNotification {
+                target: &target,
+                recipient: r,
+                urgency: Urgency::Normal,
+                mode: Some(Mode::Immediate),
+                due_at_ms: now,
+                now_ms: now,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Grant (`admin: true`) or revoke the admin role of `target` (module docs).
 pub async fn set_admin(
     state: &AppState,
@@ -67,6 +96,88 @@ pub async fn set_admin(
     }
     let now = state.now_ms();
     let mut tx = state.db().begin_write().await?;
+    let r = set_admin_in(&mut tx, target, admin, by, now).await?;
+    tx.commit().await?;
+    tracing::info!(
+        actor = actor.map(UserId::as_str),
+        user = %target,
+        admin,
+        via = match by {
+            By::Admin(_) => Via::Console,
+            By::CommandLine => Via::CommandLine,
+        }
+        .as_str(),
+        "admin role changed"
+    );
+    Ok(r)
+}
+
+/// `faro-server admin grant --create`: create an account for `email` (an
+/// address with no account yet, already normalized) and make it an admin,
+/// in one transaction. The account starts the way the first admin's does
+/// at setup: a member, so they can set up keys at their first sign-in,
+/// named `display_name` (already normalized). Nobody is signed in: the
+/// person signs in with an email link like anyone else, which also proves
+/// the address is theirs. Written to the admin log as `account_created`
+/// (emailed to the person, saying how to sign in) and `admin_granted`
+/// (emailed to the person and every other admin, as usual).
+pub async fn create_admin(
+    state: &AppState,
+    email: &str,
+    display_name: &str,
+) -> AppResult<AdminRole> {
+    let now = state.now_ms();
+    let mut tx = state.db().begin_write().await?;
+    if users::by_email(&mut *tx, email).await?.is_some() {
+        return Err(AppError::conflict(
+            "email_in_use",
+            "an account with this email already exists",
+        ));
+    }
+    let user = users::User {
+        id: UserId::from_random(&faro_crypto::random_bytes::<16>()),
+        email: email.to_owned(),
+        display_name: display_name.to_owned(),
+        roles: users::Roles {
+            admin: false,
+            member: true,
+            ally: false,
+        },
+        disabled: false,
+        created_at_ms: now,
+        deletion: None,
+    };
+    users::insert(&mut *tx, &user).await?;
+    let entry = admin_log::insert(
+        &mut *tx,
+        Action::AccountCreated,
+        &user.id,
+        None,
+        Via::CommandLine,
+        now,
+    )
+    .await?;
+    tell(&mut tx, entry, std::slice::from_ref(&user.id), now).await?;
+    let r = set_admin_in(&mut tx, &user.id, true, By::CommandLine, now).await?;
+    tx.commit().await?;
+    tracing::info!(user = %user.id, "admin account created from the command line");
+    Ok(r)
+}
+
+/// [`set_admin`] inside `tx`, so `faro-server admin grant --create` can
+/// create the account in the same transaction. The caller has checked
+/// that nobody changes their own role.
+pub(crate) async fn set_admin_in(
+    tx: &mut sqlx::AnyConnection,
+    target: &UserId,
+    admin: bool,
+    by: By<'_>,
+    now: i64,
+) -> AppResult<AdminRole> {
+    let actor = match by {
+        By::Admin(a) => Some(a),
+        By::CommandLine => None,
+    };
     let user = users::by_id(&mut *tx, target)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -105,31 +216,9 @@ pub async fn set_admin(
         By::CommandLine => Via::CommandLine,
     };
     let entry = admin_log::insert(&mut *tx, action, target, actor, via, now).await?;
-    let target_log = Target::AdminLog(entry);
     let mut recipients = vec![target.clone()];
     recipients.extend(users::enabled_admin_ids_except(&mut *tx, target).await?);
-    for r in &recipients {
-        notifications::insert(
-            &mut *tx,
-            &NewNotification {
-                target: &target_log,
-                recipient: r,
-                urgency: Urgency::Normal,
-                mode: Some(Mode::Immediate),
-                due_at_ms: now,
-                now_ms: now,
-            },
-        )
-        .await?;
-    }
-    tx.commit().await?;
-    tracing::info!(
-        actor = actor.map(UserId::as_str),
-        user = %target,
-        admin,
-        via = via.as_str(),
-        "admin role changed"
-    );
+    tell(tx, entry, &recipients, now).await?;
     Ok(AdminRole {
         user_id: target.clone(),
         admin,

@@ -35,11 +35,15 @@
 //! recipient told although their account is disabled. Deletion notices
 //! (`account_deleted` on the person, `ally_deleted` on each member they are
 //! an ally for, and `account_deletion_cancelled` on both) are worded the
-//! same way, with the dates taken from the alert's detail (§12).
+//! same way, with the dates taken from the alert's detail (§12). When an
+//! admin asked for the deletion (`requested_by=admin`), they say the
+//! account is "being deleted by the instance administrator", and a
+//! disabled person is told too: it is their data.
 //!
-//! **Admin role changes** are told the same way, in words, to the person
-//! and to every other admin ([`crate::roles`]). They are not alerts: no
-//! member's feed shows them and no ally hears of them. [`crate::roles`]
+//! **Admin log entries** are told the same way, in words: role changes to
+//! the person and every other admin ([`crate::roles`]), deletions an admin
+//! asked for and their cancellation to every admin. They are not alerts: no
+//! member's feed shows them and no ally hears of them. [`crate::roles::tell`]
 //! writes their notification rows itself, always immediate, so there is
 //! nothing to fan out.
 //!
@@ -179,11 +183,27 @@ async fn fan_out(
 }
 
 /// Whether a due row must be dropped rather than sent. A disabled account
-/// hears nothing, except that it was disabled.
+/// hears nothing, except that it was disabled, and that an admin is
+/// deleting it (or cancelled that): it is their data.
 fn undeliverable(n: &DueNotification) -> bool {
-    let told_while_disabled = account_status(n) == Some(ServerAlertKind::AccountDisabled)
-        && n.recipient_id == n.member_id;
+    let told_while_disabled = n.recipient_id == n.member_id
+        && matches!(
+            account_status(n),
+            Some(
+                ServerAlertKind::AccountDisabled
+                    | ServerAlertKind::AccountDeleted
+                    | ServerAlertKind::AccountDeletionCancelled
+            )
+        );
     (n.recipient_disabled && !told_while_disabled) || !n.entitled
+}
+
+/// Whether an alert's `key=value;…` detail has `key=value`.
+fn detail_is(n: &DueNotification, key: &str, value: &str) -> bool {
+    n.alert_detail.as_deref().is_some_and(|d| {
+        d.split(';')
+            .any(|part| part.strip_prefix(key).and_then(|r| r.strip_prefix('=')) == Some(value))
+    })
 }
 
 /// The account-status kind of an alert notification, if it is one.
@@ -258,6 +278,9 @@ fn deletion_text(instance: &str, n: &DueNotification, k: ServerAlertKind) -> (St
         .alert_created_at_ms
         .map_or_else(|| "later".to_owned(), utc_time);
     let about_ally = n.about_name.is_some();
+    if detail_is(n, "requested_by", "admin") {
+        return admin_deletion_text(instance, n, k);
+    }
     match (k, about_ally, to_member) {
         (ServerAlertKind::AccountDeleted, _, true) => (
             format!("Your Faro account on {instance} will be deleted on {date}"),
@@ -333,6 +356,143 @@ fn deletion_text(instance: &str, n: &DueNotification, k: ServerAlertKind) -> (St
                 "{ally}, who is also an ally for {member}, asked for their Faro account on \
                  {instance} to be deleted on {requested} and cancelled it on {cancelled}. They \
                  stay an ally for {member}."
+            ),
+        ),
+    }
+}
+
+/// [`deletion_text`] for a deletion an admin asked for
+/// (`requested_by=admin`): "deleted by the instance administrator". The
+/// admin is not named: the admin log says who.
+fn admin_deletion_text(
+    instance: &str,
+    n: &DueNotification,
+    k: ServerAlertKind,
+) -> (String, String) {
+    const ADMIN: &str = "the instance administrator";
+    let member = &n.member_name;
+    let to_member = n.recipient_id == n.member_id;
+    let ally = n.about_name.as_deref().unwrap_or("an ally");
+    let about_ally = n.about_name.is_some();
+    let date = detail_ms(n, "purge_after").map_or_else(|| "in 7 days".to_owned(), utc_date);
+    let requested = detail_ms(n, "requested").map_or_else(|| "earlier".to_owned(), utc_time);
+    let cancelled = n
+        .alert_created_at_ms
+        .map_or_else(|| "later".to_owned(), utc_time);
+    // Who cancelled, as the start of a sentence.
+    let by_admin = detail_is(n, "cancelled_by", "admin");
+    let canceller = match (by_admin, about_ally, to_member) {
+        (true, _, _) => "The instance administrator".to_owned(),
+        (false, true, _) => ally.to_owned(),
+        (false, false, true) => "You".to_owned(),
+        (false, false, false) => member.clone(),
+    };
+    match (k, about_ally, to_member) {
+        (ServerAlertKind::AccountDeleted, _, true) => {
+            // A disabled person can't sign in to cancel.
+            let keep = if n.recipient_disabled {
+                format!(
+                    "Your account is disabled, so you can't sign in. To keep your account, \
+                     contact the people who run {instance} before {date}."
+                )
+            } else {
+                format!(
+                    "To keep your account, sign in before {date} and choose Cancel deletion, or \
+                     ask the people who run {instance}."
+                )
+            };
+            (
+                format!("Your Faro account on {instance} is being deleted by {ADMIN}"),
+                format!(
+                    "Your Faro account on {instance} is being deleted by {ADMIN}. On {date}, \
+                     everything this server stores about you is permanently deleted: your \
+                     computers, activity, alerts, reports, keys, allies and settings. Until then \
+                     nothing changes: your computers are still monitored and your allies still \
+                     receive alerts. Everyone in an accountability partnership with you has been \
+                     told. {keep} After {date}, {instance} no longer accepts anything from your \
+                     computers, so uninstall Faro from them. Copies in the operator's backups \
+                     last until those backups are rotated out."
+                ),
+            )
+        }
+        (ServerAlertKind::AccountDeleted, _, false) => (
+            format!("{member}'s Faro account on {instance} is being deleted by {ADMIN}"),
+            format!(
+                "{member}'s Faro account on {instance} is being deleted by {ADMIN}. Until \
+                 {date} nothing changes: their computers are still monitored, you still receive \
+                 alerts about them, and the deletion can still be cancelled. On {date}, \
+                 everything about {member} is permanently deleted from this server, and their \
+                 computers are no longer monitored through {instance}, even if Faro is still \
+                 installed on them."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, true) => (
+            format!("Your ally {ally}'s Faro account is being deleted by {ADMIN}"),
+            format!(
+                "The Faro account of {ally}, one of your allies on {instance}, is being deleted \
+                 by {ADMIN}. Until {date} they are still your ally, and the deletion can still \
+                 be cancelled. On {date} they stop being your ally and can no longer see \
+                 anything about you. Then open Faro and confirm your updated ally list: until \
+                 you do, your computers keep encrypting new items to a key that no longer \
+                 exists."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, false) => (
+            format!(
+                "The Faro account of {ally}, also an ally for {member}, is being deleted by \
+                 {ADMIN}"
+            ),
+            format!(
+                "The Faro account of {ally}, who is also an ally for {member} on {instance}, is \
+                 being deleted by {ADMIN}. On {date} they stop being an ally for {member}. You \
+                 still receive {member}'s alerts."
+            ),
+        ),
+        (_, false, true) => {
+            let subject = if by_admin {
+                format!("The deletion of your Faro account on {instance} was cancelled")
+            } else {
+                format!("You cancelled the deletion of your Faro account on {instance}")
+            };
+            let unexpected = if by_admin {
+                String::new()
+            } else {
+                format!(" If you didn't do this, contact the people who run {instance}.")
+            };
+            (
+                subject,
+                format!(
+                    "On {requested}, {ADMIN} asked for your Faro account on {instance} to be \
+                     deleted. {canceller} cancelled it on {cancelled}. Nothing will be deleted. \
+                     Everyone in an accountability partnership with you has been told.\
+                     {unexpected}"
+                ),
+            )
+        }
+        (_, false, false) => (
+            format!("The deletion of {member}'s Faro account was cancelled"),
+            format!(
+                "On {requested}, {ADMIN} asked for {member}'s Faro account on {instance} to be \
+                 deleted. {canceller} cancelled it on {cancelled}. Nothing will be deleted, and \
+                 you still receive alerts about them."
+            ),
+        ),
+        (_, true, true) => (
+            format!("The deletion of your ally {ally}'s Faro account was cancelled"),
+            format!(
+                "On {requested}, {ADMIN} asked for the Faro account of {ally}, one of your \
+                 allies on {instance}, to be deleted. {canceller} cancelled it on {cancelled}. \
+                 They stay your ally."
+            ),
+        ),
+        (_, true, false) => (
+            format!(
+                "The deletion of the account of {ally}, also an ally for {member}, was cancelled"
+            ),
+            format!(
+                "On {requested}, {ADMIN} asked for the Faro account of {ally}, who is also an \
+                 ally for {member} on {instance}, to be deleted. {canceller} cancelled it on \
+                 {cancelled}. They stay an ally for {member}."
             ),
         ),
     }
@@ -444,6 +604,67 @@ fn admin_log_text(
     };
     let people = format!("{url}/admin/people");
     let no_content = "Being an admin gives no access to anyone's reports, alerts or screenshots.";
+    // Deletions (§12): only admins get these; the person and their
+    // partners have their own notices.
+    match a.action {
+        Action::DeletionRequested => {
+            let date = utc_date(n.created_at_ms.saturating_add(crate::api::account::HOLD_MS));
+            return (
+                format!("{person}'s account on {instance} is being deleted"),
+                format!(
+                    "{who} asked for the Faro account of {person} ({email}) on {instance} to be \
+                     deleted. {person} and everyone in an accountability partnership with them \
+                     have been told. It is deleted on {date}. Until then, {person} or any admin \
+                     can cancel it. Every admin is told about deletions an admin asks for. If you \
+                     didn't expect this, check the People page:"
+                ),
+                people,
+            );
+        }
+        Action::DeletionCancelled => {
+            let line = if a.actor_id.as_ref() == Some(&n.member_id) {
+                format!(
+                    "{person} ({email}) cancelled the deletion of their Faro account on {instance}"
+                )
+            } else {
+                format!(
+                    "{who} cancelled the deletion of the Faro account of {person} ({email}) on \
+                     {instance}"
+                )
+            };
+            return (
+                format!("The deletion of {person}'s account on {instance} was cancelled"),
+                format!(
+                    "{line}. An admin had asked for it. Nothing will be deleted. {person} and \
+                     everyone in an accountability partnership with them have been told. The \
+                     admin log on the People page shows who asked:"
+                ),
+                people,
+            );
+        }
+        // `faro-server admin grant --create`: the person's welcome. The
+        // role notice follows separately.
+        Action::AccountCreated if n.recipient_id == n.member_id => {
+            return (
+                format!("A Faro account was created for you on {instance}"),
+                format!(
+                    "{who} created a Faro account for you on {instance}{how}, with this email \
+                     address. To sign in, open the link below and enter this address: Faro \
+                     emails you a sign-in link. No password is needed. If you didn't expect \
+                     this, contact the people who run {instance}."
+                ),
+                format!("{url}/signin"),
+            );
+        }
+        Action::AccountCreated => {
+            return (
+                format!("An account was created for {person} on {instance}"),
+                format!("{who} created a Faro account for {person} ({email}) on {instance}{how}."),
+                people,
+            );
+        }
+        Action::AdminGranted | Action::AdminRevoked => {}
+    }
     if n.recipient_id == n.member_id {
         let (subject, line) = match a.action {
             Action::AdminGranted => (
@@ -455,7 +676,11 @@ fn admin_log_text(
                      {instance}."
                 ),
             ),
-            Action::AdminRevoked => (
+            // Deletions and new accounts were worded above.
+            Action::AdminRevoked
+            | Action::DeletionRequested
+            | Action::DeletionCancelled
+            | Action::AccountCreated => (
                 format!("You are no longer an admin of {instance}"),
                 format!(
                     "{who} removed your admin role on {instance}{how}. You can still sign in, and \
@@ -475,7 +700,11 @@ fn admin_log_text(
                  expect this, check who is an admin on the People page:"
             ),
         ),
-        Action::AdminRevoked => (
+        // Deletions and new accounts were worded above.
+        Action::AdminRevoked
+        | Action::DeletionRequested
+        | Action::DeletionCancelled
+        | Action::AccountCreated => (
             format!("{person} is no longer an admin of {instance}"),
             format!(
                 "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \
@@ -927,6 +1156,81 @@ mod tests {
             "Pat, also an ally for Sam, is deleting their Faro account"
         );
         assert!(t.contains("You still receive Sam's alerts"), "{t}");
+    }
+
+    #[test]
+    fn admin_deletion_notices_say_the_instance_administrator() {
+        let by = "deleted by the instance administrator";
+        let d = format!("purge_after={PURGE};requested_by=admin");
+        let mut n = due(ServerAlertKind::AccountDeleted, true, None, &d);
+        let (s, t) = text(&n);
+        assert_eq!(
+            s,
+            "Your Faro account on Faro Test is being deleted by the instance administrator"
+        );
+        assert!(t.contains("On 2 December 2026"), "{t}");
+        assert!(t.contains("sign in before 2 December 2026"), "{t}");
+        assert!(!t.contains("You asked"), "{t}");
+        // A disabled person can't sign in to cancel.
+        n.recipient_disabled = true;
+        let (_, t) = text(&n);
+        assert!(t.contains("Your account is disabled"), "{t}");
+        assert!(!t.contains("sign in before"), "{t}");
+        assert!(!undeliverable(&n), "a disabled person is told");
+
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, false, None, &d));
+        assert!(s.contains(by) && s.starts_with("Sam's"), "{s}");
+        assert!(t.contains("Until 2 December 2026 nothing changes"), "{t}");
+        let d = format!("ally=usr_a;purge_after={PURGE};requested_by=admin");
+        for to_member in [true, false] {
+            let (s, t) = text(&due(
+                ServerAlertKind::AllyDeleted,
+                to_member,
+                Some("Pat"),
+                &d,
+            ));
+            assert!(s.contains(by) && s.contains("Pat"), "{s}");
+            assert!(!t.contains("asked for their"), "{t}");
+        }
+
+        let k = ServerAlertKind::AccountDeletionCancelled;
+        let d = format!("requested={REQUESTED};requested_by=admin");
+        let (s, t) = text(&due(k, true, None, &d));
+        assert_eq!(
+            s,
+            "You cancelled the deletion of your Faro account on Faro Test"
+        );
+        assert!(
+            t.contains("On 25 November 2026 at 14:03 UTC, the instance administrator asked"),
+            "{t}"
+        );
+        let mut n = due(k, true, None, &format!("{d};cancelled_by=admin"));
+        let (s, t) = text(&n);
+        assert_eq!(
+            s,
+            "The deletion of your Faro account on Faro Test was cancelled"
+        );
+        assert!(
+            t.contains("The instance administrator cancelled it on 25 November 2026 at 15:03"),
+            "{t}"
+        );
+        n.recipient_disabled = true;
+        assert!(!undeliverable(&n), "a disabled person is told");
+        let (s, t) = text(&due(k, false, None, &d));
+        assert_eq!(s, "The deletion of Sam's Faro account was cancelled");
+        assert!(t.contains("Sam cancelled it on"), "{t}");
+        let d = format!("ally=usr_a;{d}");
+        let (s, t) = text(&due(k, true, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "The deletion of your ally Pat's Faro account was cancelled"
+        );
+        assert!(t.contains("Pat cancelled it on"), "{t}");
+
+        // Other notices still drop for a disabled recipient.
+        let mut n = due(ServerAlertKind::AllyDeleted, true, Some("Pat"), &d);
+        n.recipient_disabled = true;
+        assert!(undeliverable(&n));
     }
 
     #[test]

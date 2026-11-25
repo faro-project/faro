@@ -157,6 +157,9 @@
 		<div class="notice warn" role="status">
 			<p>
 				<strong>Your account will be deleted on {date(session.deletion.purge_after_ms)}.</strong>
+				{#if session.deletion.by_admin}
+					The instance administrator asked for this.
+				{/if}
 				{#if session.deletion.started_at_ms}
 					The deletion has started and can no longer be cancelled.
 				{:else}

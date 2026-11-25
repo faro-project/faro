@@ -1,6 +1,10 @@
-//! `admin_log`: what admins did to accounts (§4.3). For now, granting and
-//! revoking the admin role ([`crate::roles`]). Shown in the admin console
-//! and emailed to the person and every other admin.
+//! `admin_log`: what admins did to accounts (§4.3): granting and revoking
+//! the admin role ([`crate::roles`]), and account deletions an admin asked
+//! for, with their cancellation ([`crate::api::admin`]), and accounts
+//! created from the command line. Shown in the admin console and emailed to
+//! every admin (and, for a role change, the person). Entries are kept: no
+//! retention window applies to them, and the account-deletion purge only
+//! NULLs the ids in them.
 
 use crate::tokens::new_hex_id;
 use faro_proto::UserId;
@@ -13,6 +17,14 @@ use sqlx::{Any, Executor, Row};
 pub enum Action {
     AdminGranted,
     AdminRevoked,
+    /// An admin asked for the account to be deleted (§12).
+    DeletionRequested,
+    /// A deletion an admin asked for was cancelled, by an admin or by the
+    /// person (then `actor_id` is the person themself).
+    DeletionCancelled,
+    /// `faro-server admin grant --create` created the account (followed
+    /// by `admin_granted`).
+    AccountCreated,
 }
 
 impl Action {
@@ -20,6 +32,9 @@ impl Action {
         match self {
             Action::AdminGranted => "admin_granted",
             Action::AdminRevoked => "admin_revoked",
+            Action::DeletionRequested => "deletion_requested",
+            Action::DeletionCancelled => "deletion_cancelled",
+            Action::AccountCreated => "account_created",
         }
     }
 
@@ -27,6 +42,9 @@ impl Action {
         match s {
             "admin_granted" => Some(Action::AdminGranted),
             "admin_revoked" => Some(Action::AdminRevoked),
+            "deletion_requested" => Some(Action::DeletionRequested),
+            "deletion_cancelled" => Some(Action::DeletionCancelled),
+            "account_created" => Some(Action::AccountCreated),
             _ => None,
         }
     }
@@ -36,7 +54,8 @@ impl Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Via {
-    /// An admin, in the admin console (or its API).
+    /// In the web app (or its API): an admin in the admin console, or the
+    /// person cancelling a deletion an admin asked for.
     Console,
     /// `faro-server admin …` on the server itself: no admin account did it.
     CommandLine,

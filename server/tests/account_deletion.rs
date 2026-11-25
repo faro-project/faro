@@ -1030,3 +1030,457 @@ async fn every_reference_to_users_is_purged() {
         );
     }
 }
+
+// ---- Deletion an admin asks for (#41) -------------------------------------
+
+async fn admin_delete(t: &TestApp, session: &str, user: &UserId, email: &str) -> Resp {
+    t.call(
+        Method::DELETE,
+        &format!("/admin/api/users/{user}"),
+        Some(json!({ "confirm_email": email })),
+        Some(session),
+    )
+    .await
+}
+
+async fn admin_cancel(t: &TestApp, session: &str, user: &UserId) -> Resp {
+    t.post(
+        &format!("/admin/api/users/{user}/deletion/cancel"),
+        json!({}),
+        Some(session),
+    )
+    .await
+}
+
+async fn admin_log(t: &TestApp, session: &str) -> Vec<Value> {
+    let r = t.get("/admin/api/log", Some(session)).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    r.body.as_array().expect("array").clone()
+}
+
+async fn admin_row(t: &TestApp, session: &str, user: &UserId) -> Value {
+    let r = t.get("/admin/api/users", Some(session)).await;
+    r.body
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|u| u["id"] == user.as_str())
+        .expect("listed")
+        .clone()
+}
+
+async fn make_admin(t: &TestApp, user: &UserId) {
+    sqlx::query("UPDATE users SET is_admin = 1 WHERE id = $1")
+        .bind(user.as_str())
+        .execute(t.state.db().pool())
+        .await
+        .unwrap();
+}
+
+/// Emails to `to` whose subject or text contains `needle` (a digest's
+/// text repeats each notice's subject).
+fn subjects(t: &TestApp, to: &str, needle: &str) -> Vec<faro_server::mailer::Email> {
+    t.mail_to(to)
+        .into_iter()
+        .filter(|m| m.subject.contains(needle) || m.text.contains(needle))
+        .collect()
+}
+
+const BY_ADMIN: &str = "being deleted by the instance administrator";
+
+#[tokio::test]
+async fn an_admin_deleting_an_account_tells_everyone_who_asked() {
+    let w = world().await;
+    let t = &w.t;
+    let (admin, admin_s) = t.sign_in("admin@example.org").await;
+    t.mailer.clear();
+    let now = t.clock_ms();
+
+    let r = admin_delete(t, &admin_s, &w.sam, " Sam@Example.ORG").await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    assert_eq!(r.body["told"], json!({ "allies": 2, "members": 1 }));
+    assert_eq!(r.body["deletion"]["purge_after_ms"], now + HOLD);
+    assert_eq!(r.body["deletion"]["by_admin"], true);
+    assert_eq!(
+        admin_delete(t, &admin_s, &w.sam, SAM).await.error_code(),
+        "already_deleting"
+    );
+
+    // sam keeps every session, sees who asked, and can cancel.
+    for s in [&w.sam_s, &w.sam_other_s] {
+        let me = t.get("/v1/me", Some(s)).await;
+        assert_eq!(me.status, StatusCode::OK);
+        assert_eq!(me.body["deletion"]["by_admin"], true);
+    }
+    let row = admin_row(t, &admin_s, &w.sam).await;
+    assert_eq!(row["deletion_purge_after_ms"], now + HOLD);
+    assert_eq!(row["deletion_by_admin"], true);
+    // The hold is the same as when the person asks.
+    let r = t
+        .post("/v1/me/enroll-codes", json!({}), Some(&w.sam_s))
+        .await;
+    assert_eq!(r.error_code(), "account_deleting");
+
+    deliver_all(t).await;
+    let date = faro_server::notify::utc_date(now + HOLD);
+    let own = subjects(t, SAM, BY_ADMIN);
+    assert_eq!(own.len(), 1, "{:?}", t.mail_to(SAM));
+    assert!(
+        own[0].text.contains(&format!("On {date}")),
+        "{}",
+        own[0].text
+    );
+    assert!(
+        own[0].text.contains("sign in before") && own[0].text.contains("Cancel deletion"),
+        "{}",
+        own[0].text
+    );
+    for ally in [&w.pat, &w.lee] {
+        let needle = format!("sam's Faro account on Faro is {BY_ADMIN}");
+        assert_eq!(
+            told(t, &ally.email, &needle),
+            1,
+            "{:?}",
+            t.mail_to(&ally.email)
+        );
+    }
+    let needle = format!("Your ally sam's Faro account is {BY_ADMIN}");
+    assert_eq!(
+        told(t, "jo@example.org", &needle),
+        1,
+        "{:?}",
+        t.mail_to("jo@example.org")
+    );
+    let needle = format!("of sam, also an ally for jo, is {BY_ADMIN}");
+    assert_eq!(
+        told(t, &w.kim.email, &needle),
+        1,
+        "{:?}",
+        t.mail_to(&w.kim.email)
+    );
+    // Nobody is told sam asked.
+    for to in [SAM, &w.pat.email, "jo@example.org", &w.kim.email] {
+        assert_eq!(told(t, to, "is deleting their"), 0, "{to}");
+        assert_eq!(told(t, to, "You asked"), 0, "{to}");
+    }
+    // The admin is emailed from the admin log, which says who asked.
+    let m = t.mail_to("admin@example.org");
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!(m[0].subject, "sam's account on Faro is being deleted");
+    assert!(
+        m[0].text
+            .starts_with("You asked for the Faro account of sam (sam@example.org)"),
+        "{}",
+        m[0].text
+    );
+    let log = admin_log(t, &admin_s).await;
+    assert_eq!(log[0]["action"], "deletion_requested");
+    assert_eq!(log[0]["user"]["id"], w.sam.as_str());
+    assert_eq!(log[0]["actor"]["id"], admin.as_str());
+    assert_eq!(log[0]["via"], "console");
+
+    // The purge is the same too.
+    t.clock.advance_ms(HOLD);
+    assert_eq!(purge_pass(t).await.purged, 1);
+    assert!(!user_exists(t, &w.sam).await);
+    assert_nothing_left(&rows_naming(t, &w.sam, SAM).await);
+    let r = t.heartbeat(&w.dev, DeviceState::Active).await;
+    assert_eq!(r.error_code(), "account_deleted");
+    // The log keeps the entry, without naming sam.
+    let log = admin_log(t, &admin_s).await;
+    assert_eq!(log[0]["action"], "deletion_requested");
+    assert_eq!(log[0]["user"], Value::Null);
+    assert_eq!(log[0]["actor"]["id"], admin.as_str());
+}
+
+#[tokio::test]
+async fn the_person_or_any_admin_can_cancel_and_the_same_people_are_told() {
+    let w = world().await;
+    let t = &w.t;
+    let (admin, admin_s) = t.sign_in("admin@example.org").await;
+    let (ann, ann_s) = t.sign_in("ann@example.org").await;
+    make_admin(t, &ann).await;
+    t.mailer.clear();
+
+    // The person cancels.
+    let requested = t.clock_ms();
+    let r = admin_delete(t, &admin_s, &w.sam, SAM).await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    deliver_all(t).await;
+    t.mailer.clear();
+    let r = cancel(t, &w.sam_s).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["told"], json!({ "allies": 2, "members": 1 }));
+    let cancelled = r.body["cancelled_at_ms"].as_i64().unwrap();
+    deliver_all(t).await;
+    let own = subjects(t, SAM, "You cancelled the deletion");
+    assert_eq!(own.len(), 1, "{:?}", t.mail_to(SAM));
+    let (req, can) = (
+        faro_server::notify::utc_time(requested),
+        faro_server::notify::utc_time(cancelled),
+    );
+    assert!(
+        own[0]
+            .text
+            .contains(&format!("On {req}, the instance administrator asked")),
+        "{}",
+        own[0].text
+    );
+    assert!(
+        own[0].text.contains(&format!("You cancelled it on {can}")),
+        "{}",
+        own[0].text
+    );
+    // (pat and lee get normal alerts in the digest.)
+    for ally in [&w.pat, &w.lee] {
+        let needle = "The deletion of sam's Faro account was cancelled";
+        assert_eq!(
+            told(t, &ally.email, needle),
+            1,
+            "{:?}",
+            t.mail_to(&ally.email)
+        );
+        assert_eq!(told(t, &ally.email, "sam cancelled it on"), 1);
+    }
+    let needle = "The deletion of your ally sam's Faro account was cancelled";
+    assert_eq!(
+        told(t, "jo@example.org", needle),
+        1,
+        "{:?}",
+        t.mail_to("jo@example.org")
+    );
+    assert_eq!(
+        told(
+            t,
+            &w.kim.email,
+            "of sam, also an ally for jo, was cancelled"
+        ),
+        1
+    );
+    // Both admins hear it from the log.
+    for to in ["admin@example.org", "ann@example.org"] {
+        let m = subjects(t, to, "The deletion of sam's account");
+        assert_eq!(m.len(), 1, "{to}: {:?}", t.mail_to(to));
+        assert!(
+            m[0].text
+                .starts_with("sam (sam@example.org) cancelled the deletion of their Faro account"),
+            "{}",
+            m[0].text
+        );
+    }
+    let log = admin_log(t, &admin_s).await;
+    assert_eq!(log[0]["action"], "deletion_cancelled");
+    assert_eq!(log[0]["actor"]["id"], w.sam.as_str());
+    assert_eq!(log[0]["user"]["id"], w.sam.as_str());
+    let row = admin_row(t, &admin_s, &w.sam).await;
+    assert_eq!(row["deletion_by_admin"], false);
+
+    // Another admin cancels (the one who asked could too).
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    let r = admin_delete(t, &admin_s, &w.sam, SAM).await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    deliver_all(t).await;
+    t.mailer.clear();
+    let r = admin_cancel(t, &ann_s, &w.sam).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["told"], json!({ "allies": 2, "members": 1 }));
+    assert_eq!(
+        admin_cancel(t, &ann_s, &w.sam).await.error_code(),
+        "not_deleting"
+    );
+    assert_eq!(
+        t.get("/v1/me", Some(&w.sam_s)).await.body["deletion"],
+        Value::Null
+    );
+    deliver_all(t).await;
+    let own = subjects(t, SAM, "The deletion of your Faro account");
+    assert_eq!(own.len(), 1, "{:?}", t.mail_to(SAM));
+    assert!(
+        own[0]
+            .text
+            .contains("The instance administrator cancelled it on"),
+        "{}",
+        own[0].text
+    );
+    assert_eq!(
+        told(t, &w.pat.email, "The instance administrator cancelled it"),
+        1
+    );
+    let m = subjects(t, "admin@example.org", "was cancelled");
+    assert_eq!(m.len(), 1, "{:?}", t.mail_to("admin@example.org"));
+    assert!(
+        m[0].text
+            .starts_with("ann cancelled the deletion of the Faro account of sam"),
+        "{}",
+        m[0].text
+    );
+    let log = admin_log(t, &admin_s).await;
+    assert_eq!(log[0]["action"], "deletion_cancelled");
+    assert_eq!(log[0]["actor"]["id"], ann.as_str());
+    assert_eq!(log[1]["action"], "deletion_requested");
+    assert_eq!(log[1]["actor"]["id"], admin.as_str());
+
+    // A deletion the person asked for is theirs alone to cancel, and isn't
+    // in the admin log.
+    let (_, fresh) = t.sign_in(SAM).await;
+    assert_eq!(
+        request_deletion(t, &fresh, SAM).await.status,
+        StatusCode::ACCEPTED
+    );
+    let r = admin_cancel(t, &admin_s, &w.sam).await;
+    assert_eq!(
+        (r.status, r.error_code()),
+        (StatusCode::CONFLICT, "not_admin_deletion")
+    );
+    let row = admin_row(t, &admin_s, &w.sam).await;
+    assert_eq!(row["deletion_by_admin"], false);
+    assert_eq!(admin_log(t, &admin_s).await.len(), log.len());
+
+    // Once the purge starts, nobody can cancel.
+    assert_eq!(cancel(t, &fresh).await.status, StatusCode::OK);
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    assert_eq!(
+        admin_delete(t, &admin_s, &w.sam, SAM).await.status,
+        StatusCode::ACCEPTED
+    );
+    t.clock.advance_ms(HOLD);
+    assert!(deletion::stop_and_purge_content(&t.state, &w.sam)
+        .await
+        .unwrap());
+    assert_eq!(
+        admin_cancel(t, &admin_s, &w.sam).await.error_code(),
+        "deletion_in_progress"
+    );
+    assert_eq!(cancel(t, &fresh).await.error_code(), "deletion_in_progress");
+}
+
+#[tokio::test]
+async fn a_disabled_account_can_be_deleted_and_the_person_is_still_told() {
+    let w = world().await;
+    let t = &w.t;
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    let r = t
+        .post(
+            &format!("/admin/api/users/{}/disable", w.sam),
+            json!({}),
+            Some(&admin_s),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    deliver_all(t).await;
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    t.mailer.clear();
+
+    let r = admin_delete(t, &admin_s, &w.sam, SAM).await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    deliver_all(t).await;
+    // sam can't sign in, so the email says who to ask instead.
+    let own = subjects(t, SAM, BY_ADMIN);
+    assert_eq!(own.len(), 1, "{:?}", t.mail_to(SAM));
+    assert!(
+        own[0]
+            .text
+            .contains("Your account is disabled, so you can't sign in"),
+        "{}",
+        own[0].text
+    );
+    assert!(!own[0].text.contains("sign in before"), "{}", own[0].text);
+    let needle = format!("sam's Faro account on Faro is {BY_ADMIN}");
+    assert_eq!(told(t, &w.pat.email, &needle), 1);
+    // Still disabled, and it can't be re-enabled meanwhile: the admin
+    // cancels instead.
+    let r = t
+        .post(
+            &format!("/admin/api/users/{}/enable", w.sam),
+            json!({}),
+            Some(&admin_s),
+        )
+        .await;
+    assert_eq!(r.error_code(), "account_deleting");
+    let row = admin_row(t, &admin_s, &w.sam).await;
+    assert_eq!(row["disabled"], true);
+    assert_eq!(row["deletion_by_admin"], true);
+
+    // The cancellation reaches sam too.
+    t.mailer.clear();
+    assert_eq!(
+        admin_cancel(t, &admin_s, &w.sam).await.status,
+        StatusCode::OK
+    );
+    deliver_all(t).await;
+    let needle = "The deletion of your Faro account on Faro was cancelled";
+    assert_eq!(told(t, SAM, needle), 1, "{:?}", t.mail_to(SAM));
+    assert_eq!(admin_row(t, &admin_s, &w.sam).await["disabled"], true);
+
+    // Asked again, the purge goes ahead with sam still disabled.
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    assert_eq!(
+        admin_delete(t, &admin_s, &w.sam, SAM).await.status,
+        StatusCode::ACCEPTED
+    );
+    deliver_all(t).await;
+    t.clock.advance_ms(HOLD);
+    assert_eq!(purge_pass(t).await.purged, 1);
+    assert!(!user_exists(t, &w.sam).await);
+    assert_nothing_left(&rows_naming(t, &w.sam, SAM).await);
+}
+
+#[tokio::test]
+async fn admin_deletion_needs_a_fresh_sign_in_the_address_and_another_admin() {
+    let t = TestApp::new().await;
+    let (admin, admin_s) = t.setup_admin("admin@example.org").await;
+    let (sam, sam_s) = t.sign_in(SAM).await;
+
+    // Admins only, and never their own account here.
+    let r = admin_delete(&t, &sam_s, &admin, "admin@example.org").await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = admin_delete(&t, &admin_s, &admin, "admin@example.org").await;
+    assert_eq!(
+        (r.status, r.error_code()),
+        (StatusCode::BAD_REQUEST, "cannot_delete_self")
+    );
+    let r = admin_delete(&t, &admin_s, &UserId::new("usr_nobody"), SAM).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = admin_delete(&t, &admin_s, &sam, "admin@example.org").await;
+    assert_eq!(
+        (r.status, r.error_code()),
+        (StatusCode::BAD_REQUEST, "confirmation_mismatch")
+    );
+    let path = format!("/admin/api/users/{sam}");
+    let r = t
+        .call(Method::DELETE, &path, Some(json!({})), Some(&admin_s))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    t.clock.advance_ms(10 * MIN + 1);
+    let r = admin_delete(&t, &admin_s, &sam, SAM).await;
+    assert_eq!(
+        (r.status, r.error_code()),
+        (StatusCode::FORBIDDEN, "reauth_required")
+    );
+    // Cancelling needs only a session.
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    assert_eq!(
+        admin_delete(&t, &admin_s, &sam, SAM).await.status,
+        StatusCode::ACCEPTED
+    );
+    t.clock.advance_ms(DAY);
+    assert_eq!(
+        admin_cancel(&t, &admin_s, &sam).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(admin_log(&t, &admin_s).await.len(), 2);
+
+    // Another admin can be deleted, but never the last one who stays.
+    make_admin(&t, &sam).await;
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    let r = request_deletion(&t, &admin_s, "admin@example.org").await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    let r = admin_delete(&t, &admin_s, &sam, SAM).await;
+    assert_eq!(
+        (r.status, r.error_code()),
+        (StatusCode::CONFLICT, "last_admin")
+    );
+    assert_eq!(cancel(&t, &admin_s).await.status, StatusCode::OK);
+    let r = admin_delete(&t, &admin_s, &sam, SAM).await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+}

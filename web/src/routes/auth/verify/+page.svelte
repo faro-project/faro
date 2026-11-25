@@ -60,7 +60,9 @@
 				? resolve('/invite')
 				: back === 'delete-account'
 					? `${resolve('/settings')}#delete-account`
-					: resolve('/');
+					: back === 'admin-people'
+						? resolve('/admin/people')
+						: resolve('/');
 			await goto(to, { replaceState: true });
 		} catch (e) {
 			if (e instanceof ApiError && e.code === 'invalid_or_expired_link') {

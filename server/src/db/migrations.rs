@@ -59,6 +59,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "admin_log",
                     include_str!("../../migrations/0008_admin_log.sql"),
                 ),
+                (
+                    9,
+                    "admin_deletion",
+                    include_str!("../../migrations/0009_admin_deletion.sql"),
+                ),
             ]
         }
     }

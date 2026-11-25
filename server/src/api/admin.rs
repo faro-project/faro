@@ -3,8 +3,10 @@
 //!
 //! An instance admin can configure registration, retention and the liveness
 //! grace period, test SMTP, invite members, see aggregate counts and the
-//! account list, disable or re-enable accounts, and grant or revoke the
-//! admin role ([`crate::roles`]). There is deliberately no admin route to
+//! account list, disable or re-enable accounts, grant or revoke the admin
+//! role ([`crate::roles`]), and ask for an account to be deleted (with the
+//! same hold and notices as when the person asks, [`super::account`]).
+//! There is deliberately no admin route to
 //! any member's keys, devices, allies, feed, blobs, alerts or reports, and
 //! the admin role
 //! grants nothing on the member/ally routes either (they check the caller's
@@ -205,11 +207,90 @@ pub async fn set_admin_role(
     Ok(Json(r))
 }
 
+/// `DELETE /admin/api/users/{id}` body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteUser {
+    /// The account's email address, typed out.
+    pub confirm_email: String,
+}
+
+/// `DELETE /admin/api/users/{id}`: ask for another account to be deleted,
+/// disabled or not. The same 7-day hold, notices and purge as when the
+/// person asks ([`super::account`]); the notices say the instance
+/// administrator asked. Needs a sign-in within the last
+/// [`REAUTH_WINDOW_MS`](super::account::REAUTH_WINDOW_MS) and the
+/// account's address typed out. Written to the admin log.
+pub async fn delete_user(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<DeleteUser>,
+) -> AppResult<(StatusCode, Json<super::account::DeletionRequested>)> {
+    s.require_admin()?;
+    let target = UserId::new(id);
+    if target == s.user.id {
+        return Err(AppError::bad_request(
+            "cannot_delete_self",
+            "delete your own account in Settings",
+        ));
+    }
+    let now = state.now_ms();
+    if now.saturating_sub(s.session_started_at_ms) > super::account::REAUTH_WINDOW_MS {
+        return Err(AppError::Forbidden("reauth_required"));
+    }
+    let mut tx = state.db().begin_write().await?;
+    let user = users::by_id(&mut *tx, &target)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if normalize_email(&req.confirm_email).as_deref() != Some(user.email.as_str()) {
+        return Err(AppError::bad_request(
+            "confirmation_mismatch",
+            "type the account's email address to confirm",
+        ));
+    }
+    let by = super::account::By::Admin(&s.user.id);
+    let r = super::account::start(&mut tx, &user, by, now).await?;
+    tx.commit().await?;
+    tracing::info!(
+        admin = %s.user.id,
+        user = %target,
+        purge_after_ms = r.deletion.purge_after_ms,
+        "account deletion requested by an admin"
+    );
+    Ok((StatusCode::ACCEPTED, Json(r)))
+}
+
+/// `POST /admin/api/users/{id}/deletion/cancel`: cancel a deletion an admin
+/// asked for, during its hold. Any admin may; the person may too, from
+/// their own session. A deletion the person asked for is theirs to cancel
+/// (`409 not_admin_deletion`).
+pub async fn cancel_user_deletion(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+    ApiJson(_): ApiJson<super::account::CancelDeletion>,
+) -> AppResult<Json<super::account::DeletionCancelled>> {
+    s.require_admin()?;
+    let target = UserId::new(id);
+    let now = state.now_ms();
+    let mut tx = state.db().begin_write().await?;
+    let user = users::by_id(&mut *tx, &target)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let by = super::account::By::Admin(&s.user.id);
+    let r = super::account::cancel(&mut tx, &user, by, now).await?;
+    tx.commit().await?;
+    tracing::info!(admin = %s.user.id, user = %target, "account deletion cancelled by an admin");
+    Ok(Json(r))
+}
+
 /// Entries `GET /admin/api/log` returns.
 pub const LOG_LIMIT: i64 = 200;
 
 /// `GET /admin/api/log`: the most recent admin log entries, newest first
-/// (who was made an admin or stopped being one, by whom, and when).
+/// (who was made an admin or stopped being one, which deletions admins
+/// asked for or were cancelled, by whom, and when).
 pub async fn log(
     State(state): State<AppState>,
     s: SessionUser,

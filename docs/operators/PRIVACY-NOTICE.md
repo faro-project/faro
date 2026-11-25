@@ -84,6 +84,7 @@ Our server stores the following. Some of it is shown to our admins in Faro's adm
 | **Sign-in records** | Sign-ins last 30 days. Sign-in links expire after 15 minutes, invitations after 7 days | No |
 | **Network addresses** | Like any web server, ours sees the network (IP) address of each computer and browser that connects. Faro keeps them only in memory, to limit how many requests one address can make, and does not write them to its database or its logs | No |
 | **Server logs** | Faro's log records events such as "account deletion requested" or "ally approved", with internal account and computer codes (for example `usr_…`). At its normal log level it doesn't log names, email addresses or network addresses. We keep logs for [FILL IN: how long, and where. Faro doesn't rotate its own log: Docker or systemd does, as set up on your server]. [FILL IN: if a proxy or tunnel in front of Faro (Caddy, nginx, Cloudflare) keeps its own logs, which usually include network addresses, say so and say for how long] | No |
+| **Admin log** | What our admins did to accounts: who was made an admin or stopped being one, which accounts an admin asked to delete, cancelled deletions, and accounts created on the server. Each entry says which account, which admin and when. An entry about a deleted account no longer names it | Yes |
 | **Our branding** | Our logo, welcome line and support contact, if we set them. These are public | Yes |
 
 **What this means in practice.** We can see *that* something happened on a member's computer, and when, and whether it was urgent. With Faro's default settings, a flag rated medium or high is urgent. So we can see, for example, that an urgent flag happened at 9:04 pm on a Tuesday. We can't see what was on the screen, what website it was, or why it was flagged.
@@ -111,7 +112,8 @@ Faro deletes old data automatically, once a day. These are our settings:
 | Activity records (what kind of thing happened, when, how urgent) | [FILL IN] days | 90 days |
 | Alerts and email notification records | [FILL IN] days | 90 days |
 | Sign-ins, sign-in links, invitations and setup codes | until they expire | 30 days, 15 minutes, 7 days |
-| Your account, computers, allies, keys and settings | until you delete your account (section 8) | |
+| Your account, computers, allies, keys and settings | until your account is deleted (section 8) | |
+| Admin log entries | always; a deleted account's name and code are taken out of them | always |
 
 - **Members can choose shorter, never longer.** A member can shorten how long their own records are kept, in **Settings**, to as little as 7 days. A shorter choice applies only to what arrives after the change, and their allies are told about it. This stops a member from quietly deleting something before an ally has seen it.
 - **Deleted data is removed for good** from the server.
@@ -154,7 +156,13 @@ What happens next:
 - server log lines with your internal account code, until the logs are rotated (section 4);
 - copies in our backups, until those backups are deleted (section 6).
 
-**If you can't delete your account yourself**, contact us (section 1). [FILL IN: what you will do. Facts to know: Faro has no button for an admin to delete someone else's account. A disabled account can't sign in, so an admin would first re-enable it, which emails the person and their allies. Someone who can no longer get email at their address can't sign in at all. The instance's only admin can't delete their own account. If you can't solve a request with Faro's own tools, ask your lawyer what you must do.]
+**If you can't delete your account yourself**, for example because your account is disabled or you can no longer get email at your address, contact us (section 1). [FILL IN: how you check that the request is really from you.] An admin can then delete it for you. It works the same way as deleting it yourself:
+
+- You and everyone in an accountability partnership with you are emailed straight away. The emails say your account is being deleted by the instance administrator. They don't name the admin. If your account is disabled, you are emailed too.
+- Nothing else changes for 7 days. If you can still sign in, every page says the instance administrator asked for the deletion and has a **Cancel deletion** button. Any of our admins can cancel too, for example if you ask us to. If anyone cancels, the same people are told.
+- Then everything about you is deleted, as above, and the same things remain.
+
+Our admins can't delete their own account this way, and the instance's last admin can't be deleted. Every admin deletion, and every cancellation, is recorded in our admin log with which admin did it, and emailed to all our admins. We keep that log. Once your account is deleted, it no longer names you. [FILL IN: anything else you will do, for example how long you take to act on a request. ASK YOUR LAWYER: whether that is fast enough.]
 
 ## 9. If an admin disables your account
 
