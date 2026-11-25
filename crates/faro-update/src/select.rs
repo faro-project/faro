@@ -167,13 +167,28 @@ impl VerifiedTargets {
     /// `allow_downgrade`. Ties between equal versions (differing only in
     /// build metadata ordering) resolve to the semver-greatest, then the
     /// last name in order, so the result is deterministic.
+    ///
+    /// `min_client` is not checked here (the mirror selects for every
+    /// client). A client uses [`select_for`](Self::select_for).
     pub fn select_with(&self, q: &Selection<'_>) -> Option<TargetInfo> {
+        self.select_filtered(q, None)
+    }
+
+    /// [`select_with`](Self::select_with) for a client running version
+    /// `client`: a target whose `min_client` is above it is not a
+    /// candidate, so an older target this client can use wins instead.
+    pub fn select_for(&self, q: &Selection<'_>, client: &Version) -> Option<TargetInfo> {
+        self.select_filtered(q, Some(client))
+    }
+
+    fn select_filtered(&self, q: &Selection<'_>, client: Option<&Version>) -> Option<TargetInfo> {
         let candidates = self.iter().filter(|t| {
             let c = &t.custom;
             c.kind == q.kind
                 && (c.platform == q.platform || c.platform == "any")
                 && (c.arch == q.arch || c.arch == "any")
                 && os_ok(c.min_os.as_deref(), q.os_version)
+                && client_ok(c.min_client.as_ref(), client)
         });
 
         let in_channel = |t: &TargetInfo, ch: &str| t.custom.channels.iter().any(|c| c == ch);
@@ -209,6 +224,13 @@ impl VerifiedTargets {
 
 fn line(v: &Version) -> (u64, u64) {
     (v.major, v.minor)
+}
+
+fn client_ok(min: Option<&Version>, client: Option<&Version>) -> bool {
+    match (min, client) {
+        (Some(min), Some(client)) => client >= min,
+        _ => true,
+    }
 }
 
 /// A target with an unparseable `min_os` can't be shown to be compatible, so

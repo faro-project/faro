@@ -19,7 +19,9 @@
 //!                              --expires-ms 1800000000000 --out targets.unsigned.json
 //! faro-release add-target      --metadata targets.unsigned.json --file Faro-1.4.0.pkg \
 //!                              --name client/macos/Faro-1.4.0.pkg --kind client --platform macos \
-//!                              --arch any --version 1.4.0 --channel stable --channel beta [--min-os 13]
+//!                              --arch any --version 1.4.0 --channel stable --channel beta [--min-os 13] \
+//!                              [--min-client 1.3.0]
+//! faro-release pack-data       --manifest manifest.json --payload opennsfw-int8.onnx --out opennsfw.data
 //! faro-release inspect         --root 1.root.json [--root-update 2.root.json ...] \
 //!                              --published-timestamp old/timestamp.json --published-targets old/targets.json
 //! ```
@@ -41,6 +43,12 @@
 //! documents first trusts those, then checks the new set the way an
 //! up-to-date client would, so a version that went backwards fails here
 //! instead of on every client.
+//!
+//! `pack-data` joins a model's or a blocklist's manifest and the file it
+//! describes into one data bundle ([`faro_update::bundle`]), which is then
+//! added like any other artifact (`--kind model` or `--kind blocklist`,
+//! platform and arch `any`). It doesn't read the manifest: the release
+//! scripts check it, and clients check it again before using it.
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -188,6 +196,21 @@ enum Cmd {
         channels: Vec<String>,
         #[arg(long)]
         min_os: Option<String>,
+        /// The oldest client that may install it (models and blocklists
+        /// that need a newer client).
+        #[arg(long)]
+        min_client: Option<Version>,
+    },
+    /// Join a manifest and the file it describes into one data bundle
+    /// (`faro_update::bundle`): how a model or a blocklist is published.
+    PackData {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        payload: PathBuf,
+        /// Written new; never overwritten.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -392,6 +415,7 @@ fn main() -> Result<()> {
             version,
             channels,
             min_os,
+            min_client,
         } => {
             let mut t: Targets = read_json(&metadata)?;
             let kind = parse_kind(&kind)?;
@@ -406,12 +430,50 @@ fn main() -> Result<()> {
                     version,
                     channels,
                     min_os,
+                    min_client,
                 },
             };
             if !add_target(&mut t, &name, entry)? {
                 println!("{name} is already listed with the same content");
             }
             write_json(&metadata, &t)
+        }
+        Cmd::PackData {
+            manifest,
+            payload,
+            out,
+        } => pack_data(&manifest, &payload, &out),
+    }
+}
+
+/// `pack-data`: the bundle is written to a temporary name and renamed, so
+/// a failed run leaves nothing at `out`.
+fn pack_data(manifest: &Path, payload: &Path, out: &Path) -> Result<()> {
+    let m = read(manifest)?;
+    let mut p =
+        std::fs::File::open(payload).with_context(|| format!("opening {}", payload.display()))?;
+    if out.exists() {
+        bail!("{} already exists", out.display());
+    }
+    let tmp = out.with_extension("partial");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let written = faro_update::bundle::write_bundle(&mut f, &m, &mut p)
+        .and_then(|n| Ok(f.sync_all().map(|_| n)?))
+        .with_context(|| format!("writing {}", out.display()));
+    drop(f);
+    match written {
+        Ok(n) => {
+            std::fs::rename(&tmp, out).with_context(|| format!("renaming to {}", out.display()))?;
+            eprintln!("{}: {n} bytes", out.display());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
         }
     }
 }
@@ -719,6 +781,7 @@ mod tests {
                 version: Version::parse(version).unwrap(),
                 channels: channels.iter().map(|c| c.to_string()).collect(),
                 min_os: Some("13".into()),
+                min_client: None,
             },
         }
     }
@@ -880,5 +943,30 @@ mod tests {
             (3, Hash32::of(b"onf")),
             "describe_file hashes the whole file"
         );
+    }
+
+    #[test]
+    fn pack_data_writes_a_bundle_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, p, out) = (
+            dir.path().join("manifest.json"),
+            dir.path().join("model.onnx"),
+            dir.path().join("model.data"),
+        );
+        std::fs::write(&m, b"{\"name\":\"m\"}").unwrap();
+        std::fs::write(&p, b"weights").unwrap();
+        pack_data(&m, &p, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let mut r = &bytes[..];
+        assert_eq!(
+            faro_update::bundle::read_bundle_manifest(&mut r).unwrap(),
+            b"{\"name\":\"m\"}"
+        );
+        assert_eq!(r, b"weights");
+        assert!(pack_data(&m, &p, &out).is_err(), "never overwritten");
+        let missing = dir.path().join("none.onnx");
+        let out2 = dir.path().join("other.data");
+        assert!(pack_data(&m, &missing, &out2).is_err());
+        assert!(!out2.exists() && !out2.with_extension("partial").exists());
     }
 }

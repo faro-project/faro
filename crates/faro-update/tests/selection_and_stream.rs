@@ -248,6 +248,49 @@ fn min_os_filters_when_os_version_known() {
     assert_eq!(q(None).as_deref(), Some("2.0.0"));
 }
 
+/// A model that needs a newer client is skipped by older clients, which
+/// get the newest one they can use. The mirror (`select_with`) ignores it.
+#[test]
+fn min_client_filters_for_clients_only() {
+    let model = |ver: &str, min: Option<&str>| {
+        let mut t = target(
+            TargetKind::Model,
+            "any",
+            "any",
+            ver,
+            &["stable"],
+            ver.as_bytes(),
+        );
+        t.custom.min_client = min.map(v);
+        t
+    };
+    let vt = verified(vec![
+        ("m1", model("1.0.0", None)),
+        ("m2", model("2.0.0", Some("1.5.0"))),
+    ]);
+    let ch = Channel::stable();
+    let q = Selection {
+        channel: &ch,
+        kind: TargetKind::Model,
+        platform: "macos",
+        arch: "aarch64",
+        current_version: None,
+        os_version: None,
+        allow_downgrade: false,
+    };
+    let for_client = |c: &str| vt.select_for(&q, &v(c)).map(|t| t.name);
+    assert_eq!(for_client("1.4.9").as_deref(), Some("m1"));
+    assert_eq!(for_client("1.5.0").as_deref(), Some("m2"));
+    assert_eq!(vt.select_with(&q).map(|t| t.name).as_deref(), Some("m2"));
+    // Still never a downgrade.
+    let cur = v("1.0.0");
+    let q = Selection {
+        current_version: Some(&cur),
+        ..q
+    };
+    assert_eq!(vt.select_for(&q, &v("1.4.9")), None);
+}
+
 #[test]
 fn channel_parsing() {
     assert_eq!("stable".parse::<Channel>().unwrap(), Channel::stable());

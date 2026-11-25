@@ -107,13 +107,18 @@
 //! ## Target selection
 //!
 //! Targets carry `custom = {kind, platform, arch, version (semver),
-//! channels, min_os?}`. A channel is either a name (`stable`, `beta`, ...),
+//! channels, min_os?, min_client?}`. A channel is either a name (`stable`, `beta`, ...),
 //! selecting the highest semver listed in it, or the instance-admin pin
 //! `stable-1`, selecting the newest release on the `major.minor` line
 //! immediately below the newest stable line (precisely specified on
 //! [`VerifiedTargets::select_with`]). A version equal to or below the
 //! installed one is never selected unless the caller sets
 //! [`Selection::allow_downgrade`]. Platform/arch `any` matches everything.
+//! A client also skips targets whose `min_client` is above its own version
+//! ([`VerifiedTargets::select_for`]).
+//!
+//! Models and blocklists are two files each (a manifest and what it
+//! describes), joined into one target as a [`bundle`].
 //!
 //! ## Signing
 //!
@@ -128,6 +133,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bundle;
 mod envelope;
 mod error;
 pub mod metadata;
