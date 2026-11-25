@@ -642,6 +642,27 @@ fn admin_log_text(
                 people,
             );
         }
+        // `faro-server admin grant --create`: the person's welcome. The
+        // role notice follows separately.
+        Action::AccountCreated if n.recipient_id == n.member_id => {
+            return (
+                format!("A Faro account was created for you on {instance}"),
+                format!(
+                    "{who} created a Faro account for you on {instance}{how}, with this email \
+                     address. To sign in, open the link below and enter this address: Faro \
+                     emails you a sign-in link. No password is needed. If you didn't expect \
+                     this, contact the people who run {instance}."
+                ),
+                format!("{url}/signin"),
+            );
+        }
+        Action::AccountCreated => {
+            return (
+                format!("An account was created for {person} on {instance}"),
+                format!("{who} created a Faro account for {person} ({email}) on {instance}{how}."),
+                people,
+            );
+        }
         Action::AdminGranted | Action::AdminRevoked => {}
     }
     if n.recipient_id == n.member_id {
@@ -655,8 +676,11 @@ fn admin_log_text(
                      {instance}."
                 ),
             ),
-            // Deletions were worded above.
-            Action::AdminRevoked | Action::DeletionRequested | Action::DeletionCancelled => (
+            // Deletions and new accounts were worded above.
+            Action::AdminRevoked
+            | Action::DeletionRequested
+            | Action::DeletionCancelled
+            | Action::AccountCreated => (
                 format!("You are no longer an admin of {instance}"),
                 format!(
                     "{who} removed your admin role on {instance}{how}. You can still sign in, and \
@@ -676,8 +700,11 @@ fn admin_log_text(
                  expect this, check who is an admin on the People page:"
             ),
         ),
-        // Deletions were worded above.
-        Action::AdminRevoked | Action::DeletionRequested | Action::DeletionCancelled => (
+        // Deletions and new accounts were worded above.
+        Action::AdminRevoked
+        | Action::DeletionRequested
+        | Action::DeletionCancelled
+        | Action::AccountCreated => (
             format!("{person} is no longer an admin of {instance}"),
             format!(
                 "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \

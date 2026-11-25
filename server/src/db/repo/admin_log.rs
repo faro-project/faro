@@ -1,7 +1,10 @@
 //! `admin_log`: what admins did to accounts (§4.3): granting and revoking
 //! the admin role ([`crate::roles`]), and account deletions an admin asked
-//! for, with their cancellation ([`crate::api::admin`]). Shown in the admin
-//! console and emailed to every admin (and, for a role change, the person).
+//! for, with their cancellation ([`crate::api::admin`]), and accounts
+//! created from the command line. Shown in the admin console and emailed to
+//! every admin (and, for a role change, the person). Entries are kept: no
+//! retention window applies to them, and the account-deletion purge only
+//! NULLs the ids in them.
 
 use crate::tokens::new_hex_id;
 use faro_proto::UserId;
@@ -19,6 +22,9 @@ pub enum Action {
     /// A deletion an admin asked for was cancelled, by an admin or by the
     /// person (then `actor_id` is the person themself).
     DeletionCancelled,
+    /// `faro-server admin grant --create` created the account (followed
+    /// by `admin_granted`).
+    AccountCreated,
 }
 
 impl Action {
@@ -28,6 +34,7 @@ impl Action {
             Action::AdminRevoked => "admin_revoked",
             Action::DeletionRequested => "deletion_requested",
             Action::DeletionCancelled => "deletion_cancelled",
+            Action::AccountCreated => "account_created",
         }
     }
 
@@ -37,6 +44,7 @@ impl Action {
             "admin_revoked" => Some(Action::AdminRevoked),
             "deletion_requested" => Some(Action::DeletionRequested),
             "deletion_cancelled" => Some(Action::DeletionCancelled),
+            "account_created" => Some(Action::AccountCreated),
             _ => None,
         }
     }

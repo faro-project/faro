@@ -533,6 +533,9 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
     let alert_cut = cutoff(now, instance.alert_days);
     // Notifications outlive nothing they refer to (they cascade), but
     // delivered or suppressed rows are pruned on the alert window too.
+    // That includes the emails about admin log entries; the entries
+    // themselves are kept and never pruned (only an account's purge NULLs
+    // the ids in them).
     s.notifications += sqlx::query("DELETE FROM notifications WHERE created_at < $1")
         .bind(alert_cut)
         .execute(pool)

@@ -226,7 +226,12 @@ export interface AdminLogAccount {
 /** One entry of `GET /admin/api/log`, newest first. */
 export interface AdminLogEntry {
 	id: string;
-	action: 'admin_granted' | 'admin_revoked' | 'deletion_requested' | 'deletion_cancelled';
+	action:
+		| 'admin_granted'
+		| 'admin_revoked'
+		| 'deletion_requested'
+		| 'deletion_cancelled'
+		| 'account_created';
 	/** The account it was about; null once that account is deleted. */
 	user: AdminLogAccount | null;
 	/**

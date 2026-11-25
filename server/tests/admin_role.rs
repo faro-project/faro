@@ -301,7 +301,7 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
     let name = instance(&t);
     t.mailer.clear();
 
-    let out = faro_server::cli::admin_grant(&t.state, " Kim@Example.org ")
+    let out = faro_server::cli::admin_grant(&t.state, " Kim@Example.org ", false, None)
         .await
         .expect("granted");
     assert!(out.starts_with("kim@example.org is now an admin"), "{out}");
@@ -329,18 +329,18 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
     assert_eq!(entry["via"], "command_line");
 
     // Again: nothing changes.
-    let out = faro_server::cli::admin_grant(&t.state, "kim@example.org")
+    let out = faro_server::cli::admin_grant(&t.state, "kim@example.org", false, None)
         .await
         .expect("no-op");
     assert!(out.contains("already an admin"), "{out}");
     assert_eq!(log(&t, &admin_s).await.len(), 1);
 
     // No such account.
-    let e = faro_server::cli::admin_grant(&t.state, "nobody@example.org")
+    let e = faro_server::cli::admin_grant(&t.state, "nobody@example.org", false, None)
         .await
         .expect_err("no account");
     assert!(e.to_string().contains("sign in once"), "{e}");
-    let e = faro_server::cli::admin_grant(&t.state, "not an address")
+    let e = faro_server::cli::admin_grant(&t.state, "not an address", false, None)
         .await
         .expect_err("not an address");
     assert!(e.to_string().contains("not an email address"), "{e}");
@@ -354,7 +354,7 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
-    let e = faro_server::cli::admin_grant(&t.state, "sam@example.org")
+    let e = faro_server::cli::admin_grant(&t.state, "sam@example.org", false, None)
         .await
         .expect_err("disabled");
     assert!(e.to_string().contains("is disabled"), "{e}");
@@ -367,7 +367,7 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
         )
         .await;
     assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
-    let e = faro_server::cli::admin_grant(&t.state, "lee@example.org")
+    let e = faro_server::cli::admin_grant(&t.state, "lee@example.org", false, None)
         .await
         .expect_err("deleting");
     assert!(e.to_string().contains("being deleted"), "{e}");
@@ -426,4 +426,189 @@ async fn the_log_forgets_deleted_accounts() {
         .await,
         0
     );
+}
+
+#[tokio::test]
+async fn the_command_line_can_create_the_admin_account() {
+    let t = TestApp::new().await;
+    let (_admin, admin_s) = t.setup_admin("admin@example.org").await;
+    let name = instance(&t);
+    t.mailer.clear();
+
+    // Without --create, an unknown address is still refused.
+    let e = faro_server::cli::admin_grant(&t.state, "new@example.org", false, None)
+        .await
+        .expect_err("no account");
+    assert!(e.to_string().contains("--create"), "{e}");
+    assert!(log(&t, &admin_s).await.is_empty());
+
+    let out = faro_server::cli::admin_grant(&t.state, " New@Example.org ", true, Some("Noor"))
+        .await
+        .expect("created");
+    assert!(
+        out.starts_with("Created an account for new@example.org (Noor)"),
+        "{out}"
+    );
+    let users = t.get("/admin/api/users", Some(&admin_s)).await;
+    let row = users
+        .body
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|u| u["email"] == "new@example.org")
+        .expect("created")
+        .clone();
+    assert_eq!(row["display_name"], "Noor");
+    assert_eq!(
+        row["roles"],
+        json!({ "admin": true, "member": true, "ally": false })
+    );
+    assert_eq!(row["last_login_at_ms"], Value::Null);
+    assert_eq!(row["disabled"], false);
+    let new = UserId::new(row["id"].as_str().expect("id"));
+
+    // Logged as two entries, from the command line.
+    let entries = log(&t, &admin_s).await;
+    let mut actions: Vec<&str> = entries
+        .iter()
+        .map(|e| e["action"].as_str().expect("action"))
+        .collect();
+    actions.sort_unstable();
+    assert_eq!(actions, ["account_created", "admin_granted"]);
+    for e in &entries {
+        assert_eq!(e["user"]["id"], new.as_str());
+        assert_eq!(e["actor"], Value::Null);
+        assert_eq!(e["via"], "command_line");
+    }
+
+    // The person gets a welcome saying how to sign in, and the usual role
+    // notice. The other admin gets the role notice.
+    t.notify_now().await;
+    let mut m = t.mail_to("new@example.org");
+    m.sort_by(|a, b| a.subject.cmp(&b.subject));
+    assert_eq!(m.len(), 2, "{m:?}");
+    assert_eq!(
+        m[0].subject,
+        format!("A Faro account was created for you on {name}")
+    );
+    assert!(
+        m[0].text.contains("Faro emails you a sign-in link"),
+        "{}",
+        m[0].text
+    );
+    assert!(m[0].text.contains("/signin"), "{}", m[0].text);
+    assert_eq!(m[1].subject, format!("You are now an admin of {name}"));
+    let m = only_mail(&t, "admin@example.org");
+    assert_eq!(m.subject, format!("Noor is now an admin of {name}"));
+
+    // The person signs in with an email link like anyone else, and sets up
+    // keys as a member.
+    let (id, s) = t.sign_in("new@example.org").await;
+    assert_eq!(id, new);
+    let me = t.get("/v1/me", Some(&s)).await;
+    assert_eq!(me.body["user"]["roles"]["admin"], true);
+    assert_eq!(me.body["has_member_keys"], false);
+    assert_eq!(
+        t.get("/admin/api/overview", Some(&s)).await.status,
+        StatusCode::OK
+    );
+    t.create_member_keys(&id, &s).await;
+
+    // Running it again changes nothing.
+    t.mailer.clear();
+    let out = faro_server::cli::admin_grant(&t.state, "new@example.org", true, Some("Other"))
+        .await
+        .expect("no-op");
+    assert!(out.contains("already an admin"), "{out}");
+    assert!(out.contains("--name was not used"), "{out}");
+    assert_eq!(log(&t, &admin_s).await.len(), 2);
+    t.notify_now().await;
+    assert!(t.mailer.sent().is_empty());
+
+    // An existing account is granted, not created again; the name defaults
+    // like a sign-up's.
+    let (kim, _) = t.sign_in("kim@example.org").await;
+    t.clock.advance_ms(1000);
+    let out = faro_server::cli::admin_grant(&t.state, "kim@example.org", true, None)
+        .await
+        .expect("granted");
+    assert!(out.starts_with("kim@example.org is now an admin"), "{out}");
+    assert_eq!(log(&t, &admin_s).await[0]["user"]["id"], kim.as_str());
+    let out = faro_server::cli::admin_grant(&t.state, "zed@example.org", true, None)
+        .await
+        .expect("created");
+    assert!(out.contains("(zed)"), "{out}");
+    let e = faro_server::cli::admin_grant(&t.state, "x@example.org", true, Some("  "))
+        .await
+        .expect_err("bad name");
+    assert!(e.to_string().contains("--name"), "{e}");
+}
+
+#[tokio::test]
+async fn create_still_refuses_disabled_and_deleting_accounts() {
+    let t = TestApp::new().await;
+    let (_admin, admin_s) = t.setup_admin("admin@example.org").await;
+    let (sam, _) = t.sign_in("sam@example.org").await;
+    let (_lee, lee_s) = t.sign_in("lee@example.org").await;
+    let r = t
+        .post(
+            &format!("/admin/api/users/{sam}/disable"),
+            json!({}),
+            Some(&admin_s),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let e = faro_server::cli::admin_grant(&t.state, "sam@example.org", true, None)
+        .await
+        .expect_err("disabled");
+    assert!(e.to_string().contains("is disabled"), "{e}");
+    let r = t
+        .call(
+            Method::DELETE,
+            "/v1/me",
+            Some(json!({ "confirm_email": "lee@example.org" })),
+            Some(&lee_s),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    let e = faro_server::cli::admin_grant(&t.state, "lee@example.org", true, None)
+        .await
+        .expect_err("deleting");
+    assert!(e.to_string().contains("being deleted"), "{e}");
+    // Nothing was created or logged.
+    assert!(log(&t, &admin_s).await.is_empty());
+    assert_eq!(count(&t.state, "SELECT COUNT(*) AS n FROM users").await, 3);
+}
+
+/// The admin log is kept: retention prunes the emails' delivery rows, never
+/// the entries.
+#[tokio::test]
+async fn retention_keeps_the_admin_log() {
+    let t = TestApp::new().await;
+    let (_admin, admin_s) = t.setup_admin("admin@example.org").await;
+    let (kim, _) = t.sign_in("kim@example.org").await;
+    assert_eq!(
+        set_admin(&t, &admin_s, &kim, true).await.status,
+        StatusCode::OK
+    );
+    t.notify_now().await;
+    let before = log(&t, &admin_s).await;
+    assert_eq!(before.len(), 1);
+
+    // Years pass; retention runs.
+    t.clock.advance_ms(5 * 366 * 24 * 3600 * 1000);
+    faro_server::retention::run_once(&t.state)
+        .await
+        .expect("retention");
+    assert_eq!(
+        count(
+            &t.state,
+            "SELECT COUNT(*) AS n FROM notifications WHERE admin_log_id IS NOT NULL"
+        )
+        .await,
+        0,
+        "delivery rows are pruned"
+    );
+    let (_, admin_s) = t.sign_in("admin@example.org").await;
+    assert_eq!(log(&t, &admin_s).await, before);
 }

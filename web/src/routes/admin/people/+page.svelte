@@ -522,8 +522,9 @@
 <section class="log" aria-labelledby="admin-log">
 	<h2 id="admin-log">Admin log</h2>
 	<p class="muted">
-		Every time someone is made an admin or stops being one, and every deletion an admin asks for.
-		Faro emails every admin each time.
+		Every time someone is made an admin or stops being one, every deletion an admin asks for, and
+		every account created from the command line. Faro emails the admins about each one. Entries are
+		never removed, but a deleted account's name is taken out of them.
 	</p>
 	{#if logError}
 		<div class="notice error" role="alert">{logError}</div>
@@ -544,6 +545,8 @@
 							removed the admin role from <strong title={e.user?.email}>{nameOf(e.user)}</strong>
 						{:else if e.action === 'deletion_requested'}
 							asked to delete <strong title={e.user?.email}>{accountOf(e)}</strong>
+						{:else if e.action === 'account_created'}
+							created <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{:else}
 							cancelled the deletion of <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{/if}

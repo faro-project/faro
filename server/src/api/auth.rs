@@ -157,7 +157,7 @@ async fn may_register(state: &AppState, email: &str, now: i64) -> AppResult<bool
 }
 
 /// Local part of an email, as a starting display name for self-registered users.
-fn default_display_name(email: &str) -> String {
+pub(crate) fn default_display_name(email: &str) -> String {
     let local = email.split('@').next().unwrap_or("member");
     let name: String = local.chars().take(64).collect();
     if name.is_empty() {
