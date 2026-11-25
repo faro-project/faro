@@ -100,8 +100,17 @@ struct FakeInstaller {
 }
 
 impl Installer for FakeInstaller {
-    fn check_package(&self, package: &Path, target: &TargetInfo) -> Result<(), PackageCheckError> {
+    fn check_package(
+        &self,
+        package: &Path,
+        target: &TargetInfo,
+        installed: &Version,
+    ) -> Result<(), PackageCheckError> {
         assert!(package.is_file(), "checked on disk, after the download");
+        assert!(
+            target.custom.version > *installed,
+            "given the running version to compare the package with"
+        );
         self.checked.lock().unwrap().push(target.name.clone());
         match self.verdict.lock().unwrap().clone() {
             Some(e) => Err(e),

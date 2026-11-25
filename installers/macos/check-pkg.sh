@@ -2,7 +2,10 @@
 # Check a built package without installing it: the payload has every file
 # at its fixed location with root ownership, the agent app carries the
 # right bundle identifier, the install scripts are present, and the
-# installer only installs for the whole computer. Every program must be
+# installer only installs for the whole computer. PackageInfo and the
+# Distribution carry the package's full semver version (the updater reads
+# it before installing), and the packaged faro-service reports the same
+# one. Every program must be
 # universal (arm64 + x86_64) and built for the minimum macOS, unless
 # `--arch` names the one architecture of a local single-architecture build.
 #
@@ -53,6 +56,34 @@ host_archs="$(sed -n 's/.*hostArchitectures="\([^"]*\)".*/\1/p' "$dist")"
 [[ "$host_archs" == "$want_archs" ]] || fail "hostArchitectures is \"$host_archs\" (want $want_archs)"
 [[ "$(sed -n 's/.*<os-version min="\([0-9.]*\)".*/\1/p' "$dist")" == "$min_os" ]] \
     || fail "the installer must require macOS $min_os"
+
+# The full semver version, which the updater reads from PackageInfo and the
+# Distribution before it installs a package (PROTOCOL.md §8.2, step 6;
+# crates/faro-service/src/update/package_version.rs). Both must name the
+# version in the file name, and the Distribution must install exactly the
+# one component, org.faro.pkg. The packaged faro-service must report the
+# same version (below). The app bundle can't carry a pre-release.
+pkg_stem="$(basename "$pkg" .pkg)"
+pkg_stem="${pkg_stem%-dev}"
+version="${pkg_stem#Faro-}"
+semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+[[ "$version" =~ $semver_re ]] || fail "cannot read a semver version from the file name $(basename "$pkg")"
+info_xml="$component/PackageInfo"
+[[ "$(xmllint --xpath 'string(/pkg-info/@identifier)' "$info_xml")" == org.faro.pkg ]] \
+    || fail "PackageInfo's identifier is not org.faro.pkg"
+got="$(xmllint --xpath 'string(/pkg-info/@version)' "$info_xml")"
+[[ "$got" == "$version" ]] || fail "PackageInfo's version is \"$got\" (want $version)"
+[[ "$(xmllint --xpath 'count(//pkg-ref[normalize-space(text()) != ""])' "$dist")" == 1 ]] \
+    || fail "the Distribution must install exactly one component"
+[[ "$(xmllint --xpath 'string(//pkg-ref[normalize-space(text()) != ""])' "$dist")" == "#faro-component.pkg" ]] \
+    || fail "the Distribution must install faro-component.pkg"
+[[ "$(xmllint --xpath 'string(//pkg-ref[normalize-space(text()) != ""]/@id)' "$dist")" == org.faro.pkg ]] \
+    || fail "the Distribution's component is not org.faro.pkg"
+for got in $(xmllint --xpath '//pkg-ref[@id="org.faro.pkg"]/@version' "$dist" | sed 's/ *version="\([^"]*\)"/\1 /g'); do
+    [[ "$got" == "$version" ]] || fail "the Distribution names version \"$got\" (want $version)"
+done
+[[ "$(xmllint --xpath 'string(//pkg-ref[normalize-space(text()) != ""]/@version)' "$dist")" == "$version" ]] \
+    || fail "the Distribution's component has no version $version"
 
 for s in preinstall postinstall lib.sh; do
     [[ -f "$component/Scripts/$s" ]] || fail "missing script $s"
@@ -164,6 +195,8 @@ fi
 # The model, through the packaged service, on this Mac's architecture.
 host_arch="$(uname -m)"
 if [[ ",$want_archs," == *",$host_arch,"* ]]; then
+    got="$("$service" --version)" || fail "faro-service ($host_arch) --version failed"
+    [[ "$got" == "faro-service $version" ]] || fail "faro-service --version printed \"$got\" (want $version)"
     check="$("$service" model-check --manifest "$work/payload/$model_dir/manifest.json" --runs 5)" \
         || fail "faro-service ($host_arch) cannot use the packaged model"
     echo "$check"

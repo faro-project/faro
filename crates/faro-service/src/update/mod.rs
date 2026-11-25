@@ -16,9 +16,11 @@
 //!    the instance can hold a computer back, never move it back;
 //! 4. downloads it with streaming verification against the signed length
 //!    and BLAKE3;
-//! 5. has the platform [`Installer`] check the package itself (on macOS:
-//!    Faro's Developer ID signature and notarization, [`signature`]), and
-//!    only then installs it.
+//! 5. has the platform [`Installer`] check the package itself, and only
+//!    then installs it. On macOS that is Faro's Developer ID signature and
+//!    notarization ([`signature`]), then the version inside the package,
+//!    which must be the target's and above the running one
+//!    ([`package_version`]).
 //!
 //! The trust state is saved after every verification step, `Ok` or `Err`
 //! (a rejected document can still raise the observed-time mark that stops
@@ -31,8 +33,9 @@
 //! skipped until the project publishes another. A failing package is
 //! never retried in a loop.
 //!
-//! **Rejected packages.** A package that fails the signature check with
-//! positive evidence that it isn't Faro's is recorded in `rejected` in
+//! **Rejected packages.** A package that fails the package check with
+//! positive evidence that it isn't what the metadata says (not Faro's, or
+//! another version than the target's) is recorded in `rejected` in
 //! `update-attempts.json` and never retried. The check that rejects it
 //! returns [`Outcome::Rejected`], and later checks that select it again
 //! return [`Outcome::PreviouslyRejected`] with the same reason, so the
@@ -48,6 +51,7 @@
 
 pub mod fetch;
 pub mod install;
+pub mod package_version;
 pub mod signature;
 
 use crate::state::{StateDir, StateError};
@@ -94,8 +98,9 @@ pub enum CheckError {
     State(#[from] StateError),
     #[error(transparent)]
     Install(#[from] InstallError),
-    /// The package's own signature couldn't be confirmed (never a
-    /// rejection: that is [`Outcome::Rejected`]).
+    /// The package's own check (its signature or the version inside it)
+    /// couldn't conclude (never a rejection: that is
+    /// [`Outcome::Rejected`]).
     #[error(transparent)]
     Package(PackageCheckError),
     #[error("cannot manage downloads in {path}: {source}")]
@@ -179,7 +184,7 @@ pub struct Attempts {
     pub pending: Option<Pending>,
     /// Failed installs by package BLAKE3 (`b3:…`).
     pub failures: BTreeMap<String, u32>,
-    /// Packages whose signature check rejected them, by BLAKE3, with the
+    /// Packages the package check rejected, by BLAKE3, with the
     /// reason. Never retried.
     pub rejected: BTreeMap<String, String>,
 }
@@ -201,8 +206,9 @@ pub enum Outcome {
     InstallPending { version: String },
     /// The install of `version` has started.
     Installing { version: Version },
-    /// The package for `version` failed its signature check just now:
-    /// not installed, and never retried. Report it as tamper.
+    /// The package for `version` failed its package check just now (its
+    /// signature, or the version inside it): not installed, and never
+    /// retried. Report it as tamper.
     Rejected { version: Version, reason: String },
     /// That package was rejected by an earlier check, for `reason`.
     PreviouslyRejected { version: Version, reason: String },
@@ -395,7 +401,8 @@ impl ClientUpdater {
         let package = self.download(&target).await?;
         let checked = {
             let (i, p, t) = (installer.clone(), package.clone(), target.clone());
-            tokio::task::spawn_blocking(move || i.check_package(&p, &t))
+            let installed = self.spec.installed.clone();
+            tokio::task::spawn_blocking(move || i.check_package(&p, &t, &installed))
                 .await
                 .unwrap_or_else(|e| {
                     Err(PackageCheckError::Unconfirmed(format!(
@@ -410,7 +417,7 @@ impl ClientUpdater {
                     %version,
                     %reason,
                     package = %package.display(),
-                    "refusing the update package: it is not signed and notarized as Faro's; kept for inspection"
+                    "refusing the update package; kept for inspection"
                 );
                 let mut a = self.attempts()?;
                 a.rejected.insert(key, reason.clone());

@@ -54,6 +54,13 @@ hostname = "0.4"
 # rustls (ring provider, like the rest of the workspace) with the OS trust
 # store, so instances using a locally installed CA work; no native-tls/OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+# Reading the version inside a macOS update package (src/update/
+# package_version.rs): the xar archive's zlib streams, its SHA checksums
+# and its XML table of contents.
+flate2 = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+roxmltree = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
