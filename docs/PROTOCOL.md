@@ -262,7 +262,39 @@ The instance uses these fields for liveness and to tell the device which `seq` i
 
 Both alerts are tamper-class: allies can move them to the digest but not turn them off.
 
-## 8. Deviations from ARCHITECTURE.md v0.2
+## 8. Updates
+
+Releases are signed by the project with TUF-style metadata (`faro-update`; the roles, threshold, rollback and freeze rules are documented in `crates/faro-update/src/lib.rs`). Every document is a DSSE-style envelope whose signatures cover `PAE(payload_type, payload)` under the tag `faro/update-envelope/v1`, with payload types `application/vnd.faro.{root,targets,timestamp}+json`.
+
+### 8.1 Layout
+
+The project's publishing location, a release directory for an air-gapped import, and an instance's mirror all use the same layout. An instance serves it under `/v1/updates`:
+
+| Path | Content |
+|---|---|
+| `roots/<n>.json` | Root version `n`, for `n >= 2`. Root 1 ships with every client and server. |
+| `timestamp.json` | The current timestamp: commits to the exact length and BLAKE3 of `targets.json`. |
+| `targets.json` | The artifact list: target name → length, BLAKE3, `{kind, platform, arch, version, channels, min_os?}`. |
+| `targets/<name>` | An artifact, under its target name. |
+
+`GET /v1/updates` returns `{"available": bool, "channel": "<channel>"}`: whether the instance has verified metadata to serve, and the channel its admin chose (`stable`, `beta`, … or the pin `stable-1`). Every path under `/v1/updates` is public: the content is project-signed, and a member's browser may download the installer from it.
+
+### 8.2 Client rules
+
+A client trusts the root it shipped with, never the instance. On each check it:
+
+1. fetches `roots/<v+1>.json` until a 404, verifying each rotation against the previous root;
+2. fetches and verifies `timestamp.json`, then `targets.json`, which must match the timestamp's commitment byte for byte (a mirror that switches release between the two requests is retried later);
+3. selects for its platform, arch and OS version in the instance's channel, never below its installed version;
+4. downloads the artifact, reading at most the signed length plus one byte, and installs it only if length and BLAKE3 match.
+
+It persists its trust state after every step, including failed ones. The instance chooses the channel, so it can hold clients back or move them between channels, but it can't make them install anything the project didn't sign or go back to an older release.
+
+### 8.3 What the mirror does
+
+The mirror is configured with the same root of trust (`updates.root`) and runs the same verification before it stores anything. It serves exactly the bytes it verified. Artifacts are cached by BLAKE3. For each kind, platform and arch, an online mirror prefetches what its channel selects and fetches other listed artifacts on first request. `kind = server` artifacts are never fetched or served. A root older than the mirror's own (when the mirror started from a newer root file than a client) is passed through from upstream unverified, because the client verifies it.
+
+## 9. Deviations from ARCHITECTURE.md v0.2
 
 | Topic | ARCHITECTURE.md | Protocol v1 | Why |
 |---|---|---|---|

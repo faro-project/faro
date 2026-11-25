@@ -8,7 +8,8 @@
 > - **There are no releases yet.** You can build the image yourself from the source code (one command; it takes a while the first time), or use the development image `ghcr.io/faro-project/faro-server:main` that CI builds from the latest code for amd64 and arm64 (see [Path B](#4-path-b-a-raspberry-pi)).
 > - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
 > - **Postgres is untested** in these deployment files. Use the built-in SQLite database, which is the right choice for almost everyone anyway.
-> - Not built yet: passkey sign-in (you sign in with email links for now), Web Push notifications (email only), S3 storage for attachments (local disk only), and the update mirror.
+> - The **update mirror** is built, but the Faro project hasn't published a signed release or its root of trust yet, so there is nothing to mirror, and the macOS client doesn't install updates yet. See [Updates for members' computers](#updates-for-members-computers).
+> - Not built yet: passkey sign-in (you sign in with email links for now), Web Push notifications (email only), and S3 storage for attachments (local disk only).
 
 ## Contents
 
@@ -454,6 +455,7 @@ faro-server doctor
 [OK  ] settings       registration invite-only, retention 90/30/90 days (headers/blobs/alerts), liveness grace 10800 s
 [OK  ] smtp           smtp.example.org reachable
 [OK  ] disk           18.2 GiB free
+[OK  ] updates        release metadata version 12 (4 artifacts cached)
 [OK  ] backups        not verifiable from here: schedule `faro-server backup --out …` and rotate copies
 
 0 failure(s), 0 warning(s)
@@ -553,6 +555,42 @@ After a restore the log says "previous run did not shut down cleanly". That's ex
 Database changes are applied automatically when the new version starts, and they only go forward: to go back to an older version, restore the backup you made in step 1.
 
 While Faro is pre-alpha there are no release versions, and `git pull` gets the latest development code, which can be broken. Only do this on a test or pilot instance. Once releases exist, this guide will tell you to upgrade to a release instead.
+
+### Updates for members' computers
+
+Members' computers get Faro updates **through your instance**, not straight from the Faro project. Your instance downloads each release from the project, keeps a copy, and hands it to the computers that ask. That way a college lab with hundreds of computers downloads a release from the internet once.
+
+Your instance can't change an update. Releases are signed by the Faro project, and every computer checks that signature itself before installing anything. A broken or compromised instance can *delay* updates, but it can't push its own code to members' computers or move them back to an older release. Your instance checks the signatures too, so it never stores or hands out a file the project didn't sign.
+
+It needs two settings, in `faro.env` (or the `[updates]` section of `faro.toml`):
+
+```sh
+# The project's root of trust. The official image will include this file.
+FARO_UPDATES_ROOT=/usr/share/faro/update-root.json
+# Where the project publishes releases.
+FARO_UPDATES_UPSTREAM=https://…
+```
+
+> Neither exists yet: the project hasn't published its first signed release. Until then the mirror stays off, and `doctor` says so with a `WARN` line.
+
+Once it's on, the instance checks for a new release every hour (`FARO_UPDATES_REFRESH_SECS`). It stores what it downloads in `updates/` in the data folder. Backups leave that folder out, because it can always be downloaded again.
+
+**Which releases computers get.** Choose this on the admin console's **Settings** page (or with `FARO_UPDATES_CHANNEL`):
+
+- **Stable** (the default): each new release, once the project marks it stable.
+- **One release behind** (`stable-1`): the newest release of the previous version. This suits managed computers, such as a college lab, that only take a release after it has been out for a while. Computers that already have a newer release keep it: Faro never moves a computer back.
+- **Beta**: releases before they are marked stable, for people who want to test them.
+
+**Check on it** with `sudo docker compose exec faro faro-server updates status`. It shows when the instance last checked, which release it has, and which files it holds. `doctor` warns when the latest check failed, or when the copy the instance holds is too old for computers to accept. The project re-signs its releases daily so that computers can tell an old copy from a current one.
+
+**An instance without internet access** (air-gapped) leaves `FARO_UPDATES_UPSTREAM` unset. Copy a release folder from the project onto the server, then copy it into the container and load it (from the `deploy` folder):
+
+```sh
+sudo docker compose cp release-2027-01 faro:/tmp/release
+sudo docker compose exec faro faro-server updates import --from /tmp/release
+```
+
+The running server serves the new release within a minute. Because the project re-signs releases daily, an air-gapped instance needs a fresh copy at least that often, or computers will refuse it as too old.
 
 ---
 

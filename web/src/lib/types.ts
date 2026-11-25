@@ -68,6 +68,17 @@ export interface InstanceSettings {
 	liveness: {
 		grace_secs: number;
 	};
+	updates: {
+		/** `stable`, `beta`, … or the pin `stable-1`. */
+		channel: string;
+	};
+}
+
+/** `GET /v1/updates`: what the instance's update mirror offers. */
+export interface UpdatesInfo {
+	/** The mirror has verified release metadata to serve. */
+	available: boolean;
+	channel: string;
 }
 
 /** `PATCH /admin/api/settings` body: any subset. */
@@ -80,6 +91,7 @@ export interface SettingsPatch {
 		alert_days?: number;
 	};
 	liveness_grace_secs?: number;
+	update_channel?: string;
 }
 
 /** `GET /admin/api/overview`: configuration and aggregate counts only. */

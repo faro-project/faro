@@ -268,6 +268,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 - **Binding to an instance happens at enrollment, not at build time.** The installer is generic. The member enrolls with a link or QR code (`faro://enroll?i=https://faro.example.org&c=XXXX-XXXX`) or by pasting the instance URL and a code. The client fetches `/.well-known/faro` (the instance's ID, its identity public key and version), shows the instance name for confirmation and pins the instance identity key.
 - **Updates go through the instance.** The service asks *its instance* for update metadata, and the instance mirrors and caches signed releases from upstream. The **client verifies the project's signatures** (TUF-style: an offline root key, plus targets and timestamp keys) itself, so a compromised or malicious instance can delay updates but can't push code. Instance admins can **pin a version channel** (`stable`, `stable-1`) for managed fleets, such as a college lab. Air-gapped instances can load release bundles by hand.
 - Models and blocklists use the same signed channel.
+- *Status: `faro-update` verifies the metadata, and `faro-server` has the mirror (`server/src/updates`, PROTOCOL.md §8). It verifies against the project root before storing anything, prefetches what the instance's channel selects, fetches other listed artifacts on demand, and has an air-gapped `updates import`. Not done yet: the client side (the service checking, downloading and installing), and the project's own root keys and publishing location.*
 
 ---
 

@@ -1,4 +1,5 @@
-//! Command-line interface: `faro-server serve | init | backup | doctor | version`.
+//! Command-line interface: `faro-server serve | init | backup | doctor |
+//! updates | version`.
 //!
 //! * `init` creates the data directory and the instance identity key,
 //!   migrates the database, and prints a one-time setup token for the web
@@ -10,6 +11,9 @@
 //! * `backup --out FILE.tar` writes a consistent snapshot (database, identity
 //!   key, config, blobs); see [`crate::backup`].
 //! * `doctor` checks the configuration and environment; see [`crate::doctor`].
+//! * `updates status` shows what the update mirror holds; `updates import
+//!   --from DIR` loads a release by hand on an air-gapped instance. See
+//!   [`crate::updates`].
 //! * `version` prints the server and protocol versions.
 //!
 //! Secrets printed here (setup tokens) go to **stdout/stderr only**, never
@@ -86,8 +90,41 @@ pub enum Command {
         #[arg(long)]
         no_smtp_check: bool,
     },
+    /// Inspect or load the update mirror.
+    Updates {
+        #[command(subcommand)]
+        action: UpdatesCommand,
+    },
     /// Print version information.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UpdatesCommand {
+    /// Show what the mirror holds and how its latest refresh went.
+    Status {
+        /// Path to faro.toml (optional; FARO_* env vars override it).
+        #[arg(long, env = "FARO_CONFIG")]
+        config: Option<PathBuf>,
+        /// Development mode (see `serve --dev`).
+        #[arg(long)]
+        dev: bool,
+    },
+    /// Load a signed release from a directory (an air-gapped instance). The
+    /// directory has the upstream layout: timestamp.json, targets.json,
+    /// roots/<n>.json and targets/<name>. A running server serves it within
+    /// a minute.
+    Import {
+        /// Path to faro.toml (optional; FARO_* env vars override it).
+        #[arg(long, env = "FARO_CONFIG")]
+        config: Option<PathBuf>,
+        /// Development mode (see `serve --dev`).
+        #[arg(long)]
+        dev: bool,
+        /// The release directory.
+        #[arg(long)]
+        from: PathBuf,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +147,13 @@ pub enum CliError {
     Backup(#[from] crate::backup::BackupError),
     #[error("doctor found problems")]
     DoctorFailed,
+    #[error(
+        "the update mirror is off: set updates.root (FARO_UPDATES_ROOT) to the project's \
+         root of trust"
+    )]
+    UpdatesOff,
+    #[error("update mirror: {0}")]
+    Updates(Box<crate::updates::MirrorError>),
     #[error("cannot listen on {addr}: {source}")]
     Listen {
         addr: std::net::SocketAddr,
@@ -282,6 +326,96 @@ async fn run_doctor(cfg: Config, check_smtp: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+fn open_mirror_cli(cfg: &Config) -> Result<crate::updates::Mirror, CliError> {
+    let root_path = cfg.updates.root.as_ref().ok_or(CliError::UpdatesOff)?;
+    let root = std::fs::read(root_path).map_err(|source| {
+        CliError::Bootstrap(bootstrap::BootstrapError::UpdateRoot {
+            path: root_path.clone(),
+            source,
+        })
+    })?;
+    crate::updates::Mirror::open(cfg.data_dir.join(crate::updates::MIRROR_DIR), root, None)
+        .map_err(|e| CliError::Updates(Box::new(e)))
+}
+
+fn print_mirror_status(s: &crate::updates::MirrorStatus) {
+    let when = |ms: Option<i64>| {
+        ms.and_then(|ms| time::OffsetDateTime::from_unix_timestamp(ms / 1000).ok())
+            .and_then(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_else(|| "never".to_owned())
+    };
+    let ver = |v: Option<u64>| v.map_or_else(|| "-".to_owned(), |v| v.to_string());
+    println!("  source:         {}", s.source.as_deref().unwrap_or("-"));
+    println!("  last attempt:   {}", when(s.last_attempt_ms));
+    println!("  last success:   {}", when(s.last_success_ms));
+    if let Some(e) = &s.last_error {
+        println!("  last error:     {e}");
+    }
+    println!("  root version:   {}", ver(s.root_version));
+    println!(
+        "  timestamp:      version {}, expires {}",
+        ver(s.timestamp_version),
+        when(s.timestamp_expires_ms)
+    );
+    println!(
+        "  targets:        version {}, expires {}",
+        ver(s.targets_version),
+        when(s.targets_expires_ms)
+    );
+    println!("  cached artifacts ({}):", s.cached.len());
+    for a in &s.cached {
+        println!(
+            "    {}  ({:?} {} {}/{}, {} bytes)",
+            a.name, a.kind, a.version, a.platform, a.arch, a.length
+        );
+    }
+    for f in &s.failed {
+        println!("  not mirrored:   {f}");
+    }
+}
+
+async fn run_updates(action: UpdatesCommand) -> Result<(), CliError> {
+    match action {
+        UpdatesCommand::Status { config, dev } => {
+            let cfg = load_config(config.as_deref(), std::env::vars(), false, dev)?;
+            if cfg.updates.root.is_none() {
+                return Err(CliError::UpdatesOff);
+            }
+            let dir = cfg.data_dir.join(crate::updates::MIRROR_DIR);
+            println!("Update mirror ({})", dir.display());
+            println!(
+                "  mode:           {}",
+                match &cfg.updates.upstream {
+                    Some(u) => format!("online, from {u}"),
+                    None => "air-gapped (updates import)".to_owned(),
+                }
+            );
+            print_mirror_status(&crate::updates::read_status(&dir));
+            Ok(())
+        }
+        UpdatesCommand::Import { config, dev, from } => {
+            let cfg = load_config(config.as_deref(), std::env::vars(), false, dev)?;
+            let mirror = open_mirror_cli(&cfg)?;
+            let now = crate::clock::Clock::now_ms(&SystemClock);
+            let status = mirror
+                .refresh_from(
+                    &crate::updates::upstream::Upstream::Dir(from),
+                    now,
+                    &faro_update::Channel::stable(),
+                    crate::updates::Prefetch::All,
+                )
+                .await
+                .map_err(|e| CliError::Updates(Box::new(e)))?;
+            println!("Release imported.");
+            print_mirror_status(&status);
+            Ok(())
+        }
+    }
+}
+
 /// Entry point used by `main`.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -335,6 +469,7 @@ pub fn main() -> ExitCode {
                         let cfg = load_config(config.as_deref(), std::env::vars(), false, dev)?;
                         run_doctor(cfg, !no_smtp_check).await
                     }
+                    Command::Updates { action } => run_updates(action).await,
                     Command::Version => Ok(()),
                 }
             })

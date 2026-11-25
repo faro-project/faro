@@ -1,13 +1,20 @@
 <script lang="ts">
 	// Instance settings an admin may change (PATCH /admin/api/settings):
-	// registration, retention and, optionally, the liveness grace period.
+	// registration, retention and, optionally, the liveness grace period and
+	// the update channel.
 	// Used by the setup wizard and the admin console's Settings page.
 	//
 	// Only fields that differ from what is in effect are sent, so untouched
 	// settings keep following faro.toml / FARO_* variables.
 
+	import { onMount } from 'svelte';
 	import { api, ApiError, describeError } from '#lib/api.ts';
-	import type { InstanceSettings, RegistrationMode, SettingsPatch } from '#lib/types.ts';
+	import type {
+		InstanceSettings,
+		RegistrationMode,
+		SettingsPatch,
+		UpdatesInfo
+	} from '#lib/types.ts';
 
 	let {
 		settings,
@@ -15,6 +22,7 @@
 		heading = 'Who can join, and how long data is kept',
 		submitLabel = 'Save',
 		showLiveness = false,
+		showUpdates = false,
 		onskip,
 		skipLabel = 'Skip'
 	}: {
@@ -23,6 +31,7 @@
 		heading?: string;
 		submitLabel?: string;
 		showLiveness?: boolean;
+		showUpdates?: boolean;
 		onskip?: () => void;
 		skipLabel?: string;
 	} = $props();
@@ -42,6 +51,9 @@
 	let blobDays = $state(seed.retention.blob_days);
 	let alertDays = $state(seed.retention.alert_days);
 	let graceHours = $state(secsToHours(seed.liveness.grace_secs));
+	let channel = $state(seed.updates.channel);
+	/** Whether the mirror has a release to serve; null until known. */
+	let updatesAvailable = $state<boolean | null>(null);
 	let busy = $state(false);
 	let error = $state('');
 	let saved = $state(false);
@@ -63,6 +75,49 @@
 			hint: 'No new accounts. People who already have one can still sign in.'
 		}
 	];
+
+	const CHANNELS: { value: string; label: string; hint: string }[] = [
+		{
+			value: 'stable',
+			label: 'Stable',
+			hint: 'Each new release, once the Faro project marks it stable. Best for most instances.'
+		},
+		{
+			value: 'stable-1',
+			label: 'One release behind',
+			hint:
+				'The newest release of the previous version, for managed computers (a college lab, say) ' +
+				'that wait until a release has been out for a while. Computers already on a newer ' +
+				'release keep it.'
+		},
+		{
+			value: 'beta',
+			label: 'Beta',
+			hint: 'Releases before they are marked stable. Only for people who want to test them.'
+		}
+	];
+	// A channel set in faro.toml that isn't one of the above stays selectable.
+	let channels = $derived(
+		CHANNELS.some((c) => c.value === baseline.updates.channel)
+			? CHANNELS
+			: [
+					...CHANNELS,
+					{
+						value: baseline.updates.channel,
+						label: baseline.updates.channel,
+						hint: 'Set in faro.toml or FARO_UPDATES_CHANNEL.'
+					}
+				]
+	);
+
+	onMount(async () => {
+		if (!showUpdates) return;
+		try {
+			updatesAvailable = (await api.get<UpdatesInfo>('/v1/updates')).available;
+		} catch {
+			updatesAvailable = null;
+		}
+	});
 
 	function secsToHours(s: number): number {
 		return Math.round((s / 3600) * 100) / 100;
@@ -108,6 +163,7 @@
 		if (showLiveness && Number(graceHours) !== secsToHours(baseline.liveness.grace_secs)) {
 			patch.liveness_grace_secs = graceSecs;
 		}
+		if (showUpdates && channel !== baseline.updates.channel) patch.update_channel = channel;
 		return patch;
 	}
 
@@ -128,6 +184,7 @@
 			baseline = next;
 			domains = next.registration.allowed_email_domains.join(', ');
 			graceHours = secsToHours(next.liveness.grace_secs);
+			channel = next.updates.channel;
 			saved = true;
 			onsaved(next);
 		} catch (err) {
@@ -249,6 +306,33 @@
 					<span class="field-error">Use a value from 10 minutes (0.17) to 7 days (168).</span>
 				{/if}
 			</div>
+		</fieldset>
+	{/if}
+
+	{#if showUpdates}
+		<fieldset>
+			<legend>Software updates</legend>
+			<p class="hint">
+				Computers get Faro updates through this server, which passes on releases signed by the Faro
+				project. Each computer checks the project's signature itself, so this server can't change an
+				update.
+			</p>
+			{#if updatesAvailable === false}
+				<div class="notice" role="status">
+					This server isn't passing on updates yet. Its administrator sets
+					<code>updates.root</code> (and, unless the server is offline,
+					<code>updates.upstream</code>) in faro.toml; <code>faro-server doctor</code> shows what is missing.
+				</div>
+			{/if}
+			{#each channels as c (c.value)}
+				<label class="choice">
+					<input type="radio" name="update-channel" value={c.value} bind:group={channel} />
+					<span>
+						{c.label}
+						<span class="hint">{c.hint}</span>
+					</span>
+				</label>
+			{/each}
 		</fieldset>
 	{/if}
 

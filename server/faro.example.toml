@@ -68,3 +68,20 @@ magic_links_per_email_per_hour = 5
 # 2) A certificate you manage yourself (PEM chain + key; reloaded on restart). FARO_TLS_CERT_PATH / _KEY_PATH
 # cert_path = "/etc/faro/fullchain.pem"
 # key_path = "/etc/faro/privkey.pem"
+
+[updates]
+# The update mirror: members' computers get Faro updates through this
+# instance, which passes on releases signed by the Faro project. Computers
+# check the project's signature themselves, so the instance can't alter one.
+# Off until `root` is set.
+# The project's root of trust (a signed root document). Official images and   FARO_UPDATES_ROOT
+# packages ship it; the mirror only keeps what verifies against it.
+# root = "/usr/share/faro/update-root.json"
+# Where the project publishes releases. Leave unset on an air-gapped instance FARO_UPDATES_UPSTREAM
+# and load releases with `faro-server updates import --from DIR`.
+# upstream = "https://updates.example.org/faro"
+# Seconds between upstream checks (300 to 21600).                             FARO_UPDATES_REFRESH_SECS
+refresh_secs = 3600
+# stable, beta, ... or stable-1 (the previous version's newest release, for   FARO_UPDATES_CHANNEL
+# managed fleets). The admin console's Settings page can change it.
+channel = "stable"

@@ -424,3 +424,46 @@ fn selected_target_verifies_against_its_content() {
     assert!(verify_target_stream(&b"1.9.2"[..], &t, 1 << 20).is_err());
     assert_eq!(vt.get(&t.name), Some(t));
 }
+
+#[test]
+fn incremental_verifier_matches_the_stream_rules() {
+    use faro_update::TargetVerifier;
+    let content = b"0123456789abcdef".repeat(10);
+    let i = info(&content);
+
+    // Any chunking of the right bytes passes.
+    for size in [1, 7, 64, content.len()] {
+        let mut v = TargetVerifier::new(&i, 1 << 20).unwrap();
+        for chunk in content.chunks(size) {
+            v.update(chunk).unwrap();
+        }
+        assert_eq!(v.remaining(), 0);
+        v.finish().unwrap();
+    }
+
+    // A chunk past the signed length is refused before it counts.
+    let mut v = TargetVerifier::new(&i, 1 << 20).unwrap();
+    v.update(&content[..150]).unwrap();
+    assert!(matches!(
+        v.update(&content[..11]),
+        Err(StreamError::TooLong { .. })
+    ));
+    assert_eq!(v.remaining(), 10, "the refused chunk was not counted");
+
+    // Short, wrong bytes, and over the caller's cap.
+    let mut v = TargetVerifier::new(&i, 1 << 20).unwrap();
+    v.update(&content[..159]).unwrap();
+    assert!(matches!(
+        v.finish(),
+        Err(StreamError::TooShort { got: 159, .. })
+    ));
+    let mut v = TargetVerifier::new(&i, 1 << 20).unwrap();
+    let mut wrong = content.clone();
+    wrong[0] ^= 1;
+    v.update(&wrong).unwrap();
+    assert!(matches!(v.finish(), Err(StreamError::HashMismatch { .. })));
+    assert!(matches!(
+        TargetVerifier::new(&i, 159),
+        Err(StreamError::ExceedsCap { .. })
+    ));
+}

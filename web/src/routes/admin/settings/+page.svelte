@@ -37,9 +37,10 @@
 {:else}
 	<SettingsForm
 		{settings}
-		heading="Registration, retention and check-ins"
+		heading="Registration, retention, check-ins and updates"
 		submitLabel="Save settings"
 		showLiveness
+		showUpdates
 		onsaved={(s) => (settings = s)}
 	/>
 {/if}

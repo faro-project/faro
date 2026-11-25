@@ -9,6 +9,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `faro_update::testing`: a toy project that signs releases, for tests of
+# the server mirror and the client. Never enable it in a shipped binary.
+testing = []
+
 [dependencies]
 faro-proto.workspace = true
 faro-crypto.workspace = true
