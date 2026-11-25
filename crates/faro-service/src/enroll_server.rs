@@ -181,12 +181,23 @@ struct Target {
     member_key: Option<String>,
 }
 
-fn fail(kind: FailureKind, detail: impl Into<String>) -> EnrollResponse {
-    EnrollResponse::failed(kind, detail)
+/// A failure answer. Boxed: the response type is large.
+struct Refused(Box<EnrollResponse>);
+
+fn fail(kind: FailureKind, detail: impl Into<String>) -> Refused {
+    Refused(Box::new(EnrollResponse::failed(kind, detail)))
+}
+
+fn failure(e: &EnrollError) -> Refused {
+    fail(failure_kind(e), e.to_string())
 }
 
 impl EnrollService {
-    pub fn new(state_dir: impl Into<PathBuf>, client: ClientOptions, approver: Arc<dyn Approver>) -> Self {
+    pub fn new(
+        state_dir: impl Into<PathBuf>,
+        client: ClientOptions,
+        approver: Arc<dyn Approver>,
+    ) -> Self {
         EnrollService {
             state_dir: state_dir.into(),
             client,
@@ -215,7 +226,10 @@ impl EnrollService {
     }
 
     /// Tests: the accounts the preview lists.
-    pub fn with_accounts(mut self, f: impl Fn() -> Option<Accounts> + Send + Sync + 'static) -> Self {
+    pub fn with_accounts(
+        mut self,
+        f: impl Fn() -> Option<Accounts> + Send + Sync + 'static,
+    ) -> Self {
         self.accounts = Arc::new(f);
         self
     }
@@ -235,7 +249,7 @@ impl EnrollService {
     /// Answer one request.
     pub async fn handle(&self, req: EnrollRequest) -> EnrollResponse {
         tracing::info!(request = req.kind(), "enroll request from the agent");
-        let resp = match req {
+        let answer = match req {
             EnrollRequest::Status => self.status(),
             EnrollRequest::Preview(target) => self.preview(&target).await,
             EnrollRequest::Enroll {
@@ -244,10 +258,16 @@ impl EnrollService {
                 confirmed_identity,
                 authorization,
             } => {
-                self.enroll(&target, &confirmed_instance, &confirmed_identity, &authorization)
-                    .await
+                self.enroll(
+                    &target,
+                    &confirmed_instance,
+                    &confirmed_identity,
+                    &authorization,
+                )
+                .await
             }
         };
+        let resp = answer.unwrap_or_else(|r| *r.0);
         match &resp {
             EnrollResponse::Failed { kind, detail } => {
                 tracing::info!(?kind, %detail, "enroll request refused")
@@ -257,34 +277,32 @@ impl EnrollService {
         resp
     }
 
-    fn dir(&self) -> Result<StateDir, EnrollResponse> {
+    fn dir(&self) -> Result<StateDir, Refused> {
         StateDir::open(&self.state_dir).map_err(|e| fail(FailureKind::Failed, e.to_string()))
     }
 
-    fn status(&self) -> EnrollResponse {
-        let dir = match self.dir() {
-            Ok(d) => d,
-            Err(r) => return r,
-        };
-        match dir.enrollment() {
-            Ok(e) => EnrollResponse::Status(EnrollStatus {
+    fn status(&self) -> Result<EnrollResponse, Refused> {
+        let dir = self.dir()?;
+        let status = match dir.enrollment() {
+            Ok(e) => EnrollStatus {
                 enrolled: true,
                 instance_name: Some(e.instance_name.clone()),
                 instance_url: Some(e.instance_url.clone()),
                 endorsed: matches!(dir.endorsement(), Ok(Some(_))),
-            }),
-            Err(StateError::NotEnrolled) => EnrollResponse::Status(EnrollStatus {
+            },
+            Err(StateError::NotEnrolled) => EnrollStatus {
                 enrolled: false,
                 instance_name: None,
                 instance_url: None,
                 endorsed: false,
-            }),
-            Err(e) => fail(FailureKind::Failed, e.to_string()),
-        }
+            },
+            Err(e) => return Err(fail(FailureKind::Failed, e.to_string())),
+        };
+        Ok(EnrollResponse::Status(status))
     }
 
     /// Refuse if the computer is enrolled.
-    fn not_enrolled(&self) -> Result<StateDir, EnrollResponse> {
+    fn not_enrolled(&self) -> Result<StateDir, Refused> {
         let dir = self.dir()?;
         match dir.enrollment() {
             Ok(e) => Err(fail(
@@ -296,7 +314,7 @@ impl EnrollService {
         }
     }
 
-    fn parse(target: &EnrollTarget) -> Result<Target, EnrollResponse> {
+    fn parse(target: &EnrollTarget) -> Result<Target, Refused> {
         let bad = |e: link::LinkError| fail(FailureKind::BadInput, e.to_string());
         match target {
             EnrollTarget::Link(l) => {
@@ -315,39 +333,28 @@ impl EnrollService {
         }
     }
 
-    async fn discover(&self, url: &Url) -> Result<InstanceInfo, EnrollResponse> {
+    async fn discover(&self, url: &Url) -> Result<InstanceInfo, Refused> {
         let client = InstanceClient::new(url.clone(), self.clock.clone(), &self.client)
             .map_err(|e| failure(&e.into()))?;
         enroll::discover(&client).await.map_err(|e| failure(&e))
     }
 
-    fn device_name(&self) -> Result<String, EnrollResponse> {
+    fn device_name(&self) -> Result<String, Refused> {
         enroll::device_name(self.device_name.as_deref())
             .map_err(|e| fail(FailureKind::Failed, e.to_string()))
     }
 
-    async fn preview(&self, target: &EnrollTarget) -> EnrollResponse {
-        let t = match Self::parse(target) {
-            Ok(t) => t,
-            Err(r) => return r,
-        };
-        if let Err(r) = self.not_enrolled() {
-            return r;
-        }
-        let info = match self.discover(&t.instance).await {
-            Ok(i) => i,
-            Err(r) => return r,
-        };
-        let device_name = match self.device_name() {
-            Ok(n) => n,
-            Err(r) => return r,
-        };
+    async fn preview(&self, target: &EnrollTarget) -> Result<EnrollResponse, Refused> {
+        let t = Self::parse(target)?;
+        self.not_enrolled()?;
+        let info = self.discover(&t.instance).await?;
+        let device_name = self.device_name()?;
         let lister = self.accounts.clone();
         let accounts = tokio::task::spawn_blocking(move || lister())
             .await
             .ok()
             .flatten();
-        EnrollResponse::Preview(EnrollPreview {
+        Ok(EnrollResponse::Preview(EnrollPreview {
             instance_name: info.name.clone(),
             instance_url: info.url.to_string(),
             instance_id: info.well_known.instance_id.as_str().to_owned(),
@@ -356,7 +363,7 @@ impl EnrollService {
             guest_enabled: accounts.as_ref().is_some_and(|a| a.guest_enabled),
             accounts: accounts.map(|a| a.names),
             member_key_in_link: t.member_key.is_some(),
-        })
+        }))
     }
 
     async fn enroll(
@@ -365,35 +372,23 @@ impl EnrollService {
         confirmed_instance: &str,
         confirmed_identity: &[u8; 32],
         authorization: &[u8; AUTHORIZATION_LEN],
-    ) -> EnrollResponse {
+    ) -> Result<EnrollResponse, Refused> {
         let Ok(guard) = self.enrolling.clone().try_lock_owned() else {
-            return fail(FailureKind::Busy, "another enrollment is in progress");
+            return Err(fail(FailureKind::Busy, "another enrollment is in progress"));
         };
-        let t = match Self::parse(target) {
-            Ok(t) => t,
-            Err(r) => return r,
-        };
-        let dir = match self.not_enrolled() {
-            Ok(d) => d,
-            Err(r) => return r,
-        };
-        let device_name = match self.device_name() {
-            Ok(n) => n,
-            Err(r) => return r,
-        };
-        let info = match self.discover(&t.instance).await {
-            Ok(i) => i,
-            Err(r) => return r,
-        };
+        let t = Self::parse(target)?;
+        let dir = self.not_enrolled()?;
+        let device_name = self.device_name()?;
+        let info = self.discover(&t.instance).await?;
         let confirmed = |info: &InstanceInfo| {
             info.well_known.identity_pubkey.as_bytes() == confirmed_identity
                 && info.well_known.instance_id.as_str() == confirmed_instance
         };
         if !confirmed(&info) {
-            return fail(
+            return Err(fail(
                 FailureKind::InstanceChanged,
                 "the instance answers with another identity than the one you confirmed",
-            );
+            ));
         }
 
         // The prompt names what the service discovered itself. The
@@ -409,20 +404,20 @@ impl EnrollService {
         });
         let _guard = match tokio::time::timeout(self.approval_timeout, asked).await {
             Err(_) => {
-                return fail(
+                return Err(fail(
                     FailureKind::NotApproved,
                     "no administrator answered in time",
-                )
+                ))
             }
-            Ok(Err(e)) => return fail(FailureKind::Failed, format!("approval failed: {e}")),
+            Ok(Err(e)) => return Err(fail(FailureKind::Failed, format!("approval failed: {e}"))),
             Ok(Ok((_, Err(ApprovalError::NotApproved)))) => {
-                return fail(FailureKind::NotApproved, "no administrator approved")
+                return Err(fail(FailureKind::NotApproved, "no administrator approved"))
             }
             Ok(Ok((_, Err(ApprovalError::Unavailable(why))))) => {
-                return fail(FailureKind::Unavailable, why)
+                return Err(fail(FailureKind::Unavailable, why))
             }
             Ok(Ok((_, Err(ApprovalError::Failed(why))))) => {
-                return fail(FailureKind::Failed, why)
+                return Err(fail(FailureKind::Failed, why))
             }
             Ok(Ok((guard, Ok(())))) => guard,
         };
@@ -438,19 +433,16 @@ impl EnrollService {
         let member_key_checked = params.member_key.is_some();
         // The CLI's enrollment, pinning and member-key check; its confirm
         // step re-checks the identity the person confirmed.
-        let enrollment = match enroll::enroll(&dir, self.clock.clone(), &params, confirmed).await {
-            Ok(e) => e,
-            Err(e) => return failure(&e),
-        };
-        let key = match state::load_device_key(&dir) {
-            Ok(k) => k,
-            Err(e) => return fail(FailureKind::Failed, e.to_string()),
-        };
-        EnrollResponse::Enrolled(EnrollDone {
+        let enrollment = enroll::enroll(&dir, self.clock.clone(), &params, confirmed)
+            .await
+            .map_err(|e| failure(&e))?;
+        let key =
+            state::load_device_key(&dir).map_err(|e| fail(FailureKind::Failed, e.to_string()))?;
+        Ok(EnrollResponse::Enrolled(EnrollDone {
             device_fingerprint: enroll::device_fingerprint(&key.public()),
             member_fingerprint: enroll::member_fingerprint(&enrollment.member_sign_pubkey),
             member_key_checked,
-        })
+        }))
     }
 }
 
@@ -478,10 +470,6 @@ pub fn failure_kind(e: &EnrollError) -> FailureKind {
         EnrollError::State(StateError::AlreadyEnrolled { .. }) => FailureKind::AlreadyEnrolled,
         _ => FailureKind::Failed,
     }
-}
-
-fn failure(e: &EnrollError) -> EnrollResponse {
-    fail(failure_kind(e), e.to_string())
 }
 
 #[cfg(unix)]
@@ -636,7 +624,10 @@ mod listener {
 
     async fn accept_loop(server: IpcServer, service: Arc<EnrollService>, slots: Arc<Semaphore>) {
         loop {
-            match server.accept_typed::<EnrollResponse, faro_ipc::EnrollRequest>().await {
+            match server
+                .accept_typed::<EnrollResponse, faro_ipc::EnrollRequest>()
+                .await
+            {
                 Ok(conn) => {
                     let service = service.clone();
                     let slot = slots.clone().try_acquire_owned();
@@ -657,7 +648,10 @@ mod listener {
         service: &EnrollService,
         have_slot: bool,
     ) {
-        let req = match conn.recv_timeout(REQUEST_TIMEOUT, "an enroll request").await {
+        let req = match conn
+            .recv_timeout(REQUEST_TIMEOUT, "an enroll request")
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "no enroll request");
@@ -683,7 +677,10 @@ mod tests {
     fn the_prompt_names_the_instance_without_control_characters() {
         let url = Url::parse("https://faro.example.org/").unwrap();
         let p = approval_prompt("Sam\u{7}'s Faro", &url);
-        assert!(p.contains("\u{201c}Sam's Faro\u{201d} (faro.example.org)"), "{p}");
+        assert!(
+            p.contains("\u{201c}Sam's Faro\u{201d} (faro.example.org)"),
+            "{p}"
+        );
         assert!(p.contains("every account"));
         assert!(!p.chars().any(char::is_control));
     }
@@ -697,11 +694,20 @@ mod tests {
                 message: String::new(),
             })
         };
-        assert_eq!(failure_kind(&api(401, "invalid_enroll_code")), FailureKind::WrongCode);
+        assert_eq!(
+            failure_kind(&api(401, "invalid_enroll_code")),
+            FailureKind::WrongCode
+        );
         assert_eq!(failure_kind(&api(503, "x")), FailureKind::Unreachable);
         assert_eq!(failure_kind(&api(404, "not_found")), FailureKind::NotFaro);
-        assert_eq!(failure_kind(&api(409, "member_keys_required")), FailureKind::Failed);
-        assert_eq!(failure_kind(&EnrollError::Declined), FailureKind::InstanceChanged);
+        assert_eq!(
+            failure_kind(&api(409, "member_keys_required")),
+            FailureKind::Failed
+        );
+        assert_eq!(
+            failure_kind(&EnrollError::Declined),
+            FailureKind::InstanceChanged
+        );
         assert_eq!(
             failure_kind(&EnrollError::InvalidInstance("x".into())),
             FailureKind::NotFaro

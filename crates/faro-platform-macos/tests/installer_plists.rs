@@ -46,7 +46,8 @@ fn checked_in_plists_match_the_generator() {
 /// code-signing requirement names.
 #[test]
 fn the_agent_bundle_opens_faro_links() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../installers/macos/Info.plist.in");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../installers/macos/Info.plist.in");
     let info: plist::Dictionary = plist::from_file(&path).expect("Info.plist.in parses");
     assert_eq!(
         info.get("CFBundleIdentifier").and_then(|v| v.as_string()),

@@ -381,8 +381,7 @@ async fn garbage_from_a_verified_peer_is_a_typed_error() {
 #[tokio::test]
 async fn enroll_request_and_response_round_trip() {
     use faro_ipc::{
-        EnrollClientConnection, EnrollRequest, EnrollResponse, EnrollServerConnection,
-        EnrollStatus,
+        EnrollClientConnection, EnrollRequest, EnrollResponse, EnrollServerConnection, EnrollStatus,
     };
     let dir = private_dir();
     let path = faro_ipc::enroll_socket_path(&dir.path().join("agent.sock"), None);

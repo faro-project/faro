@@ -129,7 +129,13 @@ fn offer_enrollment(ui: &faro_platform_macos::ui::SessionUi, args: &RunArgs) {
                 // SAFETY: geteuid has no preconditions and cannot fail.
                 let uid = unsafe { libc::geteuid() };
                 let socket = faro_ipc::resolve_enroll_socket(&base, uid);
-                faro_agent::enroll::run_flow(&MacEnrollUi(handle), &MacAuthorizer, &socket, trust, link);
+                faro_agent::enroll::run_flow(
+                    &MacEnrollUi(handle),
+                    &MacAuthorizer,
+                    &socket,
+                    trust,
+                    link,
+                );
                 open2.store(false, Ordering::SeqCst);
             });
         if let Err(e) = spawned {
@@ -145,16 +151,17 @@ struct MacEnrollUi(faro_platform_macos::ui::UiHandle);
 #[cfg(target_os = "macos")]
 impl faro_agent::enroll::EnrollUi for MacEnrollUi {
     fn ask_target(&self, s: &faro_agent::enroll::PasteScreen) -> Option<(String, String)> {
-        self.0.ask_enroll_target(&faro_platform_macos::ui::TwoFields {
-            title: s.title.clone(),
-            body: s.body.clone(),
-            first_label: s.first_label.clone(),
-            first_placeholder: s.first_placeholder.clone(),
-            second_label: s.second_label.clone(),
-            second_placeholder: s.second_placeholder.clone(),
-            ok: s.ok.clone(),
-            cancel: s.cancel.clone(),
-        })
+        self.0
+            .ask_enroll_target(&faro_platform_macos::ui::TwoFields {
+                title: s.title.clone(),
+                body: s.body.clone(),
+                first_label: s.first_label.clone(),
+                first_placeholder: s.first_placeholder.clone(),
+                second_label: s.second_label.clone(),
+                second_placeholder: s.second_placeholder.clone(),
+                ok: s.ok.clone(),
+                cancel: s.cancel.clone(),
+            })
     }
 
     fn confirm(&self, s: &faro_agent::enroll::Screen, ok: &str, cancel: &str) -> bool {

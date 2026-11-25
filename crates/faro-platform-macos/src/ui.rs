@@ -51,10 +51,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
-    NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSTextField,
-    NSVariableStatusItemLength, NSView,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSFloatingWindowLevel, NSImage, NSMenu,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,

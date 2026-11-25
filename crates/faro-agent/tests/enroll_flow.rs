@@ -7,8 +7,8 @@
 use faro_agent::enroll::{run_flow, Authorizer, EnrollUi, PasteScreen, Screen};
 use faro_agent::ServiceTrust;
 use faro_ipc::{
-    AllowSameUid, EnrollDone, EnrollPreview, EnrollRequest, EnrollResponse,
-    EnrollServerConnection, EnrollStatus, EnrollTarget, FailureKind, IpcServer,
+    AllowSameUid, EnrollDone, EnrollPreview, EnrollRequest, EnrollResponse, EnrollServerConnection,
+    EnrollStatus, EnrollTarget, FailureKind, IpcServer,
 };
 use std::any::Any;
 use std::cell::RefCell;
@@ -186,10 +186,14 @@ fn a_link_is_confirmed_then_enrolled_with_the_confirmed_identity() {
         }
     );
     assert_eq!(*auth.created.borrow(), 1);
-    assert!(!*auth.alive.borrow(), "the authorization is freed after the answer");
+    assert!(
+        !*auth.alive.borrow(),
+        "the authorization is freed after the answer"
+    );
     let log = ui.log.borrow();
     assert_eq!(log.len(), 2, "{log:?}");
-    assert!(log[0].starts_with("confirm [Enroll]: Enroll this computer with \u{201c}Sam's Faro\u{201d}?"));
+    assert!(log[0]
+        .starts_with("confirm [Enroll]: Enroll this computer with \u{201c}Sam's Faro\u{201d}?"));
     assert!(log[1].starts_with("message: This computer is enrolled"));
     assert!(log[1].contains("0123456789abcdef"));
 }
@@ -201,7 +205,11 @@ fn cancelling_the_confirmation_sends_nothing_more() {
     let auth = FakeAuthorizer::default();
     run(&svc, &ui, &auth, Some(LINK));
     assert_eq!(svc.requests().len(), 1);
-    assert_eq!(*auth.created.borrow(), 0, "no authorization without consent");
+    assert_eq!(
+        *auth.created.borrow(),
+        0,
+        "no authorization without consent"
+    );
     assert_eq!(ui.log.borrow().len(), 1);
 }
 
@@ -265,7 +273,10 @@ fn a_refused_enrollment_is_explained() {
     run(&svc, &ui, &auth, Some(LINK));
     assert!(!*auth.alive.borrow());
     let log = ui.log.borrow();
-    assert!(log.last().unwrap().starts_with("problem: Not approved"), "{log:?}");
+    assert!(
+        log.last().unwrap().starts_with("problem: Not approved"),
+        "{log:?}"
+    );
 }
 
 #[test]
@@ -300,6 +311,9 @@ fn only_root_counts_as_the_service_in_production() {
         ServiceTrust::Root,
         Some(LINK.into()),
     );
-    assert!(svc.requests().is_empty(), "nothing sent to a non-root listener");
+    assert!(
+        svc.requests().is_empty(),
+        "nothing sent to a non-root listener"
+    );
     assert!(ui.log.borrow()[0].starts_with("problem: Faro isn't answering"));
 }

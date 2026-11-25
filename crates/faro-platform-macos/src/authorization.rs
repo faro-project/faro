@@ -46,9 +46,7 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CString};
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{
-    CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
-};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 
 /// The right that approves enrolling this computer.
 pub const ENROLL_RIGHT: &str = "org.faro.enroll";
@@ -161,7 +159,10 @@ pub enum AuthError {
     AlreadyAuthorized,
     /// Any other Authorization Services failure.
     #[error("{call} failed (OSStatus {status})")]
-    Os { call: &'static str, status: OSStatus },
+    Os {
+        call: &'static str,
+        status: OSStatus,
+    },
 }
 
 fn check(call: &'static str, status: OSStatus) -> Result<(), AuthError> {
@@ -252,8 +253,7 @@ impl Authorization {
             items: &mut item,
         };
         // The prompt is plain text: no NUL (it is passed with its length).
-        let prompt: Option<Vec<u8>> =
-            prompt.map(|p| p.bytes().filter(|&b| b != 0).collect());
+        let prompt: Option<Vec<u8>> = prompt.map(|p| p.bytes().filter(|&b| b != 0).collect());
         let mut env_item = prompt.as_ref().map(|p| AuthorizationItem {
             name: ENV_PROMPT.as_ptr().cast(),
             value_length: p.len(),
@@ -273,9 +273,8 @@ impl Authorization {
         // SAFETY: `self.0` is live; `rights` and `env` point to item arrays
         // (and NUL-terminated names and value buffers) that outlive the
         // call; a null `authorized_rights` asks for no copy.
-        let status = unsafe {
-            AuthorizationCopyRights(self.0, &rights, &env, flags, ptr::null_mut())
-        };
+        let status =
+            unsafe { AuthorizationCopyRights(self.0, &rights, &env, flags, ptr::null_mut()) };
         check("AuthorizationCopyRights", status)
     }
 }
@@ -649,10 +648,7 @@ mod tests {
         let service = Authorization::from_external_form(&ext).expect("import");
         let r = service.copy_rights(ENROLL_RIGHT, Some("test"), false);
         assert!(
-            matches!(
-                r,
-                Err(AuthError::InteractionNotAllowed | AuthError::Denied)
-            ),
+            matches!(r, Err(AuthError::InteractionNotAllowed | AuthError::Denied)),
             "{r:?}"
         );
     }

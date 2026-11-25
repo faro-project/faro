@@ -528,9 +528,7 @@ fn start_enroll_server(config: &Config) -> AbortOnDrop {
     {
         use crate::enroll_server::{EnrollServer, EnrollService, SystemApprover};
         let service = EnrollService::from_config(config, Arc::new(SystemApprover));
-        AbortOnDrop(Some(tokio::spawn(
-            EnrollServer::new(service, config).run(),
-        )))
+        AbortOnDrop(Some(tokio::spawn(EnrollServer::new(service, config).run())))
     }
     #[cfg(not(unix))]
     {

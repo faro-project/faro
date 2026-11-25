@@ -14,8 +14,8 @@ mod e2e_support;
 
 use e2e_support::*;
 use faro_ipc::{
-    AllowSameUid, EnrollClientConnection, EnrollRequest, EnrollResponse, EnrollTarget,
-    FailureKind, IpcClient,
+    AllowSameUid, EnrollClientConnection, EnrollRequest, EnrollResponse, EnrollTarget, FailureKind,
+    IpcClient,
 };
 use faro_service::accounts::{enrollment_notice, Accounts};
 use faro_service::client::ClientOptions;
@@ -169,7 +169,10 @@ async fn preview_approve_enroll_then_activation_continues() {
     assert_eq!(&p.identity_key, w.t.state.identity().public().as_bytes());
     assert_eq!(p.instance_url, w.gate.url().as_str());
     assert_eq!(p.device_name, DEVICE_NAME);
-    assert_eq!(p.accounts.as_deref(), Some(&["alex".to_owned(), "sam".to_owned()][..]));
+    assert_eq!(
+        p.accounts.as_deref(),
+        Some(&["alex".to_owned(), "sam".to_owned()][..])
+    );
     assert!(p.guest_enabled && p.member_key_in_link);
     assert!(!b.has(DEVICE_KEY_FILE), "a preview writes nothing");
     assert_eq!(admin.asked(), 0, "a preview asks nobody");
@@ -178,7 +181,11 @@ async fn preview_approve_enroll_then_activation_continues() {
     let screen = faro_agent::enroll::confirm_screen(&p);
     for line in enrollment_notice(Some(&sample_accounts())).lines() {
         let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(screen.body.contains(&line), "missing {line:?} in {}", screen.body);
+        assert!(
+            screen.body.contains(&line),
+            "missing {line:?} in {}",
+            screen.body
+        );
     }
 
     let done = match svc.handle(enroll_req(&target, &p)).await {
@@ -191,7 +198,10 @@ async fn preview_approve_enroll_then_activation_continues() {
     // a prompt naming the instance the service discovered.
     assert_eq!(admin.authorizations.lock().unwrap().as_slice(), [AUTH]);
     let prompt = admin.prompts.lock().unwrap()[0].clone();
-    assert!(prompt.contains(&w.t.state.config().instance.name), "{prompt}");
+    assert!(
+        prompt.contains(&w.t.state.config().instance.name),
+        "{prompt}"
+    );
     assert!(prompt.contains("127.0.0.1"), "{prompt}");
 
     match svc.handle(EnrollRequest::Status).await {
@@ -204,17 +214,24 @@ async fn preview_approve_enroll_then_activation_continues() {
     let Computer { tmp, state_dir } = b;
     let mut dev = w.adopt_device(tmp, state_dir);
     assert_eq!(dev.fingerprint(), done.device_fingerprint);
-    assert_eq!(dev.enrollment.member_sign_pubkey, w.member_keys.sign.public());
+    assert_eq!(
+        dev.enrollment.member_sign_pubkey,
+        w.member_keys.sign.public()
+    );
     assert_eq!(
         dev.enrollment.instance_identity_pubkey,
         w.t.state.identity().public()
     );
     dev.start(quiet_classifier());
-    dev.wait("awaiting endorsement", |s| s.phase == Phase::AwaitingEndorsement)
-        .await;
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
     let anchor = w.endorse(&dev).await;
     let st = dev
-        .wait("running", |s| s.phase == Phase::Running && s.manifest.is_some())
+        .wait("running", |s| {
+            s.phase == Phase::Running && s.manifest.is_some()
+        })
         .await;
     assert_eq!(st.manifest, Some(anchor));
     dev.shutdown().await;
@@ -262,7 +279,11 @@ async fn an_identity_other_than_the_confirmed_one_is_refused() {
     let r = svc.handle(enroll_req(&target, &other_id)).await;
     assert_eq!(failed(&r), FailureKind::InstanceChanged);
 
-    assert_eq!(admin.asked(), 0, "nobody is asked to approve another instance");
+    assert_eq!(
+        admin.asked(),
+        0,
+        "nobody is asked to approve another instance"
+    );
     assert!(!b.has(ENROLLMENT_FILE) && !b.has(DEVICE_KEY_FILE));
 }
 
@@ -413,8 +434,10 @@ async fn the_enroll_socket_answers_before_enrollment() {
     let w = World::new().await;
     let b = Computer::new();
     let admin = FakeAdmin::new(Answer::Approve);
-    let mut config = faro_service::Config::default();
-    config.state_dir = b.state_dir.clone();
+    let mut config = faro_service::Config {
+        state_dir: b.state_dir.clone(),
+        ..Default::default()
+    };
     // The sockets go next to the state directory, in the test's private
     // tempdir (macOS socket paths are limited to 104 bytes).
     config.ipc.socket_path = b.tmp.path().join("agent.sock");

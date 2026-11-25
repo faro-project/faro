@@ -110,9 +110,10 @@ pub fn target_from_fields(first: &str, second: &str) -> Result<EnrollTarget, Scr
 /// What `faro-service enroll` prints about the accounts
 /// (`faro_service::accounts::enrollment_notice`), one sentence per line.
 pub fn accounts_notice(accounts: Option<&[String]>, guest_enabled: bool) -> Vec<String> {
-    let mut out =
-        vec!["Faro will monitor every account on this computer, including accounts created later."
-            .to_owned()];
+    let mut out = vec![
+        "Faro will monitor every account on this computer, including accounts created later."
+            .to_owned(),
+    ];
     if let Some(names) = accounts.filter(|a| !a.is_empty()) {
         out.push(format!("Accounts: {}", names.join(", ")));
     }
@@ -139,7 +140,10 @@ pub fn confirm_screen(p: &EnrollPreview) -> Screen {
          computer types their name and password to approve.",
     );
     Screen::new(
-        format!("Enroll this computer with \u{201c}{}\u{201d}?", p.instance_name),
+        format!(
+            "Enroll this computer with \u{201c}{}\u{201d}?",
+            p.instance_name
+        ),
         body,
     )
 }
@@ -219,10 +223,9 @@ pub fn failure_screen(kind: FailureKind, detail: &str) -> Screen {
             "Each code works once and expires. Make a new one on the Computers page of \
              your Faro web app and try again.",
         ),
-        FailureKind::AlreadyEnrolled => Screen::new(
-            "This computer is already enrolled",
-            "Nothing was changed.",
-        ),
+        FailureKind::AlreadyEnrolled => {
+            Screen::new("This computer is already enrolled", "Nothing was changed.")
+        }
         FailureKind::NotApproved => Screen::new(
             "Not approved",
             "An administrator of this computer has to type their name and password to \
@@ -476,7 +479,10 @@ mod tests {
     #[test]
     fn confirm_names_the_instance_and_every_account() {
         let s = confirm_screen(&preview());
-        assert_eq!(s.title, "Enroll this computer with \u{201c}Sam's Faro\u{201d}?");
+        assert_eq!(
+            s.title,
+            "Enroll this computer with \u{201c}Sam's Faro\u{201d}?"
+        );
         assert!(s.body.contains("Address: https://faro.example.org/"));
         assert!(s.body.contains("\u{201c}Laptop\u{201d}"));
         assert!(s.body.contains("every account on this computer"));
@@ -531,7 +537,9 @@ mod tests {
             assert!(!failure_screen(kind, " ").body.contains("Details"));
         }
         assert!(failure_screen(WrongCode, "").body.contains("new one"));
-        assert!(failure_screen(NotApproved, "").body.contains("Nothing was changed"));
+        assert!(failure_screen(NotApproved, "")
+            .body
+            .contains("Nothing was changed"));
     }
 
     #[test]
@@ -542,7 +550,9 @@ mod tests {
             instance_url: Some("https://faro.example.org/".into()),
             endorsed: false,
         });
-        assert!(s.body.contains("\u{201c}Sam's Faro\u{201d} (https://faro.example.org/)"));
+        assert!(s
+            .body
+            .contains("\u{201c}Sam's Faro\u{201d} (https://faro.example.org/)"));
         assert!(s.body.contains("waiting for approval"));
     }
 }

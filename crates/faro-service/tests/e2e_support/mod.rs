@@ -401,6 +401,8 @@ impl World {
 
     /// A device enrolled some other way (the agent's enroll socket,
     /// `tests/enroll_gui.rs`) into `state_dir`, which lives in `tmp`.
+    // Only tests/enroll_gui.rs uses it; tests/e2e.rs compiles this module too.
+    #[allow(dead_code)]
     pub fn adopt_device(&self, tmp: tempfile::TempDir, state_dir: PathBuf) -> Device {
         let dir = StateDir::open(&state_dir).expect("state dir");
         let enrollment = dir.enrollment().expect("enrolled");
