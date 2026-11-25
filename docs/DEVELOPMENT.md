@@ -5,7 +5,7 @@
 ## Toolchain
 
 - Rust stable, 1.94 or newer (`rust-version` in the root `Cargo.toml`; set by `sqlx` 0.9, which the server needs so it can share the patched SQLite that `rusqlite` 0.41 bundles). CI uses the latest stable.
-- No nightly is needed, except for the optional `cargo fuzz` targets.
+- No nightly is needed, except for the optional `cargo fuzz` targets (see [Fuzzing](#fuzzing)).
 - `cargo-deny` is used for license, ban and advisory checks: `cargo deny check`.
 - Node.js 22.17 or newer (SvelteKit 3 needs it), only for the web app in `web/` (CI and the container image use Node 24). The Rust build never runs npm.
 
@@ -98,7 +98,40 @@ Without `web/build`, `faro-server` still builds and its API works; page requests
 
 ## Update metadata in tests
 
-`faro-update`'s `testing` feature adds `faro_update::testing::ToyProject`, a project with its own keys. It signs releases (root, targets, timestamp, artifacts) and writes them in the upstream layout (PROTOCOL.md §8.1), so the mirror and client tests can publish whatever they need. Enable it only in `[dev-dependencies]`, never in a shipped binary. `server/tests/updates.rs` serves such a directory over HTTP on localhost to exercise the online mirror.
+`faro-update`'s `testing` feature adds `faro_update::testing::ToyProject`, a project with its own keys. It signs releases (root, targets, timestamp, artifacts) and writes them in the upstream layout (PROTOCOL.md §8.1), so the mirror and client tests can publish whatever they need. `ToyProject::from_seed` derives the keys from a seed, so separate processes sign identical documents, and `sign_raw` signs any payload bytes without validating them. Enable it only in `[dev-dependencies]`, never in a shipped binary. `server/tests/updates.rs` serves such a directory over HTTP on localhost to exercise the online mirror.
+
+## Fuzzing
+
+The parsers that read untrusted input have `cargo fuzz` targets (ARCHITECTURE.md §9). Each fuzz crate has an empty `[workspace]` table, which keeps it out of the workspace: stable builds, `cargo clippy --workspace` and `cargo test --workspace` never build it. They need nightly Rust and `cargo-fuzz`; the default toolchain can stay stable.
+
+```sh
+rustup toolchain install nightly --profile minimal
+cargo install cargo-fuzz
+cd crates/faro-update/fuzz
+cargo run --release --example seed_corpus               # seeds into corpus/<target>/
+cargo +nightly fuzz run client_flow -- -max_total_time=600
+cargo +nightly fuzz run client_flow artifacts/client_flow/crash-<hash>   # replay one input
+cargo test --release --lib                              # the seeds still decode and verify
+```
+
+| Crate | Target | Input |
+|---|---|---|
+| `faro-update` | `envelope` | A served envelope of each role, and a root to bootstrap from (`Updater::bootstrap`, the one place a payload is parsed before its signatures are checked) |
+| | `metadata` | Root, targets and timestamp payloads, a persisted `TrustedState`, target names, channels and OS versions |
+| | `client_flow` | A whole update check from an untrusted mirror: root rotations, timestamps and targets fed to the `Updater` the way a client calls it, with the state persisted in between. Every document the state ends up trusting must be one the project signed |
+| | `signed_flow` | The same check with payloads the harness signs with the project's keys (a buggy release tool or a compromised key), which reaches validation, the version and expiry rules, selection and download checks |
+| `faro-proto` | `encoding` | `from_b64`, `from_slice`, `from_prefixed_hex`, the base64 serde adapters, the canonical writer, ids, enum names, key ids, safety codes |
+| | `event` | Event uploads (`EventsBatchRequest`, `SignedEvent`) and decrypted `EventBody`s |
+| | `report` | Report uploads (`ReportUpload`) and decrypted `DailyReport`s |
+| | `api` | The HTTP API types the server reads from devices and browsers and the client reads from its instance; the first byte picks the type |
+| `faro-ipc` | `decode_agent_msg`, `decode_service_msg`, `stream_decoder` | Agent ↔ service messages |
+
+Every target fails on a panic. Beyond that, every faro-proto decoder must round-trip (decode, encode, decode to an equal value, encode to the same bytes), and the faro-update targets check the state machine's rules after every call: nothing trusted rolls back, a failed call changes nothing but the observed time, and the persisted state loads back unchanged and stays small.
+
+- **Seeds.** `faro-update`'s seeds are documents signed by `ToyProject::from_seed`, a toy project with fixed keys whose first root every target trusts, so a seed written by one process verifies in another. `faro-proto`'s are sample values of each type. Both are written by the crate's `seed_corpus` example, and `corpus/` is not checked in. The `src/lib.rs` tests check that the seeds still decode and reach as far into the verifier as they should, so run them after changing a type.
+- **A shared machine.** libFuzzer uses one process unless asked for more; keep it that way (`-jobs=1`) and fuzz one target at a time.
+- **Findings.** Fix the bug with a regression test in the crate's normal test suite, not only in the corpus. A finding in `faro-update` is a security issue: describe it in the pull request that fixes it, never in a public issue.
+- **CI.** `.github/workflows/fuzz.yml` runs every target nightly and on demand (`workflow_dispatch`, with the seconds per target as input; 300 by default) on the Linux runner, and never on pull requests. Each run starts from the corpus the previous one grew (kept in the Actions cache), and a crashing input is uploaded as the `fuzz-crashes-<crate>-<run id>` artifact, kept for 30 days.
 
 ## The domain category bundle
 
@@ -218,7 +251,7 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 |---|---|---|
 | `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval` |
 | `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel` |
-| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build |
+| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, the arm64 container build, the nightly `fuzz` workflow |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
 
 There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`.
