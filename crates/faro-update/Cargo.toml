@@ -32,3 +32,6 @@ proptest.workspace = true
 [[example]]
 name = "faro-release"
 path = "examples/faro-release.rs"
+# Run its unit tests with the crate's (`cargo test -p faro-update`): the
+# release workflow depends on it.
+test = true
