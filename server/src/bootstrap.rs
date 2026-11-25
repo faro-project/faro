@@ -13,6 +13,8 @@ use crate::mailer::Mailer;
 use crate::settings::{InstanceSettings, StoredSettings};
 use crate::state::{AppState, StateParts};
 use crate::tokens::{new_token, TokenPurpose};
+use crate::updates::upstream::Upstream;
+use crate::updates::{Mirror, MirrorError, MIRROR_DIR};
 use faro_crypto::{random_bytes, Zeroizing};
 use faro_proto::InstanceId;
 use std::path::Path;
@@ -36,6 +38,16 @@ pub enum BootstrapError {
     Db(#[from] DbError),
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("cannot read the update root of trust {path}: {source}")]
+    UpdateRoot {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("update mirror: {0}")]
+    Updates(#[from] MirrorError),
+    #[error("update mirror: cannot set up the upstream client: {0}")]
+    UpdatesClient(#[source] reqwest::Error),
     #[error(
         "the identity key in the data directory does not match the one recorded in the database; \
          refusing to start (restore the original identity.key, or point at the right database)"
@@ -110,8 +122,10 @@ pub async fn open(
     })?;
 
     let settings = load_settings(&db, &config).await?;
+    let updates = open_mirror(&config, clock.now_ms())?;
 
     Ok(AppState::new(StateParts {
+        updates,
         settings,
         config,
         db,
@@ -121,6 +135,30 @@ pub async fn open(
         identity,
         instance_id: row.id,
     }))
+}
+
+/// The update mirror, if `updates.root` is configured. What a previous run
+/// left on disk is served right away, without waiting for upstream.
+fn open_mirror(config: &Config, now_ms: i64) -> Result<Option<Arc<Mirror>>, BootstrapError> {
+    let Some(root_path) = &config.updates.root else {
+        return Ok(None);
+    };
+    let root = std::fs::read(root_path).map_err(|source| BootstrapError::UpdateRoot {
+        path: root_path.clone(),
+        source,
+    })?;
+    let upstream = config
+        .updates
+        .upstream
+        .as_deref()
+        .map(|u| Upstream::http(u, config.dev))
+        .transpose()
+        .map_err(BootstrapError::UpdatesClient)?;
+    let mirror = Mirror::open(config.data_dir.join(MIRROR_DIR), root, upstream)?;
+    if let Err(e) = mirror.reload(now_ms) {
+        tracing::warn!(error = %e, "could not load mirrored update metadata");
+    }
+    Ok(Some(Arc::new(mirror)))
 }
 
 /// Effective settings: config file plus the admin's stored overrides. If the

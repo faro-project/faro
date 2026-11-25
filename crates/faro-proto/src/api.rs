@@ -26,6 +26,24 @@ pub struct WellKnown {
     pub protocol: u16,
 }
 
+/// Base path of the instance's update mirror (ARCHITECTURE.md §3.8,
+/// PROTOCOL.md §8). Everything under it is public and read-only:
+/// project-signed metadata and artifacts, which clients verify against the
+/// project's root of trust themselves, never against the instance.
+pub const UPDATES_PATH: &str = "/v1/updates";
+
+/// `GET /v1/updates`: what the instance's mirror offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatesInfo {
+    /// Whether the instance has verified update metadata to serve. `false`
+    /// when the mirror is off or has not completed a refresh yet.
+    pub available: bool,
+    /// The release channel the instance admin chose for its clients:
+    /// a channel name (`stable`, `beta`) or the pin `stable-1`. Clients
+    /// follow it but never downgrade because of it.
+    pub channel: String,
+}
+
 /// Client platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

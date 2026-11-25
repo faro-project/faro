@@ -26,8 +26,6 @@
 //! ([`crate::web`]), which sends its own, page-specific CSP. API paths it
 //! does not know keep the JSON 404.
 //!
-//! Not built yet (see the stage report): the update mirror; its router would
-//! merge into [`api_routes`] the same way.
 
 use crate::api::{
     admin, allies, auth, devices, events, feed, heartbeat, invites, keys, manifests, prefs,
@@ -36,12 +34,13 @@ use crate::api::{
 use crate::error::AppError;
 use crate::ratelimit;
 use crate::state::AppState;
+use crate::updates::api as updates;
 use axum::extract::{MatchedPath, Request};
 use axum::handler::Handler;
 use axum::http::{header, HeaderName, HeaderValue};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
-use faro_proto::api::WELL_KNOWN_PATH;
+use faro_proto::api::{UPDATES_PATH, WELL_KNOWN_PATH};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -133,6 +132,24 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             get(prefs::get_retention).put(prefs::put_retention),
         )
         .route("/v1/privacy-notice", get(privacy::get))
+        // The update mirror: public, project-signed releases (§3.8).
+        .route(UPDATES_PATH, get(updates::info))
+        .route(
+            &format!("{UPDATES_PATH}/timestamp.json"),
+            get(updates::timestamp),
+        )
+        .route(
+            &format!("{UPDATES_PATH}/targets.json"),
+            get(updates::targets),
+        )
+        .route(
+            &format!("{UPDATES_PATH}/roots/{{file}}"),
+            get(updates::root),
+        )
+        .route(
+            &format!("{UPDATES_PATH}/targets/{{*name}}"),
+            get(updates::artifact),
+        )
         // Admin console: configuration and aggregate metadata only.
         .route("/admin/api/overview", get(admin::overview))
         .route("/admin/api/users", get(admin::list_users))

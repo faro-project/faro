@@ -9,6 +9,7 @@ use crate::mailer::Mailer;
 use crate::ratelimit::RateLimiter;
 use crate::settings::InstanceSettings;
 use crate::tokens::TokenHasher;
+use crate::updates::Mirror;
 use faro_proto::InstanceId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -29,6 +30,7 @@ struct Inner {
     rate_limiter: RateLimiter,
     device_locks: KeyedLocks,
     settings: RwLock<InstanceSettings>,
+    updates: Option<Arc<Mirror>>,
 }
 
 /// Everything needed to build an [`AppState`]; see [`crate::bootstrap`].
@@ -42,6 +44,8 @@ pub struct StateParts {
     pub instance_id: InstanceId,
     /// Effective admin-editable settings (config file + stored overrides).
     pub settings: InstanceSettings,
+    /// The update mirror, when `updates.root` is configured.
+    pub updates: Option<Arc<Mirror>>,
 }
 
 impl AppState {
@@ -57,6 +61,7 @@ impl AppState {
             rate_limiter: RateLimiter::new(),
             device_locks: KeyedLocks::default(),
             settings: RwLock::new(p.settings),
+            updates: p.updates,
         }))
     }
 
@@ -114,6 +119,11 @@ impl AppState {
         *self.0.settings.write().unwrap_or_else(|p| p.into_inner()) = s;
     }
 
+    /// The update mirror, if this instance runs one.
+    pub fn updates(&self) -> Option<&Arc<Mirror>> {
+        self.0.updates.as_ref()
+    }
+
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.0.rate_limiter
     }
@@ -128,12 +138,12 @@ impl AppState {
 
 /// A map of named async mutexes that forgets idle entries.
 #[derive(Debug, Default)]
-struct KeyedLocks {
+pub(crate) struct KeyedLocks {
     map: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl KeyedLocks {
-    async fn lock(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) async fn lock(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let m = {
             // A poisoned std mutex only means another thread panicked while
             // inserting; the map itself is still usable.

@@ -48,21 +48,12 @@ fn run<R: Read>(
     info: &TargetInfo,
     max_len: u64,
 ) -> Result<(), StreamError> {
-    let expected = info.length;
-    if expected > max_len {
-        return Err(StreamError::ExceedsCap {
-            name: info.name.clone(),
-            length: expected,
-            max_len,
-        });
-    }
-    let mut hasher = blake3::Hasher::new();
+    let mut verifier = TargetVerifier::new(info, max_len)?;
     let mut buf = vec![0u8; CHUNK];
-    let mut total: u64 = 0;
     loop {
         // Never ask for more than one byte past the signed length.
-        let remaining_plus_one = (expected - total).saturating_add(1);
-        let want = usize::try_from(remaining_plus_one).map_or(CHUNK, |r| r.min(CHUNK));
+        let want =
+            usize::try_from(verifier.remaining().saturating_add(1)).map_or(CHUNK, |r| r.min(CHUNK));
         let n = match reader.read(&mut buf[..want]) {
             Ok(0) => break,
             // A reader claiming more than the buffer it was given violates
@@ -76,31 +67,85 @@ fn run<R: Read>(
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         };
-        // `n <= want <= expected - total + 1`, so this cannot overflow.
-        total += n as u64;
-        if total > expected {
-            return Err(StreamError::TooLong {
-                name: info.name.clone(),
-                expected,
-            });
-        }
         let chunk = &buf[..n];
-        hasher.update(chunk);
+        verifier.update(chunk)?;
         if let Some(w) = sink.as_mut() {
             w.write_all(chunk)?;
         }
     }
-    if total < expected {
-        return Err(StreamError::TooShort {
+    verifier.finish()
+}
+
+/// Incremental form of [`verify_target_stream`], for callers that receive
+/// the artifact in chunks they don't control (an async HTTP body).
+///
+/// Feed every chunk to [`update`](Self::update) *before* using it, then call
+/// [`finish`](Self::finish). `update` fails as soon as the total passes the
+/// signed length, so a caller that writes each chunk only after `update`
+/// accepted it never stores a byte past that length. As with
+/// [`copy_verified_target`], nothing written is trustworthy until `finish`
+/// returns `Ok`.
+#[derive(Debug)]
+pub struct TargetVerifier {
+    name: String,
+    expected: u64,
+    blake3: [u8; 32],
+    total: u64,
+    hasher: blake3::Hasher,
+}
+
+impl TargetVerifier {
+    /// Start verifying `info`. Refuses a target whose signed length exceeds
+    /// the caller's own cap `max_len` before any byte arrives.
+    pub fn new(info: &TargetInfo, max_len: u64) -> Result<Self, StreamError> {
+        if info.length > max_len {
+            return Err(StreamError::ExceedsCap {
+                name: info.name.clone(),
+                length: info.length,
+                max_len,
+            });
+        }
+        Ok(TargetVerifier {
             name: info.name.clone(),
-            got: total,
-            expected,
-        });
+            expected: info.length,
+            blake3: *info.blake3.as_bytes(),
+            total: 0,
+            hasher: blake3::Hasher::new(),
+        })
     }
-    if hasher.finalize().as_bytes() != info.blake3.as_bytes() {
-        return Err(StreamError::HashMismatch {
-            name: info.name.clone(),
-        });
+
+    /// Bytes still expected before the signed length is reached.
+    pub fn remaining(&self) -> u64 {
+        self.expected - self.total
     }
-    Ok(())
+
+    /// Account for the next chunk. Errors if it takes the total past the
+    /// signed length; the chunk must then be discarded.
+    pub fn update(&mut self, chunk: &[u8]) -> Result<(), StreamError> {
+        let n = chunk.len() as u64;
+        if n > self.remaining() {
+            return Err(StreamError::TooLong {
+                name: self.name.clone(),
+                expected: self.expected,
+            });
+        }
+        self.total += n;
+        self.hasher.update(chunk);
+        Ok(())
+    }
+
+    /// The stream ended: check the length and the hash.
+    pub fn finish(self) -> Result<(), StreamError> {
+        if self.total < self.expected {
+            return Err(StreamError::TooShort {
+                name: self.name,
+                got: self.total,
+                expected: self.expected,
+            });
+        }
+        if self.hasher.finalize().as_bytes() != &self.blake3 {
+            return Err(StreamError::HashMismatch { name: self.name });
+        }
+        Ok(())
+    }
 }

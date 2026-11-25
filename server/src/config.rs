@@ -289,6 +289,54 @@ impl TlsConfig {
     }
 }
 
+/// The update mirror (§3.8, §4.1 item 7). See [`crate::updates`].
+///
+/// * `root` set, `upstream` set: the instance fetches signed releases from
+///   the project and serves them to its clients.
+/// * `root` set, no `upstream`: an air-gapped instance; releases are loaded
+///   by hand with `faro-server updates import`.
+/// * no `root`: the mirror is off and clients get no updates through this
+///   instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// The project's root of trust: a signed root document
+    /// (`1.root.json`), as shipped with the official container image and
+    /// packages. The mirror only stores and serves what verifies against it.
+    pub root: Option<PathBuf>,
+    /// Base URL where the project publishes update metadata and artifacts.
+    pub upstream: Option<String>,
+    /// Seconds between checks of `upstream`.
+    pub refresh_secs: u64,
+    /// The release channel offered to this instance's clients: `stable`,
+    /// `beta`, ... or the pin `stable-1` for managed fleets.
+    pub channel: String,
+}
+
+/// Bounds on [`UpdatesConfig::refresh_secs`]. The project re-signs its
+/// timestamp about daily, so checking less often than that would let
+/// clients see expired metadata.
+pub const MIN_UPDATE_REFRESH_SECS: u64 = 300;
+pub const MAX_UPDATE_REFRESH_SECS: u64 = 6 * 3600;
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig {
+            root: None,
+            upstream: None,
+            refresh_secs: 3600,
+            channel: faro_update::STABLE_CHANNEL.to_owned(),
+        }
+    }
+}
+
+/// Check an update channel string (a channel name or `stable-1`).
+pub fn parse_update_channel(s: &str) -> Result<faro_update::Channel, ConfigError> {
+    s.trim()
+        .parse()
+        .map_err(|e: faro_update::InvalidChannel| ConfigError::Invalid(e.to_string()))
+}
+
 /// The full server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -312,6 +360,7 @@ pub struct Config {
     pub liveness: LivenessConfig,
     pub rate_limit: RateLimitConfig,
     pub tls: TlsConfig,
+    pub updates: UpdatesConfig,
 }
 
 impl Default for Config {
@@ -330,6 +379,7 @@ impl Default for Config {
             liveness: LivenessConfig::default(),
             rate_limit: RateLimitConfig::default(),
             tls: TlsConfig::default(),
+            updates: UpdatesConfig::default(),
         }
     }
 }
@@ -443,6 +493,10 @@ impl Config {
                 "TLS_ACME_PRODUCTION" => self.tls.acme_production = parse_bool(k, &val)?,
                 "TLS_CERT_PATH" => self.tls.cert_path = non_empty(&val).map(PathBuf::from),
                 "TLS_KEY_PATH" => self.tls.key_path = non_empty(&val).map(PathBuf::from),
+                "UPDATES_ROOT" => self.updates.root = non_empty(&val).map(PathBuf::from),
+                "UPDATES_UPSTREAM" => self.updates.upstream = non_empty(&val),
+                "UPDATES_REFRESH_SECS" => self.updates.refresh_secs = parse_num(k, &val)?,
+                "UPDATES_CHANNEL" => self.updates.channel = val.trim().to_owned(),
                 "RATE_LIMIT_PER_MINUTE" => {
                     self.rate_limit.unauthenticated_per_minute = parse_num(k, &val)?
                 }
@@ -539,6 +593,7 @@ impl Config {
         }
         self.validate_smtp()?;
         self.validate_tls()?;
+        self.validate_updates()?;
         if self.rate_limit.unauthenticated_per_minute == 0
             || self.rate_limit.magic_links_per_email_per_hour == 0
         {
@@ -607,6 +662,48 @@ impl Config {
                 "behind_proxy and built-in TLS are mutually exclusive \
                  (the proxy terminates TLS)",
             );
+        }
+        Ok(())
+    }
+
+    fn validate_updates(&mut self) -> Result<(), ConfigError> {
+        let invalid = |m: String| Err(ConfigError::Invalid(m));
+        let dev = self.dev;
+        let u = &mut self.updates;
+        u.channel = parse_update_channel(&u.channel)?.to_string();
+        if !(MIN_UPDATE_REFRESH_SECS..=MAX_UPDATE_REFRESH_SECS).contains(&u.refresh_secs) {
+            return invalid(format!(
+                "updates.refresh_secs must be from {MIN_UPDATE_REFRESH_SECS} to \
+                 {MAX_UPDATE_REFRESH_SECS}"
+            ));
+        }
+        if let Some(up) = &u.upstream {
+            let up = up.trim().trim_end_matches('/').to_owned();
+            let rest = match (up.strip_prefix("https://"), up.strip_prefix("http://")) {
+                (Some(r), _) => r,
+                (None, Some(r)) if dev => r,
+                (None, Some(_)) => {
+                    return invalid(format!(
+                        "updates.upstream {up:?} must use https:// (dev = true allows http://)"
+                    ))
+                }
+                _ => return invalid(format!("updates.upstream {up:?} must start with https://")),
+            };
+            if rest.is_empty()
+                || rest.starts_with('/')
+                || rest.contains(['?', '#', '@', ' '])
+                || rest.chars().any(|c| c.is_control())
+            {
+                return invalid(format!("updates.upstream {up:?} is not a valid base URL"));
+            }
+            if u.root.is_none() {
+                return invalid(
+                    "updates.upstream needs updates.root: the mirror only serves releases \
+                     it can verify against the project's root of trust"
+                        .into(),
+                );
+            }
+            u.upstream = Some(up);
         }
         Ok(())
     }
@@ -868,6 +965,59 @@ mod tests {
             sqlite_url_for(Path::new("/tmp/my dir/faro?.db")),
             "sqlite:///tmp/my%20dir/faro%3F.db?mode=rwc"
         );
+    }
+
+    #[test]
+    fn updates_validation() {
+        let base = || Config {
+            public_url: "https://faro.example.org".into(),
+            ..Config::default()
+        };
+        let mut c = base();
+        c.apply_env(env(&[
+            ("FARO_UPDATES_ROOT", "/usr/share/faro/update-root.json"),
+            ("FARO_UPDATES_UPSTREAM", "https://updates.example.org/faro/"),
+            ("FARO_UPDATES_REFRESH_SECS", "1800"),
+            ("FARO_UPDATES_CHANNEL", " stable-1 "),
+        ]))
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(
+            c.updates.upstream.as_deref(),
+            Some("https://updates.example.org/faro")
+        );
+        assert_eq!(c.updates.channel, "stable-1");
+        assert_eq!(c.updates.refresh_secs, 1800);
+
+        let bad: [fn(&mut Config); 6] = [
+            // An upstream the mirror couldn't verify.
+            |c| c.updates.upstream = Some("https://u.example.org".into()),
+            // Plain HTTP outside dev mode.
+            |c| {
+                c.updates.root = Some("/r.json".into());
+                c.updates.upstream = Some("http://u.example.org".into());
+            },
+            |c| {
+                c.updates.root = Some("/r.json".into());
+                c.updates.upstream = Some("https://user@u.example.org".into());
+            },
+            |c| c.updates.channel = "stable-2".into(),
+            |c| c.updates.refresh_secs = MIN_UPDATE_REFRESH_SECS - 1,
+            |c| c.updates.refresh_secs = MAX_UPDATE_REFRESH_SECS + 1,
+        ];
+        for (i, tweak) in bad.into_iter().enumerate() {
+            let mut c = base();
+            tweak(&mut c);
+            assert!(c.validate().is_err(), "case {i} should be rejected");
+        }
+
+        // Air-gapped: a root without an upstream. Dev mode allows http.
+        let mut c = base();
+        c.updates.root = Some("/r.json".into());
+        c.validate().unwrap();
+        c.dev = true;
+        c.updates.upstream = Some("http://127.0.0.1:9000".into());
+        c.validate().unwrap();
     }
 
     #[test]

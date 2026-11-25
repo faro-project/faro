@@ -134,6 +134,8 @@ pub mod metadata;
 mod select;
 mod signer;
 mod stream;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod trust;
 
 pub use envelope::{pae, Envelope, EnvelopeSignature, ENVELOPE_TAG, MAX_SIGNATURES};
@@ -145,5 +147,5 @@ pub use metadata::{
 pub use select::{Channel, InvalidChannel, Selection, TargetInfo, VerifiedTargets};
 pub use semver::Version;
 pub use signer::MetadataSigner;
-pub use stream::{copy_verified_target, verify_target_stream};
+pub use stream::{copy_verified_target, verify_target_stream, TargetVerifier};
 pub use trust::{TargetsRecord, TimestampRecord, TrustedState, Updater};

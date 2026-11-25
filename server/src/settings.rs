@@ -1,5 +1,6 @@
 //! Admin-editable instance settings (§4.3, §8): registration mode and domain
-//! allowlist, retention windows and the liveness grace period.
+//! allowlist, retention windows, the liveness grace period and the update
+//! channel.
 //!
 //! **Precedence.** `faro.toml` / `FARO_*` provide the initial values. Once an
 //! admin changes a setting through `PATCH /admin/api/settings`, the changed
@@ -25,6 +26,16 @@ pub struct InstanceSettings {
     pub registration: RegistrationConfig,
     pub retention: RetentionConfig,
     pub liveness: LivenessConfig,
+    pub updates: UpdateSettings,
+}
+
+/// The admin-editable part of [`crate::config::UpdatesConfig`]. Where
+/// updates come from (root of trust, upstream) stays in the config file:
+/// it is a deployment decision, not a console one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    /// `stable`, `beta`, ... or the pin `stable-1`.
+    pub channel: String,
 }
 
 /// What an admin has overridden (persisted as `instance.settings_json`).
@@ -39,6 +50,7 @@ pub struct StoredSettings {
     pub retention_blob_days: Option<u32>,
     pub retention_alert_days: Option<u32>,
     pub liveness_grace_secs: Option<u64>,
+    pub update_channel: Option<String>,
 }
 
 /// `PATCH /admin/api/settings` body: any subset of fields.
@@ -49,6 +61,7 @@ pub struct SettingsPatch {
     pub allowed_email_domains: Option<Vec<String>>,
     pub retention: Option<RetentionPatch>,
     pub liveness_grace_secs: Option<u64>,
+    pub update_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +115,9 @@ impl StoredSettings {
         if let Some(g) = p.liveness_grace_secs {
             self.liveness_grace_secs = Some(g);
         }
+        if let Some(c) = &p.update_channel {
+            self.update_channel = Some(c.clone());
+        }
     }
 }
 
@@ -112,6 +128,9 @@ impl InstanceSettings {
             registration: c.registration.clone(),
             retention: c.retention.clone(),
             liveness: c.liveness.clone(),
+            updates: UpdateSettings {
+                channel: c.updates.channel.clone(),
+            },
         }
     }
 
@@ -137,6 +156,9 @@ impl InstanceSettings {
         }
         if let Some(g) = stored.liveness_grace_secs {
             c.liveness.grace_secs = g;
+        }
+        if let Some(ch) = &stored.update_channel {
+            c.updates.channel = ch.clone();
         }
         c.validate()?;
         let r = &c.retention;
@@ -214,6 +236,14 @@ mod tests {
                 ..StoredSettings::default()
             },
             StoredSettings {
+                update_channel: Some("Stable".into()),
+                ..StoredSettings::default()
+            },
+            StoredSettings {
+                update_channel: Some("stable-2".into()),
+                ..StoredSettings::default()
+            },
+            StoredSettings {
                 allowed_email_domains: Some(vec!["not a domain".into()]),
                 registration_mode: Some(RegistrationMode::Open),
                 ..StoredSettings::default()
@@ -229,6 +259,13 @@ mod tests {
         };
         let s = InstanceSettings::resolve(&c, &ok).unwrap();
         assert_eq!(s.registration.allowed_email_domains, vec!["college.edu"]);
+        assert_eq!(s.updates.channel, "stable", "from config");
+        let pin = StoredSettings {
+            update_channel: Some(" stable-1 ".into()),
+            ..StoredSettings::default()
+        };
+        let s = InstanceSettings::resolve(&c, &pin).unwrap();
+        assert_eq!(s.updates.channel, "stable-1");
     }
 
     #[test]

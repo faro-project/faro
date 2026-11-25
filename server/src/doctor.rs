@@ -268,12 +268,94 @@ pub async fn run(cfg: &Config, check_smtp: bool) -> Report {
         None => r.push("disk", Level::Warn, "could not determine free space"),
     }
 
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    check_updates(cfg, now_ms, &mut r);
+
     r.push(
         "backups",
         Level::Ok,
         "not verifiable from here: schedule `faro-server backup --out …` and rotate copies",
     );
     r
+}
+
+/// The update mirror (§3.8, §9 "update freshness"): configured, refreshing,
+/// and holding metadata clients will still accept.
+pub fn check_updates(cfg: &Config, now_ms: i64, r: &mut Report) {
+    let Some(root) = &cfg.updates.root else {
+        r.push(
+            "updates",
+            Level::Warn,
+            "off: clients get no updates through this instance (set updates.root)",
+        );
+        return;
+    };
+    match std::fs::read(root) {
+        Err(e) => {
+            r.push(
+                "updates",
+                Level::Fail,
+                format!("cannot read root of trust {}: {e}", root.display()),
+            );
+            return;
+        }
+        Ok(b) => {
+            if let Err(e) = faro_update::Updater::bootstrap(&b) {
+                r.push(
+                    "updates",
+                    Level::Fail,
+                    format!("{} is not a valid signed root: {e}", root.display()),
+                );
+                return;
+            }
+        }
+    }
+    let s = crate::updates::read_status(&cfg.data_dir.join(crate::updates::MIRROR_DIR));
+    let error = s
+        .last_error
+        .as_deref()
+        .map(|e| format!("; latest refresh failed: {e}"))
+        .unwrap_or_default();
+    let Some(expires) = s
+        .timestamp_expires_ms
+        .filter(|_| s.last_success_ms.is_some())
+    else {
+        r.push(
+            "updates",
+            Level::Warn,
+            format!("no release mirrored yet{error}"),
+        );
+        return;
+    };
+    if expires <= now_ms {
+        r.push(
+            "updates",
+            Level::Warn,
+            format!(
+                "the mirrored release metadata has expired, so clients will not update until \
+                 the next successful refresh{error}"
+            ),
+        );
+        return;
+    }
+    let summary = format!(
+        "release metadata version {} ({} artifacts cached)",
+        s.targets_version.unwrap_or(0),
+        s.cached.len()
+    );
+    if error.is_empty() && s.failed.is_empty() {
+        r.push("updates", Level::Ok, summary);
+    } else if error.is_empty() {
+        r.push(
+            "updates",
+            Level::Warn,
+            format!("{summary}; not mirrored: {}", s.failed.join(", ")),
+        );
+    } else {
+        r.push("updates", Level::Warn, format!("{summary}{error}"));
+    }
 }
 
 async fn check_database(cfg: &Config, key_path: &Path, r: &mut Report) {

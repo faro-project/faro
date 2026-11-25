@@ -1,5 +1,6 @@
 //! In-process background workers (§4.2 "Jobs"): uptime bookkeeping, the
-//! notifier and digests, the liveness monitor and retention.
+//! notifier and digests, the liveness monitor, retention and the update
+//! mirror.
 //!
 //! Every worker is a periodic loop around a `run_once`-style function that
 //! reads time only through [`AppState::now_ms`] (an injectable
@@ -258,6 +259,34 @@ pub fn spawn_all(
             move || {
                 let state = state.clone();
                 async move { retention::run_once(&state).await.map(|_| ()) }
+            },
+        ));
+    }
+    if let Some(mirror) = state.updates().cloned() {
+        let state = state.clone();
+        // An online mirror checks upstream every `refresh_secs`; an
+        // air-gapped one only re-reads what `updates import` wrote, often.
+        let period = if mirror.upstream().is_some() {
+            state.config().updates.refresh_secs
+        } else {
+            60
+        };
+        handles.push(spawn_periodic(
+            "updates",
+            Duration::from_secs(5),
+            Duration::from_secs(period),
+            cancel.clone(),
+            move || {
+                let (state, mirror) = (state.clone(), mirror.clone());
+                async move {
+                    let channel =
+                        crate::config::parse_update_channel(&state.settings().updates.channel)
+                            .map_err(|e| AppError::internal(e.to_string()))?;
+                    match mirror.refresh(state.now_ms(), &channel).await {
+                        Ok(_) | Err(crate::updates::MirrorError::Busy) => Ok(()),
+                        Err(e) => Err(AppError::internal(format!("update mirror: {e}"))),
+                    }
+                }
             },
         ));
     }

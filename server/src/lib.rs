@@ -58,6 +58,7 @@ pub mod settings;
 pub mod state;
 pub mod tls;
 pub mod tokens;
+pub mod updates;
 pub mod web;
 pub mod workers;
 
