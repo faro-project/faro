@@ -13,6 +13,14 @@
 //! mapping, report sharing) *are* read from `[member_settings]`, but every
 //! change to them is announced to allies as a `settings_change` event when
 //! the service starts ([`crate::runtime`]).
+//!
+//! **Without `[member_settings]`** the device keeps the settings it last
+//! announced (`settings.json` in the state directory), and only a device that
+//! has never announced any starts from [`MemberSettings::default`]. So a new
+//! default (such as `medium` flags becoming `urgent`) reaches new devices but
+//! never silently changes an existing one
+//! ([`crate::state::settings_in_effect`]). Removing the section therefore
+//! keeps the current settings; to go back to the defaults, write them out.
 
 use faro_core::MemberSettings;
 use serde::{Deserialize, Serialize};
@@ -57,8 +65,11 @@ pub struct Config {
     pub network: NetworkConfig,
     pub report: ReportConfig,
     pub updates: UpdatesConfig,
-    /// The member's settings. Changes are announced to allies.
-    pub member_settings: MemberSettings,
+    /// The member's settings, if set here. Changes are announced to allies.
+    /// `None` keeps the settings last announced, or the defaults on a device
+    /// that has announced none ([`crate::state::settings_in_effect`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_settings: Option<MemberSettings>,
 }
 
 impl Default for Config {
@@ -71,7 +82,7 @@ impl Default for Config {
             network: NetworkConfig::default(),
             report: ReportConfig::default(),
             updates: UpdatesConfig::default(),
-            member_settings: MemberSettings::default(),
+            member_settings: None,
         }
     }
 }
@@ -462,7 +473,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(c.state_dir, Path::new("/var/lib/faro"));
         assert_eq!(c.network.heartbeat_secs, 300);
-        assert_eq!(c.member_settings, MemberSettings::default());
+        assert_eq!(
+            c.member_settings, None,
+            "the stored settings, or the defaults"
+        );
     }
 
     #[test]
@@ -499,8 +513,10 @@ mod tests {
         assert_eq!(c.ipc.allowed_uids, vec![501]);
         assert_eq!(c.network.heartbeat_secs, 120);
         assert_eq!(c.report.utc_offset_minutes, -300);
-        assert_eq!(c.member_settings.capture_mean_secs(), 90);
-        assert!(c.member_settings.share_top_apps());
+        let s = c.member_settings.expect("[member_settings] is set");
+        assert_eq!(s.capture_mean_secs(), 90);
+        assert!(s.share_top_apps());
+        assert_eq!(s.urgency().medium(), faro_proto::Urgency::Urgent);
     }
 
     #[test]

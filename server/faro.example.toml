@@ -7,7 +7,9 @@
 # Where the identity key, the SQLite database and encrypted blobs are stored.   FARO_DATA_DIR
 data_dir = "/var/lib/faro"
 
-# Leave unset for SQLite in data_dir. For larger instances use Postgres:        FARO_DATABASE_URL
+# Leave unset for SQLite in data_dir. The beta supports SQLite only.            FARO_DATABASE_URL
+# Postgres is experimental and NOT supported in this release (doctor and the
+# startup log warn about it):
 # database_url = "postgres://faro:secret@localhost/faro"
 
 # The address members and allies use to reach this instance.                   FARO_PUBLIC_URL

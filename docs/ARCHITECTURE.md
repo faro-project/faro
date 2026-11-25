@@ -209,10 +209,12 @@ frame ─▶ dHash dedupe ─▶ preprocess
 **Thumbnail.** About 320 px wide with a strong Gaussian blur (σ≈12) followed by pixelation. It shows the gist ("a video player with a person") without explicit detail. The blur is applied before any encryption or persistence, so the output can't be reversed.
 
 **Models.** Swappable, versioned and signed by the project, and distributed through the update channel (§3.8).
-- Baseline: an open NSFW classifier exported to ONNX and quantized to int8, chosen in a Phase 0 benchmark. **Every candidate needs to be compatible with Apache-2.0.** OpenNSFW is BSD. Avoid AGPL or non-commercial weights, and check NudeNet's terms specifically.
-- Long term: **a small CLIP-style encoder (MobileCLIP or OpenCLIP, permissively licensed) with linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head.
+- **Weights must be permissively licensed** (§11): no GPL, AGPL or non-commercial weights. The candidates and their licences are compared in [research/model-licenses.md](research/model-licenses.md).
+- **Training data:** no model trained on a dataset with documented child sexual abuse material. Today that means NudeNet's dataset and LAION-5B, and the list grows with any later finding. A model's training data must be disclosed well enough to check this.
+- Baseline for the beta: **OpenNSFW** (Yahoo, BSD-2-Clause), converted by the project from Yahoo's original weights to ONNX and quantized to int8. It is ImageNet-pretrained, which is allowed for this baseline only. NudeNet is excluded: it is GPL or AGPL, and its dataset contained CSAM.
+- Long term: **a permissively licensed OpenCLIP image encoder that isn't ImageNet-based, with Faro's own linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head. MobileCLIP no longer qualifies: Apple relicensed its weights as research-only in 2025.
 - Runtime: `ort` with CoreML, DirectML and CPU execution providers. Target under 80 ms per frame on CPU.
-- **Screenshot domain gap**: `models/` includes a screenshot-specific eval set, and CI fails on regressions.
+- **Screenshot domain gap**: a screenshot-specific eval set, curated by the maintainer and kept outside the repository because it contains explicit imagery. `models/eval-baseline.json` holds its metrics (never images), and CI fails on regressions (DEVELOPMENT.md "Model benchmark").
 - Later: on-device OCR (Apple Vision, `Windows.Media.Ocr`) combined with keyword lists.
 
 **Context signals.** Domain categorization uses open blocklists (check licenses: StevenBlack/hosts is MIT; review OISD and UT1 terms) compiled into an FST or Bloom filter and shipped as a signed bundle. The browser extension reports `{url, title, incognito}` over native messaging. A browser in use without the extension is reported as context.
@@ -412,8 +414,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 | Urgency | Produced by | Default delivery |
 |---|---|---|
-| `urgent` | `high` rating flag, every tamper event, uninstall, chain gap, invalid signature, missed check-in past grace, upload stall, a computer removed by its member, an account disabled by an admin | **Immediate** email + Web Push |
-| `normal` | `medium` flag, settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
+| `urgent` | `high` rating flag, `medium` rating flag (by default), every tamper event, uninstall, chain gap, invalid signature, missed check-in past grace, upload stall, a computer removed by its member, an account disabled by an admin | **Immediate** email + Web Push |
+| `normal` | `medium` flag (if the member chooses), settings change, ally added or removed, pause or resume, an account re-enabled | Bundled into the **next hourly digest** |
 | `none` | Clean captures, heartbeats, low-rated flags, context signals | Only in the daily report |
 
 - Server-generated alerts (missed check-in, chain gap) set their own urgency.
@@ -434,7 +436,16 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
   | `ally_disabled` | server | urgent | An admin disabled the account of one of the member's allies (§4.3). |
 
   In the table, "urgent (floor)" means the instance raises the event to urgent with `EventKind::min_urgency()`, whatever the device signed. The source is the alert's source: a device kind never counts as a server kind, or the other way round. Everything else can be switched off, including flags of any rating, `settings_change`, `paused`, `resumed`, `agent_restarted`, `ally_added`, `member_settings_changed`, `account_enabled` and `ally_enabled`.
-- The member chooses the threshold mapping, for example whether `medium` counts as urgent. Changing the mapping is itself a `normal` event that allies are told about.
+- The member chooses the threshold mapping within per-rating floors. The default and the floor are not always the same:
+
+  | Rating | Default | Floor (lowest the member may choose) |
+  |---|---|---|
+  | `low` | `none` | `none` |
+  | `medium` | `urgent` | `normal` |
+  | `high` | `urgent` | `urgent` |
+
+  Changing the mapping in either direction, including lowering `medium` flags to `normal`, is itself a `normal` event that allies are told about. The floors are enforced on the device: the instance can't see a flag's rating, so its own floor (`EventKind::min_urgency`) applies to event kinds, not ratings.
+- A device keeps the mapping it last announced to allies. Devices that started before `medium` defaulted to `urgent` stay at `normal` until the member changes it; only new devices start at the new default, so allies never see a mapping change the member didn't make.
 - Notification text is content-free: *"Urgent: new alert for Sam on Laptop-X. Open Faro to view."* Details only appear after decryption in the app.
 - **Privacy trade-off, accepted:** the operator can see *that* an urgent event happened and when, but not what it was. The operator privacy notice states this.
 
@@ -530,7 +541,7 @@ Institutions running instances (churches, colleges) make consent even more impor
 **Phase 0: Spikes (2–4 weeks)**
 1. macOS ScreenCaptureKit from a LaunchAgent: permission persistence and re-prompt behavior.
 2. Windows: capture from an agent launched by the service into the user session; multi-monitor, user switching, RDP.
-3. Model benchmark plus Apache-compatible license review.
+3. Model benchmark: OpenNSFW, exported to int8 ONNX, on the screenshot eval set. The license review is done ([research/model-licenses.md](research/model-licenses.md)).
 4. Wayland portal restore tokens on GNOME and KDE.
 5. Crypto round trip: Rust encrypt → browser decrypt, member-signed ally keys.
 6. `faro-server` skeleton on SQLite with built-in ACME, running on a Raspberry Pi.
@@ -539,18 +550,23 @@ Institutions running instances (churches, colleges) make consent even more impor
 Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college).
 
 **Phase 2: Hardening, Linux, institutions**
-Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit.
+Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
 
 **Phase 3: Beyond**
 Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter), Helm chart, and possibly federation between instances.
 
 ---
 
-## 14. Open questions
+## 14. Open questions and decisions
 
-1. **Funding and stewardship of the project**: signing certificates, the Apple Developer account and the release infrastructure have small fixed costs and need a responsible owner (a nonprofit? fiscal sponsorship?).
-2. **Cross-instance allies**: is one account per instance enough, or is lightweight federation (an ally on instance A following a member on instance B) worth the complexity later?
-3. **Capture frequency default**: start at a 60 s mean?
-4. **Default urgency mapping**: should `medium` flags be `urgent` or `normal` by default?
-5. **Instance discovery**: should the project keep an opt-in public list of instances for people who don't want to host their own (for example a ministry offering a free shared instance)?
-6. **Mobile timing**: many users' main risk is the phone, so mobile shouldn't slip so far that the product isn't useful.
+### Open
+
+- **Funding and stewardship of the project**: signing certificates, the Apple Developer account and the release infrastructure have small fixed costs and need a responsible owner (a nonprofit? fiscal sponsorship?).
+- **Mobile timing**: many users' main risk is the phone, so mobile shouldn't slip so far that the product isn't useful.
+
+### Decisions
+
+- **Cross-instance allies: one account per instance is enough for v1.** An ally who supports members on two instances has an account on each. Lightweight federation (an ally on instance A following a member on instance B) stays out of v1 (§1) and is at most a Phase 3 possibility (§13).
+- **Capture frequency default: a 60 s mean** (§3.4), `MEAN_DEFAULT_SECS` in `faro-core`'s scheduler. Members can still choose 30–300 s, and allies are told when they do.
+- **Default urgency mapping: `medium` flags are `urgent` by default.** The floor stays `normal`, so a member may lower them, and allies are told when they do (§5.4). Devices that started before this default keep the mapping they already announced; only new devices start at `urgent`.
+- **Instance discovery: yes, an opt-in public list of instances, later.** It helps people who don't want to host their own (for example a ministry offering a free shared instance). It isn't needed for the beta and is on the Phase 2 roadmap (§13).

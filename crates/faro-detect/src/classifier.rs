@@ -24,6 +24,8 @@ use zeroize::Zeroizing;
 
 #[cfg(feature = "onnx")]
 pub mod onnx;
+#[cfg(all(test, feature = "onnx"))]
+pub(crate) mod test_onnx;
 
 /// SPDX identifiers of licences accepted for model weights (§11). These are
 /// permissive and Apache-2.0 compatible; copyleft-network (AGPL) and
@@ -426,11 +428,7 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, DetectError> {
 /// `TamperSignal::IntegrityFailure`.
 pub fn load_model(manifest_path: impl AsRef<Path>) -> Result<VerifiedModel, DetectError> {
     let manifest_path = manifest_path.as_ref();
-    let raw = read_capped(manifest_path, MAX_MANIFEST_BYTES)?;
-    let info: ModelInfo =
-        serde_json::from_slice(&raw).map_err(|e| DetectError::Manifest(e.to_string()))?;
-    info.validate()?;
-
+    let info = read_manifest(manifest_path)?;
     let rel = Path::new(&info.file);
     if info.file.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(DetectError::Manifest(format!(
@@ -441,6 +439,26 @@ pub fn load_model(manifest_path: impl AsRef<Path>) -> Result<VerifiedModel, Dete
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let bytes = read_capped(&dir.join(rel), MAX_MODEL_BYTES)?;
     VerifiedModel::verify(info, bytes)
+}
+
+/// Like [`load_model`], but read the model from `model_path` instead of the
+/// manifest's `file`, for benchmarking a candidate file that sits elsewhere.
+/// The licence and BLAKE3 checks are the same.
+pub fn load_model_at(
+    manifest_path: impl AsRef<Path>,
+    model_path: impl AsRef<Path>,
+) -> Result<VerifiedModel, DetectError> {
+    let info = read_manifest(manifest_path.as_ref())?;
+    let bytes = read_capped(model_path.as_ref(), MAX_MODEL_BYTES)?;
+    VerifiedModel::verify(info, bytes)
+}
+
+fn read_manifest(path: &Path) -> Result<ModelInfo, DetectError> {
+    let raw = read_capped(path, MAX_MANIFEST_BYTES)?;
+    let info: ModelInfo =
+        serde_json::from_slice(&raw).map_err(|e| DetectError::Manifest(e.to_string()))?;
+    info.validate()?;
+    Ok(info)
 }
 
 /// Turn a frame into the model's input tensor (see [`ModelInfo`] for the
@@ -646,6 +664,16 @@ mod tests {
         // Tampered weights → Integrity.
         let p = write_model(dir.path(), &info(), b"weightz");
         assert!(matches!(load_model(&p), Err(DetectError::Integrity { .. })));
+
+        // A candidate file elsewhere gets the same check.
+        let other = dir.path().join("candidate.onnx");
+        std::fs::write(&other, b"weights").unwrap();
+        assert_eq!(load_model_at(&p, &other).unwrap().bytes(), b"weights");
+        std::fs::write(&other, b"weightz").unwrap();
+        assert!(matches!(
+            load_model_at(&p, &other),
+            Err(DetectError::Integrity { .. })
+        ));
     }
 
     #[test]

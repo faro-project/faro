@@ -1,0 +1,5 @@
+# Hand-written fixture for the domains-compile tests. Not a real blocklist.
+127.0.0.1 localhost
+0.0.0.0 adult-fixture.test
+0.0.0.0 www.second-adult.test   # inline comment
+0.0.0.0 192.168.0.1

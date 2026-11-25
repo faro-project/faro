@@ -98,7 +98,7 @@
 	<form onsubmit={save} novalidate>
 		<fieldset>
 			<legend class="visually-hidden">Email notifications about {about}</legend>
-			{#each [{ id: 'urgent', label: 'Urgent', hint: 'Tamper, missed check-ins, high flags' }, { id: 'normal', label: 'Normal', hint: 'Medium flags, settings and ally changes' }, { id: 'none', label: 'Everything else', hint: 'Low-rated items' }] as row (row.id)}
+			{#each [{ id: 'urgent', label: 'Urgent', hint: 'Tamper, missed check-ins, high flags, medium flags by default' }, { id: 'normal', label: 'Normal', hint: 'Settings and ally changes, medium flags if the member chose normal' }, { id: 'none', label: 'Everything else', hint: 'Low-rated items' }] as row (row.id)}
 				<div class="pref">
 					<label for="pref-{row.id}-{memberId}">
 						{row.label}
