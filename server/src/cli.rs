@@ -584,6 +584,19 @@ mod tests {
     }
 
     #[test]
+    fn admin_grant_takes_an_email() {
+        let cli = Cli::try_parse_from(["faro-server", "admin", "grant", "--email", "a@b.org"])
+            .expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Grant { email, .. }
+            } if email == "a@b.org"
+        ));
+        assert!(Cli::try_parse_from(["faro-server", "admin", "grant"]).is_err());
+    }
+
+    #[test]
     fn flags_apply_before_validation() {
         // Defaults have an http:// public URL, which only --dev permits.
         assert!(load_config(None, Vec::new(), false, false).is_err());
