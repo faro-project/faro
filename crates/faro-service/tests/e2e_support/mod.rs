@@ -415,6 +415,7 @@ impl World {
             script: Script::new(),
             utc_offset_minutes: 0,
             updates: faro_service::UpdateOverrides::default(),
+            model_manifest: None,
             handle: None,
             _tmp: tmp,
         }
