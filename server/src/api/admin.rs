@@ -3,8 +3,10 @@
 //!
 //! An instance admin can configure registration, retention and the liveness
 //! grace period, test SMTP, invite members, see aggregate counts and the
-//! account list, and disable or re-enable accounts. There is deliberately no admin route to any member's keys,
-//! devices, allies, feed, blobs, alerts or reports, and the admin role
+//! account list, disable or re-enable accounts, and grant or revoke the
+//! admin role ([`crate::roles`]). There is deliberately no admin route to
+//! any member's keys, devices, allies, feed, blobs, alerts or reports, and
+//! the admin role
 //! grants nothing on the member/ally routes either (they check the caller's
 //! own relationships). Delivery problems are visible as counts, never as
 //! recipients or messages.
@@ -21,6 +23,7 @@
 use super::ApiJson;
 use crate::auth::normalize_email;
 use crate::auth::session::SessionUser;
+use crate::db::repo::admin_log;
 use crate::db::repo::alerts::{self, AlertSource, NewAlert};
 use crate::db::repo::invites::InviteKind;
 use crate::db::repo::notifications::{self, DeliveryCounts};
@@ -172,6 +175,47 @@ pub async fn invite_member(
     }
     let created = super::invites::create(&state, &s.user, InviteKind::Member, &email).await?;
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// `PUT /admin/api/users/{id}/admin` body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetAdmin {
+    pub admin: bool,
+}
+
+/// `PUT /admin/api/users/{id}/admin`: grant (`{"admin": true}`) or revoke
+/// the admin role of another account. Told to the person and every other
+/// admin; see [`crate::roles`].
+pub async fn set_admin_role(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<SetAdmin>,
+) -> AppResult<Json<crate::roles::AdminRole>> {
+    s.require_admin()?;
+    let target = UserId::new(id);
+    let r = crate::roles::set_admin(
+        &state,
+        &target,
+        req.admin,
+        crate::roles::By::Admin(&s.user.id),
+    )
+    .await?;
+    Ok(Json(r))
+}
+
+/// Entries `GET /admin/api/log` returns.
+pub const LOG_LIMIT: i64 = 200;
+
+/// `GET /admin/api/log`: the most recent admin log entries, newest first
+/// (who was made an admin or stopped being one, by whom, and when).
+pub async fn log(
+    State(state): State<AppState>,
+    s: SessionUser,
+) -> AppResult<Json<Vec<admin_log::Entry>>> {
+    s.require_admin()?;
+    Ok(Json(admin_log::recent(state.db().pool(), LOG_LIMIT).await?))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

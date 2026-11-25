@@ -1,21 +1,32 @@
 <script lang="ts">
-	// Accounts on this instance (metadata only), member invitations, and
-	// disabling or re-enabling accounts. GET /admin/api/users never includes
-	// who is anyone's ally, devices' names or anything a member's devices
-	// sent.
+	// Accounts on this instance (metadata only), member invitations,
+	// disabling or re-enabling accounts, and granting or revoking the admin
+	// role. GET /admin/api/users never includes who is anyone's ally,
+	// devices' names or anything a member's devices sent.
 	//
 	// Admins are users like everyone else: any account but your own can be
 	// disabled, and the server always emails the person and every
-	// accountability partner (ARCHITECTURE.md §4.3).
+	// accountability partner. Any account but your own can be made an admin
+	// or stop being one, and the server always emails the person and every
+	// other admin (ARCHITECTURE.md §4.3). The admin log lists those changes.
 
 	import { onMount } from 'svelte';
 	import { api, ApiError, describeError } from '#lib/api.ts';
 	import { ago, count, date, dateTime } from '#lib/format.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { AdminUserRow, InstanceSettings, InviteCreated } from '#lib/types.ts';
+	import type {
+		AdminLogAccount,
+		AdminLogEntry,
+		AdminRole,
+		AdminUserRow,
+		InstanceSettings,
+		InviteCreated
+	} from '#lib/types.ts';
 
 	let users = $state<AdminUserRow[] | null>(null);
 	let settings = $state<InstanceSettings | null>(null);
+	let adminLog = $state<AdminLogEntry[] | null>(null);
+	let logError = $state('');
 	let loadError = $state('');
 
 	let query = $state('');
@@ -26,15 +37,17 @@
 	let inviteError = $state('');
 	let invited = $state<InviteCreated[]>([]);
 
-	// Disable / re-enable, confirmed in a dialog.
+	// Disable / re-enable, and grant / revoke the admin role, confirmed in a
+	// dialog.
+	type Change = 'disable' | 'enable' | 'grant' | 'revoke';
 	let dialog = $state<HTMLDialogElement | null>(null);
-	let pending = $state<{ user: AdminUserRow; disable: boolean } | null>(null);
+	let pending = $state<{ user: AdminUserRow; change: Change } | null>(null);
 	let statusBusy = $state(false);
 	let statusError = $state('');
 	let statusDone = $state('');
 
-	function confirmStatus(user: AdminUserRow, disable: boolean) {
-		pending = { user, disable };
+	function confirmChange(user: AdminUserRow, change: Change) {
+		pending = { user, change };
 		statusError = '';
 		dialog?.showModal();
 	}
@@ -44,31 +57,62 @@
 		pending = null;
 	}
 
-	async function changeStatus() {
+	async function changeStatus(user: AdminUserRow, disable: boolean) {
+		await api.post(
+			`/admin/api/users/${encodeURIComponent(user.id)}/${disable ? 'disable' : 'enable'}`
+		);
+		if (users) {
+			users = users.map((u) => (u.id === user.id ? { ...u, disabled: disable } : u));
+		}
+		statusDone = disable
+			? `${user.display_name}'s account was disabled. Faro is emailing ${user.display_name} and their accountability partners.`
+			: `${user.display_name}'s account was re-enabled. Faro is emailing ${user.display_name} and their accountability partners.`;
+	}
+
+	async function changeAdmin(user: AdminUserRow, admin: boolean) {
+		await api.put<AdminRole>(`/admin/api/users/${encodeURIComponent(user.id)}/admin`, { admin });
+		if (users) {
+			users = users.map((u) => (u.id === user.id ? { ...u, roles: { ...u.roles, admin } } : u));
+		}
+		const name = user.display_name;
+		// A disabled person isn't emailed.
+		const told = user.disabled ? 'every other admin' : `${name} and every other admin`;
+		statusDone = admin
+			? `${name} is now an admin. Faro is emailing ${told}.`
+			: `${name} is no longer an admin. Faro is emailing ${told}.`;
+		await loadLog();
+	}
+
+	async function applyChange() {
 		if (!pending) return;
-		const { user, disable } = pending;
+		const { user, change } = pending;
 		statusBusy = true;
 		statusError = '';
 		try {
-			await api.post(
-				`/admin/api/users/${encodeURIComponent(user.id)}/${disable ? 'disable' : 'enable'}`
-			);
-			if (users) {
-				users = users.map((u) => (u.id === user.id ? { ...u, disabled: disable } : u));
+			if (change === 'disable' || change === 'enable') {
+				await changeStatus(user, change === 'disable');
+			} else {
+				await changeAdmin(user, change === 'grant');
 			}
-			statusDone = disable
-				? `${user.display_name}'s account was disabled. Faro is emailing ${user.display_name} and their accountability partners.`
-				: `${user.display_name}'s account was re-enabled. Faro is emailing ${user.display_name} and their accountability partners.`;
 			closeDialog();
 		} catch (e) {
-			if (e instanceof ApiError && (e.code === 'already_disabled' || e.code === 'not_disabled')) {
+			if (
+				e instanceof ApiError &&
+				['already_disabled', 'not_disabled', 'already_admin', 'not_admin'].includes(e.code)
+			) {
 				// Someone else got there first: show the current state.
 				closeDialog();
 				await load();
 			} else if (e instanceof ApiError && e.code === 'cannot_disable_self') {
 				statusError = 'You cannot disable your own account. Ask another admin.';
+			} else if (e instanceof ApiError && e.code === 'cannot_change_own_role') {
+				statusError = 'You cannot change your own admin role. Ask another admin.';
 			} else if (e instanceof ApiError && e.code === 'last_admin') {
 				statusError = 'The instance must keep at least one enabled admin.';
+			} else if (e instanceof ApiError && e.code === 'account_disabled') {
+				statusError = `${user.display_name}'s account is disabled. Re-enable it first.`;
+			} else if (e instanceof ApiError && e.code === 'account_deleting') {
+				statusError = `${user.display_name} asked for their account to be deleted, so it can't be changed now.`;
 			} else {
 				statusError = describeError(e);
 			}
@@ -87,6 +131,28 @@
 		} catch (e) {
 			loadError = describeError(e);
 		}
+		await loadLog();
+	}
+
+	async function loadLog() {
+		logError = '';
+		try {
+			adminLog = await api.get<AdminLogEntry[]>('/admin/api/log');
+		} catch (e) {
+			logError = describeError(e);
+		}
+	}
+
+	/** Who made an admin log change, as the start of a sentence. */
+	function actorOf(e: AdminLogEntry): string {
+		if (e.via === 'command_line') return 'Someone on the server';
+		if (!e.actor) return 'A deleted account';
+		return e.actor.id === session.user?.id ? 'You' : e.actor.display_name;
+	}
+
+	function nameOf(a: AdminLogAccount | null): string {
+		if (!a) return 'a deleted account';
+		return a.id === session.user?.id ? 'you' : a.display_name;
 	}
 
 	onMount(load);
@@ -268,14 +334,75 @@
 							<span class="chip">you</span>
 						{:else if u.deletion_purge_after_ms}
 							<!-- The person may still cancel; the server refuses changes meanwhile. -->
-						{:else if u.disabled}
-							<button class="secondary small" type="button" onclick={() => confirmStatus(u, false)}>
-								Enable…
-							</button>
 						{:else}
-							<button class="secondary small" type="button" onclick={() => confirmStatus(u, true)}>
-								Disable…
-							</button>
+							{#if u.disabled}
+								<button
+									class="secondary small"
+									type="button"
+									onclick={() => confirmChange(u, 'enable')}
+								>
+									Enable…
+								</button>
+							{:else}
+								<button
+									class="secondary small"
+									type="button"
+									onclick={() => confirmChange(u, 'disable')}
+								>
+									Disable…
+								</button>
+							{/if}
+							{#if u.roles.admin}
+								<button
+									class="secondary small"
+									type="button"
+									onclick={() => confirmChange(u, 'revoke')}
+								>
+									Remove admin…
+								</button>
+							{:else if !u.disabled}
+								<button
+									class="secondary small"
+									type="button"
+									onclick={() => confirmChange(u, 'grant')}
+								>
+									Make admin…
+								</button>
+							{/if}
+						{/if}
+					</span>
+				</li>
+			{/each}
+		</ul>
+	{/if}
+</section>
+
+<section class="log" aria-labelledby="admin-log">
+	<h2 id="admin-log">Admin log</h2>
+	<p class="muted">
+		Every time someone is made an admin or stops being one. Faro emails the person and every other
+		admin each time.
+	</p>
+	{#if logError}
+		<div class="notice error" role="alert">{logError}</div>
+	{:else if !adminLog}
+		<p class="muted" role="status">Loading…</p>
+	{:else if adminLog.length === 0}
+		<p class="muted">Nothing yet.</p>
+	{:else}
+		<ul class="entries">
+			{#each adminLog as e (e.id)}
+				<li>
+					<span class="at" title={dateTime(e.at_ms)}>{date(e.at_ms)}</span>
+					<span>
+						<strong title={e.actor?.email}>{actorOf(e)}</strong>
+						{#if e.action === 'admin_granted'}
+							made <strong title={e.user?.email}>{nameOf(e.user)}</strong> an admin
+						{:else}
+							removed the admin role from <strong title={e.user?.email}>{nameOf(e.user)}</strong>
+						{/if}
+						{#if e.via === 'command_line'}
+							<span class="muted">(from the command line)</span>
 						{/if}
 					</span>
 				</li>
@@ -287,7 +414,24 @@
 <dialog bind:this={dialog} onclose={() => (pending = null)} aria-labelledby="status-title">
 	{#if pending}
 		{@const name = pending.user.display_name}
-		{#if pending.disable}
+		{#if pending.change === 'grant'}
+			<h2 id="status-title">Make {name} an admin?</h2>
+			<p>
+				{name} ({pending.user.email}) will be able to change this instance's settings, invite
+				people, disable accounts and make other people admins.
+			</p>
+			<p>Faro will email {name} and every other admin right away.</p>
+			<p class="muted">
+				Being an admin gives no access to anyone's reports, alerts or screenshots.
+			</p>
+		{:else if pending.change === 'revoke'}
+			<h2 id="status-title">Remove {name}'s admin role?</h2>
+			<p>
+				{name} ({pending.user.email}) won't be able to use the admin console any more. They can
+				still sign in, and nothing else about their account changes.
+			</p>
+			<p>Faro will email {name} and every other admin right away.</p>
+		{:else if pending.change === 'disable'}
 			<h2 id="status-title">Disable {name}'s account?</h2>
 			<p>
 				{name} ({pending.user.email}) won't be able to sign in, and is signed out everywhere now.
@@ -313,12 +457,22 @@
 		{/if}
 		<div class="actions">
 			<button
-				class={pending.disable ? 'danger' : 'primary'}
+				class={pending.change === 'disable' || pending.change === 'revoke' ? 'danger' : 'primary'}
 				type="button"
-				onclick={changeStatus}
+				onclick={applyChange}
 				disabled={statusBusy}
 			>
-				{#if statusBusy}Saving…{:else if pending.disable}Disable account{:else}Re-enable account{/if}
+				{#if statusBusy}
+					Saving…
+				{:else if pending.change === 'disable'}
+					Disable account
+				{:else if pending.change === 'enable'}
+					Re-enable account
+				{:else if pending.change === 'grant'}
+					Make admin
+				{:else}
+					Remove admin role
+				{/if}
 			</button>
 			<button class="secondary" type="button" onclick={closeDialog}>Cancel</button>
 		</div>
@@ -404,7 +558,7 @@
 		display: grid;
 		grid-template-columns:
 			minmax(0, 2.2fr) minmax(0, 1.2fr) minmax(0, 1.3fr) minmax(0, 1.3fr)
-			6.5rem;
+			8.5rem;
 		gap: 0.75rem;
 		padding: 0.75rem 1rem;
 		border-top: 1px solid var(--border);
@@ -472,7 +626,41 @@
 
 	.action {
 		display: flex;
-		justify-content: flex-end;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 0.35rem;
+	}
+
+	.log {
+		margin-top: 2rem;
+	}
+
+	.entries {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+	}
+
+	.entries li {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0 0.75rem;
+		padding: 0.6rem 1rem;
+		border-top: 1px solid var(--border);
+		overflow-wrap: anywhere;
+	}
+
+	.entries li:first-child {
+		border-top: none;
+	}
+
+	.entries .at {
+		color: var(--muted);
+		font-size: 0.88rem;
+		min-width: 6.5rem;
 	}
 
 	dialog h2 {
@@ -501,7 +689,9 @@
 		}
 
 		.action {
-			justify-content: flex-start;
+			flex-direction: row;
+			flex-wrap: wrap;
+			align-items: flex-start;
 			margin-top: 0.25rem;
 		}
 

@@ -1,12 +1,13 @@
 //! `notifications` and `notification_prefs` (§5.4).
 //!
 //! A notification row records that one recipient should be (or, with status
-//! `suppressed`, chose not to be) told about one alert or report. Delivery
-//! state: `pending` → `sent`, or after [`crate::notify::policy::MAX_ATTEMPTS`]
+//! `suppressed`, chose not to be) told about one alert, report or
+//! [`admin_log`](super::admin_log) entry. Delivery state: `pending` → `sent`, or after [`crate::notify::policy::MAX_ATTEMPTS`]
 //! failures `failed`. `last_error` holds a short machine code only (never a
 //! server response, which could echo addresses).
 
-use super::parse_col;
+use super::admin_log::{Action, Via};
+use super::{parse_col, parse_opt_col};
 use crate::notify::policy::{Mode, QuietHours};
 use crate::tokens::new_hex_id;
 use faro_proto::{DeviceId, Urgency, UserId};
@@ -17,6 +18,9 @@ use sqlx::{Any, Executor, Row};
 pub enum Target {
     Alert(String),
     Report(String),
+    /// An admin log entry: a role change, told to the person and every
+    /// other admin ([`crate::roles`]).
+    AdminLog(String),
 }
 
 pub struct NewNotification<'a> {
@@ -34,23 +38,26 @@ pub async fn insert<'e>(
     e: impl Executor<'e, Database = Any>,
     n: &NewNotification<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let (alert_id, report_id) = match n.target {
-        Target::Alert(a) => (Some(a.clone()), None),
-        Target::Report(r) => (None, Some(r.clone())),
+    let (alert_id, report_id, log_id) = match n.target {
+        Target::Alert(a) => (Some(a.clone()), None, None),
+        Target::Report(r) => (None, Some(r.clone()), None),
+        Target::AdminLog(l) => (None, None, Some(l.clone())),
     };
     let (status, mode) = match n.mode {
         None | Some(Mode::Off) => ("suppressed", Mode::Immediate),
         Some(m) => ("pending", m),
     };
     let r = sqlx::query(
-        "INSERT INTO notifications (id, alert_id, report_id, recipient_id, channel, urgency,
-                                    status, attempts, created_at, mode, due_at, next_attempt_at)
-         VALUES ($1, $2, $3, $4, 'email', $5, $6, 0, $7, $8, $9, $9)
+        "INSERT INTO notifications (id, alert_id, report_id, admin_log_id, recipient_id, channel,
+                                    urgency, status, attempts, created_at, mode, due_at,
+                                    next_attempt_at)
+         VALUES ($1, $2, $3, $4, $5, 'email', $6, $7, 0, $8, $9, $10, $10)
          ON CONFLICT DO NOTHING",
     )
     .bind(new_hex_id())
     .bind(alert_id)
     .bind(report_id)
+    .bind(log_id)
     .bind(n.recipient.as_str())
     .bind(n.urgency.as_str())
     .bind(status)
@@ -72,8 +79,10 @@ pub struct DueNotification {
     pub recipient_disabled: bool,
     /// The recipient is still entitled to hear about this member (they are
     /// the member, an active ally, or the alert's extra recipient). An ally
-    /// removed after the row was queued is not.
+    /// removed after the row was queued is not. Always true for an admin
+    /// log entry: its recipients were chosen when it was written.
     pub entitled: bool,
+    /// The member, or for an admin log entry the account it is about.
     pub member_id: UserId,
     pub member_name: String,
     pub device_id: Option<DeviceId>,
@@ -93,6 +102,20 @@ pub struct DueNotification {
     pub alert_detail: Option<String>,
     /// When the alert was raised.
     pub alert_created_at_ms: Option<i64>,
+    /// `Some` for an admin log entry.
+    pub admin_log: Option<AdminLogNotice>,
+}
+
+/// What a notification about an admin log entry needs to word it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminLogNotice {
+    pub action: Action,
+    pub via: Via,
+    /// The email address of the account it is about.
+    pub user_email: String,
+    /// The admin who did it, if any and not deleted since.
+    pub actor_id: Option<UserId>,
+    pub actor_name: Option<String>,
 }
 
 /// Due pending notifications of one mode, oldest first.
@@ -105,14 +128,17 @@ pub async fn due<'e>(
     let rows = sqlx::query(
         "SELECT n.id, n.recipient_id, n.urgency, n.attempts, n.created_at,
                 r.email AS recipient_email, r.disabled AS recipient_disabled,
-                COALESCE(a.member_id, rp.member_id) AS member_id,
+                COALESCE(a.member_id, rp.member_id, al.user_id) AS member_id,
                 COALESCE(a.device_id, rp.device_id) AS device_id,
                 a.source AS alert_source, a.kind AS alert_kind,
                 a.detail AS alert_detail, a.created_at AS alert_created_at,
                 a.extra_recipient_id,
-                m.display_name AS member_name, d.name AS device_name,
+                m.display_name AS member_name, m.email AS member_email, d.name AS device_name,
                 ab.display_name AS about_name,
-                CASE WHEN n.recipient_id = COALESCE(a.member_id, rp.member_id)
+                al.action AS log_action, al.via AS log_via, al.actor_id AS log_actor_id,
+                act.display_name AS log_actor_name,
+                CASE WHEN n.admin_log_id IS NOT NULL
+                       OR n.recipient_id = COALESCE(a.member_id, rp.member_id)
                        OR n.recipient_id = a.extra_recipient_id
                        OR EXISTS (SELECT 1 FROM ally_links l
                                   WHERE l.member_id = COALESCE(a.member_id, rp.member_id)
@@ -122,9 +148,11 @@ pub async fn due<'e>(
          JOIN users r ON r.id = n.recipient_id
          LEFT JOIN alerts a ON a.id = n.alert_id
          LEFT JOIN reports rp ON rp.id = n.report_id
-         JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id)
+         LEFT JOIN admin_log al ON al.id = n.admin_log_id
+         JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id, al.user_id)
          LEFT JOIN devices d ON d.id = COALESCE(a.device_id, rp.device_id)
          LEFT JOIN users ab ON ab.id = a.about_user_id
+         LEFT JOIN users act ON act.id = al.actor_id
          WHERE n.status = 'pending' AND n.mode = $1 AND n.due_at <= $2
            AND n.next_attempt_at <= $2
          ORDER BY n.created_at, n.id
@@ -141,6 +169,18 @@ pub async fn due<'e>(
             let extra: Option<String> = r.try_get("extra_recipient_id")?;
             let source: Option<String> = r.try_get("alert_source")?;
             let kind: Option<String> = r.try_get("alert_kind")?;
+            let admin_log = match parse_opt_col(r, "log_action", Action::parse)? {
+                None => None,
+                Some(action) => Some(AdminLogNotice {
+                    action,
+                    via: parse_col(r, "log_via", Via::parse)?,
+                    user_email: r.try_get("member_email")?,
+                    actor_id: r
+                        .try_get::<Option<String>, _>("log_actor_id")?
+                        .map(UserId::new),
+                    actor_name: r.try_get("log_actor_name")?,
+                }),
+            };
             Ok(DueNotification {
                 id: r.try_get("id")?,
                 to_extra_recipient: extra.as_deref() == Some(recipient_id.as_str()),
@@ -161,6 +201,7 @@ pub async fn due<'e>(
                 about_name: r.try_get("about_name")?,
                 alert_detail: r.try_get("alert_detail")?,
                 alert_created_at_ms: r.try_get("alert_created_at")?,
+                admin_log,
             })
         })
         .collect()

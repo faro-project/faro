@@ -288,12 +288,36 @@ sudo docker compose exec faro faro-server init
 **3. Use the admin console** at `https://faro.yourchurch.org/admin` (the **Admin** link at the top of every page, once you're signed in as the admin):
 
 - **Overview:** how many people and computers there are, when computers last checked in, storage use and email delivery, plus the notice members see of what you can and cannot see as the operator.
-- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. People can delete their own accounts from Settings. The People page then shows "being deleted" with the date, and while the deletion waits you can't disable or re-enable that account. As the only admin you can't delete your own account.
+- **People:** invite members by email, and see accounts (names, email addresses, roles, last sign-in and how many computers each has). An invited person accepts by signing in with the invited address. You can also **disable** an account, which stops that person signing in. Faro always emails them and everyone in an accountability partnership with them (their allies, and the members they are an ally for), and their computers keep being monitored. Admins are treated like everyone else: another admin can disable your account, but nobody can disable their own. You can also make someone an admin (see below). People can delete their own accounts from Settings. The People page then shows "being deleted" with the date, and while the deletion waits you can't change that account. As the only admin you can't delete your own account.
 - **Settings:** registration, retention and the missed check-in grace period.
 - **Branding:** your logo and a few things to show or hide (see below).
 - **Email:** send yourself a test message.
 
 If you've been signed out (sessions last 30 days), sign in at `/signin`: enter your email address and open the link Faro emails you. Signing in needs working email, so set it up ([section 7](#7-email-smtp)).
+
+### More than one admin
+
+An instance can have several admins. Two is a good idea: if one admin loses access, the other can still run the instance.
+
+**To make someone an admin,** open **Admin → People** and choose **Make admin…** next to their account. They need an account first, so invite them if they don't have one. **Remove admin…** takes the role away again. They can still sign in, and nothing else about their account changes.
+
+- Nobody can change their own admin role, and the last enabled admin can't lose it.
+- A disabled account can't be made an admin. Nothing can be changed on an account that is being deleted.
+- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when.
+- Being an admin gives no access to anyone's reports, alerts or screenshots.
+
+**If nobody can sign in as an admin** (for example, the only admin lost access to their email address), make another account an admin from the server itself:
+
+```sh
+sudo docker compose exec faro faro-server admin grant --email jordan@example.org
+```
+
+Without Docker: `sudo -u faro faro-server admin grant --config /etc/faro/faro.toml --email jordan@example.org`.
+
+- The account must already exist: the person must have signed in at least once.
+- Disabled accounts and accounts being deleted are refused.
+- Faro emails the person and every other admin, as for a change in the console. The admin log shows it as done "from the command line". If Faro isn't running, the emails go out when it starts.
+- Anyone who can run commands on your server can do this. Keep access to the server as safe as access to an admin account.
 
 ### Branding your instance
 
@@ -719,6 +743,7 @@ The unit runs Faro as the unprivileged `faro` user in a tight sandbox: it can on
 | `docker compose ps` shows `unhealthy` | Look at the logs. The health check asks Faro for `/.well-known/faro` (or, with built-in HTTPS, only checks that the port is open). |
 | `{"error":"rate_limited","message":"too many requests; slow down"}`, especially when many people sign up at once | Faro limits sign-in, setup and enrollment requests per address. Behind a proxy or tunnel, make sure `FARO_BEHIND_PROXY=true` is set, otherwise everyone shares one limit. Raise `FARO_RATE_LIMIT_PER_MINUTE` if needed. |
 | `invalid_setup_token` | The token was mistyped, already used, replaced by a newer `init`, or older than 24 hours. Run `sudo docker compose exec faro faro-server init` for a new one. |
+| `admin grant` says `there is no account with the address …` | That person has never signed in. Grant the role to someone who has, or ask them to sign in once at `/signin` if your registration setting lets them create an account. |
 | Backup fails with `Permission denied` on `/backups` | Run `sudo chown 10001:10001 backups` in the `deploy` folder. |
 
 Still stuck? Open an issue at <https://github.com/faro-project/faro/issues> with the output of `faro-server doctor` (it contains no secrets) and the relevant log lines. **Never post** `faro.env`, `identity.key`, backup files, setup tokens or sign-in links.

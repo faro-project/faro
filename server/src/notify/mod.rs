@@ -37,6 +37,12 @@
 //! an ally for, and `account_deletion_cancelled` on both) are worded the
 //! same way, with the dates taken from the alert's detail (§12).
 //!
+//! **Admin role changes** are told the same way, in words, to the person
+//! and to every other admin ([`crate::roles`]). They are not alerts: no
+//! member's feed shows them and no ally hears of them. [`crate::roles`]
+//! writes their notification rows itself, always immediate, so there is
+//! nothing to fan out.
+//!
 //! **Delivery.** A failure about one recipient (an unknown mailbox, a full
 //! one) is charged to that notification: retried with exponential backoff
 //! ([`policy::backoff_ms`]) up to [`policy::MAX_ATTEMPTS`], then marked
@@ -55,7 +61,10 @@
 
 pub mod policy;
 
-use crate::db::repo::notifications::{self as notif, DueNotification, NewNotification, Target};
+use crate::db::repo::admin_log::{Action, Via};
+use crate::db::repo::notifications::{
+    self as notif, AdminLogNotice, DueNotification, NewNotification, Target,
+};
 use crate::db::repo::{alerts, allies, reports, users};
 use crate::error::AppError;
 use crate::mailer::Email;
@@ -162,6 +171,8 @@ async fn fan_out(
     match target {
         Target::Alert(id) => alerts::mark_dispatched(&mut *tx, id, now).await?,
         Target::Report(id) => reports::mark_dispatched(&mut *tx, id, now).await?,
+        // Written with their recipients by `crate::roles`; never fanned out.
+        Target::AdminLog(_) => {}
     }
     tx.commit().await?;
     Ok(created)
@@ -411,6 +422,71 @@ fn account_status_text(
     }
 }
 
+/// Subject, text and link of an admin role notice (see the module docs).
+fn admin_log_text(
+    instance: &str,
+    url: &str,
+    n: &DueNotification,
+    a: &AdminLogNotice,
+) -> (String, String, String) {
+    let person = &n.member_name;
+    let email = &a.user_email;
+    let by_you = a.actor_id.as_ref() == Some(&n.recipient_id);
+    let who = match (a.via, by_you, a.actor_name.as_deref()) {
+        (Via::CommandLine, _, _) => "Someone with access to the server".to_owned(),
+        (Via::Console, true, _) => "You".to_owned(),
+        (Via::Console, false, Some(name)) => name.to_owned(),
+        (Via::Console, false, None) => "An admin".to_owned(),
+    };
+    let how = match a.via {
+        Via::CommandLine => " from the server's command line",
+        Via::Console => "",
+    };
+    let people = format!("{url}/admin/people");
+    let no_content = "Being an admin gives no access to anyone's reports, alerts or screenshots.";
+    if n.recipient_id == n.member_id {
+        let (subject, line) = match a.action {
+            Action::AdminGranted => (
+                format!("You are now an admin of {instance}"),
+                format!(
+                    "{who} made you an admin of {instance}{how}. You can now change its \
+                     settings, invite people and disable accounts. {no_content} Every other admin \
+                     has been told. If you didn't expect this, contact the other admins of \
+                     {instance}."
+                ),
+            ),
+            Action::AdminRevoked => (
+                format!("You are no longer an admin of {instance}"),
+                format!(
+                    "{who} removed your admin role on {instance}{how}. You can still sign in, and \
+                     nothing else about your account changed. Every other admin has been told. If \
+                     you think this is a mistake, contact the other admins of {instance}."
+                ),
+            ),
+        };
+        return (subject, line, url.to_owned());
+    }
+    let (subject, line) = match a.action {
+        Action::AdminGranted => (
+            format!("{person} is now an admin of {instance}"),
+            format!(
+                "{who} made {person} ({email}) an admin of {instance}{how}. {no_content} Every \
+                 admin is told when someone becomes an admin or stops being one. If you didn't \
+                 expect this, check who is an admin on the People page:"
+            ),
+        ),
+        Action::AdminRevoked => (
+            format!("{person} is no longer an admin of {instance}"),
+            format!(
+                "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \
+                 admin is told when someone becomes an admin or stops being one. If you didn't \
+                 expect this, check who is an admin on the People page:"
+            ),
+        ),
+    };
+    (subject, line, people)
+}
+
 /// Re-check quiet hours at send time (a retry or a digest may fall inside
 /// them). Returns the deferral instant, if any.
 async fn quiet_deferral(
@@ -608,6 +684,14 @@ pub fn compose_immediate(state: &AppState, n: &DueNotification) -> Email {
     let instance = &cfg.instance.name;
     let url = &cfg.public_url;
     let member = &n.member_name;
+    if let Some(a) = &n.admin_log {
+        let (subject, line, link) = admin_log_text(instance, url, n, a);
+        return Email {
+            to: n.recipient_email.clone(),
+            subject,
+            text: format!("{line}\n\n{link}\n"),
+        };
+    }
     if let Some(k) = account_status(n) {
         let (subject, line) = account_status_text(instance, n, k);
         return Email {
@@ -673,7 +757,12 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
     for n in items {
         let c = per.entry(n.member_id.as_str()).or_default();
         c.name.clone_from(&n.member_name);
-        if let Some(k) = account_status(n) {
+        if let Some(a) = &n.admin_log {
+            // Always sent immediately (`crate::roles`); worded in full if a
+            // digest ever carries one.
+            let (subject, line, _) = admin_log_text(&cfg.instance.name, &cfg.public_url, n, a);
+            c.status.push(format!("{subject}. {line}"));
+        } else if let Some(k) = account_status(n) {
             let (subject, line) = account_status_text(&cfg.instance.name, n, k);
             // A deletion notice's dates and what to do are the point of
             // it, so the digest carries its whole text.
@@ -796,6 +885,7 @@ mod tests {
             about_name: about.map(str::to_owned),
             alert_detail: Some(detail.to_owned()),
             alert_created_at_ms: Some(REQUESTED + 3600 * 1000),
+            admin_log: None,
         }
     }
 

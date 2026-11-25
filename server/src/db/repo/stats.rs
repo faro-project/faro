@@ -176,6 +176,7 @@ mod tests {
             include_str!("auth_tokens.rs"),
             include_str!("uptime.rs"),
             include_str!("deletion.rs"),
+            include_str!("admin_log.rs"),
             include_str!("../../retention.rs"),
         ];
         let needle = ["SU", "M("].concat();

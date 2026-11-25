@@ -109,7 +109,7 @@
 				fieldError = "This isn't your account's email address.";
 			} else if (err instanceof ApiError && err.code === 'last_admin') {
 				error =
-					"You're the only admin of this instance, so your account can't be deleted. Someone else has to be made an admin first.";
+					"You're the only admin of this instance, so your account can't be deleted. Make someone else an admin first, under Admin → People.";
 			} else {
 				error = describeError(err);
 			}

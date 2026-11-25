@@ -199,6 +199,33 @@ export interface AdminUserRow {
 	deletion_purge_after_ms: number | null;
 }
 
+/** `PUT /admin/api/users/{id}/admin` response. */
+export interface AdminRole {
+	user_id: string;
+	admin: boolean;
+	/** How many people are emailed: the person and every other admin. */
+	told: number;
+}
+
+/** An account named in the admin log. */
+export interface AdminLogAccount {
+	id: string;
+	display_name: string;
+	email: string;
+}
+
+/** One entry of `GET /admin/api/log`, newest first. */
+export interface AdminLogEntry {
+	id: string;
+	action: 'admin_granted' | 'admin_revoked';
+	/** The account it was about; null once that account is deleted. */
+	user: AdminLogAccount | null;
+	/** The admin who did it; null from the command line or once deleted. */
+	actor: AdminLogAccount | null;
+	via: 'console' | 'command_line';
+	at_ms: number;
+}
+
 /** `POST /admin/api/invites` (and member ally invites) response. */
 export interface InviteCreated {
 	email: string;
