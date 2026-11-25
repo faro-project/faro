@@ -37,8 +37,24 @@ pub struct Reason {
     pub source: ReasonSource,
     pub label: String,
     /// Classifier score in `[0, 1]`, if the reason has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "finite_score"
+    )]
     pub score: Option<f32>,
+}
+
+/// A score must be a finite `f32`. JSON numbers beyond its range (`1e39`)
+/// would otherwise decode as infinity, which encodes as `null`: the score
+/// would silently vanish the next time the body is written.
+fn finite_score<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+    match Option::<f32>::deserialize(d)? {
+        Some(s) if !s.is_finite() => Err(serde::de::Error::custom(
+            "reason score is not a finite 32-bit number",
+        )),
+        s => Ok(s),
+    }
 }
 
 impl std::fmt::Display for Reason {
@@ -333,6 +349,23 @@ mod tests {
             account_label(&"x".repeat(200)).chars().count(),
             MAX_ACCOUNT_LABEL
         );
+    }
+
+    #[test]
+    fn reason_scores_must_be_finite() {
+        // Found by the `report` fuzz target: 1E93 decoded as infinity and
+        // re-encoded as `null`, dropping the score.
+        let r = |score: &str| {
+            serde_json::from_str::<Reason>(&format!(
+                r#"{{"source":"image","label":"x","score":{score}}}"#
+            ))
+        };
+        assert!(r("1E93").is_err());
+        assert!(r("-1e39").is_err());
+        assert_eq!(r("0.93").unwrap().score, Some(0.93));
+        assert_eq!(r("null").unwrap().score, None);
+        let missing: Reason = serde_json::from_str(r#"{"source":"app","label":"x"}"#).unwrap();
+        assert_eq!(missing.score, None);
     }
 
     #[test]
