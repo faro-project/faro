@@ -293,7 +293,7 @@ Both alerts are tamper-class: allies can move them to the digest but not turn th
 
 ## 8. Updates
 
-Releases are signed by the project with TUF-style metadata (`faro-update`; the roles, threshold, rollback and freeze rules are documented in `crates/faro-update/src/lib.rs`). Every document is a DSSE-style envelope whose signatures cover `PAE(payload_type, payload)` under the tag `faro/update-envelope/v1`, with payload types `application/vnd.faro.{root,targets,timestamp}+json`.
+Releases are signed by the project with TUF-style metadata (`faro-update`; the roles, threshold, rollback and freeze rules are documented in `crates/faro-update/src/lib.rs`, and the keys are made and rotated as in [KEY-CEREMONY.md](KEY-CEREMONY.md)). Every document is a DSSE-style envelope whose signatures cover `PAE(payload_type, payload)` under the tag `faro/update-envelope/v1`, with payload types `application/vnd.faro.{root,targets,timestamp}+json`.
 
 ### 8.1 Layout
 
