@@ -8,7 +8,7 @@
 
 use crate::config::{Config, SmtpTls};
 use crate::db::repo::instance;
-use crate::db::Db;
+use crate::db::{Db, POSTGRES_UNSUPPORTED};
 use crate::identity::IDENTITY_FILE;
 use crate::mailer::SmtpMailer;
 use std::path::Path;
@@ -207,6 +207,7 @@ pub async fn run(cfg: &Config, check_smtp: bool) -> Report {
     }
 
     // Database.
+    check_postgres(cfg, &mut r);
     check_database(cfg, &key, &mut r).await;
 
     // SMTP.
@@ -355,6 +356,14 @@ pub fn check_updates(cfg: &Config, now_ms: i64, r: &mut Report) {
         );
     } else {
         r.push("updates", Level::Warn, format!("{summary}{error}"));
+    }
+}
+
+/// Postgres is experimental and unsupported in the beta: a `WARN` line when
+/// the database is Postgres, nothing for SQLite.
+pub fn check_postgres(cfg: &Config, r: &mut Report) {
+    if cfg.uses_postgres() {
+        r.push("postgres", Level::Warn, POSTGRES_UNSUPPORTED);
     }
 }
 

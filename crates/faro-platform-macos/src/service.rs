@@ -298,6 +298,9 @@ pub mod pkg_layout {
     /// The installed **global** LaunchAgent: launchd starts it in every
     /// account's GUI session, including accounts created after install.
     pub const AGENT_PLIST: &str = "/Library/LaunchAgents/org.faro.agent.plist";
+    /// The project's update root of trust (a signed root document), shipped
+    /// in release packages (§3.8). Without it the service doesn't update.
+    pub const UPDATE_ROOT: &str = "/Library/Faro/update-root.json";
 }
 
 /// The daemon job the `.pkg` installs ([`pkg_layout`]).

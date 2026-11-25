@@ -344,6 +344,8 @@ pub struct Config {
     /// Where the identity key, SQLite database and blobs live.
     pub data_dir: PathBuf,
     /// `sqlite://…` or `postgres://…`. Defaults to `<data_dir>/faro.db`.
+    /// The beta supports SQLite only: Postgres is experimental and
+    /// unsupported, and `doctor` and `serve` warn about it.
     pub database_url: Option<String>,
     /// The externally visible base URL, e.g. `https://faro.example.org`.
     pub public_url: String,
@@ -714,6 +716,12 @@ impl Config {
             Some(u) => u.clone(),
             None => sqlite_url_for(&self.data_dir.join("faro.db")),
         }
+    }
+
+    /// Whether the database is Postgres, which this release doesn't support
+    /// ([`crate::db::POSTGRES_UNSUPPORTED`]).
+    pub fn uses_postgres(&self) -> bool {
+        crate::db::Backend::from_url(&self.database_url()) == Some(crate::db::Backend::Postgres)
     }
 
     /// Whether cookies get `Secure` and responses get HSTS.

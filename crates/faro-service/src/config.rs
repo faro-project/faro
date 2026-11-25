@@ -64,6 +64,7 @@ pub struct Config {
     pub ipc: IpcConfig,
     pub network: NetworkConfig,
     pub report: ReportConfig,
+    pub updates: UpdatesConfig,
     /// The member's settings, if set here. Changes are announced to allies.
     /// `None` keeps the settings last announced, or the defaults on a device
     /// that has announced none ([`crate::state::settings_in_effect`]).
@@ -80,6 +81,7 @@ impl Default for Config {
             ipc: IpcConfig::default(),
             network: NetworkConfig::default(),
             report: ReportConfig::default(),
+            updates: UpdatesConfig::default(),
             member_settings: None,
         }
     }
@@ -219,6 +221,32 @@ pub struct ReportConfig {
     pub utc_offset_minutes: i32,
 }
 
+/// Client updates (§3.8, [`crate::update`]). There is deliberately no
+/// switch to turn them off: an install that stops taking updates would keep
+/// whatever bugs (or weaknesses) the project has since fixed. Updates only
+/// run when the package ships the project's root of trust.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// How often the instance's mirror is checked. 3600..=86400 (default
+    /// 21600, every 6 hours), jittered.
+    pub check_secs: u64,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig {
+            check_secs: 6 * 3600,
+        }
+    }
+}
+
+impl UpdatesConfig {
+    pub fn check_interval(&self) -> Duration {
+        Duration::from_secs(self.check_secs)
+    }
+}
+
 fn invalid(field: &'static str, reason: impl Into<String>) -> ConfigError {
     ConfigError::Invalid {
         field,
@@ -332,6 +360,9 @@ impl Config {
         }
         if !(1..=600).contains(&n.request_timeout_secs) {
             return Err(invalid("network.request_timeout_secs", "must be 1..=600"));
+        }
+        if !(3600..=86_400).contains(&self.updates.check_secs) {
+            return Err(invalid("updates.check_secs", "must be 3600..=86400"));
         }
         if !(-14 * 60..=14 * 60).contains(&self.report.utc_offset_minutes) {
             return Err(invalid(
@@ -519,6 +550,18 @@ mod tests {
                 ..
             })
         ));
+        assert!(Config::from_toml_str("[updates]\ncheck_secs = 60").is_err());
+        assert!(
+            Config::from_toml_str("[updates]\nenabled = false").is_err(),
+            "no off switch"
+        );
+        assert_eq!(
+            Config::from_toml_str("[updates]\ncheck_secs = 7200")
+                .unwrap()
+                .updates
+                .check_secs,
+            7200
+        );
         assert!(matches!(
             Config::from_toml_str("[network]\nheartbeat_secs = 5"),
             Err(ConfigError::Invalid { .. })

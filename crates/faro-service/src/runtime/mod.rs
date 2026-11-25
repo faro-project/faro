@@ -28,6 +28,7 @@ mod net;
 pub mod spawn;
 mod status;
 pub mod supervisor;
+mod updates;
 
 pub use self::core::{PauseRequest, AGENT_ABSENT_MS};
 pub use goodbye::{say_goodbye, GoodbyeError, GoodbyeOptions, GoodbyeOutcome};
@@ -41,6 +42,9 @@ use crate::config::Config;
 use crate::enroll::{self, EndorsementPoll, EnrollError};
 use crate::source::{FrameSource, SourceCommand, SourceEvent, SourceIo};
 use crate::state::{self, Enrollment, StateDir, StateError, ENDORSEMENT_FILE};
+use crate::update::fetch::{FetchError, UpdateFetcher};
+use crate::update::install::{platform_installer, Installer};
+use crate::update::{CheckError, ClientSpec, ClientUpdater};
 use faro_core::clock::{Clock, SystemClock};
 use faro_core::{
     EventWriter, MemberSettings, OutboxError, PrunePolicy, Scheduler, SchedulerConfig,
@@ -95,6 +99,45 @@ pub enum ServiceError {
     DeviceRemoved,
     #[error("the service task failed: {0}")]
     Join(String),
+    #[error("updates: {0}")]
+    Update(#[from] Box<CheckError>),
+    #[error("updates: {0}")]
+    UpdateFetch(#[from] Box<FetchError>),
+}
+
+/// Test overrides for the update task ([`ServiceBuilder::updates`]).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateOverrides {
+    /// The root of trust instead of the packaged file.
+    pub root: Option<Vec<u8>>,
+    /// The installer instead of the platform one.
+    pub installer: Option<Arc<dyn Installer>>,
+    /// This computer, instead of [`ClientSpec::this_machine`].
+    pub spec: Option<ClientSpec>,
+    /// Delay before the first check.
+    pub first_check: Option<Duration>,
+}
+
+/// The packaged root of trust, if this platform ships one and it exists.
+fn packaged_update_root() -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    let path = Some(std::path::Path::new(
+        faro_platform_macos::pkg_layout::UPDATE_ROOT,
+    ));
+    #[cfg(not(target_os = "macos"))]
+    let path: Option<&std::path::Path> = None;
+    let path = path?;
+    match std::fs::read(path) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(path = %path.display(), "no update root of trust; updates are off");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "cannot read the update root of trust; updates are off");
+            None
+        }
+    }
 }
 
 /// Builds a [`Service`]. See the module docs.
@@ -108,6 +151,7 @@ pub struct ServiceBuilder {
     seed: Option<u64>,
     tick: Duration,
     spawn_agent: Option<AgentSpawn>,
+    updates: UpdateOverrides,
 }
 
 impl ServiceBuilder {
@@ -122,6 +166,7 @@ impl ServiceBuilder {
             seed: None,
             tick: Duration::from_secs(1),
             spawn_agent: None,
+            updates: UpdateOverrides::default(),
         }
     }
 
@@ -181,6 +226,12 @@ impl ServiceBuilder {
         self
     }
 
+    /// Override parts of the update task (tests).
+    pub fn updates(mut self, o: UpdateOverrides) -> Self {
+        self.updates = o;
+        self
+    }
+
     /// Development: launch and relaunch the agent binary.
     pub fn spawn_agent(mut self, spec: AgentSpawn) -> Self {
         self.spawn_agent = Some(spec);
@@ -207,6 +258,28 @@ impl ServiceBuilder {
             &opts,
             self.base_url,
         )?;
+        let updater = match self.updates.root.clone().or_else(packaged_update_root) {
+            Some(root) => {
+                let fetch = UpdateFetcher::new(client.base_url().clone(), &opts)
+                    .map_err(|e| ServiceError::UpdateFetch(Box::new(e)))?;
+                let installer = self
+                    .updates
+                    .installer
+                    .clone()
+                    .or_else(|| platform_installer(dir.path()));
+                let spec = self
+                    .updates
+                    .spec
+                    .clone()
+                    .unwrap_or_else(ClientSpec::this_machine);
+                Some(
+                    ClientUpdater::new(dir.clone(), root, fetch, clock.clone(), spec, installer)
+                        .map_err(|e| ServiceError::Update(Box::new(e)))?,
+                )
+            }
+            None => None,
+        };
+        let update_first_check = self.updates.first_check;
         let outbox =
             faro_core::Outbox::open(dir.path(), &enrollment.instance_id, &enrollment.device_id)?;
         let head = outbox.head()?;
@@ -259,6 +332,8 @@ impl ServiceBuilder {
             control_tx,
             control_rx,
             pokes: Pokes::default(),
+            updater,
+            update_first_check,
             lock,
         })
     }
@@ -315,6 +390,8 @@ pub struct Service {
     control_tx: mpsc::Sender<Control>,
     control_rx: mpsc::Receiver<Control>,
     pokes: Pokes,
+    updater: Option<ClientUpdater>,
+    update_first_check: Option<Duration>,
     /// Held until `run` returns ([`StateDir::try_lock`]).
     lock: state::StateLock,
 }
@@ -352,6 +429,8 @@ impl Service {
             control_tx,
             mut control_rx,
             pokes,
+            updater,
+            update_first_check,
             lock: _lock,
         } = self;
         tokio::pin!(shutdown);
@@ -388,6 +467,16 @@ impl Service {
         // here is fine (the refresh loop re-checks).
         if let Err(e) = refresher.check_identity().await {
             tracing::warn!(error = %e, "could not confirm the instance identity at start");
+        }
+        // Updates run from the start, before activation too: a computer
+        // waiting for its member's endorsement still gets fixes.
+        if let Some(updater) = updater {
+            tasks.spawn(updates::update_loop(
+                updater,
+                update_first_check.unwrap_or_else(updates::default_first_check),
+                config.updates.check_interval(),
+                stop_rx.clone(),
+            ));
         }
         tasks.spawn(heartbeat_loop(
             heartbeater.clone(),
