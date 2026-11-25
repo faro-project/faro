@@ -6,13 +6,16 @@
 //! ([`PolicyConfig`](crate::PolicyConfig)), not here, so swapping models only
 //! needs a new manifest plus, if label names differ, a policy update.
 //!
-//! Models are distributed through the signed update channel (§3.8) as an
-//! ONNX file plus a JSON manifest ([`ModelInfo`]). [`load_model`] checks the
-//! manifest's licence against [`ALLOWED_MODEL_LICENSES`] (§11) and the
-//! file's BLAKE3 against the manifest, and hands back the verified bytes so
-//! the runtime loads *exactly* what was checked (no re-read from disk, no
+//! A model is an ONNX file plus a JSON manifest ([`ModelInfo`]). The beta's
+//! model ships in the macOS package; later ones come through the signed
+//! update channel (§3.8). [`load_model`] checks the manifest's licence
+//! against [`ALLOWED_MODEL_LICENSES`] (§11), that the manifest carries the
+//! attribution and licence text that licence asks for, and the file's
+//! BLAKE3 against the manifest. It hands back the verified bytes so the
+//! runtime loads *exactly* what was checked (no re-read from disk, no
 //! time-of-check/time-of-use gap).
 
+use crate::attribution::{check_attribution, Attribution};
 use crate::error::DetectError;
 use crate::resample::resample_rgb;
 use crate::scratch::Scratch;
@@ -187,6 +190,16 @@ pub struct ModelInfo {
     pub output: OutputActivation,
     /// SPDX licence identifier of the weights; see [`ALLOWED_MODEL_LICENSES`].
     pub license: String,
+    /// The full text of `license`, verbatim. Required for licences in
+    /// [`TEXT_REQUIRED_LICENSES`](crate::attribution::TEXT_REQUIRED_LICENSES),
+    /// whose text must travel with every copy of the weights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_text: Option<String>,
+    /// Who made the weights and what Faro changed. Required unless the
+    /// licence is in
+    /// [`NO_ATTRIBUTION_LICENSES`](crate::attribution::NO_ATTRIBUTION_LICENSES).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<Attribution>,
     /// Lowercase hex BLAKE3 of the model file.
     pub blake3: String,
 }
@@ -210,11 +223,14 @@ impl ModelInfo {
             input_scale: default_input_scale(),
             output: OutputActivation::Probabilities,
             license: "Apache-2.0".to_owned(),
+            license_text: None,
+            attribution: None,
             blake3: String::new(),
         }
     }
 
-    /// Check internal consistency and the licence allowlist.
+    /// Check internal consistency, the licence allowlist, and that the
+    /// attribution and licence text the licence asks for are there.
     pub fn validate(&self) -> Result<(), DetectError> {
         let bad = |m: String| Err(DetectError::Manifest(m));
         if self.name.trim().is_empty() || self.version.trim().is_empty() {
@@ -250,7 +266,13 @@ impl ModelInfo {
         if !ALLOWED_MODEL_LICENSES.contains(&self.license.as_str()) {
             return Err(DetectError::License(self.license.clone()));
         }
-        Ok(())
+        let has_text = |_: &str| {
+            self.license_text
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        };
+        check_attribution([self.license.as_str()], self.attribution.as_ref(), has_text)
+            .map_err(|e| DetectError::Manifest(format!("licence {}: {e}", self.license)))
     }
 }
 
@@ -523,6 +545,24 @@ pub fn postprocess(raw: &[f32], info: &ModelInfo) -> Result<ImageScores, DetectE
     ImageScores::new(info.labels.iter().cloned().zip(probs))
 }
 
+/// Licence fields for test manifests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::attribution::Attribution;
+
+    pub(crate) const MIT_TEXT: &str = "Permission is hereby granted, free of charge, ...";
+
+    pub(crate) fn attribution() -> Attribution {
+        Attribution {
+            author: "Faro tests".into(),
+            copyright: vec!["Copyright (c) 2026 Faro tests".into()],
+            source_url: "https://example.org/model".into(),
+            license_url: "https://example.org/model/LICENSE".into(),
+            changes: "None: a graph the tests encode by hand.".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,7 +585,9 @@ mod tests {
             layout: TensorLayout::Nchw,
             input_scale: 1.0 / 255.0,
             output: OutputActivation::Softmax,
-            license: "Apache-2.0".into(),
+            license: "MIT".into(),
+            license_text: Some(test_support::MIT_TEXT.into()),
+            attribution: Some(test_support::attribution()),
             blake3: blake3::hash(b"weights").to_hex().to_string(),
         }
     }
@@ -641,6 +683,38 @@ mod tests {
         let mut i = info();
         i.input_size.width = 0;
         assert!(i.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_needs_what_the_licence_asks_for() {
+        let manifest_err = |i: ModelInfo| match i.validate() {
+            Err(DetectError::Manifest(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        let mut i = info();
+        i.attribution = None;
+        assert!(manifest_err(i).contains("requires attribution"));
+        let mut i = info();
+        i.license_text = Some("  ".into());
+        assert!(manifest_err(i).contains("MIT requires its text"));
+        let mut i = info();
+        i.attribution.as_mut().unwrap().copyright.clear();
+        assert!(manifest_err(i).contains("copyright"));
+        let mut i = info();
+        i.attribution.as_mut().unwrap().changes.clear();
+        assert!(manifest_err(i).contains("attribution.changes"));
+        // A public-domain dedication needs neither.
+        let mut i = info();
+        i.license = "CC0-1.0".into();
+        i.license_text = None;
+        i.attribution = None;
+        assert!(i.validate().is_ok());
+        // load_model refuses such a manifest before reading the weights.
+        let dir = tempfile::tempdir().unwrap();
+        let mut i = info();
+        i.license_text = None;
+        let p = write_model(dir.path(), &i, b"weights");
+        assert!(matches!(load_model(&p), Err(DetectError::Manifest(_))));
     }
 
     fn write_model(dir: &Path, info: &ModelInfo, weights: &[u8]) -> std::path::PathBuf {

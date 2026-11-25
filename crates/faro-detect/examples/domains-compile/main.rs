@@ -36,6 +36,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Parser, Subcommand};
+use faro_detect::attribution::{check_attribution, Attribution, AttributionError};
 use faro_detect::{
     Category, CompileStats, DomainCategorizer, DomainCategorizerBuilder, ALLOWED_MODEL_LICENSES,
 };
@@ -52,20 +53,6 @@ const MANIFEST_FORMAT: &str = "faro-domains-manifest/1";
 const MAX_SOURCE_BYTES: u64 = 256 << 20;
 const DEFAULT_SOURCES_DIR: &str = "target/domains/sources";
 const MAX_NAME_LEN: usize = 64;
-
-/// Allowlisted licences that ask for nothing to travel with the data.
-const NO_ATTRIBUTION_LICENSES: &[&str] = &["CC0-1.0", "Unlicense"];
-/// Allowlisted licences whose text must accompany copies, together with the
-/// copyright notice. (CC-BY-4.0 needs attribution too, but a link to the
-/// licence is enough.)
-const TEXT_REQUIRED_LICENSES: &[&str] = &[
-    "Apache-2.0",
-    "MIT",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Zlib",
-];
 
 /// The opening of every manifest, so it reads on its own.
 const MANIFEST_NOTICE: &str = "The domain bundle described here is compiled from the \
@@ -193,7 +180,7 @@ fn blake3_hex(bytes: &[u8]) -> String {
 struct Config {
     version: u32,
     /// Full licence texts by SPDX id, for licences in
-    /// [`TEXT_REQUIRED_LICENSES`]. Copied into the manifest.
+    /// [`faro_detect::attribution::TEXT_REQUIRED_LICENSES`]. Copied into the manifest.
     #[serde(default)]
     license_texts: BTreeMap<String, String>,
     #[serde(rename = "source", default)]
@@ -225,26 +212,6 @@ struct Source {
     terms: Option<String>,
     /// Required for approved sources whose licence asks for attribution.
     attribution: Option<Attribution>,
-}
-
-/// What a source's licence asks to travel with the data. Copied verbatim
-/// into the manifest.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Attribution {
-    /// The creators, as the upstream names them.
-    author: String,
-    /// The upstream's copyright notices, verbatim. Required for licences in
-    /// [`TEXT_REQUIRED_LICENSES`]; may be empty for CC-BY-4.0 when the
-    /// upstream gives none.
-    #[serde(default)]
-    copyright: Vec<String>,
-    /// Where the upstream publishes the list.
-    source_url: String,
-    /// The licence the list is used under.
-    license_url: String,
-    /// What was changed (CC BY 4.0 §3(a)(1)(B)).
-    changes: String,
 }
 
 /// The upstream's syntax. Both are parsed by
@@ -373,45 +340,22 @@ impl Source {
     /// with the bundle.
     fn validate_attribution(&self, license_texts: &BTreeMap<String, String>) -> Result<()> {
         let name = &self.name;
-        let ids = spdx_ids(&self.license);
-        if ids.iter().all(|id| NO_ATTRIBUTION_LICENSES.contains(id)) {
-            return Ok(());
-        }
-        let Some(a) = &self.attribution else {
-            bail!(
+        let checked = check_attribution(spdx_ids(&self.license), self.attribution.as_ref(), |id| {
+            license_texts.contains_key(id)
+        });
+        match checked {
+            Ok(()) => Ok(()),
+            Err(AttributionError::Missing) => bail!(
                 "source {name}: its licence {} requires attribution, but it has no \
                  [source.attribution]",
                 self.license
-            );
-        };
-        for (field, value) in [
-            ("author", &a.author),
-            ("source_url", &a.source_url),
-            ("license_url", &a.license_url),
-            ("changes", &a.changes),
-        ] {
-            ensure!(
-                !value.trim().is_empty(),
-                "source {name}: attribution.{field} is empty"
-            );
-        }
-        ensure!(
-            a.copyright.iter().all(|c| !c.trim().is_empty()),
-            "source {name}: empty attribution.copyright line"
-        );
-        for id in ids.iter().filter(|id| TEXT_REQUIRED_LICENSES.contains(id)) {
-            ensure!(
-                !a.copyright.is_empty(),
-                "source {name}: {id} requires the copyright notice, but attribution.copyright \
-                 is empty"
-            );
-            ensure!(
-                license_texts.contains_key(*id),
+            ),
+            Err(AttributionError::NoLicenseText(id)) => bail!(
                 "source {name}: {id} requires its text to travel with the bundle; add it to \
                  [license_texts]"
-            );
+            ),
+            Err(e) => bail!("source {name}: {e}"),
         }
-        Ok(())
     }
 
     fn included(&self, allow_unapproved: bool) -> bool {

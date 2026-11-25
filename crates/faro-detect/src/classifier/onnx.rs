@@ -118,7 +118,9 @@ mod tests {
             layout: TensorLayout::Nchw,
             input_scale: 1.0 / 255.0,
             output: OutputActivation::Softmax,
-            license: "Apache-2.0".into(),
+            license: "MIT".into(),
+            license_text: Some(crate::classifier::test_support::MIT_TEXT.into()),
+            attribution: Some(crate::classifier::test_support::attribution()),
             blake3: blake3::hash(bytes).to_hex().to_string(),
         }
     }
