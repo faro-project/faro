@@ -131,6 +131,22 @@ extern "C" {
         bundle: *const c_void,
         locale_table_name: *const c_void,
     ) -> OSStatus;
+    fn SecCodeCopySelf(flags: u32, self_code: *mut *const c_void) -> OSStatus;
+    fn SecRequirementCreateWithString(
+        text: *const c_void,
+        flags: u32,
+        requirement: *mut *const c_void,
+    ) -> OSStatus;
+    fn SecCodeCheckValidity(
+        code: *const c_void,
+        flags: u32,
+        requirement: *const c_void,
+    ) -> OSStatus;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRelease(cf: *const c_void);
 }
 
 /// What went wrong.
@@ -327,12 +343,19 @@ const METADATA_KEYS: &[&str] = &[
     "default-button",
 ];
 
+/// Keys authd adds when a rule is written, naming the program that wrote
+/// it: its signing identifier and its code requirement. They must be text;
+/// [`ensure_enroll_rule`] also checks that the running service satisfies
+/// `requirement`, so a rule someone else wrote is rewritten.
+const CREATOR_KEYS: &[&str] = &["identifier", "requirement"];
+
 /// Whether `def` is exactly Faro's rule ([`enroll_rule`]) plus metadata.
 ///
 /// Every required key must be there with exactly its value, and any other
 /// key except the metadata authd keeps (comment, dates, version, tries,
-/// prompts) makes it fail: `rule`, `mechanisms`, `k-of-n`,
-/// `extract-password` and anything unknown could change who passes.
+/// prompts, and the creator keys) makes it fail: `rule`, `mechanisms`,
+/// `k-of-n`, `extract-password` and anything unknown could change who
+/// passes. Who wrote the rule is checked separately ([`rule_creator`]).
 pub fn definition_ok(def: &RuleDefinition) -> Result<(), String> {
     let required = enroll_rule();
     for (key, want) in &required {
@@ -343,12 +366,72 @@ pub fn definition_ok(def: &RuleDefinition) -> Result<(), String> {
         }
     }
     for key in def.keys() {
+        if CREATOR_KEYS.contains(&key.as_str()) {
+            if !matches!(def.get(key), Some(RuleValue::Text(_))) {
+                return Err(format!("`{key}` is not text"));
+            }
+            continue;
+        }
         let known = required.iter().any(|(k, _)| k == key) || METADATA_KEYS.contains(&key.as_str());
         if !known {
             return Err(format!("unexpected key `{key}`"));
         }
     }
     Ok(())
+}
+
+/// The code requirement authd recorded for the program that wrote the
+/// rule, if it recorded one.
+pub fn rule_creator(def: &RuleDefinition) -> Option<&str> {
+    match def.get("requirement") {
+        Some(RuleValue::Text(r)) => Some(r),
+        _ => None,
+    }
+}
+
+/// Whether the running program satisfies the code requirement `text`,
+/// checked by Security.framework against this process's own code.
+fn self_satisfies(text: &str) -> Result<bool, AuthError> {
+    let os = |call: &'static str, status: OSStatus| AuthError::Os { call, status };
+    let text = CFString::from_str(text);
+    let mut req: *const c_void = ptr::null();
+    // SAFETY: `text` is a valid CFString for the call; `req` receives a +1
+    // SecRequirementRef on success, released below.
+    let status =
+        unsafe { SecRequirementCreateWithString((&*text as *const CFString).cast(), 0, &mut req) };
+    if status != ERR_SUCCESS || req.is_null() {
+        // Not a requirement we can even parse: not ours.
+        return Ok(false);
+    }
+    let mut code: *const c_void = ptr::null();
+    // SAFETY: `code` receives a +1 SecCodeRef for this process on success.
+    let status = unsafe { SecCodeCopySelf(0, &mut code) };
+    if status != ERR_SUCCESS || code.is_null() {
+        // SAFETY: `req` is a +1 reference we own.
+        unsafe { CFRelease(req) };
+        return Err(os("SecCodeCopySelf", status));
+    }
+    // SAFETY: both are valid, owned Security objects.
+    let status = unsafe { SecCodeCheckValidity(code, 0, req) };
+    // SAFETY: both are +1 references we own; neither is used afterwards.
+    unsafe {
+        CFRelease(code);
+        CFRelease(req);
+    }
+    Ok(status == ERR_SUCCESS)
+}
+
+/// [`definition_ok`], plus: if authd recorded who wrote the rule, it must
+/// be this program.
+fn rule_ok(def: &RuleDefinition) -> Result<Result<(), String>, AuthError> {
+    if let Err(why) = definition_ok(def) {
+        return Ok(Err(why));
+    }
+    match rule_creator(def) {
+        None => Ok(Ok(())),
+        Some(req) if self_satisfies(req)? => Ok(Ok(())),
+        Some(_) => Ok(Err("the rule was written by another program".into())),
+    }
 }
 
 fn to_rule_value(v: &CFType) -> RuleValue {
@@ -507,7 +590,7 @@ pub fn ensure_enroll_rule(may_write: bool) -> Result<RuleCheck, AuthError> {
         }
     }
     let problem = match read_rule(ENROLL_RIGHT)? {
-        Some(def) => match definition_ok(&def) {
+        Some(def) => match rule_ok(&def)? {
             Ok(()) => return Ok(RuleCheck::Correct),
             Err(why) => Some(why),
         },
@@ -521,7 +604,7 @@ pub fn ensure_enroll_rule(may_write: bool) -> Result<RuleCheck, AuthError> {
     }
     write_enroll_rule()?;
     match read_rule(ENROLL_RIGHT)? {
-        Some(def) => definition_ok(&def).map_err(AuthError::RuleAltered)?,
+        Some(def) => rule_ok(&def)?.map_err(AuthError::RuleAltered)?,
         None => return Err(AuthError::RuleMissing),
     }
     Ok(RuleCheck::Rewritten(problem))
@@ -616,6 +699,56 @@ mod tests {
             d.insert(extra.to_owned(), RuleValue::Other);
             assert!(definition_ok(&d).is_err(), "extra {extra} accepted");
         }
+    }
+
+    /// authd adds `identifier` and `requirement` (who wrote the rule) when
+    /// a rule is written. They are allowed as text, and checked by
+    /// [`rule_ok`] instead.
+    #[test]
+    fn creator_keys_are_allowed_as_text() {
+        let mut d = faro_rule();
+        d.insert(
+            "identifier".into(),
+            RuleValue::Text("org.faro.service".into()),
+        );
+        d.insert(
+            "requirement".into(),
+            RuleValue::Text("cdhash H\"a8ca9feb7e76931719a1a13c6ac3ee6be22f0a49\"".into()),
+        );
+        assert_eq!(definition_ok(&d), Ok(()));
+        assert_eq!(
+            rule_creator(&d),
+            Some("cdhash H\"a8ca9feb7e76931719a1a13c6ac3ee6be22f0a49\"")
+        );
+        for key in ["identifier", "requirement"] {
+            let mut bad = d.clone();
+            bad.insert(key.into(), RuleValue::Bool(true));
+            assert!(definition_ok(&bad).is_err(), "non-text {key} accepted");
+        }
+        assert_eq!(rule_creator(&faro_rule()), None);
+    }
+
+    #[test]
+    fn a_rule_written_by_another_program_is_refused() {
+        // This test binary isn't the program those requirements name.
+        let mut d = faro_rule();
+        d.insert(
+            "requirement".into(),
+            RuleValue::Text("identifier \"com.example.not-faro\"".into()),
+        );
+        assert!(matches!(rule_ok(&d), Ok(Err(_))));
+        d.insert("requirement".into(), RuleValue::Text("never".into()));
+        assert!(matches!(rule_ok(&d), Ok(Err(_))));
+        d.insert(
+            "requirement".into(),
+            RuleValue::Text("not a requirement (".into()),
+        );
+        assert!(matches!(rule_ok(&d), Ok(Err(_))));
+        // A requirement this process does satisfy is accepted.
+        d.insert("requirement".into(), RuleValue::Text("always".into()));
+        assert_eq!(rule_ok(&d), Ok(Ok(())));
+        // No creator recorded: only the definition counts.
+        assert_eq!(rule_ok(&faro_rule()), Ok(Ok(())));
     }
 
     /// Read-only: an Apple right reads back with the keys this module
