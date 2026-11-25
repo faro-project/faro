@@ -106,6 +106,9 @@ else
         echo "FARO_TEAM_ID must be a 10-character Apple team ID" >&2
         exit 1
     fi
+    # faro-service compiles it in (option_env!) to check update packages'
+    # signatures, so every cargo run below must see it.
+    export FARO_TEAM_ID
 fi
 
 # Every slice is built for the oldest macOS the package installs on.
@@ -136,7 +139,7 @@ models="$work/models"
 # a system copy found by pkg-config and dynamic linking are all ruled out,
 # and its pins must be the ones ort-sys was written for.
 ort="$work/onnxruntime"
-ort_sys="$(cargo metadata --manifest-path "$repo/Cargo.toml" --format-version 1 --locked \
+ort_sys="$(cargo metadata --manifest-path "$repo/Cargo.toml" --format-version 1 --locked --features faro-service/onnx \
     | /usr/bin/python3 -I -c 'import json, sys
 m = json.load(sys.stdin)
 print(next(p["manifest_path"] for p in m["packages"] if p["name"] == "ort-sys"))')"

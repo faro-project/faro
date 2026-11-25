@@ -141,6 +141,23 @@ done < <(find "$work/payload" -type f -print0)
 
 # ONNX Runtime is linked into faro-service, never loaded from a dylib.
 service="$work/payload/Library/Faro/bin/faro-service"
+# A release package's faro-service has the Team ID compiled in (it checks
+# update packages' signatures with it; without it, it refuses them all):
+# the one the default config's agent requirement names, in every slice.
+if [[ "$(basename "$pkg")" != *-dev.pkg ]]; then
+    team="$(sed -n 's/.*certificate leaf\[subject.OU\] = "\([A-Z0-9]\{10\}\)".*/\1/p' \
+        "$work/payload/Library/Faro/service.toml.default")"
+    [[ -n "$team" ]] || fail "service.toml.default names no Team ID"
+    for a in ${want_archs//,/ }; do
+        if [[ "$want_archs" == *,* ]]; then
+            lipo -thin "$a" -output "$work/faro-service.$a" "$service"
+        else
+            cp "$service" "$work/faro-service.$a"
+        fi
+        LC_ALL=C grep -qaF "$team" "$work/faro-service.$a" \
+            || fail "faro-service ($a) was built without the Team ID $team (FARO_TEAM_ID)"
+    done
+fi
 if otool -L "$service" | grep -qi onnxruntime; then
     fail "faro-service loads ONNX Runtime dynamically: $(otool -L "$service" | grep -i onnxruntime)"
 fi
