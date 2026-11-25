@@ -63,7 +63,7 @@ npm run dev         # http://localhost:5173, API proxied to faro-server on :8080
 npm run check       # svelte-check (types)
 npm run lint        # prettier --check; `npm run format` fixes
 npm run build       # web/build, which the next `cargo build -p faro-server` embeds
-npm test            # the crypto port against the Rust test vectors
+npm test            # the crypto port against the Rust test vectors, and key re-wrapping
 npm run vectors     # rewrite the vectors' from_web part after changing web/src/lib/crypto
 ```
 
@@ -78,11 +78,11 @@ npm run vectors     # rewrite the vectors' from_web part after changing web/src/
 | `/allies` | members | Inviting allies, safety codes, approving and removing them, re-signing after one leaves |
 | `/activity` | members | Their own feed, decrypted with their key: what their allies see |
 | `/supporting`, `/supporting/member?id=` | allies | The members they support, each member's feed, notification settings, safety code, leaving |
-| `/settings` | everyone | Name, key fingerprints, changing a member's passphrase or recovery code, a member's retention and own notifications |
+| `/settings` | everyone | Name, key fingerprints, changing the passphrase or getting a new recovery code (member and ally keys), a member's retention and own notifications |
 | `/privacy` | everyone | The operator privacy notice |
 | `/admin/…` | admins | Overview, people, settings, email |
 
-**Keys in the browser.** Private keys are created, wrapped and unwrapped in the page (`web/src/lib/keys`), held in memory only (`keyring.svelte.ts`: forgotten on reload, sign-out, "Lock" or after 30 idle minutes) and never sent anywhere unwrapped. Everything the browser builds on is checked first: a recipient manifest the server returns must verify against the member's own key, enrollment links take the member key fingerprint from the unlocked key, and safety codes are computed from the viewer's own key, never the server's copy. The storage formats are in PROTOCOL.md §4.3.
+**Keys in the browser.** Private keys are created, wrapped and unwrapped in the page (`web/src/lib/keys`), held in memory only (`keyring.svelte.ts`: forgotten on reload, sign-out, "Lock" or after 30 idle minutes) and never sent anywhere unwrapped. Everything the browser builds on is checked first: a recipient manifest the server returns must verify against the member's own key, enrollment links take the member key fingerprint from the unlocked key, and safety codes are computed from the viewer's own key, never the server's copy. A new passphrase or recovery code replaces only the wrapped copies (`web/src/lib/keys/wrapping.ts`): each new copy is opened again and checked against the stored public key before it is uploaded. The storage formats are in PROTOCOL.md §4.3.
 
 **Crypto.** `web/src/lib/crypto` ports what browsers need from `faro-proto` and `faro-crypto` (canonical encoding, key ids, safety codes, Ed25519, opening sealed boxes and items, Argon2id wrapping, manifests and endorsements) on the audited, pure-JavaScript `@noble` libraries. WebAssembly libsodium isn't an option: the page CSP has no `'wasm-unsafe-eval'`. Argon2id at the default 64 MiB / 3 passes takes well under a second. Both implementations check `crates/faro-crypto/tests/data/web-vectors.json`, in both directions; change one side, run both tests.
 

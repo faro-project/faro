@@ -294,6 +294,28 @@ pub async fn insert_key<'e>(
     Ok(())
 }
 
+/// Replace the wrapped private half of the live ally key `key_row_id`, if
+/// it still holds exactly `old` (so of two changes made from the same
+/// challenge, only one lands). The public key is never touched. Returns
+/// whether a row changed.
+pub async fn replace_wrapped<'e>(
+    e: impl Executor<'e, Database = Any>,
+    key_row_id: &str,
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE ally_keys SET wrapped_privkey = $1
+         WHERE id = $2 AND wrapped_privkey = $3 AND revoked_at IS NULL",
+    )
+    .bind(new.to_string())
+    .bind(key_row_id)
+    .bind(old.to_string())
+    .execute(e)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 /// Ids of the member's active allies (notification recipients).
 pub async fn active_ally_ids<'e>(
     e: impl Executor<'e, Database = Any>,

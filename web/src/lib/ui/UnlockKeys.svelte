@@ -76,7 +76,8 @@
 				);
 			} else if (kind === 'ally' && allyBlob) {
 				keyring.setAlly(
-					await unlockAllyKey(allyBlob, user.id, input, useRecovery, (f) => (progress = f))
+					await unlockAllyKey(allyBlob, user.id, input, useRecovery, (f) => (progress = f)),
+					useRecovery
 				);
 			}
 			secret = '';

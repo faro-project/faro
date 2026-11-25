@@ -21,6 +21,7 @@
 //! member: invites are created from the member's own session and approval
 //! needs the member's signing key.
 
+use super::keys::{parse_wrapped, RewrapResponse};
 use super::ApiJson;
 use crate::auth::normalize_email;
 use crate::auth::session::SessionUser;
@@ -33,8 +34,9 @@ use crate::tokens::{is_token_shaped, new_token, TokenPurpose};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use faro_proto::api::AllyKeyUpload;
-use faro_proto::keys::key_id;
+use faro_proto::api::{AllyKeyUpload, REQUEST_MAX_SKEW_MS};
+use faro_proto::encoding::b64_encode;
+use faro_proto::keys::{key_id, ProvenAllyKeyRewrap};
 use faro_proto::{EncPublicKey, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -363,4 +365,126 @@ pub async fn get_my_ally_key(
         wrapped_privkey: k.wrapped_privkey,
         created_at_ms: k.created_at_ms,
     }))
+}
+
+// ---- Re-wrapping the ally key ---------------------------------------------
+//
+// An ally changes their passphrase, or gets a new recovery code, by
+// replacing `wrapped_privkey`. The key itself never changes, so no member
+// has to approve anything again and safety codes stay the same.
+//
+// The instance can't tell a good wrapping from garbage, so a stolen session
+// alone must not be able to overwrite it: that would lock the ally out of
+// every member they support. Members prove possession by signing
+// (`PUT /v1/me/keys/wrapped`). An X25519 key can't sign, so the instance
+// seals a challenge to the ally's public key instead, and only the holder of
+// the private key can open it. The browser answers with a MAC keyed by the
+// challenge (`AllyKeyRewrap::proof`), never the challenge itself, so this
+// can't be used to make the browser open other sealed boxes for the
+// instance. The challenge is a keyed hash over the ally, their key, the time
+// and the wrapping it replaces, so it needs no storage, expires after
+// `REQUEST_MAX_SKEW_MS`, and is good for one change only.
+
+/// `POST /v1/me/ally-key/challenge` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllyKeyChallenge {
+    pub enc_pubkey: EncPublicKey,
+    /// The instance's clock, for the [`faro_proto::keys::AllyKeyRewrap`].
+    pub issued_at_ms: i64,
+    /// A 32-byte challenge sealed to `enc_pubkey` (`crypto_box_seal`),
+    /// base64url.
+    pub sealed_challenge: String,
+}
+
+fn challenge_for(
+    state: &AppState,
+    ally: &UserId,
+    key: &allies::AllyKeyRow,
+    issued_at_ms: i64,
+) -> blake3::Hash {
+    // Only the last field can contain a newline.
+    let input = format!(
+        "{}\n{}\n{issued_at_ms}\n{}",
+        ally.as_str(),
+        key.enc_pubkey.to_b64(),
+        key.wrapped_privkey
+    );
+    state.hasher().mac(TokenPurpose::AllyKeyChallenge, &input)
+}
+
+/// `POST /v1/me/ally-key/challenge`: a challenge only the caller's ally key
+/// can open, for [`put_my_wrapped_ally_key`].
+pub async fn ally_key_challenge(
+    State(state): State<AppState>,
+    s: SessionUser,
+) -> AppResult<Json<AllyKeyChallenge>> {
+    let k = allies::live_key(state.db().pool(), &s.user.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let issued_at_ms = state.now_ms();
+    let challenge = challenge_for(&state, &s.user.id, &k, issued_at_ms);
+    let sealed = faro_crypto::seal_to(&k.enc_pubkey, challenge.as_bytes())
+        .map_err(|_| AppError::internal("could not seal the challenge"))?;
+    Ok(Json(AllyKeyChallenge {
+        enc_pubkey: k.enc_pubkey,
+        issued_at_ms,
+        sealed_challenge: b64_encode(&sealed),
+    }))
+}
+
+/// `PUT /v1/me/ally-key/wrapped`: replace the wrapped copy of the caller's
+/// ally key (a new passphrase, or a new recovery code), proven with a
+/// challenge from [`ally_key_challenge`]. The public key can't change.
+/// Like the member's re-wrap, this notifies nobody: nothing anyone else
+/// sees has changed.
+pub async fn put_my_wrapped_ally_key(
+    State(state): State<AppState>,
+    s: SessionUser,
+    ApiJson(proven): ApiJson<ProvenAllyKeyRewrap>,
+) -> AppResult<Json<RewrapResponse>> {
+    let req = &proven.body;
+    if &req.instance_id != state.instance_id() || req.ally_id != s.user.id {
+        return Err(AppError::bad_request(
+            "rewrap_mismatch",
+            "the request must name this instance and your account",
+        ));
+    }
+    let wrapped_privkey = parse_wrapped("wrapped_privkey", &req.wrapped_privkey)?;
+    let pool = state.db().pool();
+    let k = allies::live_key(pool, &s.user.id).await?.ok_or_else(|| {
+        AppError::conflict(
+            "ally_key_required",
+            "you have no ally key; accept an invitation first",
+        )
+    })?;
+    if req.enc_pubkey != k.enc_pubkey {
+        return Err(AppError::conflict(
+            "ally_key_mismatch",
+            "your ally key can't be replaced, only wrapped under a new passphrase",
+        ));
+    }
+    let now = state.now_ms();
+    if req.issued_at_ms > now || now - req.issued_at_ms > REQUEST_MAX_SKEW_MS {
+        return Err(AppError::bad_request(
+            "stale_request",
+            "the challenge has expired; ask for a new one",
+        ));
+    }
+    let challenge = challenge_for(&state, &s.user.id, &k, req.issued_at_ms);
+    let expected = req.proof(challenge.as_bytes());
+    // `blake3::Hash` compares in constant time.
+    if blake3::Hash::from_bytes(proven.proof.0) != blake3::Hash::from_bytes(expected.0) {
+        return Err(AppError::bad_request(
+            "bad_rewrap_proof",
+            "the proof is wrong, or its challenge was already used",
+        ));
+    }
+    if !allies::replace_wrapped(pool, &k.id, &k.wrapped_privkey, &wrapped_privkey).await? {
+        return Err(AppError::conflict(
+            "stale_request",
+            "your key was changed while this request was being made",
+        ));
+    }
+    tracing::info!(ally = %s.user.id, "ally re-wrapped their key");
+    Ok(Json(RewrapResponse { updated_at_ms: now }))
 }

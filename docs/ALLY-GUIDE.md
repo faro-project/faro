@@ -26,7 +26,7 @@ That last part is the point. Faro exists to make honest conversations easier, no
 - **Ally:** you. Someone a member trusts to see their reports and alerts.
 - **Instance:** the Faro server your invitation came from. A church, a college, a small group or one person runs it. Its name is at the top of each page.
 - **Passphrase:** like a password, but longer, for example a few unrelated words strung together. You choose it. It unlocks what the member shares with you.
-- **Recovery code:** a long code Faro makes for you, as a spare key. If you forget your passphrase, the recovery code unlocks things instead.
+- **Recovery code:** a long code Faro makes for you, as a spare key. If you forget your passphrase, the recovery code unlocks things instead. You can get a new one in **Settings**.
 - **Safety code:** a set of numbers you and the member compare, to make sure the member is approving *you* and not an impostor.
 
 ## 2. Accepting the invitation
@@ -72,9 +72,16 @@ What the member shares with you is locked on their computer before it is sent, a
 
 You type your passphrase on the **Supporting** pages whenever Faro needs to show you details. It stays unlocked in that browser tab until you click **Lock** (top of the page), sign out, close or reload the tab, or leave it alone for 30 minutes. On a shared computer, click **Lock** and **Sign out** when you're done.
 
-**If you forget your passphrase:** on any unlock screen, click **Forgot it? Use the recovery code** and type the recovery code instead.
+**If you forget your passphrase:** on any unlock screen, click **Forgot it? Use the recovery code** and type the recovery code instead. Faro then offers to set a new passphrase: click **Choose a new passphrase** in the note at the top of the page. Your recovery code keeps working afterwards.
 
-Today the web app has no way for an ally to choose a new passphrase or get a new recovery code, so if you forget your passphrase you'll need the recovery code every time. If you lose both, Faro can't get your key back. Tell the member, so they know you can't read their reports.
+**Changing your passphrase or recovery code:** open **Settings** (your name, top right). Under **Your keys**:
+
+- **Change my passphrase…** sets a new passphrase. Tick **Also make a new recovery code** if you want a new code too.
+- **Get a new recovery code…** replaces your recovery code and keeps your passphrase. Use it if you lost the code, or think someone else has seen it. The old code stops working, and the new one is shown once, so save it.
+
+Faro may ask you to unlock first. Nothing changes for the members you support: your safety code stays the same, they aren't told, and you can still read everything they share.
+
+If you lose both your passphrase and your recovery code, Faro can't get your key back. Tell the member, so they know you can't read their reports.
 
 ## 4. Comparing the safety code
 

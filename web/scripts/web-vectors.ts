@@ -15,6 +15,7 @@ import {
 	manifestRef,
 	manifestSigningBytes,
 	memberBindingSigningBytes,
+	proveAllyKeyRewrap,
 	signWith
 } from '../src/lib/crypto/proto.ts';
 
@@ -54,6 +55,8 @@ const s1 = new Uint8Array(32).fill(0x21);
 const s2 = new Uint8Array(32).fill(0x31);
 
 const msg = utf8('signed by the web app');
+// What an ally's browser opens from the instance's sealed challenge.
+const challenge = new Uint8Array(32).fill(0x44);
 v.from_web = {
 	comment: 'Written by web/scripts/web-vectors.ts (npm run vectors); checked by the Rust test.',
 	sign_pubkey: b64(pk),
@@ -115,7 +118,20 @@ v.from_web = {
 			recovery_wrapped: '{"sign":{},"enc":{}}'
 		},
 		keyRewrapSigningBytes
-	)
+	),
+	ally_key_rewrap: {
+		challenge_hex: hex(challenge),
+		proven: proveAllyKeyRewrap(
+			{
+				instance_id: ids.instance,
+				ally_id: ids.ally_a,
+				enc_pubkey: v.keys.ally_a_pubkey,
+				issued_at_ms: 1_790_000_400_000,
+				wrapped_privkey: JSON.stringify(allyWrapped)
+			},
+			challenge
+		)
+	}
 };
 writeFileSync(path, JSON.stringify(v, null, 2) + '\n');
 console.log(`wrote from_web to ${path}`);

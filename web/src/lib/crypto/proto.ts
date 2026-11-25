@@ -5,6 +5,7 @@
 // field by field. On the wire a signed structure is its fields flattened
 // together with `sig` (`Signed<T>`).
 
+import { blake3 } from '@noble/hashes/blake3.js';
 import { b64, unb64Fixed, type Bytes } from './bytes.ts';
 import { Canonical, hash, hashFromString, hashToString } from './canonical.ts';
 import { isWeakX25519, sign, verify } from './keys.ts';
@@ -161,6 +162,45 @@ export function keyRewrapSigningBytes(r: KeyRewrap): Bytes {
 		.str(r.wrapped_enc_key)
 		.str(r.recovery_wrapped)
 		.finish();
+}
+
+/**
+ * `faro_proto::keys::AllyKeyRewrap`: replace the stored wrapped copy of the
+ * ally key. An X25519 key can't sign, so the request is proven with a MAC
+ * keyed by a challenge the instance sealed to the ally key
+ * (`allyKeyRewrapProof`). `wrapped_privkey` is the exact JSON text.
+ */
+export interface AllyKeyRewrap {
+	instance_id: string;
+	ally_id: string;
+	enc_pubkey: string;
+	issued_at_ms: number;
+	wrapped_privkey: string;
+}
+
+export function allyKeyRewrapProofBytes(r: AllyKeyRewrap): Bytes {
+	return new Canonical('faro/ally-key-rewrap/v1')
+		.str(r.instance_id)
+		.str(r.ally_id)
+		.fixed(key32(r.enc_pubkey, 'enc_pubkey'))
+		.i64(r.issued_at_ms)
+		.str(r.wrapped_privkey)
+		.finish();
+}
+
+/**
+ * The wire form: `r` flattened with `proof`, `BLAKE3-keyed(challenge,
+ * proof bytes)` as `b3:<hex>`. Only the MAC leaves the browser, never the
+ * challenge, so a hostile instance can't use this to have other sealed boxes
+ * (such as item keys) opened for it.
+ */
+export function proveAllyKeyRewrap(
+	r: AllyKeyRewrap,
+	challenge: Uint8Array
+): AllyKeyRewrap & { proof: string } {
+	if (challenge.length !== 32) throw new Error('the challenge must be 32 bytes');
+	const mac = blake3(allyKeyRewrapProofBytes(r), { key: challenge });
+	return { ...r, proof: hashToString(mac) };
 }
 
 /** Sign `body` with the Ed25519 `seed`, giving the flattened wire form. */
