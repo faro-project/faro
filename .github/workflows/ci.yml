@@ -40,6 +40,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
+      # The toolchain action's steps use `shell: bash`. With WSL installed,
+      # the first `bash` on a Windows runner's PATH is WSL's launcher, which
+      # can't run the step scripts; put Git Bash ahead of it.
+      - if: runner.os == 'Windows'
+        shell: powershell
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\Git\bin'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
