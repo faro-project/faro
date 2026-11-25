@@ -8,19 +8,28 @@
 //! ```
 //!
 //! The config (`sources.toml`) lists every source with its category, format,
-//! SPDX licence, an `approved` flag and the BLAKE3 of the exact file to use.
+//! SPDX licence, its review state and the BLAKE3 of the exact file to use.
 //! A source is either a `url`, which `fetch` downloads into `--sources-dir`
 //! (named after the source), or a local `path` relative to the config file.
 //! `build` reads only those files, refuses any whose hash differs from its
-//! pin, and writes the bundle plus a JSON manifest (sources, licences, entry
-//! counts, BLAKE3 of the bundle). The same config and inputs always give
-//! byte-identical outputs.
+//! pin, and writes the bundle plus a JSON manifest (sources, licences,
+//! attribution, entry counts, BLAKE3 of the bundle). The same config and
+//! inputs always give byte-identical outputs.
 //!
-//! Unapproved sources are left out of `fetch` and `build` unless
-//! `--allow-unapproved` is given, which is for local experiments only: a
-//! bundle built that way says so in its manifest and must never ship. An
-//! approved source must carry a licence from the Apache-2.0-compatible
-//! allowlist ([`ALLOWED_MODEL_LICENSES`]), or the config is rejected.
+//! A source is in one of three states:
+//!
+//! * **approved** (`approved = true`): always included. Its licence must be on
+//!   the Apache-2.0-compatible allowlist ([`ALLOWED_MODEL_LICENSES`]), and if
+//!   that licence requires attribution, the source must carry it (and the
+//!   config the licence text, where the licence asks for the text to travel
+//!   with copies), or the config is rejected. The manifest ships next to the
+//!   bundle, so it carries all of this and is enough to comply on its own.
+//! * **pending** (`approved = false`): left out unless `--allow-unapproved`
+//!   is given, which is for local experiments only. A bundle built that way
+//!   says so in its manifest and must never ship.
+//! * **refused** (`refused = "reason"`): the maintainer turned it down. It is
+//!   kept in the config so nobody proposes it again, and it is never fetched
+//!   or compiled, even with `--allow-unapproved`.
 //!
 //! This is a project tool, not part of any shipped client. Parsing is
 //! [`DomainCategorizerBuilder::add_source`], exactly as the library does it.
@@ -31,7 +40,7 @@ use faro_detect::{
     Category, CompileStats, DomainCategorizer, DomainCategorizerBuilder, ALLOWED_MODEL_LICENSES,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,6 +52,27 @@ const MANIFEST_FORMAT: &str = "faro-domains-manifest/1";
 const MAX_SOURCE_BYTES: u64 = 256 << 20;
 const DEFAULT_SOURCES_DIR: &str = "target/domains/sources";
 const MAX_NAME_LEN: usize = 64;
+
+/// Allowlisted licences that ask for nothing to travel with the data.
+const NO_ATTRIBUTION_LICENSES: &[&str] = &["CC0-1.0", "Unlicense"];
+/// Allowlisted licences whose text must accompany copies, together with the
+/// copyright notice. (CC-BY-4.0 needs attribution too, but a link to the
+/// licence is enough.)
+const TEXT_REQUIRED_LICENSES: &[&str] = &[
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+];
+
+/// The opening of every manifest, so it reads on its own.
+const MANIFEST_NOTICE: &str = "The domain bundle described here is compiled from the \
+     third-party lists below and is distributed under their licences. Each source lists its \
+     authors, copyright notices, where it comes from, its licence and what was changed; \
+     `license_texts` holds the full text of every licence that requires it, which applies \
+     together with that source's copyright notices.";
 
 #[derive(Parser)]
 #[command(
@@ -62,7 +92,8 @@ enum Cmd {
         config: PathBuf,
         #[arg(long, default_value = DEFAULT_SOURCES_DIR)]
         sources_dir: PathBuf,
-        /// Also fetch unapproved sources (local experiments only).
+        /// Also fetch pending sources (local experiments only). Refused
+        /// sources are never fetched.
         #[arg(long)]
         allow_unapproved: bool,
     },
@@ -79,8 +110,9 @@ enum Cmd {
         /// `manifest.json`].
         #[arg(long)]
         manifest: Option<PathBuf>,
-        /// Include unapproved sources. For local experiments only: the
-        /// manifest records it and such a bundle must never ship.
+        /// Include pending sources. For local experiments only: the manifest
+        /// records it and such a bundle must never ship. Refused sources are
+        /// never included.
         #[arg(long)]
         allow_unapproved: bool,
     },
@@ -108,20 +140,25 @@ fn main() -> Result<()> {
             manifest,
             allow_unapproved,
         } => {
-            let cfg = Config::load(&config)?;
             let manifest = manifest.unwrap_or_else(|| out.with_extension("manifest.json"));
-            let compiled = compile(&cfg, config_dir(&config), &sources_dir, allow_unapproved)?;
-            for s in &compiled.refused {
-                eprintln!(
-                    "refused unapproved source {} ({}); --allow-unapproved includes it for local \
-                     experiments only",
-                    s.name, s.license
-                );
-                if let Some(terms) = &s.terms {
-                    eprintln!("  terms: {terms}");
+            let (excluded, m) = build(&config, &sources_dir, &out, &manifest, allow_unapproved)?;
+            for e in &excluded {
+                match &e.why {
+                    Why::Refused(reason) => {
+                        eprintln!("left out {} (refused: {reason})", e.name)
+                    }
+                    Why::Pending(terms) => {
+                        eprintln!(
+                            "left out {} ({}, pending approval); --allow-unapproved includes \
+                             it for local experiments only",
+                            e.name, e.license
+                        );
+                        if let Some(terms) = terms {
+                            eprintln!("  terms: {terms}");
+                        }
+                    }
                 }
             }
-            let m = write_outputs(&compiled, &out, &manifest)?;
             eprintln!(
                 "wrote {} ({} domains from {} sources, {} bytes, blake3 {}) and {}",
                 out.display(),
@@ -146,10 +183,6 @@ fn main() -> Result<()> {
     }
 }
 
-fn config_dir(config: &Path) -> &Path {
-    config.parent().unwrap_or(Path::new("."))
-}
-
 fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
@@ -159,6 +192,10 @@ fn blake3_hex(bytes: &[u8]) -> String {
 #[serde(deny_unknown_fields)]
 struct Config {
     version: u32,
+    /// Full licence texts by SPDX id, for licences in
+    /// [`TEXT_REQUIRED_LICENSES`]. Copied into the manifest.
+    #[serde(default)]
+    license_texts: BTreeMap<String, String>,
     #[serde(rename = "source", default)]
     sources: Vec<Source>,
 }
@@ -175,6 +212,8 @@ struct Source {
     license: String,
     /// Signed off for redistribution in shipped bundles.
     approved: bool,
+    /// Turned down by the maintainer, with the reason. Never compiled.
+    refused: Option<String>,
     /// An https URL that `fetch` downloads; pin it to an immutable revision.
     url: Option<String>,
     /// Or a local file, relative to the config file's directory.
@@ -182,8 +221,30 @@ struct Source {
     /// Lowercase hex BLAKE3 of the exact file.
     blake3: String,
     homepage: Option<String>,
-    /// What the upstream terms say (shown when the source is refused).
+    /// What the upstream terms say (shown while the source is pending).
     terms: Option<String>,
+    /// Required for approved sources whose licence asks for attribution.
+    attribution: Option<Attribution>,
+}
+
+/// What a source's licence asks to travel with the data. Copied verbatim
+/// into the manifest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Attribution {
+    /// The creators, as the upstream names them.
+    author: String,
+    /// The upstream's copyright notices, verbatim. Required for licences in
+    /// [`TEXT_REQUIRED_LICENSES`]; may be empty for CC-BY-4.0 when the
+    /// upstream gives none.
+    #[serde(default)]
+    copyright: Vec<String>,
+    /// Where the upstream publishes the list.
+    source_url: String,
+    /// The licence the list is used under.
+    license_url: String,
+    /// What was changed (CC BY 4.0 §3(a)(1)(B)).
+    changes: String,
 }
 
 /// The upstream's syntax. Both are parsed by
@@ -221,9 +282,15 @@ impl Config {
             "unsupported config version {} (expected {CONFIG_VERSION})",
             config.version
         );
+        for (id, text) in &config.license_texts {
+            ensure!(
+                !text.trim().is_empty(),
+                "license_texts: empty text for {id}"
+            );
+        }
         let mut names = BTreeSet::new();
         for s in &config.sources {
-            s.validate()?;
+            s.validate(&config.license_texts)?;
             ensure!(
                 names.insert(s.name.as_str()),
                 "duplicate source name {:?}",
@@ -234,26 +301,24 @@ impl Config {
     }
 }
 
+/// The licence identifiers in an SPDX expression (operators and
+/// parentheses dropped; `WITH` is kept, so it never matches the allowlist).
+fn spdx_ids(expr: &str) -> Vec<&str> {
+    expr.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter(|t| !t.is_empty() && *t != "AND" && *t != "OR")
+        .collect()
+}
+
 /// Whether every identifier in an SPDX expression is on the allowlist.
 /// Deliberately conservative: `OR` is treated like `AND`, and `WITH`
 /// exceptions are not accepted.
 fn license_is_permissive(expr: &str) -> bool {
-    let mut ids = 0;
-    for token in expr
-        .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-        .filter(|t| !t.is_empty())
-    {
-        match token {
-            "AND" | "OR" => {}
-            id if ALLOWED_MODEL_LICENSES.contains(&id) => ids += 1,
-            _ => return false,
-        }
-    }
-    ids > 0
+    let ids = spdx_ids(expr);
+    !ids.is_empty() && ids.iter().all(|id| ALLOWED_MODEL_LICENSES.contains(id))
 }
 
 impl Source {
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, license_texts: &BTreeMap<String, String>) -> Result<()> {
         let name = &self.name;
         ensure!(
             !name.is_empty()
@@ -282,6 +347,16 @@ impl Source {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "source {name}: blake3 must be 64 lowercase hex digits"
         );
+        if let Some(reason) = &self.refused {
+            ensure!(
+                !reason.trim().is_empty(),
+                "source {name}: `refused` needs a reason"
+            );
+            ensure!(
+                !self.approved,
+                "source {name} can't be both approved and refused"
+            );
+        }
         if self.approved {
             ensure!(
                 license_is_permissive(&self.license),
@@ -289,12 +364,58 @@ impl Source {
                  Apache-2.0-compatible allowlist (ARCHITECTURE.md §11)",
                 self.license
             );
+            self.validate_attribution(license_texts)?;
+        }
+        Ok(())
+    }
+
+    /// An approved source must carry everything its licence asks to travel
+    /// with the bundle.
+    fn validate_attribution(&self, license_texts: &BTreeMap<String, String>) -> Result<()> {
+        let name = &self.name;
+        let ids = spdx_ids(&self.license);
+        if ids.iter().all(|id| NO_ATTRIBUTION_LICENSES.contains(id)) {
+            return Ok(());
+        }
+        let Some(a) = &self.attribution else {
+            bail!(
+                "source {name}: its licence {} requires attribution, but it has no \
+                 [source.attribution]",
+                self.license
+            );
+        };
+        for (field, value) in [
+            ("author", &a.author),
+            ("source_url", &a.source_url),
+            ("license_url", &a.license_url),
+            ("changes", &a.changes),
+        ] {
+            ensure!(
+                !value.trim().is_empty(),
+                "source {name}: attribution.{field} is empty"
+            );
+        }
+        ensure!(
+            a.copyright.iter().all(|c| !c.trim().is_empty()),
+            "source {name}: empty attribution.copyright line"
+        );
+        for id in ids.iter().filter(|id| TEXT_REQUIRED_LICENSES.contains(id)) {
+            ensure!(
+                !a.copyright.is_empty(),
+                "source {name}: {id} requires the copyright notice, but attribution.copyright \
+                 is empty"
+            );
+            ensure!(
+                license_texts.contains_key(*id),
+                "source {name}: {id} requires its text to travel with the bundle; add it to \
+                 [license_texts]"
+            );
         }
         Ok(())
     }
 
     fn included(&self, allow_unapproved: bool) -> bool {
-        self.approved || allow_unapproved
+        self.refused.is_none() && (self.approved || allow_unapproved)
     }
 
     fn local_path(&self, config_dir: &Path, sources_dir: &Path) -> PathBuf {
@@ -344,8 +465,12 @@ fn fetch(config: &Config, sources_dir: &Path, allow_unapproved: bool) -> Result<
         .with_context(|| format!("creating {}", sources_dir.display()))?;
     for s in &config.sources {
         let Some(url) = &s.url else { continue };
+        if let Some(reason) = &s.refused {
+            eprintln!("{}: refused ({reason}), not fetched", s.name);
+            continue;
+        }
         if !s.included(allow_unapproved) {
-            eprintln!("{}: unapproved ({}), not fetched", s.name, s.license);
+            eprintln!("{}: pending approval ({}), not fetched", s.name, s.license);
             continue;
         }
         let dest = sources_dir.join(&s.name);
@@ -381,12 +506,20 @@ fn fetch(config: &Config, sources_dir: &Path, allow_unapproved: bool) -> Result<
     Ok(())
 }
 
-/// A source left out because it isn't approved.
+/// A source left out of a build.
 #[derive(Debug)]
-struct Refused {
+struct Excluded {
     name: String,
     license: String,
-    terms: Option<String>,
+    why: Why,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Why {
+    /// Refused by the maintainer, with the reason.
+    Refused(String),
+    /// Not approved yet, with what its terms say.
+    Pending(Option<String>),
 }
 
 /// The result of [`compile`].
@@ -395,7 +528,9 @@ struct Compiled {
     bundle: Vec<u8>,
     domains: usize,
     sources: Vec<SourceReport>,
-    refused: Vec<Refused>,
+    /// The texts of the licences of the included sources.
+    license_texts: BTreeMap<String, String>,
+    excluded: Vec<Excluded>,
 }
 
 /// Build the bundle from the config's sources, in config order.
@@ -407,13 +542,18 @@ fn compile(
 ) -> Result<Compiled> {
     let mut builder = DomainCategorizerBuilder::new();
     let mut sources = Vec::new();
-    let mut refused = Vec::new();
+    let mut excluded = Vec::new();
+    let mut license_texts = BTreeMap::new();
     for s in &config.sources {
         if !s.included(allow_unapproved) {
-            refused.push(Refused {
+            let why = match &s.refused {
+                Some(reason) => Why::Refused(reason.clone()),
+                None => Why::Pending(s.terms.clone()),
+            };
+            excluded.push(Excluded {
                 name: s.name.clone(),
                 license: s.license.clone(),
-                terms: s.terms.clone(),
+                why,
             });
             continue;
         }
@@ -437,6 +577,11 @@ fn compile(
             s.name,
             s.format
         );
+        for id in spdx_ids(&s.license) {
+            if let Some(text) = config.license_texts.get(id) {
+                license_texts.insert(id.to_owned(), text.clone());
+            }
+        }
         sources.push(SourceReport::new(s, stats));
     }
     ensure!(!sources.is_empty(), "no sources to compile");
@@ -453,7 +598,8 @@ fn compile(
         bundle,
         domains: categorizer.len(),
         sources,
-        refused,
+        license_texts,
+        excluded,
     })
 }
 
@@ -462,12 +608,14 @@ fn compile(
 #[derive(Debug, Serialize)]
 struct Manifest {
     format: &'static str,
+    notice: &'static str,
     bundle: BundleInfo,
     /// Distinct domains in the bundle.
     domains: usize,
     /// True only for `--allow-unapproved` builds, which must never ship.
     unapproved_included: bool,
     sources: Vec<SourceReport>,
+    license_texts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -488,6 +636,8 @@ struct SourceReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     homepage: Option<String>,
     blake3: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attribution: Option<Attribution>,
     /// Non-empty, non-comment lines.
     lines: usize,
     /// Domains accepted (some may also be in other sources).
@@ -507,6 +657,7 @@ impl SourceReport {
             origin: s.origin().to_owned(),
             homepage: s.homepage.clone(),
             blake3: s.blake3.clone(),
+            attribution: s.attribution.clone(),
             lines: stats.lines,
             domains: stats.domains,
             skipped: stats.skipped,
@@ -517,6 +668,7 @@ impl SourceReport {
 fn manifest(compiled: &Compiled, bundle_file: &str) -> Manifest {
     Manifest {
         format: MANIFEST_FORMAT,
+        notice: MANIFEST_NOTICE,
         bundle: BundleInfo {
             file: bundle_file.to_owned(),
             bytes: compiled.bundle.len() as u64,
@@ -525,7 +677,23 @@ fn manifest(compiled: &Compiled, bundle_file: &str) -> Manifest {
         domains: compiled.domains,
         unapproved_included: compiled.sources.iter().any(|s| !s.approved),
         sources: compiled.sources.clone(),
+        license_texts: compiled.license_texts.clone(),
     }
+}
+
+/// `build`: load the config, compile, and write the bundle and manifest.
+fn build(
+    config_path: &Path,
+    sources_dir: &Path,
+    out: &Path,
+    manifest_path: &Path,
+    allow_unapproved: bool,
+) -> Result<(Vec<Excluded>, Manifest)> {
+    let config = Config::load(config_path)?;
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
+    let compiled = compile(&config, config_dir, sources_dir, allow_unapproved)?;
+    let m = write_outputs(&compiled, out, manifest_path)?;
+    Ok((compiled.excluded, m))
 }
 
 fn write_outputs(compiled: &Compiled, out: &Path, manifest_path: &Path) -> Result<Manifest> {
@@ -551,6 +719,14 @@ fn write_outputs(compiled: &Compiled, out: &Path, manifest_path: &Path) -> Resul
 mod tests {
     use super::*;
 
+    const FIXTURE_FILES: &[&str] = &[
+        "sources.toml",
+        "adult.hosts",
+        "gambling.txt",
+        "unapproved.txt",
+        "refused.txt",
+    ];
+
     fn fixtures() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/domains-compile/fixtures")
     }
@@ -569,6 +745,12 @@ mod tests {
         )
     }
 
+    fn excluded(c: &Compiled) -> Vec<(&str, &Why)> {
+        c.excluded.iter().map(|e| (&*e.name, &e.why)).collect()
+    }
+
+    /// One source `s`, then `extra` (its remaining keys, possibly followed
+    /// by `[source.attribution]` and `[license_texts]` tables).
     fn source_toml(extra: &str) -> String {
         format!(
             "version = 1\n[[source]]\nname = \"s\"\ncategory = \"adult\"\nformat = \"domains\"\n\
@@ -576,6 +758,11 @@ mod tests {
             "0".repeat(64)
         )
     }
+
+    const ATTRIBUTION: &str = "[source.attribution]\nauthor = \"A\"\n\
+         copyright = [\"Copyright (c) 2026 A\"]\nsource_url = \"https://a.test/list\"\n\
+         license_url = \"https://a.test/LICENSE\"\nchanges = \"Converted.\"";
+    const MIT_TEXT: &str = "[license_texts]\nMIT = \"Permission is hereby granted...\"";
 
     #[test]
     fn compiles_the_fixture_and_loads_it_back() {
@@ -608,10 +795,22 @@ mod tests {
         );
         assert!(d.categorize_url("localhost").is_empty());
 
-        // The unapproved source was refused.
+        // The pending and the refused source were both left out.
         assert!(d.categorize_url("unapproved-fixture.test").is_empty());
-        let refused: Vec<_> = c.refused.iter().map(|r| (&*r.name, &*r.license)).collect();
-        assert_eq!(refused, [("fixture-unapproved", "GPL-3.0-only")]);
+        assert!(d.categorize_url("refused-fixture.test").is_empty());
+        assert_eq!(
+            excluded(&c),
+            [
+                (
+                    "fixture-unapproved",
+                    &Why::Pending(Some("Copyleft; not Apache-2.0 compatible.".into()))
+                ),
+                (
+                    "fixture-refused",
+                    &Why::Refused("Turned down in review.".into())
+                ),
+            ]
+        );
 
         let m = manifest(&c, "domains.bin");
         assert_eq!(m.format, MANIFEST_FORMAT);
@@ -628,6 +827,8 @@ mod tests {
         );
         assert_eq!(adult.license, "MIT");
         assert_eq!(adult.origin, "adult.hosts");
+        // Only the texts of included licences travel.
+        assert_eq!(m.license_texts.keys().collect::<Vec<_>>(), ["MIT"]);
     }
 
     #[test]
@@ -641,28 +842,53 @@ mod tests {
     }
 
     #[test]
-    fn unapproved_sources_need_the_flag() {
+    fn pending_sources_need_the_flag() {
         let c = compile_fixture(true).unwrap();
         let d = DomainCategorizer::from_bytes(&c.bundle).unwrap();
         assert_eq!(
             d.categorize_url("unapproved-fixture.test"),
             vec![Category::Adult]
         );
-        assert!(c.refused.is_empty());
         let m = manifest(&c, "domains.bin");
         assert!(m.unapproved_included);
         assert!(!m.sources[2].approved);
+        // Its licence has no text in the config, so none is copied.
+        assert!(!m.license_texts.contains_key("GPL-3.0-only"));
+    }
+
+    #[test]
+    fn refused_sources_are_rejected_even_with_the_flag() {
+        let c = compile_fixture(true).unwrap();
+        let d = DomainCategorizer::from_bytes(&c.bundle).unwrap();
+        assert!(d.categorize_url("refused-fixture.test").is_empty());
+        assert_eq!(
+            excluded(&c),
+            [(
+                "fixture-refused",
+                &Why::Refused("Turned down in review.".into())
+            )]
+        );
+        assert!(manifest(&c, "domains.bin")
+            .sources
+            .iter()
+            .all(|s| s.name != "fixture-refused"));
+
+        // Nor can a refused source be approved.
+        let both = source_toml(&format!(
+            "path = \"x\"\nlicense = \"MIT\"\napproved = true\nrefused = \"No.\"\n\
+             {ATTRIBUTION}\n{MIT_TEXT}"
+        ));
+        let err = Config::parse(&both).unwrap_err();
+        assert!(format!("{err:#}").contains("both approved and refused"));
+        let no_reason =
+            source_toml("path = \"x\"\nlicense = \"MIT\"\napproved = false\nrefused = \" \"");
+        assert!(Config::parse(&no_reason).is_err());
     }
 
     #[test]
     fn a_changed_input_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        for f in [
-            "sources.toml",
-            "adult.hosts",
-            "gambling.txt",
-            "unapproved.txt",
-        ] {
+        for f in FIXTURE_FILES {
             fs::copy(fixtures().join(f), dir.path().join(f)).unwrap();
         }
         let config = Config::load(&dir.path().join("sources.toml")).unwrap();
@@ -681,7 +907,7 @@ mod tests {
         let body = b"fetched-fixture.test\n";
         let text = format!(
             "version = 1\n[[source]]\nname = \"remote\"\ncategory = \"gambling\"\n\
-             format = \"domains\"\nlicense = \"MIT\"\napproved = true\n\
+             format = \"domains\"\nlicense = \"CC0-1.0\"\napproved = true\n\
              url = \"https://example.invalid/list.txt\"\nblake3 = \"{}\"\n",
             blake3_hex(body)
         );
@@ -702,26 +928,121 @@ mod tests {
     #[test]
     fn writes_bundle_and_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let c = compile_fixture(false).unwrap();
         let out = dir.path().join("out/domains.bin");
         let manifest_path = out.with_extension("manifest.json");
-        write_outputs(&c, &out, &manifest_path).unwrap();
+        let (excluded, _) = build(
+            &fixtures().join("sources.toml"),
+            &fixtures().join("no-such-dir"),
+            &out,
+            &manifest_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(excluded.len(), 2);
         let bundle = fs::read(&out).unwrap();
         assert!(DomainCategorizer::from_bytes(&bundle).is_ok());
         let m: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         assert_eq!(m["bundle"]["file"], "domains.bin");
         assert_eq!(m["bundle"]["blake3"], blake3_hex(&bundle));
-        assert_eq!(m["sources"][0]["category"], "adult");
-        assert_eq!(m["sources"][0]["format"], "hosts");
-        assert_eq!(m["sources"][1]["domains"], 2);
+        assert!(m["notice"].as_str().unwrap().contains("license_texts"));
+        let adult = &m["sources"][0];
+        assert_eq!(adult["category"], "adult");
+        assert_eq!(adult["format"], "hosts");
+        assert_eq!(
+            adult["attribution"]["copyright"][0],
+            "Copyright (c) 2026 Fixture Author"
+        );
+        assert!(m["license_texts"]["MIT"]
+            .as_str()
+            .unwrap()
+            .starts_with("Permission is hereby granted"));
+        let gambling = &m["sources"][1];
+        assert_eq!(gambling["license"], "CC-BY-4.0");
+        assert_eq!(gambling["domains"], 2);
+        assert_eq!(gambling["attribution"]["author"], "Fixture Collective");
+        assert!(gambling["attribution"]["changes"]
+            .as_str()
+            .unwrap()
+            .contains("Converted"));
+    }
+
+    #[test]
+    fn build_fails_without_required_attribution() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in FIXTURE_FILES {
+            fs::copy(fixtures().join(f), dir.path().join(f)).unwrap();
+        }
+        let config = dir.path().join("sources.toml");
+        let out = dir.path().join("domains.bin");
+        let run = || {
+            build(
+                &config,
+                dir.path(),
+                &out,
+                &out.with_extension("json"),
+                false,
+            )
+        };
+        run().unwrap();
+        fs::remove_file(&out).unwrap();
+
+        // Drop the CC-BY-4.0 source's attribution table.
+        let text = fs::read_to_string(&config).unwrap();
+        let start = text
+            .find("[source.attribution]\nauthor = \"Fixture Collective\"")
+            .unwrap();
+        let end = start + text[start..].find("\n\n").unwrap();
+        fs::write(&config, format!("{}{}", &text[..start], &text[end..])).unwrap();
+        let err = run().unwrap_err();
+        assert!(
+            format!("{err:#}")
+                .contains("fixture-gambling: its licence CC-BY-4.0 requires attribution"),
+            "{err:#}"
+        );
+        assert!(!out.exists(), "nothing is written");
+    }
+
+    #[test]
+    fn attribution_rules() {
+        let parse = |licence: &str, approved: bool, tables: &str| {
+            Config::parse(&source_toml(&format!(
+                "path = \"x\"\nlicense = \"{licence}\"\napproved = {approved}\n{tables}"
+            )))
+        };
+        let full = format!("{ATTRIBUTION}\n{MIT_TEXT}");
+        assert!(parse("MIT", true, &full).is_ok());
+        assert!(parse("MIT", true, "").is_err(), "no attribution");
+        assert!(parse("MIT", true, ATTRIBUTION).is_err(), "no MIT text");
+        assert!(parse("MIT", true, MIT_TEXT).is_err(), "no attribution");
+        let no_copyright = full.replace("copyright = [\"Copyright (c) 2026 A\"]\n", "");
+        assert!(
+            parse("MIT", true, &no_copyright).is_err(),
+            "MIT needs copyright"
+        );
+        let no_changes = full.replace("changes = \"Converted.\"", "changes = \"\"");
+        assert!(parse("MIT", true, &no_changes).is_err());
+        // CC BY 4.0: attribution, but no text and no copyright line needed.
+        assert!(parse("CC-BY-4.0", true, "").is_err());
+        assert!(parse("CC-BY-4.0", true, &no_copyright.replace(MIT_TEXT, "")).is_ok());
+        // Combined licences need everything each one needs.
+        assert!(parse("MIT AND CC-BY-4.0", true, &full).is_ok());
+        assert!(parse("MIT AND CC-BY-4.0", true, ATTRIBUTION).is_err());
+        // Public-domain dedications need nothing.
+        assert!(parse("CC0-1.0", true, "").is_ok());
+        // Pending sources aren't checked until they're approved.
+        assert!(parse("MIT", false, "").is_ok());
+        // A missing author is a parse error.
+        let no_author = full.replace("author = \"A\"\n", "");
+        assert!(parse("MIT", true, &no_author).is_err());
     }
 
     #[test]
     fn approved_sources_need_a_permissive_licence() {
+        let full = format!("{ATTRIBUTION}\n{MIT_TEXT}");
         let parse = |licence: &str, approved: bool| {
             Config::parse(&source_toml(&format!(
-                "path = \"x\"\nlicense = \"{licence}\"\napproved = {approved}"
+                "path = \"x\"\nlicense = \"{licence}\"\napproved = {approved}\n{full}"
             )))
         };
         assert!(parse("MIT", true).is_ok());
@@ -730,26 +1051,27 @@ mod tests {
         assert!(parse("GPL-3.0-only", true).is_err());
         assert!(parse("CC-BY-SA-4.0", true).is_err());
         assert!(parse("MIT OR GPL-3.0-only", true).is_err());
+        assert!(parse("Apache-2.0 WITH LLVM-exception", true).is_err());
         assert!(parse("NOASSERTION", true).is_err());
         assert!(parse("", true).is_err());
-        // Unapproved entries may carry any licence; they're refused at build time.
+        // Unapproved entries may carry any licence; they're left out at build time.
         assert!(parse("GPL-3.0-only", false).is_ok());
     }
 
     #[test]
     fn config_is_validated() {
-        let ok = "path = \"x\"\nlicense = \"MIT\"\napproved = true";
+        let ok = "path = \"x\"\nlicense = \"CC0-1.0\"\napproved = true";
         assert!(Config::parse(&source_toml(ok)).is_ok());
         for bad in [
             // both or neither of url and path
-            "path = \"x\"\nurl = \"https://a.test/x\"\nlicense = \"MIT\"\napproved = true",
-            "license = \"MIT\"\napproved = true",
+            "path = \"x\"\nurl = \"https://a.test/x\"\nlicense = \"CC0-1.0\"\napproved = true",
+            "license = \"CC0-1.0\"\napproved = true",
             // not https
-            "url = \"http://a.test/x\"\nlicense = \"MIT\"\napproved = true",
+            "url = \"http://a.test/x\"\nlicense = \"CC0-1.0\"\napproved = true",
             // unknown field
-            "path = \"x\"\nlicense = \"MIT\"\napproved = true\nlicence = \"MIT\"",
+            "path = \"x\"\nlicense = \"CC0-1.0\"\napproved = true\nlicence = \"MIT\"",
             // missing approved flag
-            "path = \"x\"\nlicense = \"MIT\"",
+            "path = \"x\"\nlicense = \"CC0-1.0\"",
         ] {
             assert!(Config::parse(&source_toml(bad)).is_err(), "{bad}");
         }
@@ -761,6 +1083,8 @@ mod tests {
         assert!(Config::parse(&bad_category).is_err());
         let bad_version = source_toml(ok).replace("version = 1", "version = 2");
         assert!(Config::parse(&bad_version).is_err());
+        let empty_text = source_toml(&format!("{ok}\n[license_texts]\nMIT = \" \""));
+        assert!(Config::parse(&empty_text).is_err());
         let twice = format!(
             "{}{}",
             source_toml(ok),
@@ -770,9 +1094,10 @@ mod tests {
     }
 
     /// The checked-in config: valid, every approved source pinned to a
-    /// StevenBlack/hosts commit, OISD and UT1 present but not approved.
+    /// StevenBlack/hosts commit and attributed, and the maintainer's
+    /// refusals recorded.
     #[test]
-    fn checked_in_sources_are_pinned_and_licensed() {
+    fn checked_in_sources_are_pinned_licensed_and_attributed() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("domains/sources.toml");
         let config = Config::load(&path).unwrap();
         let approved: Vec<&Source> = config.sources.iter().filter(|s| s.approved).collect();
@@ -791,16 +1116,28 @@ mod tests {
                 "{} must be pinned to a commit",
                 s.name
             );
-            assert_eq!(s.license, "MIT", "{}", s.name);
+            assert!(
+                ["MIT", "CC-BY-4.0"].contains(&s.license.as_str()),
+                "{}",
+                s.name
+            );
+            assert!(s.attribution.is_some(), "{}", s.name);
         }
-        for upstream in ["oisd-", "ut1-"] {
-            let listed: Vec<&Source> = config
+        assert!(approved.iter().any(|s| s.name == "stevenblack-porn-tiuxo"));
+        for name in [
+            "stevenblack-porn-brijrajparmar27",
+            "oisd-nsfw",
+            "ut1-gambling",
+        ] {
+            let s = config.sources.iter().find(|s| s.name == name).unwrap();
+            assert!(s.refused.is_some() && !s.included(true), "{name}");
+        }
+        assert!(
+            config
                 .sources
                 .iter()
-                .filter(|s| s.name.starts_with(upstream))
-                .collect();
-            assert!(!listed.is_empty(), "{upstream}");
-            assert!(listed.iter().all(|s| !s.approved && s.terms.is_some()));
-        }
+                .all(|s| s.approved || s.refused.is_some()),
+            "no source is left pending"
+        );
     }
 }
