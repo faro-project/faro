@@ -49,10 +49,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # No self-hosted x86_64 Linux runner yet, so amd64 stays on
+          # GitHub's runners; arm64 builds natively on the Raspberry Pi.
           - platform: linux/amd64
             runner: ubuntu-24.04
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: [self-hosted, Linux, ARM64]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     permissions:

@@ -5,13 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# Each self-hosted runner takes one job at a time, so a new push to a pull
+# request cancels its older run instead of queueing behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
   fmt:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -24,8 +30,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2022, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: macos
+            runner: [self-hosted, macOS, ARM64]
+          - os: windows
+            runner: [self-hosted, Windows, X64]
+          - os: linux
+            runner: [self-hosted, Linux, ARM64]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +58,7 @@ jobs:
   # faro-server built with that bundle embedded (FARO_REQUIRE_WEB=1 fails
   # the build if a page is missing) and its web-serving tests.
   web:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ARM64]
     defaults:
       run:
         working-directory: web
@@ -68,19 +80,24 @@ jobs:
         env:
           FARO_REQUIRE_WEB: "1"
 
+  # cargo-deny-action is a Docker image with an x86_64 binary, so it can't
+  # run on the ARM64 runner; install the native cargo-deny instead. Same
+  # check as the action ran (it passes --all-features by default).
   deny:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
         with:
-          command: check licenses bans sources advisories
+          tool: cargo-deny
+      - run: cargo deny --all-features check licenses bans sources advisories
 
   # The macOS installer: build the unsigned development package (a release
   # package needs the project's Developer ID) and check its payload, scripts
   # and installer options without installing it.
   macos-pkg:
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
