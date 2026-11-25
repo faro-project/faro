@@ -20,10 +20,21 @@
 # MACOSX_DEPLOYMENT_TARGET is set from the minimum macOS version in
 # Distribution.xml.in, so every slice runs on that version.
 #
+# faro-service is built with the image classifier (feature `onnx`) and
+# links ONNX Runtime statically, one static library per architecture,
+# fetched and checked by fetch-onnxruntime.sh. The model is built from
+# Yahoo's original files by crates/faro-detect/models/opennsfw/build.sh,
+# which refuses anything that doesn't match its pinned digests; it is
+# never taken from the repository. Both need network access the first
+# time, and CPython 3.9 (/usr/bin/python3 from the Command Line Tools).
+#
 # What it installs (faro_platform_macos::pkg_layout):
 #   /Library/Faro/bin/faro-service              the privileged service
 #   /Library/Faro/bin/faro-uninstall            removes Faro, telling allies first
 #   /Library/Faro/Faro Agent.app                the session agent (org.faro.agent)
+#   /Library/Faro/models/opennsfw/              the image model and its manifest
+#   /Library/Faro/notices/                      licences and attribution of the model
+#                                               and of ONNX Runtime
 #   /Library/Faro/service.toml.default          copied to the state dir if absent
 #   /Library/Faro/update-root.json              the project's update root of trust
 #                                               (FARO_UPDATE_ROOT; optional for --dev)
@@ -75,13 +86,14 @@ bundle_version="${version%%[-+]*}"
     exit 1
 }
 
+# Every package classifies images on ONNX Runtime.
+features=(--features faro-service/onnx)
 if (( dev )); then
     name="Faro-$version-dev"
-    features=(--features faro-service/dev)
+    features+=(--features faro-service/dev)
     : "${FARO_SIGN_IDENTITY:=-}"
 else
     name="Faro-$version"
-    features=()
     # Without the root of trust the service never updates itself, so a
     # release package must ship it.
     for v in FARO_SIGN_IDENTITY FARO_INSTALLER_IDENTITY FARO_TEAM_ID FARO_UPDATE_ROOT; do
@@ -116,10 +128,30 @@ root="$work/root"
 rm -rf "$work"
 mkdir -p "$root" "$out"
 
+echo "==> the image model"
+models="$work/models"
+"$repo/crates/faro-detect/models/opennsfw/build.sh" "$models"
+
+# ONNX Runtime, checked here and linked statically. ort-sys's own download,
+# a system copy found by pkg-config and dynamic linking are all ruled out,
+# and its pins must be the ones ort-sys was written for.
+ort="$work/onnxruntime"
+ort_sys="$(cargo metadata --manifest-path "$repo/Cargo.toml" --format-version 1 --locked \
+    | /usr/bin/python3 -I -c 'import json, sys
+m = json.load(sys.stdin)
+print(next(p["manifest_path"] for p in m["packages"] if p["name"] == "ort-sys"))')"
+ORT_SYS_DIST="$(dirname "$ort_sys")/dist.txt" "$here/fetch-onnxruntime.sh" "$ort" "${triples[@]}"
+unset ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE ORT_CXX_STDLIB CXXSTDLIB ORT_DYLIB_PATH
+export LIBONNXRUNTIME_NO_PKG_CONFIG=1 ORT_SKIP_DOWNLOAD=1
+
 echo "==> building faro-service and faro-agent ($version; ${triples[*]}; macOS $min_os+)"
-cargo build --manifest-path "$repo/Cargo.toml" --release --locked \
-    -p faro-service -p faro-agent "${features[@]+"${features[@]}"}" \
-    "${triples[@]/#/--target=}"
+# One cargo run per architecture: ORT_LIB_LOCATION names that
+# architecture's library.
+for t in "${triples[@]}"; do
+    ORT_LIB_LOCATION="$ort/$t/onnxruntime" \
+        cargo build --manifest-path "$repo/Cargo.toml" --release --locked \
+        -p faro-service -p faro-agent "${features[@]}" --target="$t"
+done
 # One binary per program, with a slice for each architecture.
 bin="$work/bin"
 mkdir -p "$bin"
@@ -138,9 +170,26 @@ cp -R "$here/payload/." "$root/"
 install -d -m 755 "$root/Library/Faro/bin"
 install -m 755 "$bin/faro-service" "$root/Library/Faro/bin/faro-service"
 install -m 755 "$here/faro-uninstall" "$root/Library/Faro/bin/faro-uninstall"
+# The image model, where pkg_layout::MODEL_MANIFEST says, and the notices
+# its licence and ONNX Runtime's ask to travel with the binaries.
+install -d -m 755 "$root/Library/Faro/models/opennsfw" "$root/Library/Faro/notices"
+install -m 644 "$models/manifest.json" "$models/opennsfw-int8.onnx" "$root/Library/Faro/models/opennsfw/"
+install -m 644 "$models/NOTICE.txt" "$root/Library/Faro/notices/opennsfw.txt"
+install -m 644 "$ort/notices/onnxruntime-LICENSE.txt" "$ort/notices/onnxruntime-ThirdPartyNotices.txt" \
+    "$root/Library/Faro/notices/"
 if [[ -n "${FARO_UPDATE_ROOT:-}" ]]; then
     [[ -f "$FARO_UPDATE_ROOT" ]] || { echo "FARO_UPDATE_ROOT: no such file $FARO_UPDATE_ROOT" >&2; exit 1; }
     install -m 644 "$FARO_UPDATE_ROOT" "$root/Library/Faro/update-root.json"
+fi
+
+# The service loads the staged model as it will once installed: its
+# licence, attribution and digest checks, then ONNX Runtime on a few
+# synthetic frames. Only this Mac's architecture can run here; check-pkg.sh
+# on an Intel Mac runs the other.
+host_arch="$(uname -m)"
+if lipo -archs "$bin/faro-service" | tr ' ' '\n' | grep -qx "$host_arch"; then
+    echo "==> checking the model with the $host_arch faro-service"
+    "$bin/faro-service" model-check --manifest "$root/Library/Faro/models/opennsfw/manifest.json" --runs 3
 fi
 
 app="$root/Library/Faro/Faro Agent.app"

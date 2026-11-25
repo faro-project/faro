@@ -176,6 +176,26 @@ On macOS the agent binary shows a menu-bar icon and the service's notices, which
 
 Browser tab URLs (`faro_platform_macos::browser`) need Accessibility and a real browser, so their live path has no automated test either. `cargo run -p faro-platform-macos --example browser_probe` prints what the agent would send every 2 seconds: the frontmost app and the reduced URL (`scheme://host/`). Run it from a terminal that has Accessibility and switch between browsers. `--pid PID --as safari|chrome|…` reads one process instead, which works for any app with a web view.
 
+## The image model
+
+The beta's image classifier is **OpenNSFW** (Yahoo, BSD-2-Clause; ARCHITECTURE.md §3.5, [research/model-licenses.md](research/model-licenses.md)). The project converts it from Yahoo's own Caffe files. Nothing in the repository holds weights: `crates/faro-detect/models/opennsfw/build.sh` makes the model every time a package is built.
+
+```sh
+crates/faro-detect/models/opennsfw/build.sh target/models            # the models, manifests and notice
+crates/faro-detect/models/opennsfw/build.sh --parity target/models   # and check them against the original
+```
+
+- **Source.** `deploy.prototxt`, `resnet_50_1by2_nsfw.caffemodel` and `LICENSE.md` from [yahoo/open_nsfw](https://github.com/yahoo/open_nsfw) at commit `a4e1393` (the archived repository's last). `build.sh` pins each file's SHA-256 and BLAKE3 and refuses any other bytes.
+- **Tools.** CPython 3.9 (the Command Line Tools' `/usr/bin/python3`, or `FARO_PYTHON`) and the versions in `requirements.txt`, installed with `pip --require-hashes` into a fresh virtual environment.
+- **Conversion** (`convert.py`). It decodes Yahoo's two files itself (no Caffe, no third-party port), folds each BatchNorm and Scale layer into the convolution before it, and writes `opennsfw-fp32.onnx`. Max pooling uses `ceil_mode`, as Caffe does. The weights are not retrained or changed in any other way.
+- **Quantization.** ONNX Runtime's static quantizer makes `opennsfw-int8.onnx`: QDQ format, int8 weights per channel, uint8 activations, calibrated on synthetic images the script draws (solid colours, gradients, UI-like windows). Stages 2 and 3 run in int8. The stem (the first convolution and stages 0 and 1) and the classifier head stay in float: quantizing them moves p(nsfw) by up to 0.25 on synthetic images, against about 0.06 this way, at the same speed. This is the model the package ships.
+- **Pinned outputs.** `manifest.json` (int8) and `manifest-fp32.json` pin each model's BLAKE3, and `build.sh` refuses a conversion that doesn't match. The same tools give the same bytes on the same kind of Mac. The quantizer runs the fp32 model to calibrate, so another CPU or tool version can give different bytes: `build.sh` then stops and prints the new hash. Check that run with `--parity` before changing a pin.
+- **Parity** (`parity.py`, with `--parity`). OpenCV's Caffe importer runs Yahoo's original files as the reference, and both models get the same tensors for 14 synthetic, non-explicit images (solid colours, gradients, UI windows with text). It fails if p(nsfw) differs by more than 1e-4 (fp32) or 0.05 (int8). `check-pkg.sh` repeats the three solid-colour cases with the packaged service, on each architecture it can run.
+- **Licence and attribution.** The manifests carry `license_text` (Yahoo's `LICENSE.md`, word for word; `notice.py` checks) and `attribution` (author, copyright line, source and licence URLs, and the changes above). `load_model` refuses a manifest without what its licence asks for, with the same rules as the domain bundle compiler (`faro_detect::attribution`). The package installs `notices/opennsfw.txt` from them.
+- **Labels.** `sfw` and `nsfw`. The default policy reads `nsfw` as explicit; `sfw` is ignored. There is no `suggestive` output. Faro resizes the whole frame to 224×224; Yahoo's script resizes to 256 and crops the centre. Whether that matters on screenshots is for the maintainer's eval on the real set ([Model benchmark](#model-benchmark)).
+- **Caches.** Downloads and models are cached by digest in `~/Library/Caches/faro-models` (`FARO_MODEL_CACHE`) and checked again on every use, so a repeat build only reinstalls the tools.
+- **In the service.** `faro-service` built with `--features onnx` loads `/Library/Faro/models/opennsfw/manifest.json` (`pkg_layout::MODEL_MANIFEST`) with `load_model`'s checks and runs it on ONNX Runtime's CPU provider, one thread. Without a model it rates frames from context signals only. When the packaged service's model is missing, altered or can't be loaded, it does the same and reports an urgent `integrity_failure` (`image model (missing)`, `(changed)` or `(cannot load)`) once it runs. `faro-service model-check [--manifest PATH]` loads a model the same way and prints its scores for a few synthetic frames and its latency.
+
 ## Model benchmark
 
 `faro_detect::bench` and the `model-bench` example measure a candidate image classifier the way the service uses it, and gate regressions against a baseline (ARCHITECTURE.md §3.5). Build it with `--release`: an unoptimized build says so in its output, and its latency means nothing.
@@ -186,7 +206,17 @@ $B --manifest m.json --set /Volumes/FaroEval/set --json results.json      # run
 $B --manifest m.json --model candidate.onnx --set … --json results.json   # weights elsewhere
 $B --manifest m.json --set … --baseline models/eval-baseline.json         # run and gate
 $B --results results.json --baseline models/eval-baseline.json            # gate only
+$B --write-synthetic-set /tmp/synthetic                                   # a set with no real image
 $B --help                                                                 # every option
+```
+
+**Latency without the real set.** `--write-synthetic-set DIR` writes the 15 synthetic images the harness tests use (solid colours and UI-like windows, labelled by colour). Benchmark a model on it for its latency; its precision and recall mean nothing. For OpenNSFW:
+
+```sh
+crates/faro-detect/models/opennsfw/build.sh target/models
+$B --write-synthetic-set target/synthetic
+$B --manifest target/models/manifest.json --set target/synthetic        # int8, as shipped
+$B --manifest target/models/manifest-fp32.json --set target/synthetic   # fp32
 ```
 
 The manifest is the same `ModelInfo` JSON the update channel ships, and the same checks apply: the licence must be on `ALLOWED_MODEL_LICENSES` and `blake3` must match the weights (`b3sum candidate.onnx`). `--policy policy.json` benchmarks other thresholds (a partial `PolicyConfig`; the default is the built-in policy).
@@ -243,7 +273,8 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 
 - **The package is universal.** It runs on Apple Silicon and Intel Macs. `build-pkg.sh` builds `faro-service` and `faro-agent` once for `aarch64-apple-darwin` and once for `x86_64-apple-darwin`, then joins each pair with `lipo -create`. Apple's clang compiles the C code (the bundled SQLite, `ring`, `blake3`) for both, so no other toolchain is needed. `--arch arm64` or `--arch x86_64` builds one architecture only, which is faster; check such a package with `check-pkg.sh --arch arm64 …`.
 - **Every slice targets macOS 13.** `build-pkg.sh` sets `MACOSX_DEPLOYMENT_TARGET` from the `os-version min` in `Distribution.xml.in`. `check-pkg.sh` fails if any Mach-O file in the payload lacks an architecture, if `hostArchitectures` is not `arm64,x86_64`, or if a slice's minimum macOS is not 13.0.
-- **On Intel.** The `macos-pkg-intel` job runs on the Intel Mac runner after `macos-pkg`. It checks the same universal package, expands it without installing it, and runs the x86_64 `faro-service` and `faro-agent` with `--version`. On an Apple Silicon Mac with Rosetta 2, `cargo test --target x86_64-apple-darwin` runs the x86_64 tests locally.
+- **On Intel.** The `macos-pkg-intel` job runs on the Intel Mac runner after `macos-pkg`. It checks the same universal package (so the x86_64 `faro-service` classifies with the packaged model, see below), expands it without installing it, and runs the x86_64 `faro-service` and `faro-agent` with `--version`. On an Apple Silicon Mac with Rosetta 2, `cargo test --target x86_64-apple-darwin` runs the x86_64 tests locally.
+- **The image model and ONNX Runtime.** Every package's `faro-service` is built with `--features onnx`. `fetch-onnxruntime.sh` downloads ONNX Runtime 1.22.0's static library for each architecture (the builds `ort-sys` 2.0.0-rc.10 pins in its `dist.txt`; `build-pkg.sh` checks the pins are the same), checks its SHA-256, and `build-pkg.sh` links it with `ORT_LIB_LOCATION`, one cargo run per architecture, with pkg-config and dynamic linking turned off. So `faro-service` carries ONNX Runtime and there is no dylib to join. The static builds carry no licence files, so ONNX Runtime's MIT licence and `ThirdPartyNotices.txt` come from the same release's Python wheel on PyPI, also pinned by SHA-256. The model comes from `crates/faro-detect/models/opennsfw/build.sh` (see [The image model](#the-image-model)). The package installs it in `/Library/Faro/models/opennsfw` and the notices in `/Library/Faro/notices` (`opennsfw.txt`, `onnxruntime-LICENSE.txt`, `onnxruntime-ThirdPartyNotices.txt`). Both scripts need network access on a first build, and the model needs `/usr/bin/python3`. Downloads are cached by digest (`~/Library/Caches/faro-models`, `~/Library/Caches/faro-onnxruntime`). `check-pkg.sh` fails if any of these files is missing, if a notice lacks its copyright line or licence text, if `faro-service` loads ONNX Runtime from a dylib, or if this Mac's slice of `faro-service` can't load the model or scores solid black, white or grey more than 0.05 from Yahoo's original.
 
 - **A `--dev` package is not safe to use on anyone.** Its `faro-service` is built with the `dev` feature, so it accepts any program running as a logged-in user as the agent. Install it only on a test machine.
 - **A release package** needs `FARO_SIGN_IDENTITY` (Developer ID Application), `FARO_INSTALLER_IDENTITY` (Developer ID Installer) and `FARO_TEAM_ID`. The package's default `service.toml` sets `ipc.agent_requirement` from the team ID. `FARO_NOTARY_PROFILE` (a `notarytool` keychain profile) also notarizes and staples it.

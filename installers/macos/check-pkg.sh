@@ -6,6 +6,13 @@
 # universal (arm64 + x86_64) and built for the minimum macOS, unless
 # `--arch` names the one architecture of a local single-architecture build.
 #
+# The image model must be there with its manifest, and the notices with
+# the model's BSD-2-Clause text and attribution and ONNX Runtime's licence
+# and third-party notices. faro-service must link ONNX Runtime statically,
+# and the slice for this Mac's architecture must load the model (licence,
+# attribution and digest checks) and score three solid colours within
+# MODEL_TOLERANCE of Yahoo's original Caffe model.
+#
 #   installers/macos/check-pkg.sh target/pkg/Faro-<version>[-dev].pkg
 #   installers/macos/check-pkg.sh --arch arm64 target/pkg/Faro-<version>-dev.pkg
 set -euo pipefail
@@ -24,6 +31,12 @@ case "$arch" in
 esac
 # The oldest macOS Faro supports (ARCHITECTURE.md §3.3).
 min_os=13.0
+# p(nsfw) of Yahoo's Caffe model for solid black, white and grey (128), as
+# crates/faro-detect/models/opennsfw/parity.py computes them with OpenCV.
+# A solid colour is the same classifier input whatever the resize, so the
+# packaged int8 model must agree within its parity tolerance.
+model_reference=("solid-black 0.066799" "solid-white 0.014106" "solid-grey 0.197584")
+MODEL_TOLERANCE=0.05
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -74,6 +87,22 @@ expect "Library/Faro/Faro Agent.app/Contents/Info.plist" 100644
 expect "Library/Faro/service.toml.default" 100644
 expect "Library/LaunchDaemons/org.faro.service.plist" 100644
 expect "Library/LaunchAgents/org.faro.agent.plist" 100644
+model_dir="Library/Faro/models/opennsfw"
+expect "$model_dir/manifest.json" 100644
+expect "$model_dir/opennsfw-int8.onnx" 100644
+expect "Library/Faro/notices/opennsfw.txt" 100644
+expect "Library/Faro/notices/onnxruntime-LICENSE.txt" 100644
+expect "Library/Faro/notices/onnxruntime-ThirdPartyNotices.txt" 100644
+# What the licences ask to travel with the binaries.
+notices="$work/payload/Library/Faro/notices"
+has() { grep -qF -- "$2" "$notices/$1" || fail "notices/$1 lacks \"$2\""; }
+has opennsfw.txt "Copyright 2016, Yahoo Inc."
+has opennsfw.txt "BSD-2-Clause"
+has opennsfw.txt "Redistributions in binary form must reproduce the above copyright notice"
+has opennsfw.txt "https://github.com/yahoo/open_nsfw/"
+has onnxruntime-LICENSE.txt "Copyright (c) Microsoft Corporation"
+has onnxruntime-LICENSE.txt "Permission is hereby granted, free of charge"
+has onnxruntime-ThirdPartyNotices.txt "THIRD PARTY SOFTWARE NOTICES AND INFORMATION"
 # The update root of trust: required in a release package (without it the
 # service never updates), optional in a development one.
 update_root="$work/payload/Library/Faro/update-root.json"
@@ -109,6 +138,28 @@ while IFS= read -r -d '' f; do
     done
 done < <(find "$work/payload" -type f -print0)
 (( machos >= 2 )) || fail "the payload has $machos Mach-O files (want faro-service and faro-agent)"
+
+# ONNX Runtime is linked into faro-service, never loaded from a dylib.
+service="$work/payload/Library/Faro/bin/faro-service"
+if otool -L "$service" | grep -qi onnxruntime; then
+    fail "faro-service loads ONNX Runtime dynamically: $(otool -L "$service" | grep -i onnxruntime)"
+fi
+# The model, through the packaged service, on this Mac's architecture.
+host_arch="$(uname -m)"
+if [[ ",$want_archs," == *",$host_arch,"* ]]; then
+    check="$("$service" model-check --manifest "$work/payload/$model_dir/manifest.json" --runs 5)" \
+        || fail "faro-service ($host_arch) cannot use the packaged model"
+    echo "$check"
+    for ref in "${model_reference[@]}"; do
+        read -r frame want <<< "$ref"
+        got="$(echo "$check" | awk -v f="$frame" '$1 == f { for (i = 2; i < NF; i++) if ($i == "nsfw") print $(i + 1) }')"
+        [[ -n "$got" ]] || fail "model-check printed no nsfw score for $frame"
+        awk -v a="$got" -v b="$want" -v t="$MODEL_TOLERANCE" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }' \
+            || fail "$frame: the packaged model gives p(nsfw) $got, the original $want (tolerance $MODEL_TOLERANCE)"
+    done
+else
+    echo "check-pkg: no $host_arch slice to run; the model check is skipped"
+fi
 
 info="$work/payload/Library/Faro/Faro Agent.app/Contents/Info.plist"
 [[ "$(plutil -extract CFBundleIdentifier raw "$info")" == org.faro.agent ]] || fail "agent bundle id"
