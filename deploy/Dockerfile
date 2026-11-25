@@ -22,6 +22,8 @@
 #
 # Runtime layout:
 #   /usr/local/bin/faro-server   the binary (ENTRYPOINT; default command `serve`)
+#   /usr/share/faro/update-root.json
+#                                the project's update root of trust, once it exists
 #   /data                        data directory (identity key, SQLite DB, blobs,
 #                                ACME certificates): mount a volume here
 #   port 8080                    the listen port inside the container, plain
@@ -64,6 +66,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
  && install -m 0755 target/release/faro-server /usr/local/bin/faro-server \
  && /usr/local/bin/faro-server version
 
+# The project's update root of trust (docs/KEY-CEREMONY.md, "Shipping root
+# 1"), for FARO_UPDATES_ROOT=/usr/share/faro/update-root.json. Until the key
+# ceremony has committed release/update-root.json there is none, and the
+# directory stays empty.
+RUN mkdir -p /out/share/faro \
+ && if [ -f release/update-root.json ]; then \
+        install -m 0644 release/update-root.json /out/share/faro/update-root.json; \
+    fi
+
 # Runtime: Debian 13 slim, matching the builder's glibc. Kept to Debian
 # rather than distroless so `docker compose exec faro faro-server backup`,
 # restore with tar, and the bash health check all work in the container.
@@ -86,6 +97,7 @@ RUN groupadd --system --gid 10001 faro \
  && chmod 0700 /data
 
 COPY --from=builder /usr/local/bin/faro-server /usr/local/bin/faro-server
+COPY --from=builder /out/share/faro/ /usr/share/faro/
 COPY --chmod=0755 deploy/healthcheck.sh /usr/local/bin/faro-healthcheck
 
 # Defaults for the container. Everything else (public URL, TLS mode, SMTP)
