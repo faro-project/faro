@@ -23,6 +23,8 @@ There is no central Faro service. A church, a college, a small group or one pers
 - [Architecture](docs/ARCHITECTURE.md): the full design, threat model and roadmap.
 - [Wire protocol](docs/PROTOCOL.md): byte-level signing, hashing and encryption formats.
 - [Development](docs/DEVELOPMENT.md): building, testing, crate map and the invariants every change must keep.
+- [Ally guide](docs/ALLY-GUIDE.md): a plain-language guide for allies, from accepting an invitation to having the conversation.
+- [Security policy](SECURITY.md): how to report a vulnerability, and what's in scope.
 
 ## Repository layout
 
