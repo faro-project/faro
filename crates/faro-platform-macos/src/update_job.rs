@@ -20,6 +20,13 @@
 //! The package path is passed as an argument, never spliced into the
 //! script, and `PATH` is fixed in the job, so nothing from the package name
 //! or the environment can change what runs as root.
+//!
+//! **What was checked before.** The service writes this job only for a
+//! package whose length and BLAKE3 match the project-signed metadata, and
+//! whose own signature passed `faro_service::update::signature`: Faro's
+//! Developer ID Installer certificate and notarization. The package stays
+//! in the service's root-only state directory between that check and the
+//! install.
 
 use crate::service::{pkg_layout, PlistError, AGENT_LABEL, DAEMON_LABEL, FIRST_REGULAR_UID};
 use plist::{Dictionary, Value};

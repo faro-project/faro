@@ -791,13 +791,28 @@ async fn goodbye_writes_nothing_when_it_cannot_be_delivered() {
     dev.shutdown().await;
 }
 
-/// Records the packages the service asks it to install.
+/// Records the packages the service asks it to install. With `reject`,
+/// the package signature check rejects every package.
 #[derive(Debug, Default)]
 struct RecordingInstaller {
     calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    checked: std::sync::Mutex<Vec<String>>,
+    reject: Option<String>,
 }
 
 impl faro_service::update::install::Installer for RecordingInstaller {
+    fn check_package(
+        &self,
+        _package: &std::path::Path,
+        target: &faro_update::TargetInfo,
+    ) -> Result<(), faro_service::update::signature::PackageCheckError> {
+        self.checked.lock().unwrap().push(target.name.clone());
+        match &self.reject {
+            Some(r) => Err(faro_service::update::signature::PackageCheckError::Rejected(r.clone())),
+            None => Ok(()),
+        }
+    }
+
     fn install(
         &self,
         package: &std::path::Path,
@@ -812,12 +827,11 @@ impl faro_service::update::install::Installer for RecordingInstaller {
     }
 }
 
-/// The running service checks its instance's mirror on its own, verifies
-/// the release against the project root it ships with, and hands the
-/// package to the installer. It does this before its member has endorsed
-/// it, too: a computer waiting for activation still gets fixes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_service_installs_an_update_from_its_instance() {
+const UPDATE_PKG: &str = "client/macos/aarch64/Faro-99.0.0.pkg";
+
+/// An instance whose mirror holds release 99.0.0, and the project root that
+/// signed it.
+async fn world_with_an_update() -> (World, Vec<u8>) {
     use faro_update::testing::{Artifact, ToyProject, DAY_MS};
     use faro_update::TargetKind;
     let now = faro_core::Clock::wall_ms(&faro_core::SystemClock::new());
@@ -826,12 +840,11 @@ async fn the_service_installs_an_update_from_its_instance() {
     let root_file = project_dir.path().join("root.json");
     std::fs::write(&root_file, project.first_root()).unwrap();
     let release = project_dir.path().join("release");
-    let pkg = "client/macos/aarch64/Faro-99.0.0.pkg";
     project
         .publish(
             &release,
             &[Artifact::new(
-                pkg,
+                UPDATE_PKG,
                 TargetKind::Client,
                 "macos",
                 "aarch64",
@@ -854,12 +867,16 @@ async fn the_service_installs_an_update_from_its_instance() {
         )
         .await
         .unwrap();
+    (w, project.first_root())
+}
 
-    let mut dev = w.enroll_device().await;
-    let installer = std::sync::Arc::new(RecordingInstaller::default());
-    dev.updates = faro_service::UpdateOverrides {
-        root: Some(project.first_root()),
-        installer: Some(installer.clone()),
+fn update_overrides(
+    root: Vec<u8>,
+    installer: std::sync::Arc<RecordingInstaller>,
+) -> faro_service::UpdateOverrides {
+    faro_service::UpdateOverrides {
+        root: Some(root),
+        installer: Some(installer),
         spec: Some(faro_service::update::ClientSpec {
             platform: "macos".into(),
             arch: "aarch64".into(),
@@ -867,23 +884,96 @@ async fn the_service_installs_an_update_from_its_instance() {
             installed: faro_update::Version::new(1, 0, 0),
         }),
         first_check: Some(Duration::ZERO),
-    };
+    }
+}
+
+/// Wait up to 30 s for `f`.
+async fn within_30s(what: &str, f: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !f() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: not within 30 s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The running service checks its instance's mirror on its own, verifies
+/// the release against the project root it ships with, and hands the
+/// package to the installer. It does this before its member has endorsed
+/// it, too: a computer waiting for activation still gets fixes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_service_installs_an_update_from_its_instance() {
+    let (w, root) = world_with_an_update().await;
+    let mut dev = w.enroll_device().await;
+    let installer = std::sync::Arc::new(RecordingInstaller::default());
+    dev.updates = update_overrides(root, installer.clone());
     dev.start(quiet_classifier());
     dev.wait("awaiting endorsement", |s| {
         s.phase == Phase::AwaitingEndorsement
     })
     .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while installer.calls.lock().unwrap().is_empty() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "no install within 30 s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    within_30s("an install", || !installer.calls.lock().unwrap().is_empty()).await;
     assert_eq!(
         *installer.calls.lock().unwrap(),
-        vec![(pkg.to_owned(), b"new faro".to_vec())]
+        vec![(UPDATE_PKG.to_owned(), b"new faro".to_vec())]
+    );
+    assert_eq!(*installer.checked.lock().unwrap(), [UPDATE_PKG]);
+    dev.shutdown().await;
+}
+
+/// A project-signed package that fails its own signature check (the
+/// update keys leaked) is not installed, and allies get a tamper-class
+/// integrity failure. It was rejected before activation; the event is
+/// written once the device is active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejected_update_package_is_reported_as_tamper() {
+    let (w, root) = world_with_an_update().await;
+    let mut dev = w.enroll_device().await;
+    let installer = std::sync::Arc::new(RecordingInstaller {
+        reject: Some("signed by team ZZZZZ99999, not ABCDE12345".into()),
+        ..RecordingInstaller::default()
+    });
+    dev.updates = update_overrides(root, installer.clone());
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    within_30s("a package check", || {
+        !installer.checked.lock().unwrap().is_empty()
+    })
+    .await;
+
+    w.endorse(&dev).await;
+    dev.wait("the tamper event", |s| {
+        s.phase == Phase::Running && s.tamper_events >= 1
+    })
+    .await;
+    let last = dev.upload_all().await;
+    let mut found = Vec::new();
+    for seq in 1..=last {
+        let item = w.event_item(&w.member_session, &dev, seq).await;
+        let body: EventBody = serde_json::from_slice(
+            &open_event(&item, &dev, seq, &w.member, &w.member_keys.enc).expect("member opens"),
+        )
+        .expect("EventBody");
+        if let EventBody::Tamper {
+            signal: TamperSignal::IntegrityFailure { component },
+            ..
+        } = body
+        {
+            found.push(component);
+        }
+    }
+    assert_eq!(
+        found,
+        ["update package 99.0.0: signed by team ZZZZZ99999, not ABCDE12345"]
+    );
+    assert!(
+        installer.calls.lock().unwrap().is_empty(),
+        "never installed"
     );
     dev.shutdown().await;
 }

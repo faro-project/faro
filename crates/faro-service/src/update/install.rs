@@ -4,6 +4,11 @@
 //! the OS. The updater calls it only with a file whose length and BLAKE3
 //! matched the project-signed targets. Tests inject their own.
 //!
+//! Before it installs anything, the updater asks the installer to check
+//! the package itself ([`Installer::check_package`]). On macOS that is the
+//! package's Developer ID signature and notarization
+//! ([`super::signature`]): a second layer, in case the update keys leak.
+//!
 //! On macOS ([`LaunchdInstaller`]) the install runs as the one-shot launchd
 //! job `org.faro.update` (`faro_platform_macos::update_job`), because the
 //! package's preinstall stops this service and would kill an `installer`
@@ -11,6 +16,7 @@
 //! packages will come from the project's apt/dnf repository (§3.3), and
 //! Windows has no client yet.
 
+use super::signature::PackageCheckError;
 use faro_update::TargetInfo;
 use std::path::Path;
 
@@ -24,6 +30,12 @@ pub enum InstallError {
 
 /// Starts installing a verified package.
 pub trait Installer: Send + Sync + std::fmt::Debug {
+    /// Check `package` itself before it is installed, beyond the metadata
+    /// (on macOS: Faro's Developer ID signature and notarization). There is
+    /// no default: every installer says what it checks. Called on a
+    /// blocking thread; it must not change anything on disk.
+    fn check_package(&self, package: &Path, target: &TargetInfo) -> Result<(), PackageCheckError>;
+
     /// Start installing `package` (already verified against `target`).
     /// Returns once the install has *started*: on success the installer
     /// typically stops this service, replaces it and starts the new one.
@@ -48,6 +60,11 @@ pub fn platform_installer(state_dir: &Path) -> Option<std::sync::Arc<dyn Install
         // SAFETY: geteuid has no preconditions and cannot fail.
         let root = unsafe { libc::geteuid() } == 0;
         if packaged && root {
+            if super::signature::BUILD_POLICY == super::signature::PackagePolicy::RefuseAll {
+                tracing::warn!(
+                    "this build has no Team ID (FARO_TEAM_ID): it will refuse every update package"
+                );
+            }
             return Some(std::sync::Arc::new(LaunchdInstaller::new(state_dir)));
         }
         None
@@ -115,6 +132,22 @@ impl LaunchdInstaller {
 
 #[cfg(target_os = "macos")]
 impl Installer for LaunchdInstaller {
+    fn check_package(&self, package: &Path, target: &TargetInfo) -> Result<(), PackageCheckError> {
+        use super::signature::{self, Accepted};
+        match signature::check_package(package)? {
+            Accepted::Verified { team_id } => tracing::info!(
+                version = %target.custom.version,
+                team_id,
+                "the update package is signed by Faro's Developer ID and notarized"
+            ),
+            Accepted::Unchecked => tracing::warn!(
+                version = %target.custom.version,
+                "development build: installing the update package without checking its signature"
+            ),
+        }
+        Ok(())
+    }
+
     fn install(&self, package: &Path, target: &TargetInfo) -> Result<(), InstallError> {
         use std::io::Write;
         if Self::job_running() {
