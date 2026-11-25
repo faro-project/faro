@@ -65,6 +65,8 @@ export interface PendingDeletion {
 	purge_after_ms: number;
 	/** When the purge started; it can no longer be cancelled. */
 	started_at_ms: number | null;
+	/** An admin asked for it, not the person. The person or any admin may cancel. */
+	by_admin: boolean;
 }
 
 /** Who a deletion notice (or its cancellation) went to. */
@@ -86,7 +88,12 @@ export interface DeletionRequested {
 	told: DeletionTold;
 }
 
-/** `POST /v1/me/deletion/cancel` response */
+/** `DELETE /admin/api/users/{id}` body: an admin asks for someone's account to be deleted. */
+export interface DeleteUser {
+	confirm_email: string;
+}
+
+/** `POST /v1/me/deletion/cancel` and `POST /admin/api/users/{id}/deletion/cancel` response */
 export interface DeletionCancelled {
 	requested_at_ms: number;
 	cancelled_at_ms: number;
@@ -195,8 +202,10 @@ export interface AdminUserRow {
 	device_count: number;
 	/** Most recent check-in of any of the user's devices. */
 	devices_last_seen_at_ms: number | null;
-	/** When the account will be deleted, if the person asked for that. */
+	/** When the account will be deleted, if it is being deleted. */
 	deletion_purge_after_ms: number | null;
+	/** An admin asked for the deletion (any admin may cancel it), not the person. */
+	deletion_by_admin: boolean;
 }
 
 /** `PUT /admin/api/users/{id}/admin` response. */
@@ -217,10 +226,13 @@ export interface AdminLogAccount {
 /** One entry of `GET /admin/api/log`, newest first. */
 export interface AdminLogEntry {
 	id: string;
-	action: 'admin_granted' | 'admin_revoked';
+	action: 'admin_granted' | 'admin_revoked' | 'deletion_requested' | 'deletion_cancelled';
 	/** The account it was about; null once that account is deleted. */
 	user: AdminLogAccount | null;
-	/** The admin who did it; null from the command line or once deleted. */
+	/**
+	 * Who did it; null from the command line or once deleted. For
+	 * `deletion_cancelled`, the person themself if they cancelled.
+	 */
 	actor: AdminLogAccount | null;
 	via: 'console' | 'command_line';
 	at_ms: number;

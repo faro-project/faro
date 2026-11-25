@@ -126,6 +126,9 @@
 	{#if session.deletion}
 		<p>
 			Your account will be deleted on <strong>{date(session.deletion.purge_after_ms)}</strong>.
+			{#if session.deletion.by_admin}
+				The instance administrator asked for this. If you don't know why, ask them.
+			{/if}
 			{#if told}
 				{#if told.allies || told.members}
 					{[

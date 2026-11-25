@@ -208,10 +208,15 @@ function describeAlert(
 				tone: 'info'
 			};
 		}
+		// `requested_by=admin`: the instance administrator asked, not the
+		// person; `cancelled_by=admin`: an admin cancelled.
 		case 'account_deleted': {
 			const when = Number(d.purge_after);
 			return {
-				title: 'The account is being deleted',
+				title:
+					d.requested_by === 'admin'
+						? 'The account is being deleted by the instance administrator'
+						: 'The account is being deleted',
 				text: when
 					? `Until ${date(when)} nothing changes, and the deletion can be cancelled. Then everything about the account is removed from this server.`
 					: 'After 7 days everything about the account is removed from this server.',
@@ -221,6 +226,17 @@ function describeAlert(
 		case 'ally_deleted': {
 			const n = who(d.ally);
 			const when = Number(d.purge_after);
+			if (d.requested_by === 'admin') {
+				return {
+					title: n
+						? `${n}'s account is being deleted by the instance administrator`
+						: "An ally's account is being deleted by the instance administrator",
+					text: when
+						? `They stop being an ally on ${date(when)}, unless the deletion is cancelled.`
+						: 'They stop being an ally after 7 days, unless the deletion is cancelled.',
+					tone
+				};
+			}
 			return {
 				title: n ? `${n} is deleting their account` : 'An ally is deleting their account',
 				text: when
@@ -232,6 +248,23 @@ function describeAlert(
 		case 'account_deletion_cancelled': {
 			const n = who(d.ally);
 			const asked = Number(d.requested);
+			if (d.requested_by === 'admin') {
+				const by =
+					d.cancelled_by === 'admin'
+						? 'The instance administrator'
+						: d.ally
+							? (n ?? 'The ally')
+							: 'The member';
+				return {
+					title: d.ally
+						? `The deletion of ${n ? `${n}'s` : "an ally's"} account was cancelled`
+						: 'The account deletion was cancelled',
+					text: asked
+						? `The instance administrator asked for it on ${date(asked)}. ${by} cancelled it. Nothing will be deleted.`
+						: `${by} cancelled it. Nothing will be deleted.`,
+					tone: 'info'
+				};
+			}
 			return {
 				title: d.ally
 					? `${n ?? 'An ally'} cancelled deleting their account`

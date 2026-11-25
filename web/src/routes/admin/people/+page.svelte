@@ -8,20 +8,31 @@
 	// disabled, and the server always emails the person and every
 	// accountability partner. Any account but your own can be made an admin
 	// or stop being one, and the server always emails the person and every
-	// other admin (ARCHITECTURE.md §4.3). The admin log lists those changes.
+	// other admin (ARCHITECTURE.md §4.3). Any account but your own can be
+	// deleted, disabled or not, with the same 7-day hold and emails as when
+	// the person asks (§12); the person or any admin can cancel. The admin
+	// log lists role changes and deletions.
 
 	import { onMount } from 'svelte';
 	import { api, ApiError, describeError } from '#lib/api.ts';
 	import { ago, count, date, dateTime } from '#lib/format.ts';
+	import { saveReturnTo } from '#lib/return-to.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type {
 		AdminLogAccount,
 		AdminLogEntry,
 		AdminRole,
 		AdminUserRow,
+		DeletionCancelled,
+		DeletionRequested,
 		InstanceSettings,
-		InviteCreated
+		InviteCreated,
+		MagicLinkResponse
 	} from '#lib/types.ts';
+
+	/** Must match `REAUTH_WINDOW_MS` and `HOLD_MS` in server/src/api/account.rs. */
+	const REAUTH_MS = 10 * 60 * 1000;
+	const HOLD_MS = 7 * 24 * 3600 * 1000;
 
 	let users = $state<AdminUserRow[] | null>(null);
 	let settings = $state<InstanceSettings | null>(null);
@@ -37,19 +48,92 @@
 	let inviteError = $state('');
 	let invited = $state<InviteCreated[]>([]);
 
-	// Disable / re-enable, and grant / revoke the admin role, confirmed in a
-	// dialog.
-	type Change = 'disable' | 'enable' | 'grant' | 'revoke';
+	// Disable / re-enable, grant / revoke the admin role, and delete an
+	// account or cancel that, confirmed in a dialog.
+	type Change = 'disable' | 'enable' | 'grant' | 'revoke' | 'delete' | 'cancel-deletion';
 	let dialog = $state<HTMLDialogElement | null>(null);
 	let pending = $state<{ user: AdminUserRow; change: Change } | null>(null);
 	let statusBusy = $state(false);
 	let statusError = $state('');
 	let statusDone = $state('');
 
+	// Deleting needs a sign-in within the last 10 minutes and the address
+	// typed out, as when people delete their own account.
+	let confirmEmail = $state('');
+	let fieldError = $state('');
+	let linkSentAt = $state(0);
+	let now = $state(Date.now());
+	let fresh = $derived(session.startedAt > 0 && now - session.startedAt < REAUTH_MS);
+
+	$effect(() => {
+		const t = setInterval(() => (now = Date.now()), 15_000);
+		return () => clearInterval(t);
+	});
+
+	/** After signing in again in another tab, this one learns it on focus. */
+	function recheck() {
+		now = Date.now();
+		if (!fresh && linkSentAt) void session.refresh().catch(() => {});
+	}
+
 	function confirmChange(user: AdminUserRow, change: Change) {
 		pending = { user, change };
 		statusError = '';
+		fieldError = '';
+		confirmEmail = '';
+		now = Date.now();
 		dialog?.showModal();
+	}
+
+	async function confirmItsYou() {
+		if (!session.user) return;
+		statusError = '';
+		statusBusy = true;
+		try {
+			saveReturnTo('admin-people');
+			await api.post<MagicLinkResponse>('/v1/auth/magic-link', { email: session.user.email });
+			linkSentAt = Date.now();
+		} catch (e) {
+			statusError = describeError(e);
+		} finally {
+			statusBusy = false;
+		}
+	}
+
+	async function deleteAccount(user: AdminUserRow): Promise<boolean> {
+		if (confirmEmail.trim().toLowerCase() !== user.email) {
+			fieldError = `Type ${user.email} exactly.`;
+			return false;
+		}
+		const r = await api.delete<DeletionRequested>(
+			`/admin/api/users/${encodeURIComponent(user.id)}`,
+			{ confirm_email: confirmEmail.trim() }
+		);
+		const purge = r.deletion.purge_after_ms;
+		if (users) {
+			users = users.map((u) =>
+				u.id === user.id ? { ...u, deletion_purge_after_ms: purge, deletion_by_admin: true } : u
+			);
+		}
+		const name = user.display_name;
+		statusDone = `${name}'s account will be deleted on ${date(purge)}. Faro is emailing ${name}, their accountability partners and every admin. Until then, ${name} or any admin can cancel.`;
+		await loadLog();
+		return true;
+	}
+
+	async function cancelDeletion(user: AdminUserRow) {
+		await api.post<DeletionCancelled>(
+			`/admin/api/users/${encodeURIComponent(user.id)}/deletion/cancel`,
+			{}
+		);
+		if (users) {
+			users = users.map((u) =>
+				u.id === user.id ? { ...u, deletion_purge_after_ms: null, deletion_by_admin: false } : u
+			);
+		}
+		const name = user.display_name;
+		statusDone = `${name}'s account will not be deleted. Faro is emailing ${name}, their accountability partners and every admin.`;
+		await loadLog();
 	}
 
 	function closeDialog() {
@@ -91,18 +175,41 @@
 		try {
 			if (change === 'disable' || change === 'enable') {
 				await changeStatus(user, change === 'disable');
-			} else {
+			} else if (change === 'grant' || change === 'revoke') {
 				await changeAdmin(user, change === 'grant');
+			} else if (change === 'delete') {
+				if (!(await deleteAccount(user))) return;
+			} else {
+				await cancelDeletion(user);
 			}
 			closeDialog();
 		} catch (e) {
 			if (
 				e instanceof ApiError &&
-				['already_disabled', 'not_disabled', 'already_admin', 'not_admin'].includes(e.code)
+				[
+					'already_disabled',
+					'not_disabled',
+					'already_admin',
+					'not_admin',
+					'already_deleting',
+					'not_deleting'
+				].includes(e.code)
 			) {
 				// Someone else got there first: show the current state.
 				closeDialog();
 				await load();
+			} else if (e instanceof ApiError && e.code === 'reauth_required') {
+				// The clocks disagree; ask the server again.
+				await session.refresh().catch(() => {});
+				statusError = "Your sign-in is more than 10 minutes old. Confirm it's you first.";
+			} else if (e instanceof ApiError && e.code === 'confirmation_mismatch') {
+				fieldError = `Type ${user.email} exactly.`;
+			} else if (e instanceof ApiError && e.code === 'cannot_delete_self') {
+				statusError = 'To delete your own account, use Delete your account in Settings.';
+			} else if (e instanceof ApiError && e.code === 'not_admin_deletion') {
+				statusError = `${user.display_name} asked for this deletion themself, so only they can cancel it.`;
+			} else if (e instanceof ApiError && e.code === 'deletion_in_progress') {
+				statusError = 'The deletion has started and can no longer be cancelled.';
 			} else if (e instanceof ApiError && e.code === 'cannot_disable_self') {
 				statusError = 'You cannot disable your own account. Ask another admin.';
 			} else if (e instanceof ApiError && e.code === 'cannot_change_own_role') {
@@ -112,7 +219,7 @@
 			} else if (e instanceof ApiError && e.code === 'account_disabled') {
 				statusError = `${user.display_name}'s account is disabled. Re-enable it first.`;
 			} else if (e instanceof ApiError && e.code === 'account_deleting') {
-				statusError = `${user.display_name} asked for their account to be deleted, so it can't be changed now.`;
+				statusError = `${user.display_name}'s account is being deleted, so it can't be changed now.`;
 			} else {
 				statusError = describeError(e);
 			}
@@ -153,6 +260,14 @@
 	function nameOf(a: AdminLogAccount | null): string {
 		if (!a) return 'a deleted account';
 		return a.id === session.user?.id ? 'you' : a.display_name;
+	}
+
+	/** The account a deletion entry is about, as the end of a sentence. */
+	function accountOf(e: AdminLogEntry): string {
+		if (!e.user) return 'an account that has since been deleted';
+		if (e.user.id === session.user?.id) return 'your account';
+		if (e.actor?.id === e.user.id) return 'their account';
+		return `${e.user.display_name}'s account`;
 	}
 
 	onMount(load);
@@ -205,6 +320,8 @@
 		return (['admin', 'member', 'ally'] as const).filter((r) => u.roles[r]);
 	}
 </script>
+
+<svelte:window onfocus={recheck} />
 
 <svelte:head>
 	<title>People · Admin · Faro</title>
@@ -300,8 +417,16 @@
 						{#each rolesOf(u) as r (r)}<span class="chip">{r}</span>{/each}
 						{#if u.disabled}<span class="chip off">disabled</span>{/if}
 						{#if u.deletion_purge_after_ms}
-							<span class="chip off" title="The person asked for their account to be deleted">
+							<span
+								class="chip off"
+								title={u.deletion_by_admin
+									? 'An admin asked for this account to be deleted'
+									: 'The person asked for their account to be deleted'}
+							>
 								being deleted {date(u.deletion_purge_after_ms)}
+							</span>
+							<span class="asked">
+								{u.deletion_by_admin ? 'asked by an admin' : 'asked by the person'}
 							</span>
 						{/if}
 					</span>
@@ -333,7 +458,17 @@
 						{#if u.id === session.user?.id}
 							<span class="chip">you</span>
 						{:else if u.deletion_purge_after_ms}
-							<!-- The person may still cancel; the server refuses changes meanwhile. -->
+							<!-- The server refuses other changes meanwhile. A deletion the
+							     person asked for is theirs to cancel. -->
+							{#if u.deletion_by_admin}
+								<button
+									class="secondary small"
+									type="button"
+									onclick={() => confirmChange(u, 'cancel-deletion')}
+								>
+									Cancel deletion…
+								</button>
+							{/if}
 						{:else}
 							{#if u.disabled}
 								<button
@@ -369,6 +504,13 @@
 									Make admin…
 								</button>
 							{/if}
+							<button
+								class="secondary small"
+								type="button"
+								onclick={() => confirmChange(u, 'delete')}
+							>
+								Delete…
+							</button>
 						{/if}
 					</span>
 				</li>
@@ -380,8 +522,8 @@
 <section class="log" aria-labelledby="admin-log">
 	<h2 id="admin-log">Admin log</h2>
 	<p class="muted">
-		Every time someone is made an admin or stops being one. Faro emails the person and every other
-		admin each time.
+		Every time someone is made an admin or stops being one, and every deletion an admin asks for.
+		Faro emails every admin each time.
 	</p>
 	{#if logError}
 		<div class="notice error" role="alert">{logError}</div>
@@ -398,8 +540,12 @@
 						<strong title={e.actor?.email}>{actorOf(e)}</strong>
 						{#if e.action === 'admin_granted'}
 							made <strong title={e.user?.email}>{nameOf(e.user)}</strong> an admin
-						{:else}
+						{:else if e.action === 'admin_revoked'}
 							removed the admin role from <strong title={e.user?.email}>{nameOf(e.user)}</strong>
+						{:else if e.action === 'deletion_requested'}
+							asked to delete <strong title={e.user?.email}>{accountOf(e)}</strong>
+						{:else}
+							cancelled the deletion of <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{/if}
 						{#if e.via === 'command_line'}
 							<span class="muted">(from the command line)</span>
@@ -445,36 +591,102 @@
 				Disabling doesn't stop monitoring: {name}'s computers keep reporting and alerting their
 				allies.
 			</p>
-		{:else}
+		{:else if pending.change === 'enable'}
 			<h2 id="status-title">Re-enable {name}'s account?</h2>
 			<p>
 				{name} ({pending.user.email}) will be able to sign in again. Faro will email {name} and their
 				accountability partners.
+			</p>
+		{:else if pending.change === 'delete'}
+			<h2 id="status-title">Delete {name}'s account?</h2>
+			<p>
+				Faro will email {name} ({pending.user.email}) and everyone in an accountability partnership
+				with them right away: their allies, and the members they are an ally for, with those
+				members' other allies. The emails say the account is being deleted by the instance
+				administrator, and they can't be switched off. Every admin is emailed too.
+			</p>
+			<p>
+				Nothing changes for 7 days: {name}'s computers are still monitored and their allies still
+				get alerts. Until {date(now + HOLD_MS)}, {name} or any admin can cancel.
+				{#if pending.user.disabled}
+					{name}'s account is disabled, so they can't sign in to cancel. The email tells them to
+					contact you.
+				{/if}
+			</p>
+			<p>
+				Then everything this server stores about {name} is permanently deleted: their computers, activity,
+				alerts, reports, keys, allies and settings. Copies in backups last until the backups are rotated
+				out.
+			</p>
+			{#if !fresh}
+				<p>
+					To delete an account, first confirm it's you: Faro emails a sign-in link to
+					<strong>{session.user?.email}</strong>.
+				</p>
+				{#if linkSentAt}
+					<div class="notice info" role="status">
+						<p>Check your email and open the link. It brings you back to this page.</p>
+					</div>
+				{/if}
+			{:else}
+				<div class="field">
+					<label for="delete-confirm">Type {pending.user.email} to confirm</label>
+					<input
+						id="delete-confirm"
+						type="email"
+						autocomplete="off"
+						placeholder={pending.user.email}
+						bind:value={confirmEmail}
+						aria-invalid={fieldError ? 'true' : undefined}
+						aria-describedby={fieldError ? 'delete-confirm-error' : undefined}
+					/>
+					{#if fieldError}
+						<span class="field-error" id="delete-confirm-error">{fieldError}</span>
+					{/if}
+				</div>
+			{/if}
+		{:else}
+			<h2 id="status-title">Cancel the deletion of {name}'s account?</h2>
+			<p>
+				Nothing will be deleted. Faro will email {name} ({pending.user.email}), everyone in an
+				accountability partnership with them, and every admin.
 			</p>
 		{/if}
 		{#if statusError}
 			<div class="notice error" role="alert">{statusError}</div>
 		{/if}
 		<div class="actions">
-			<button
-				class={pending.change === 'disable' || pending.change === 'revoke' ? 'danger' : 'primary'}
-				type="button"
-				onclick={applyChange}
-				disabled={statusBusy}
-			>
-				{#if statusBusy}
-					Saving…
-				{:else if pending.change === 'disable'}
-					Disable account
-				{:else if pending.change === 'enable'}
-					Re-enable account
-				{:else if pending.change === 'grant'}
-					Make admin
-				{:else}
-					Remove admin role
-				{/if}
+			{#if pending.change === 'delete' && !fresh}
+				<button class="primary" type="button" onclick={confirmItsYou} disabled={statusBusy}>
+					{statusBusy ? 'Sending…' : linkSentAt ? 'Send another link' : "Confirm it's you"}
+				</button>
+			{:else}
+				<button
+					class={['disable', 'revoke', 'delete'].includes(pending.change) ? 'danger' : 'primary'}
+					type="button"
+					onclick={applyChange}
+					disabled={statusBusy || (pending.change === 'delete' && !confirmEmail.trim())}
+				>
+					{#if statusBusy}
+						Saving…
+					{:else if pending.change === 'disable'}
+						Disable account
+					{:else if pending.change === 'enable'}
+						Re-enable account
+					{:else if pending.change === 'grant'}
+						Make admin
+					{:else if pending.change === 'revoke'}
+						Remove admin role
+					{:else if pending.change === 'delete'}
+						Delete account
+					{:else}
+						Cancel deletion
+					{/if}
+				</button>
+			{/if}
+			<button class="secondary" type="button" onclick={closeDialog}>
+				{pending.change === 'cancel-deletion' ? 'Back' : 'Cancel'}
 			</button>
-			<button class="secondary" type="button" onclick={closeDialog}>Cancel</button>
 		</div>
 	{/if}
 </dialog>
@@ -618,6 +830,11 @@
 	.chip.off {
 		color: var(--danger);
 		border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+	}
+
+	.asked {
+		color: var(--muted);
+		font-size: 0.8rem;
 	}
 
 	.label {

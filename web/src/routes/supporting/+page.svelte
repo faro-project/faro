@@ -107,7 +107,7 @@
 										{#if m.deletion_purge_after_ms}
 											<div class="notice warn small deleting">
 												<p>
-													{m.display_name} is deleting their account. Until {date(
+													{m.display_name}'s account is being deleted. Until {date(
 														m.deletion_purge_after_ms
 													)} nothing changes: their computers are still monitored and you can open their
 													alerts and reports. Then everything about them is removed from this server.

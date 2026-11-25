@@ -323,7 +323,7 @@
 										<strong>{a.display_name}</strong>
 										<span class="chip pending">Accepted your invitation</span>
 										{#if a.deletion_purge_after_ms}
-											<span class="chip off">Deleting their account</span>
+											<span class="chip off">Account being deleted</span>
 										{/if}
 									</div>
 									<div class="row-meta">
@@ -438,7 +438,7 @@
 									</div>
 									{#if a.deletion_purge_after_ms}
 										<div class="row-meta">
-											{a.display_name} is deleting their account. They stay your ally until {date(
+											{a.display_name}'s account is being deleted. They stay your ally until {date(
 												a.deletion_purge_after_ms
 											)}; then confirm your updated ally list here.
 										</div>
