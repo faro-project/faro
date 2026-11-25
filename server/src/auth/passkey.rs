@@ -6,8 +6,8 @@
 //!
 //! * Passkeys are the primary login for every role (§4.5, §9 "admin passkey");
 //!   magic links remain the fallback and the recovery path.
-//! * Use `webauthn-rs` (MPL-2.0 is *not* Apache-compatible for vendoring, but
-//!   linking an unmodified crate is fine; confirm with `cargo-deny` policy) or
+//! * Use `webauthn-rs` (MPL-2.0: `deny.toml` allows it as an unmodified
+//!   dependency, but don't vendor or patch it; confirm with `cargo deny`) or
 //!   a minimal in-tree verifier restricted to ES256/EdDSA, `none` attestation.
 //! * Relying-party id = the host of `public_url`; origin must equal
 //!   `public_url` exactly (no subdomains), checked server-side.

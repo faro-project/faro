@@ -35,4 +35,10 @@ assets/   brand assets (logo, colours)
 
 ## License
 
-[Apache-2.0](LICENSE). The "Faro" name and logo are reserved for official, project-signed builds (see ARCHITECTURE.md §11 and [assets/brand](assets/brand/README.md)). Forks are welcome under their own name.
+Copyright © 2026 Isaiah Zimmerman.
+
+Faro is free software under the [GNU Affero General Public License, version 3 or later](LICENSE) (AGPL-3.0-or-later). You may use, study, modify and share it. If you distribute a modified version, or run one that people use over a network (a modified `faro-server`, for example), you must offer those people its source under the same licence. Running an unmodified Faro instance asks nothing extra of you.
+
+Contributions are accepted under the [Contributor License Agreement](CLA.md). Contributors keep their copyright and grant the maintainer a licence that also allows distributing Faro under other terms (for example an app-store build or a commercial edition). In return, the CLA promises that every contribution stays publicly available under the AGPL or another open-source licence. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+The "Faro" name and logo are not covered by the licence and are reserved for official, project-signed builds (see ARCHITECTURE.md §11 and [assets/brand](assets/brand/README.md)). Forks are welcome under their own name.

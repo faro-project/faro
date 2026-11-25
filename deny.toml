@@ -1,5 +1,7 @@
-# cargo-deny policy (ARCHITECTURE.md §11): every third-party component must be
-# Apache-2.0 compatible. Run: cargo deny check
+# cargo-deny policy (ARCHITECTURE.md §11). Faro's own crates are
+# AGPL-3.0-or-later, but every third-party component must be permissive, so
+# that every edition of Faro (including builds under other terms, CLA.md) can
+# include it. Run: cargo deny check
 [graph]
 all-features = false
 
@@ -28,6 +30,11 @@ allow = [
     "0BSD",                # quoted_printable (via lettre); public-domain equivalent
 ]
 # AGPL/GPL/LGPL and non-commercial licences are rejected by omission.
+
+# Skip Faro's own crates (all `publish = false`): their licence is ours to set.
+# Third-party crates are still checked against the allowlist above.
+[licenses.private]
+ignore = true
 
 [bans]
 multiple-versions = "warn"

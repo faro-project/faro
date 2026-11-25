@@ -2,7 +2,7 @@
 
 **Status:** Draft v0.2 (2026-11-23)
 **Scope:** A free, open-source, **self-hosted** screen-accountability service, comparable to Covenant Eyes. The first release covers desktop only: macOS, Windows and Linux.
-**License:** Apache-2.0 (client, server, web app and tooling).
+**License:** AGPL-3.0-or-later (client, server, web app and tooling); contributions under the [CLA](../CLA.md).
 
 ---
 
@@ -209,7 +209,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 **Thumbnail.** About 320 px wide with a strong Gaussian blur (σ≈12) followed by pixelation. It shows the gist ("a video player with a person") without explicit detail. The blur is applied before any encryption or persistence, so the output can't be reversed.
 
 **Models.** Swappable, versioned and signed by the project, and distributed through the update channel (§3.8).
-- Baseline: an open NSFW classifier exported to ONNX and quantized to int8, chosen in a Phase 0 benchmark. **Every candidate needs to be compatible with Apache-2.0.** OpenNSFW is BSD. Avoid AGPL or non-commercial weights, and check NudeNet's terms specifically.
+- Baseline: an open NSFW classifier exported to ONNX and quantized to int8, chosen in a Phase 0 benchmark. **Every candidate needs a permissive license** (§11). OpenNSFW is BSD. Avoid GPL, AGPL or non-commercial weights, and check NudeNet's terms specifically.
 - Long term: **a small CLIP-style encoder (MobileCLIP or OpenCLIP, permissively licensed) with linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head.
 - Runtime: `ort` with CoreML, DirectML and CPU execution providers. Target under 80 ms per frame on CPU.
 - **Screenshot domain gap**: `models/` includes a screenshot-specific eval set, and CI fails on regressions.
@@ -483,9 +483,10 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 ## 11. Licensing
 
-- All Faro code is **Apache-2.0**: client, server, web app and installers. Forks, including closed or commercial ones, are allowed.
-- **Trademark**: Apache-2.0 doesn't grant trademark rights. Keep the "Faro" name and logo for official builds so that users can tell which installers are signed by the project. Forks distribute under their own name.
-- Third-party components must be Apache-2.0 compatible. That rules out AGPL or non-commercial model weights and blocklists that don't allow redistribution. CI runs `cargo-deny` to enforce license policy.
+- All Faro code is **AGPL-3.0-or-later**: client, server, web app and installers. Anyone may use, modify and redistribute it. Whoever distributes a modified version, or runs one that people use over a network, must offer those people its source. For a monitoring tool this is the point: a fork can't quietly weaken the privacy guarantees (§3.5, §5.3) and keep the change hidden from the people it monitors.
+- **Contributions** come in under the [Contributor License Agreement](../CLA.md). Contributors keep their copyright and grant the maintainer a license that includes distributing their work under other terms: an app-store build (app-store terms conflict with the GPL family, which matters for the Phase 3 iOS client), or a commercial edition. The CLA also promises that every contribution stays publicly available under the AGPL or another OSI-approved license, and lets these rights pass to a future steward such as a nonprofit (§14, question 1).
+- **Trademark**: the license doesn't grant trademark rights. Keep the "Faro" name and logo for official builds so that users can tell which installers are signed by the project. Forks distribute under their own name.
+- **Third-party components must be permissive** (Apache-2.0, MIT, BSD, ISC, CC0 and similar; MPL-2.0 only as an unmodified dependency), so that every edition of Faro can include them. That rules out GPL or AGPL dependencies, non-commercial model weights and blocklists that don't allow redistribution. CI runs `cargo-deny` to enforce this for Rust dependencies, and `faro_detect::load_model` checks each model manifest's license.
 
 ---
 
@@ -510,7 +511,7 @@ Institutions running instances (churches, colleges) make consent even more impor
 **Phase 0: Spikes (2–4 weeks)**
 1. macOS ScreenCaptureKit from a LaunchAgent: permission persistence and re-prompt behavior.
 2. Windows: capture from an agent launched by the service into the user session; multi-monitor, user switching, RDP.
-3. Model benchmark plus Apache-compatible license review.
+3. Model benchmark plus a license review (permissive weights only, §11).
 4. Wayland portal restore tokens on GNOME and KDE.
 5. Crypto round trip: Rust encrypt → browser decrypt, member-signed ally keys.
 6. `faro-server` skeleton on SQLite with built-in ACME, running on a Raspberry Pi.

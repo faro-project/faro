@@ -4,6 +4,7 @@ description = "Faro wire types shared by the client, server and web app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [lints]
