@@ -177,6 +177,9 @@ pub enum Control {
         local_wall_ms: i64,
         server_time_ms: i64,
     },
+    /// A tamper signal from a task outside the core (an update package
+    /// that failed its signature check).
+    Tamper(TamperSignal),
 }
 
 struct MemberPause {
@@ -1357,6 +1360,7 @@ impl Core {
                     self.signal(sig).await;
                 }
             }
+            Control::Tamper(sig) => self.signal(sig).await,
         }
     }
 }

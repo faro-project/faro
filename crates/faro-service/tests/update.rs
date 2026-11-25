@@ -15,6 +15,7 @@ use faro_service::client::ClientOptions;
 use faro_service::state::StateDir;
 use faro_service::update::fetch::UpdateFetcher;
 use faro_service::update::install::{InstallError, Installer};
+use faro_service::update::signature::PackageCheckError;
 use faro_service::update::{
     CheckError, ClientSpec, ClientUpdater, Outcome, Settled, ATTEMPTS_FILE, MAX_INSTALL_ATTEMPTS,
     PENDING_GRACE_MS, TRUST_FILE,
@@ -88,14 +89,26 @@ fn spec(installed: &str) -> ClientSpec {
     }
 }
 
-/// Records every install it is asked for; optionally refuses.
+/// Records every install it is asked for; optionally refuses. `verdict`
+/// plays the package signature check (`None` passes).
 #[derive(Debug, Default)]
 struct FakeInstaller {
     calls: Mutex<Vec<(String, Vec<u8>)>>,
     refuse: bool,
+    verdict: Mutex<Option<PackageCheckError>>,
+    checked: Mutex<Vec<String>>,
 }
 
 impl Installer for FakeInstaller {
+    fn check_package(&self, package: &Path, target: &TargetInfo) -> Result<(), PackageCheckError> {
+        assert!(package.is_file(), "checked on disk, after the download");
+        self.checked.lock().unwrap().push(target.name.clone());
+        match self.verdict.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     fn install(&self, package: &Path, target: &TargetInfo) -> Result<(), InstallError> {
         let bytes = std::fs::read(package).unwrap();
         self.calls
@@ -112,6 +125,14 @@ impl Installer for FakeInstaller {
 impl FakeInstaller {
     fn calls(&self) -> Vec<(String, Vec<u8>)> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn checked(&self) -> Vec<String> {
+        self.checked.lock().unwrap().clone()
+    }
+
+    fn set_verdict(&self, v: Option<PackageCheckError>) {
+        *self.verdict.lock().unwrap() = v;
     }
 }
 
@@ -456,6 +477,108 @@ async fn an_installer_that_refuses_counts_as_a_failure_at_once() {
     let a = u.attempts().unwrap();
     assert!(a.pending.is_none());
     assert_eq!(a.failures.values().copied().collect::<Vec<_>>(), vec![1]);
+}
+
+/// The metadata approves a package that isn't Faro's (the update keys
+/// leaked): it is never installed, nothing is left pending, it is reported
+/// once, and it is never tried again. The next release is.
+#[tokio::test]
+async fn a_package_that_fails_its_signature_check_is_never_installed() {
+    let mut inst = FakeInstance::start().await;
+    inst.publish(&catalog());
+    let dev = device();
+    let installer = Arc::new(FakeInstaller::default());
+    installer.set_verdict(Some(PackageCheckError::Rejected(
+        "signed by team ZZZZZ99999, not ABCDE12345".into(),
+    )));
+    let u = updater(
+        &inst,
+        &dev,
+        spec("1.0.0"),
+        Some(installer.clone()),
+        system_clock(),
+    );
+
+    assert_eq!(
+        u.check().await.unwrap(),
+        Outcome::Rejected {
+            version: Version::new(1, 2, 0),
+            reason: "signed by team ZZZZZ99999, not ABCDE12345".into()
+        }
+    );
+    assert_eq!(installer.checked(), [PKG]);
+    assert!(installer.calls().is_empty(), "never installed");
+    let a = u.attempts().unwrap();
+    assert!(a.pending.is_none(), "no install recorded");
+    assert!(a.failures.is_empty());
+    assert_eq!(a.rejected.len(), 1);
+
+    // Later checks don't download, check or report it again, even if a
+    // check would now pass.
+    installer.set_verdict(None);
+    assert_eq!(
+        u.check().await.unwrap(),
+        Outcome::PreviouslyRejected {
+            version: Version::new(1, 2, 0)
+        }
+    );
+    assert_eq!(installer.checked().len(), 1);
+    assert!(installer.calls().is_empty());
+
+    // A new release is a new package.
+    let mut cat = catalog();
+    cat.push(mac(
+        "client/macos/aarch64/Faro-1.2.1.pkg",
+        "1.2.1",
+        b"pkg 1.2.1",
+    ));
+    inst.publish(&cat);
+    assert!(matches!(
+        u.check().await.unwrap(),
+        Outcome::Installing { .. }
+    ));
+    assert_eq!(
+        installer.calls(),
+        vec![(
+            "client/macos/aarch64/Faro-1.2.1.pkg".to_owned(),
+            b"pkg 1.2.1".to_vec()
+        )]
+    );
+}
+
+/// A check that can't conclude (a tool failed, Gatekeeper couldn't confirm
+/// notarization) installs nothing, records nothing, and is tried again.
+#[tokio::test]
+async fn an_unconfirmed_signature_installs_nothing_and_is_retried() {
+    let mut inst = FakeInstance::start().await;
+    inst.publish(&catalog());
+    let dev = device();
+    let installer = Arc::new(FakeInstaller::default());
+    installer.set_verdict(Some(PackageCheckError::Unconfirmed(
+        "spctl: timed out".into(),
+    )));
+    let u = updater(
+        &inst,
+        &dev,
+        spec("1.0.0"),
+        Some(installer.clone()),
+        system_clock(),
+    );
+    assert!(matches!(
+        u.check().await.unwrap_err(),
+        CheckError::Package(PackageCheckError::Unconfirmed(_))
+    ));
+    assert!(installer.calls().is_empty());
+    let a = u.attempts().unwrap();
+    assert!(a.pending.is_none() && a.failures.is_empty() && a.rejected.is_empty());
+
+    installer.set_verdict(None);
+    assert!(matches!(
+        u.check().await.unwrap(),
+        Outcome::Installing { .. }
+    ));
+    assert_eq!(installer.checked(), [PKG, PKG]);
+    assert_eq!(installer.calls().len(), 1);
 }
 
 /// Against the real instance: the mirror imports a release, and a client

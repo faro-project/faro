@@ -15,7 +15,10 @@
 //!    that channel, **never older than or equal to the running version**:
 //!    the instance can hold a computer back, never move it back;
 //! 4. downloads it with streaming verification against the signed length
-//!    and BLAKE3, and hands it to the platform [`Installer`].
+//!    and BLAKE3;
+//! 5. has the platform [`Installer`] check the package itself (on macOS:
+//!    Faro's Developer ID signature and notarization, [`signature`]), and
+//!    only then installs it.
 //!
 //! The trust state is saved after every verification step, `Ok` or `Err`
 //! (a rejected document can still raise the observed-time mark that stops
@@ -28,6 +31,14 @@
 //! skipped until the project publishes another. A failing package is
 //! never retried in a loop.
 //!
+//! **Rejected packages.** A package that fails the signature check with
+//! positive evidence that it isn't Faro's is recorded in `rejected` in
+//! `update-attempts.json`, never retried, and reported once
+//! ([`Outcome::Rejected`]) so the service can raise a tamper-class
+//! integrity failure. Nothing is installed and no install is recorded as
+//! pending. A check that can't conclude installs nothing and is tried
+//! again at the next check.
+//!
 //! **Who installs.** Only a packaged, root-run service has an installer
 //! ([`install::platform_installer`]). Anywhere else (a development build,
 //! Linux, where packages will come from the project's repository) the
@@ -35,6 +46,7 @@
 
 pub mod fetch;
 pub mod install;
+pub mod signature;
 
 use crate::state::{StateDir, StateError};
 use faro_core::clock::Clock;
@@ -46,6 +58,7 @@ use faro_update::{
 use fetch::{FetchError, UpdateFetcher};
 use install::{InstallError, Installer};
 use serde::{Deserialize, Serialize};
+use signature::PackageCheckError;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,6 +92,10 @@ pub enum CheckError {
     State(#[from] StateError),
     #[error(transparent)]
     Install(#[from] InstallError),
+    /// The package's own signature couldn't be confirmed (never a
+    /// rejection: that is [`Outcome::Rejected`]).
+    #[error(transparent)]
+    Package(PackageCheckError),
     #[error("cannot manage downloads in {path}: {source}")]
     Io {
         path: PathBuf,
@@ -160,6 +177,9 @@ pub struct Attempts {
     pub pending: Option<Pending>,
     /// Failed installs by package BLAKE3 (`b3:…`).
     pub failures: BTreeMap<String, u32>,
+    /// Packages whose signature check rejected them, by BLAKE3, with the
+    /// reason. Never retried.
+    pub rejected: BTreeMap<String, String>,
 }
 
 /// The result of a check.
@@ -179,6 +199,11 @@ pub enum Outcome {
     InstallPending { version: String },
     /// The install of `version` has started.
     Installing { version: Version },
+    /// The package for `version` failed its signature check just now:
+    /// not installed, and never retried. Report it as tamper.
+    Rejected { version: Version, reason: String },
+    /// That package was rejected by an earlier check.
+    PreviouslyRejected { version: Version },
 }
 
 /// What happened to the previous install, judged at service start.
@@ -360,8 +385,38 @@ impl ClientUpdater {
             tracing::info!(%version, "an update is available; this service doesn't install updates");
             return Ok(Outcome::NotInstallable { version });
         };
+        let key = target.blake3.to_prefixed_hex();
+        if self.attempts()?.rejected.contains_key(&key) {
+            return Ok(Outcome::PreviouslyRejected { version });
+        }
 
         let package = self.download(&target).await?;
+        let checked = {
+            let (i, p, t) = (installer.clone(), package.clone(), target.clone());
+            tokio::task::spawn_blocking(move || i.check_package(&p, &t))
+                .await
+                .unwrap_or_else(|e| {
+                    Err(PackageCheckError::Unconfirmed(format!(
+                        "the check did not finish: {e}"
+                    )))
+                })
+        };
+        match checked {
+            Ok(()) => {}
+            Err(PackageCheckError::Rejected(reason)) => {
+                tracing::error!(
+                    %version,
+                    %reason,
+                    package = %package.display(),
+                    "refusing the update package: it is not signed and notarized as Faro's; kept for inspection"
+                );
+                let mut a = self.attempts()?;
+                a.rejected.insert(key, reason.clone());
+                self.save_attempts(&a)?;
+                return Ok(Outcome::Rejected { version, reason });
+            }
+            Err(e) => return Err(CheckError::Package(e)),
+        }
         let mut a = self.attempts()?;
         a.pending = Some(Pending {
             name: target.name.clone(),
@@ -374,9 +429,7 @@ impl ClientUpdater {
         tracing::info!(%version, from = %self.spec.installed, "installing update");
         if let Err(e) = installer.install(&package, &target) {
             a.pending = None;
-            *a.failures
-                .entry(target.blake3.to_prefixed_hex())
-                .or_insert(0) += 1;
+            *a.failures.entry(key).or_insert(0) += 1;
             self.save_attempts(&a)?;
             return Err(e.into());
         }

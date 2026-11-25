@@ -475,6 +475,7 @@ impl Service {
                 updater,
                 update_first_check.unwrap_or_else(updates::default_first_check),
                 config.updates.check_interval(),
+                control_tx.clone(),
                 stop_rx.clone(),
             ));
         }
