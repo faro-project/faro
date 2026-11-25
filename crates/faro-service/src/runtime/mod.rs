@@ -51,10 +51,9 @@ use faro_core::{
     SchedulerError,
 };
 use faro_crypto::SigningKey;
-use faro_detect::{
-    Classifier, DetectError, Detector, DetectorConfig, DomainCategorizer, NullClassifier,
-};
+use faro_detect::{Classifier, DetectError, Detector, DetectorConfig, DomainCategorizer};
 use faro_proto::api::DeviceState;
+use faro_proto::body::TamperSignal;
 use net::{
     periodic, Heartbeater, IdentityGate, ManifestRefresher, OutboxHandle, UploadStop, Uploader,
 };
@@ -146,6 +145,7 @@ pub struct ServiceBuilder {
     clock: Option<Arc<dyn Clock>>,
     source: Option<Box<dyn FrameSource>>,
     classifier: Option<Box<dyn Classifier>>,
+    model_manifest: Option<PathBuf>,
     domains: Option<DomainCategorizer>,
     base_url: Option<Url>,
     seed: Option<u64>,
@@ -161,6 +161,7 @@ impl ServiceBuilder {
             clock: None,
             source: None,
             classifier: None,
+            model_manifest: None,
             domains: None,
             base_url: None,
             seed: None,
@@ -193,10 +194,17 @@ impl ServiceBuilder {
         self
     }
 
-    /// Default: [`NullClassifier`] (context-only ratings) until the ONNX
-    /// model ships through the signed update channel.
+    /// Use this classifier instead of loading a model (tests).
     pub fn classifier(mut self, classifier: Box<dyn Classifier>) -> Self {
         self.classifier = Some(classifier);
+        self
+    }
+
+    /// Load the image model from this manifest instead of the packaged one
+    /// ([`crate::model::packaged_manifest`]). A model missing from here is
+    /// reported like a missing packaged one.
+    pub fn model_manifest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.model_manifest = Some(path.into());
         self
     }
 
@@ -287,9 +295,20 @@ impl ServiceBuilder {
             Some(s) => s,
             None => default_source(&self.config)?,
         };
-        let classifier = self
-            .classifier
-            .unwrap_or_else(|| Box::new(NullClassifier::new()));
+        let (classifier, model_tamper) = match self.classifier {
+            Some(c) => (c, None),
+            None => {
+                let (path, required) = match self.model_manifest {
+                    Some(p) => (Some(p), true),
+                    None => (
+                        crate::model::packaged_manifest(),
+                        crate::model::model_required(),
+                    ),
+                };
+                let l = crate::model::load_classifier(path.as_deref(), required);
+                (l.classifier, l.tamper)
+            }
+        };
         let detector = Detector::new(&DetectorConfig::default(), classifier, self.domains)?;
         let settings = state::settings_in_effect(&dir, self.config.member_settings.as_ref());
         let rng = match self.seed {
@@ -334,6 +353,7 @@ impl ServiceBuilder {
             pokes: Pokes::default(),
             updater,
             update_first_check,
+            model_tamper,
             lock,
         })
     }
@@ -392,6 +412,9 @@ pub struct Service {
     pokes: Pokes,
     updater: Option<ClientUpdater>,
     update_first_check: Option<Duration>,
+    /// The image model is missing, altered or unusable
+    /// ([`crate::model::ModelLoad::tamper`]); reported at start.
+    model_tamper: Option<TamperSignal>,
     /// Held until `run` returns ([`StateDir::try_lock`]).
     lock: state::StateLock,
 }
@@ -431,6 +454,7 @@ impl Service {
             pokes,
             updater,
             update_first_check,
+            model_tamper,
             lock: _lock,
         } = self;
         tokio::pin!(shutdown);
@@ -600,6 +624,9 @@ impl Service {
             status: status.clone(),
         });
         core.startup().await;
+        if let Some(sig) = model_tamper {
+            core.signal(sig).await;
+        }
         pokes.upload.notify_one();
 
         let mut ticker = tokio::time::interval(tick);

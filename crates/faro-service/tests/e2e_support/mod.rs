@@ -394,6 +394,7 @@ impl World {
             script: Script::new(),
             utc_offset_minutes: 0,
             updates: faro_service::UpdateOverrides::default(),
+            model_manifest: None,
             handle: None,
             _tmp: tmp,
         })
@@ -626,6 +627,9 @@ pub struct Device {
     /// root of trust is injected, so the service doesn't check for updates
     /// (no packaged root exists in tests).
     pub updates: faro_service::UpdateOverrides,
+    /// Load the image model from this manifest at the next
+    /// [`Device::start`], instead of using the classifier passed to it.
+    pub model_manifest: Option<PathBuf>,
     handle: Option<ServiceHandle>,
     _tmp: tempfile::TempDir,
 }
@@ -661,10 +665,14 @@ impl Device {
         cfg.network.endorsement_poll_secs = 1;
         cfg.network.upload_interval_secs = 1;
         cfg.report.utc_offset_minutes = self.utc_offset_minutes;
-        let service = Service::builder(cfg)
+        let builder = Service::builder(cfg);
+        let builder = match &self.model_manifest {
+            Some(m) => builder.model_manifest(m),
+            None => builder.classifier(classifier),
+        };
+        let service = builder
             .clock(Arc::new(self.clock.clone()))
             .boxed_frame_source(source)
-            .classifier(classifier)
             .tick_interval(Duration::from_millis(10))
             .scheduler_seed(7)
             .updates(self.updates.clone())

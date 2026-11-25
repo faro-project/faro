@@ -75,14 +75,18 @@ jobs:
           cargo test -p faro-service --features dev --lib update::signature
           FARO_TEAM_ID=ABCDE12345 cargo test -p faro-service --lib update::signature
       # The ONNX Runtime classifier and the model benchmark harness, run on
-      # a synthetic set and a tiny graph the tests generate. The `onnx`
+      # a synthetic set and a tiny graph the tests generate, and the
+      # service's model loading as the package builds it. The `onnx`
       # feature's build script downloads prebuilt ONNX Runtime binaries, so
-      # this runs on one runner only.
-      - name: faro-detect with ONNX Runtime
+      # this runs on the macOS runners only (the package build fetches and
+      # checks its own copy, see installers/macos/fetch-onnxruntime.sh).
+      - name: faro-detect and faro-service with ONNX Runtime
         if: runner.os == 'macOS'
         run: |
           cargo clippy -p faro-detect --features onnx --all-targets -- -D warnings
           cargo test -p faro-detect --features onnx
+          cargo clippy -p faro-service --features onnx --all-targets -- -D warnings
+          cargo test -p faro-service --features onnx --lib model
 
   # The SvelteKit web app (web/): format, types and the static build, then
   # faro-server built with that bundle embedded (FARO_REQUIRE_WEB=1 fails
@@ -161,9 +165,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # The universal package on the Intel Mac: check it, then expand it (never
-  # install it) and start the x86_64 slice of each program with `--version`,
-  # which shows the Intel slices load and run.
+  # The universal package on the Intel Mac: check it (check-pkg.sh runs the
+  # x86_64 faro-service's model-check, so the packaged model is classified
+  # with ONNX Runtime on Intel too), then expand it (never install it) and
+  # start the x86_64 slice of each program with `--version`, which shows
+  # the Intel slices load and run.
   macos-pkg-intel:
     needs: macos-pkg
     runs-on: [self-hosted, macOS, X64]

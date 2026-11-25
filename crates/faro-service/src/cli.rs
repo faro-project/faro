@@ -5,6 +5,7 @@
 //! faro-service [--config FILE] [--state-dir DIR] [-v] run [--socket PATH] [--spawn-agent BIN] [--capture ipc|in-process]
 //! faro-service [--config FILE] [--state-dir DIR] status
 //! faro-service [--config FILE] [--state-dir DIR] goodbye [--reason uninstalled|account-deleted | --moved-to HOST] [--within SECS]
+//! faro-service model-check [--manifest PATH] [--runs N]
 //! ```
 //!
 //! `goodbye` exits 0 once allies have been told (or there was nobody to
@@ -123,6 +124,17 @@ pub enum Command {
         #[arg(long, default_value_t = 60, value_name = "SECS")]
         within: u64,
     },
+    /// Load the image model as `run` does (licence, attribution and
+    /// digest checks), classify a few synthetic frames and time it. Reads
+    /// no state and no screen.
+    ModelCheck {
+        /// Model manifest (default: the packaged one).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Timed classifications.
+        #[arg(long, default_value_t = 20)]
+        runs: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -158,6 +170,11 @@ enum CliError {
     GoodbyeQueued { seq: u64, error: String },
     #[error("cannot start the async runtime: {0}")]
     Runtime(std::io::Error),
+    #[error("image model {}: {source}", path.display())]
+    Model {
+        path: PathBuf,
+        source: crate::model::OpenError,
+    },
 }
 
 /// Entry point for the binary.
@@ -213,6 +230,10 @@ fn load_config(cli: &Cli) -> Result<Config, CliError> {
 }
 
 async fn dispatch(cli: Cli) -> Result<(), CliError> {
+    // Needs no configuration or state.
+    if let Command::ModelCheck { manifest, runs } = &cli.command {
+        return cmd_model_check(manifest.clone(), *runs);
+    }
     let config = load_config(&cli)?;
     match cli.command {
         Command::Enroll {
@@ -291,7 +312,22 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
             opts.deliver_within = Duration::from_secs(within);
             cmd_goodbye(&config, opts).await
         }
+        Command::ModelCheck { .. } => unreachable!("handled above"),
     }
+}
+
+fn cmd_model_check(manifest: Option<PathBuf>, runs: usize) -> Result<(), CliError> {
+    let manifest = manifest
+        .or_else(crate::model::packaged_manifest)
+        .ok_or_else(|| {
+            CliError::Usage("no packaged model on this platform; give --manifest".into())
+        })?;
+    crate::model::check(&manifest, runs, &mut std::io::stdout().lock()).map_err(|source| {
+        CliError::Model {
+            path: manifest,
+            source,
+        }
+    })
 }
 
 async fn cmd_goodbye(config: &Config, opts: GoodbyeOptions) -> Result<(), CliError> {

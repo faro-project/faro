@@ -1,0 +1,4 @@
+# Model weights are built by build.sh and never committed (ARCHITECTURE.md §3.5).
+*.onnx
+*.caffemodel
+__pycache__/

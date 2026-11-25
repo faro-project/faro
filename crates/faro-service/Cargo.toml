@@ -15,6 +15,11 @@ workspace = true
 # configured. Never enable in release builds: without the signature check
 # any program the user runs can pose as the agent (source/ipc.rs).
 dev = []
+# The image classifier on ONNX Runtime (faro-detect's `onnx`). On in the
+# macOS release and package builds (installers/macos/build-pkg.sh), which
+# link ONNX Runtime statically. Without it the service runs with no image
+# model, rating frames from context signals only.
+onnx = ["faro-detect/onnx"]
 
 [lib]
 name = "faro_service"
@@ -57,6 +62,7 @@ libc = "0.2"
 faro-platform-macos.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 faro-update = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

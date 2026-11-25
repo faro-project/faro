@@ -280,6 +280,57 @@ async fn revoked_permission_is_an_urgent_tamper_alert_for_the_ally() {
     dev.shutdown().await;
 }
 
+/// 3b. An image model that doesn't match its manifest (someone replaced the
+///     weights) is never loaded: the service runs on context signals and
+///     reports it as an urgent `integrity_failure` once it is active. The
+///     component is a fixed string, never text from the manifest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_altered_image_model_is_an_urgent_tamper_alert() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    let models = tempfile::tempdir().unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../faro-detect/models/opennsfw/manifest.json"
+    ))
+    .unwrap();
+    // Weights that aren't the pinned ones, and a manifest name an ally
+    // must never see.
+    std::fs::write(models.path().join("opennsfw-int8.onnx"), b"not the model").unwrap();
+    manifest["name"] = "attacker text".into();
+    let path = models.path().join("manifest.json");
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    dev.model_manifest = Some(path);
+
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    assert_eq!(dev.status().tamper_events, 0, "reported once running");
+    w.endorse(&dev).await;
+    dev.wait("tamper event", |s| s.tamper_events >= 1).await;
+    let seq = dev.upload_all().await;
+
+    let ev = w.feed_event(&w.ally.session, &dev, seq).await;
+    assert_eq!(ev.kind, EventKind::Tamper);
+    assert_eq!(ev.urgency, Urgency::Urgent);
+    let item = w.event_item(&w.ally.session, &dev, seq).await;
+    let body: EventBody = serde_json::from_slice(
+        &open_event(&item, &dev, seq, &w.ally.id, &w.ally.keys.enc).expect("ally opens it"),
+    )
+    .expect("EventBody");
+    assert_eq!(
+        body,
+        EventBody::Tamper {
+            signal: TamperSignal::IntegrityFailure {
+                component: faro_service::model::MODEL_CHANGED.into()
+            },
+            account: None,
+        }
+    );
+    dev.shutdown().await;
+}
+
 /// 4. The instance goes down while the device records events: they queue
 ///    in the outbox, and once it is back they are all uploaded in order,
 ///    with no chain-gap (or any other chain) alert.
