@@ -306,6 +306,55 @@ async fn permission_revocation_reports_and_keeps_running() {
     recv_until(&mut conn, is_frames).await;
 }
 
+/// The person at the screen is told Screen Recording is off once, not on
+/// every poll or capture, and again when it goes off after a capture
+/// worked in between.
+#[tokio::test]
+async fn screen_recording_off_is_shown_once_per_change() {
+    let screen_off = || {
+        (
+            faro_agent::SCREEN_RECORDING_OFF.title.to_owned(),
+            faro_agent::SCREEN_RECORDING_OFF.body.to_owned(),
+        )
+    };
+    let script = Script::new();
+    script.with(|s| s.permission = PermissionState::Denied);
+    let (h, server) = Harness::start(script).await;
+    let (mut conn, _) = accept(&server).await;
+    for _ in 0..2 {
+        conn.send(&ServiceMsg::CaptureNow {
+            reason: CaptureReason::Scheduled,
+        })
+        .await
+        .unwrap();
+        recv_until(&mut conn, |m| matches!(m, AgentMsg::CaptureFailed { .. })).await;
+    }
+    // Several polls later (a Pong proves everything before it was handled).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    conn.send(&ServiceMsg::Ping { nonce: 1 }).await.unwrap();
+    recv_until(&mut conn, |m| *m == AgentMsg::Pong { nonce: 1 }).await;
+    assert_eq!(*h.notices.lock().unwrap(), vec![screen_off()]);
+
+    h.script.with(|s| s.permission = PermissionState::Granted);
+    conn.send(&ServiceMsg::CaptureNow {
+        reason: CaptureReason::Scheduled,
+    })
+    .await
+    .unwrap();
+    recv_until(&mut conn, is_frames).await;
+    h.script.with(|s| s.permission = PermissionState::Denied);
+    recv_until(&mut conn, |m| {
+        *m == AgentMsg::Permission {
+            screen: WirePermissionState::Denied,
+            accessibility: None,
+        }
+    })
+    .await;
+    conn.send(&ServiceMsg::Ping { nonce: 2 }).await.unwrap();
+    recv_until(&mut conn, |m| *m == AgentMsg::Pong { nonce: 2 }).await;
+    assert_eq!(*h.notices.lock().unwrap(), vec![screen_off(), screen_off()]);
+}
+
 #[tokio::test]
 async fn os_capture_failure_is_reported() {
     let (h, server) = Harness::start(Script::new()).await;
