@@ -588,7 +588,7 @@ export interface AppInfo {
 }
 
 export type TamperSignal =
-	| { signal: 'permission_revoked'; permission: string }
+	| { signal: 'permission_revoked'; permission: string; never_granted?: boolean }
 	| { signal: 'agent_killed_repeatedly'; count: number; window_secs: number }
 	| { signal: 'integrity_failure'; component: string }
 	| { signal: 'clock_manipulation'; wall_delta_ms: number; mono_delta_ms: number }

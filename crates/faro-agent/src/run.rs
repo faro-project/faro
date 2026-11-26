@@ -128,6 +128,7 @@ impl Agent {
             pending: Pending::default(),
             observing: None,
             poll,
+            screen_off_noticed: false,
         };
         rt.run(pin!(stop)).await
     }
@@ -187,6 +188,11 @@ struct Runtime {
     /// already drained the edges and tamper signals in it.
     observing: Option<oneshot::Receiver<Observation>>,
     poll: Interval,
+    /// The user was told Screen Recording is off, and no capture has
+    /// worked since. (A capture, not the permission check: if the check
+    /// says granted while captures are still refused, the notice must not
+    /// come back with every capture.)
+    screen_off_noticed: bool,
 }
 
 /// Await an optional one-shot; pending forever when there is none, so it can
@@ -325,6 +331,7 @@ impl Runtime {
                 obs = recv_opt(&mut self.observing) => {
                     self.observing = None;
                     let mut obs = obs.map_err(|_| WorkerGone)?;
+                    self.note_screen_permission(obs.permission);
                     self.queue_signals(&mut obs);
                 }
                 _ = self.poll.tick() => self.start_observe()?,
@@ -337,6 +344,18 @@ impl Runtime {
             self.observing = Some(self.worker.observe()?);
         }
         Ok(())
+    }
+
+    /// Tell the user when Screen Recording is off: once, and again only
+    /// after a capture worked in between. Their allies hear about it from
+    /// the service (§3.7); this is how the person at the screen does.
+    fn note_screen_permission(&mut self, screen: PermissionState) {
+        if screen == PermissionState::Denied
+            && !std::mem::replace(&mut self.screen_off_noticed, true)
+        {
+            tracing::warn!("Screen Recording is off for Faro; telling the user");
+            self.notices.screen_recording_off();
+        }
     }
 
     fn queue_signals(&mut self, obs: &mut Observation) {
@@ -434,6 +453,7 @@ impl Runtime {
                 captured_at_mono_ms,
                 frames,
             }) => {
+                self.screen_off_noticed = false;
                 let displays = frames.len();
                 // Each batch is dropped (zeroized) right after it is written;
                 // on a failed send the rest drop with the iterator.
@@ -450,6 +470,7 @@ impl Runtime {
                         PermissionState::Granted => PermissionState::Denied,
                         other => other,
                     };
+                    self.note_screen_permission(screen);
                     let perm = (WirePermissionState::from(screen), out.accessibility);
                     send(
                         conn,
@@ -477,6 +498,7 @@ impl Runtime {
         reported: &mut Reported,
     ) -> Result<(), Fail> {
         let timeout = self.config.send_timeout;
+        self.note_screen_permission(obs.permission);
         self.queue_signals(&mut obs);
         self.flush_pending(conn).await?;
 

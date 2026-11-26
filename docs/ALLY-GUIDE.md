@@ -147,6 +147,7 @@ Anyone who controls their own computer can switch Faro off. Faro can't prevent t
 | What it says | What it means |
 |---|---|
 | **Possible tampering** | Something interfered with Faro. Unlocked, it says what: a permission Faro needs was turned off, Faro was stopped several times, part of Faro was changed, the computer's clock was changed, or someone used an account on the computer while Faro wasn't running in it. |
+| **Screen Recording is off on *computer*** | What a **Possible tampering** alert becomes once unlocked, when the cause is that Faro doesn't have the Mac's Screen Recording permission, so it can't see the screen. It says whether the permission was turned off or Faro never had it on that computer (a new install, or a reinstall, which can drop it). The member is told on the computer too. To fix it, they open System Settings → Privacy & Security → Screen & System Audio Recording and switch on Faro Agent, or, if it's already on, remove it with − and add it again. |
 | **Faro kept restarting** | Faro was stopped and had to restart several times within an hour. |
 | **Faro stopped on a computer** | Faro was uninstalled, moved to another server, or the member deleted their account. |
 | ***Computer* isn't sending what it records** | The computer is online, but something is holding back what Faro records. |

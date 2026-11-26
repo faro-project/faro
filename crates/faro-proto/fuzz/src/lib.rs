@@ -520,6 +520,7 @@ fn daily_report() -> DailyReport {
         ts_ms: T0 + 10,
         signal: TamperSignal::PermissionRevoked {
             permission: "screen_recording".into(),
+            never_granted: true,
         },
         account: Some("alex".into()),
     };

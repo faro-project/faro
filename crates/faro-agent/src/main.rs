@@ -156,13 +156,8 @@ fn run_with_ui(args: RunArgs) -> ExitCode {
             quit.notify_one();
         })
     };
-    let handle = ui.handle();
+    let notices = MacNotices(ui.handle());
     offer_enrollment(&ui, &args);
-    let notices = move |title: &str, body: &str| {
-        tracing::info!(title, "showing a service notice");
-        tracing::debug!(title, body, "service notice body");
-        handle.show_notice(title, body);
-    };
     let agent = std::thread::Builder::new()
         .name("faro-agent".to_owned())
         .spawn(move || {
@@ -176,6 +171,31 @@ fn run_with_ui(args: RunArgs) -> ExitCode {
     ui.run();
     // AppKit's loop doesn't return on its own; the agent thread exits.
     ExitCode::FAILURE
+}
+
+/// Notices in the menu-bar UI.
+#[cfg(target_os = "macos")]
+struct MacNotices(faro_platform_macos::ui::UiHandle);
+
+#[cfg(target_os = "macos")]
+impl faro_agent::NoticeSink for MacNotices {
+    fn show(&mut self, title: &str, body: &str) {
+        tracing::info!(title, "showing a service notice");
+        tracing::debug!(title, body, "service notice body");
+        self.0.show_notice(title, body);
+    }
+
+    fn screen_recording_off(&mut self) {
+        let n = faro_agent::SCREEN_RECORDING_OFF;
+        self.0
+            .show_settings_notice(faro_platform_macos::ui::SettingsNotice {
+                title: n.title.to_owned(),
+                body: n.body.to_owned(),
+                open: n.open.to_owned(),
+                later: n.later.to_owned(),
+                url: n.url.to_owned(),
+            });
+    }
 }
 
 /// `faro://enroll` links and "Enroll this computer…" (issue #62): each runs
