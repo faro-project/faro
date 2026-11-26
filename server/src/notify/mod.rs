@@ -176,8 +176,9 @@ async fn fan_out(
     match target {
         Target::Alert(id) => alerts::mark_dispatched(&mut *tx, id, now).await?,
         Target::Report(id) => reports::mark_dispatched(&mut *tx, id, now).await?,
-        // Written with their recipients by `crate::roles`; never fanned out.
-        Target::AdminLog(_) => {}
+        // Written with their recipients by `crate::roles` and
+        // `crate::groups`; never fanned out.
+        Target::AdminLog(_) | Target::GroupNotice(_) => {}
     }
     tx.commit().await?;
     Ok(created)
@@ -692,6 +693,15 @@ fn admin_log_text(
                 people,
             );
         }
+        // Never queued as a notification (participants have their own
+        // content-free notice); worded in case it ever is.
+        Action::GroupArchived => {
+            return (
+                format!("A group on {instance} was archived"),
+                format!("{who} archived a group on {instance}."),
+                people,
+            );
+        }
         Action::AdminGranted | Action::AdminRevoked => {}
     }
     if n.recipient_id == n.member_id {
@@ -711,7 +721,8 @@ fn admin_log_text(
             | Action::DeletionCancelled
             | Action::AccountCreated
             | Action::AccountDisabled
-            | Action::AccountEnabled => (
+            | Action::AccountEnabled
+            | Action::GroupArchived => (
                 format!("You are no longer an admin of {instance}"),
                 format!(
                     "{who} removed your admin role on {instance}{how}. You can still sign in, and \
@@ -737,7 +748,8 @@ fn admin_log_text(
         | Action::DeletionCancelled
         | Action::AccountCreated
         | Action::AccountDisabled
-        | Action::AccountEnabled => (
+        | Action::AccountEnabled
+        | Action::GroupArchived => (
             format!("{person} is no longer an admin of {instance}"),
             format!(
                 "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \
@@ -932,6 +944,51 @@ pub async fn send_digests(state: &AppState) -> Result<SendSummary, AppError> {
     Ok(s)
 }
 
+/// Subject and text of a group notice. **Never names the group or anything
+/// about it** (GROUPS.md principle 7): email passes through third parties,
+/// and a group's name is often sensitive. The name is shown only inside
+/// Faro, after sign-in.
+pub(crate) fn group_notice_text(
+    instance: &str,
+    g: &crate::db::repo::notifications::GroupNoticeInfo,
+) -> (String, String) {
+    use crate::db::repo::group_notices::NoticeKind;
+    let (subject, line) = match (NoticeKind::parse(&g.kind), g.summary) {
+        (Some(NoticeKind::GroupJoined | NoticeKind::GroupLeft), true) => (
+            format!("People joined or left a group you facilitate on {instance}"),
+            "People joined or left a group you facilitate today. Open Faro to see who.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupJoined), false) => (
+            format!("Someone joined a group you facilitate on {instance}"),
+            "Someone joined your group. Open Faro to see who.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupLeft), false) => (
+            format!("Someone left a group you facilitate on {instance}"),
+            "Someone left your group. Open Faro to see who.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupRemoved), _) => (
+            format!("You were removed from a group on {instance}"),
+            "You were removed from a group. Your alliances are not affected.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupArchived), _) => (
+            format!("A group you are in on {instance} was closed"),
+            "A group you're in was closed. It stays readable for 30 days. Your alliances are \
+             not affected."
+                .to_owned(),
+        ),
+        (Some(NoticeKind::GroupFacilitatorOffered), _) => (
+            format!("You were offered to facilitate a group on {instance}"),
+            "A group you're in has no facilitator. Open Faro to take it on, within 14 days."
+                .to_owned(),
+        ),
+        (None, _) => (
+            format!("News about a group on {instance}"),
+            "There is news about a group you're in. Open Faro to see.".to_owned(),
+        ),
+    };
+    (subject, line)
+}
+
 fn on_device(n: &DueNotification) -> String {
     match &n.device_name {
         Some(d) => format!(" on {d}"),
@@ -952,6 +1009,14 @@ pub fn compose_immediate(state: &AppState, n: &DueNotification) -> Email {
             to: n.recipient_email.clone(),
             subject,
             text: format!("{line}\n\n{link}\n"),
+        };
+    }
+    if let Some(g) = &n.group_notice {
+        let (subject, line) = group_notice_text(instance, g);
+        return Email {
+            to: n.recipient_email.clone(),
+            subject,
+            text: format!("{line}\n\n{url}\n"),
         };
     }
     if let Some(k) = account_status(n) {
@@ -1016,7 +1081,14 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
     }
     let cfg = state.config();
     let mut per: BTreeMap<&str, Counts> = BTreeMap::new();
+    // Group notices (content-free, one line each).
+    let mut group_lines: Vec<String> = Vec::new();
     for n in items {
+        if let Some(g) = &n.group_notice {
+            let (subject, _) = group_notice_text(&cfg.instance.name, g);
+            group_lines.push(format!("- {subject}."));
+            continue;
+        }
         let c = per.entry(n.member_id.as_str()).or_default();
         c.name.clone_from(&n.member_name);
         if let Some(a) = &n.admin_log {
@@ -1050,7 +1122,7 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
             format!("{n} {many}")
         }
     };
-    let mut lines = Vec::new();
+    let mut lines = group_lines;
     for c in per.values() {
         if c.removed {
             lines.push(format!("- You are no longer an ally for {}.", c.name));
@@ -1148,6 +1220,7 @@ mod tests {
             alert_detail: Some(detail.to_owned()),
             alert_created_at_ms: Some(REQUESTED + 3600 * 1000),
             admin_log: None,
+            group_notice: None,
         }
     }
 

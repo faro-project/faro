@@ -566,6 +566,15 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             .rows_affected();
     }
 
+    // Groups: archived ones are deleted after 30 days, unaccepted
+    // facilitator offers end, old invitations go (GROUPS.md §9, §18).
+    {
+        let mut conn = state.db().pool().acquire().await?;
+        let g = crate::db::repo::groups::sweep(&mut conn, now).await?;
+        s.other += g.groups_deleted;
+        s.expired_secrets += g.invites_deleted;
+    }
+
     s.orphan_files = sweep_orphans(state, now).await?;
     tracing::info!(
         events = s.events,

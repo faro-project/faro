@@ -28,8 +28,8 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, branding, devices, events, feed, heartbeat, invites, keys,
-    manifests, prefs, privacy, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, groups, heartbeat, invites,
+    keys, manifests, prefs, privacy, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -118,7 +118,7 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/v1/invites/{token}/accept",
-            post(invites::accept.layer(limited)),
+            post(invites::accept.layer(limited.clone())),
         )
         .route("/v1/me/ally-key", get(invites::get_my_ally_key))
         .route(
@@ -136,6 +136,50 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/v1/ally/members/{member_id}", delete(allies::leave))
         .route("/v1/ally/feed", get(feed::get_feed))
         .route("/v1/blobs/{id}", get(feed::get_blob))
+        // Groups (docs/GROUPS.md).
+        .route("/v1/groups", get(groups::list_mine).post(groups::create))
+        .route(
+            "/v1/groups/{id}",
+            get(groups::get)
+                .patch(groups::patch)
+                .delete(groups::archive),
+        )
+        .route("/v1/groups/{id}/participants", get(groups::roster))
+        .route("/v1/groups/{id}/history", get(groups::history))
+        .route(
+            "/v1/groups/{id}/invites",
+            get(groups::list_invites).post(groups::create_invites),
+        )
+        .route("/v1/groups/{id}/me", delete(groups::leave))
+        .route(
+            "/v1/groups/{id}/participants/{user_id}",
+            delete(groups::remove),
+        )
+        .route(
+            "/v1/groups/{id}/participants/{user_id}/role",
+            put(groups::set_role),
+        )
+        .route(
+            "/v1/groups/{id}/facilitator-offer/accept",
+            post(groups::accept_facilitator_offer),
+        )
+        .route(
+            "/v1/groups/{id}/facilitator-offer/decline",
+            post(groups::decline_facilitator_offer),
+        )
+        .route("/v1/me/group-invites", get(groups::my_invites))
+        .route(
+            "/v1/group-invites/{token}",
+            get(groups::get_invite.layer(limited.clone())),
+        )
+        .route(
+            "/v1/group-invites/{token}/accept",
+            post(groups::accept_invite.layer(limited.clone())),
+        )
+        .route(
+            "/v1/group-invites/{token}/decline",
+            post(groups::decline_invite.layer(limited)),
+        )
         // Preferences.
         .route(
             "/v1/me/notification-prefs",
@@ -179,6 +223,8 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/admin/api/users/{id}/admin", put(admin::set_admin_role))
         .route("/admin/api/log", get(admin::log))
+        .route("/admin/api/groups", get(admin::list_groups))
+        .route("/admin/api/groups/{id}", delete(admin::archive_group))
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),

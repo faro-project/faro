@@ -31,7 +31,7 @@ use crate::db::repo::alerts::{self, AlertSource, NewAlert};
 use crate::db::repo::invites::InviteKind;
 use crate::db::repo::notifications::{self, DeliveryCounts};
 use crate::db::repo::stats::{self, DeviceCounts, LastSeenBuckets, StorageBytes, UserCounts};
-use crate::db::repo::{allies, instance, sessions, users};
+use crate::db::repo::{allies, groups, instance, sessions, users};
 use crate::error::{AppError, AppResult};
 use crate::mailer::Email;
 use crate::settings::{InstanceSettings, SettingsPatch, StoredSettings};
@@ -447,5 +447,61 @@ async fn set_account_disabled(
     Ok(Json(AccountStatus {
         user_id: target,
         disabled,
+    }))
+}
+
+/// `GET /admin/api/groups`: every group as **metadata only**: name, size,
+/// facilitators, whether listed, dates, and whether it has no facilitator
+/// (GROUPS.md §11). Never a roster beyond the facilitators, a description,
+/// or anything inside a group.
+pub async fn list_groups(
+    State(state): State<AppState>,
+    s: SessionUser,
+) -> AppResult<Json<Vec<groups::AdminGroupRow>>> {
+    s.require_admin()?;
+    Ok(Json(groups::list_for_admin(state.db().pool()).await?))
+}
+
+/// `DELETE /admin/api/groups/{id}`: archive a group, for example over an
+/// abusive name. Everyone in it is told ("A group you're in was closed",
+/// without naming it), and the admin log records who did it. Alliances stay.
+/// Read-only for 30 days, then deleted. An admin who is not in the group
+/// still sees nothing inside it.
+pub async fn archive_group(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<super::groups::Archived>> {
+    s.require_admin()?;
+    let now = state.now_ms();
+    let mut tx = state.db().begin_write().await?;
+    let group = groups::by_id(&mut *tx, &id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if group.is_archived() {
+        return Err(AppError::conflict(
+            "group_archived",
+            "this group is already archived",
+        ));
+    }
+    crate::groups::archive(&mut tx, &id, Some(&s.user.id), now).await?;
+    admin_log::insert_for_group(
+        &mut *tx,
+        admin_log::Action::GroupArchived,
+        &id,
+        &s.user.id,
+        admin_log::Via::Console,
+        now,
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::info!(admin = %s.user.id, group = %id, "group archived by an admin");
+    let group = groups::by_id(state.db().pool(), &id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(super::groups::Archived {
+        id,
+        archived_at_ms: group.archived_at_ms.unwrap_or(now),
+        delete_after_ms: group.delete_after_ms.unwrap_or(now),
     }))
 }

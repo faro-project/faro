@@ -27,7 +27,94 @@ pub struct InstanceSettings {
     pub retention: RetentionConfig,
     pub liveness: LivenessConfig,
     pub updates: UpdateSettings,
+    /// Groups (GROUPS.md §13). Not in the config file: console only.
+    #[serde(default)]
+    pub groups: GroupSettings,
 }
+
+/// Who may create groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhoCanCreateGroups {
+    Anyone,
+    Admins,
+}
+
+/// Who may list a group in the directory (the directory itself is built
+/// separately; this is stored for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhoCanListGroups {
+    Facilitators,
+    Admins,
+    Nobody,
+}
+
+/// Who may invite people into a group. A group's facilitators may narrow
+/// this for their group (never widen it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhoCanInvite {
+    Facilitators,
+    Participants,
+}
+
+impl WhoCanInvite {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WhoCanInvite::Facilitators => "facilitators",
+            WhoCanInvite::Participants => "participants",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "facilitators" => Some(Self::Facilitators),
+            "participants" => Some(Self::Participants),
+            _ => None,
+        }
+    }
+
+    /// The narrower of two settings.
+    pub fn narrowest(self, other: WhoCanInvite) -> WhoCanInvite {
+        if self == WhoCanInvite::Facilitators || other == WhoCanInvite::Facilitators {
+            WhoCanInvite::Facilitators
+        } else {
+            WhoCanInvite::Participants
+        }
+    }
+}
+
+/// Instance-wide group settings (GROUPS.md §13). There is deliberately no
+/// instance-wide group size limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupSettings {
+    /// Off hides the feature: existing groups become read-only and unlisted.
+    pub enabled: bool,
+    pub who_can_create: WhoCanCreateGroups,
+    pub who_can_list: WhoCanListGroups,
+    pub who_can_invite: WhoCanInvite,
+    /// Under `invite-only` registration, whether a group invite lets a new
+    /// address sign up (as an ally invite does).
+    pub invites_create_accounts: bool,
+    pub max_groups_per_user: u32,
+}
+
+impl Default for GroupSettings {
+    fn default() -> Self {
+        GroupSettings {
+            enabled: true,
+            who_can_create: WhoCanCreateGroups::Anyone,
+            who_can_list: WhoCanListGroups::Facilitators,
+            who_can_invite: WhoCanInvite::Facilitators,
+            invites_create_accounts: true,
+            max_groups_per_user: 10,
+        }
+    }
+}
+
+/// Upper bound on `max_groups_per_user`.
+pub const MAX_GROUPS_PER_USER_LIMIT: u32 = 1000;
 
 /// The admin-editable part of [`crate::config::UpdatesConfig`]. Where
 /// updates come from (root of trust, upstream) stays in the config file:
@@ -51,6 +138,12 @@ pub struct StoredSettings {
     pub retention_alert_days: Option<u32>,
     pub liveness_grace_secs: Option<u64>,
     pub update_channel: Option<String>,
+    pub groups_enabled: Option<bool>,
+    pub groups_who_can_create: Option<WhoCanCreateGroups>,
+    pub groups_who_can_list: Option<WhoCanListGroups>,
+    pub groups_who_can_invite: Option<WhoCanInvite>,
+    pub groups_invites_create_accounts: Option<bool>,
+    pub groups_max_per_user: Option<u32>,
 }
 
 /// `PATCH /admin/api/settings` body: any subset of fields.
@@ -62,6 +155,19 @@ pub struct SettingsPatch {
     pub retention: Option<RetentionPatch>,
     pub liveness_grace_secs: Option<u64>,
     pub update_channel: Option<String>,
+    pub groups: Option<GroupSettingsPatch>,
+}
+
+/// Any subset of [`GroupSettings`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GroupSettingsPatch {
+    pub enabled: Option<bool>,
+    pub who_can_create: Option<WhoCanCreateGroups>,
+    pub who_can_list: Option<WhoCanListGroups>,
+    pub who_can_invite: Option<WhoCanInvite>,
+    pub invites_create_accounts: Option<bool>,
+    pub max_groups_per_user: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +224,26 @@ impl StoredSettings {
         if let Some(c) = &p.update_channel {
             self.update_channel = Some(c.clone());
         }
+        if let Some(g) = &p.groups {
+            if let Some(v) = g.enabled {
+                self.groups_enabled = Some(v);
+            }
+            if let Some(v) = g.who_can_create {
+                self.groups_who_can_create = Some(v);
+            }
+            if let Some(v) = g.who_can_list {
+                self.groups_who_can_list = Some(v);
+            }
+            if let Some(v) = g.who_can_invite {
+                self.groups_who_can_invite = Some(v);
+            }
+            if let Some(v) = g.invites_create_accounts {
+                self.groups_invites_create_accounts = Some(v);
+            }
+            if let Some(v) = g.max_groups_per_user {
+                self.groups_max_per_user = Some(v);
+            }
+        }
     }
 }
 
@@ -131,6 +257,7 @@ impl InstanceSettings {
             updates: UpdateSettings {
                 channel: c.updates.channel.clone(),
             },
+            groups: GroupSettings::default(),
         }
     }
 
@@ -175,7 +302,32 @@ impl InstanceSettings {
                 "liveness grace must be at most {MAX_GRACE_SECS} seconds"
             )));
         }
-        Ok(Self::from_config(&c))
+        let mut out = Self::from_config(&c);
+        let g = &mut out.groups;
+        if let Some(v) = stored.groups_enabled {
+            g.enabled = v;
+        }
+        if let Some(v) = stored.groups_who_can_create {
+            g.who_can_create = v;
+        }
+        if let Some(v) = stored.groups_who_can_list {
+            g.who_can_list = v;
+        }
+        if let Some(v) = stored.groups_who_can_invite {
+            g.who_can_invite = v;
+        }
+        if let Some(v) = stored.groups_invites_create_accounts {
+            g.invites_create_accounts = v;
+        }
+        if let Some(v) = stored.groups_max_per_user {
+            if v == 0 || v > MAX_GROUPS_PER_USER_LIMIT {
+                return Err(ConfigError::Invalid(format!(
+                    "groups per user must be between 1 and {MAX_GROUPS_PER_USER_LIMIT}"
+                )));
+            }
+            g.max_groups_per_user = v;
+        }
+        Ok(out)
     }
 }
 
