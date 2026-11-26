@@ -2,12 +2,13 @@
 
 import { api, ApiError, describeError } from './api.ts';
 import { groupErrorMessage, type Links } from './groups.ts';
+import { proposalErrorMessage } from './proposals.ts';
 import type { MyAllies, SupportedMember } from './types.ts';
 
 /** A sentence for an error from the groups API. */
 export function groupError(e: unknown): string {
 	if (e instanceof ApiError) {
-		const m = groupErrorMessage(e.code, e.status);
+		const m = proposalErrorMessage(e.code) ?? groupErrorMessage(e.code, e.status);
 		if (m) return m;
 	}
 	return describeError(e);

@@ -146,6 +146,8 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/v1/groups/{id}/participants", get(groups::roster))
         .route("/v1/groups/{id}/history", get(groups::history))
+        .route("/v1/groups/{id}/me/allies", get(groups::my_allies_here))
+        .route("/v1/groups/{id}/user-search", get(groups::user_search))
         .route(
             "/v1/groups/{id}/invites",
             get(groups::list_invites).post(groups::create_invites),
