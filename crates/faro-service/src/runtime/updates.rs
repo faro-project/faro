@@ -5,11 +5,9 @@ use super::core::Control;
 use super::status::StatusTx;
 use crate::update::artifacts::{ArtifactOutcome, Artifacts};
 use crate::update::{CheckError, ClientUpdater, Outcome, Settled};
-use faro_core::clock::Clock;
 use faro_ipc::status::short_reason;
 use faro_proto::body::TamperSignal;
 use rand::Rng;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -78,7 +76,6 @@ pub async fn update_loop(
     every: Duration,
     control: mpsc::Sender<Control>,
     status: StatusTx,
-    clock: Arc<dyn Clock>,
     mut stop: watch::Receiver<bool>,
 ) {
     match updater.settle_pending() {
@@ -104,7 +101,7 @@ pub async fn update_loop(
         let outcome = updater.check().await;
         let (result, failed) = describe(&outcome);
         let channel = updater.last_channel();
-        let now = clock.wall_ms();
+        let now = updater.clock().wall_ms();
         status.update(|s| {
             s.updates.channel = channel;
             s.updates.last_check_ms = Some(now);

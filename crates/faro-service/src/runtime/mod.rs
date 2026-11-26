@@ -629,7 +629,6 @@ impl Service {
                 config.updates.check_interval(),
                 control_tx.clone(),
                 status.clone(),
-                clock.clone(),
                 stop_rx.clone(),
             ));
         }

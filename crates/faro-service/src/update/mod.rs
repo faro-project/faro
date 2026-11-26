@@ -275,6 +275,11 @@ impl ClientUpdater {
         &self.spec
     }
 
+    /// The clock checks are timed with.
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
     /// The channel the instance named at the last check that reached its
     /// update information.
     pub fn last_channel(&self) -> Option<String> {
