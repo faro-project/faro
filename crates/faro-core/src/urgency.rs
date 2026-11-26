@@ -428,6 +428,7 @@ mod tests {
             },
             TamperSignal::PermissionRevoked {
                 permission: "screen".into(),
+                never_granted: false,
             },
             TamperSignal::AgentKilledRepeatedly {
                 count: 3,

@@ -17,6 +17,10 @@
 //! notices wait behind it, and one that arrives anyway (the menu's "Show
 //! the monitoring notice…") is shown again after it closes.
 //!
+//! The agent's own warnings, such as Screen Recording being off, are
+//! another alert ([`UiHandle::show_settings_notice`]) whose first button
+//! opens the System Settings pane that fixes it.
+//!
 //! # Enrolling
 //!
 //! The agent can also enroll the computer (issue #62). The bundle registers
@@ -54,6 +58,7 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSApplicationTerminateReply, NSFloatingWindowLevel, NSImage, NSMenu,
     NSMenuItem, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
+    NSWorkspace,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
@@ -94,6 +99,8 @@ struct Ivars {
     showing: Cell<bool>,
     /// Show the notice again when the open alert closes.
     again: Cell<bool>,
+    /// A settings notice ([`UiHandle::show_settings_notice`]) is open.
+    settings_showing: Cell<bool>,
     on_quit: Box<dyn Fn()>,
     on_enroll: OnceCell<EnrollHandler>,
     status_item: OnceCell<Retained<NSStatusItem>>,
@@ -167,6 +174,7 @@ impl Delegate {
             notice: RefCell::new((MONITORED.to_owned(), DEFAULT_NOTICE_BODY.to_owned())),
             showing: Cell::new(false),
             again: Cell::new(false),
+            settings_showing: Cell::new(false),
             on_quit,
             on_enroll: OnceCell::new(),
             status_item: OnceCell::new(),
@@ -251,6 +259,32 @@ impl Delegate {
         }
         iv.showing.set(false);
     }
+
+    /// Show a warning whose first button opens `url`, unless one is
+    /// already open (the agent sends each once anyway).
+    fn present_settings(&self, n: &SettingsNotice) {
+        let iv = self.ivars();
+        if iv.settings_showing.replace(true) {
+            return;
+        }
+        let mtm = self.mtm();
+        let a = alert(mtm, &n.title, &n.body, true);
+        a.addButtonWithTitle(&NSString::from_str(&n.open));
+        a.addButtonWithTitle(&NSString::from_str(&n.later));
+        if run_in_front(mtm, &a) {
+            open_url(&n.url);
+        }
+        iv.settings_showing.set(false);
+    }
+}
+
+/// Open a URL (here, a System Settings pane) with its default handler.
+fn open_url(url: &str) {
+    let opened = NSURL::URLWithString(&NSString::from_str(url))
+        .is_some_and(|u| NSWorkspace::sharedWorkspace().openURL(&u));
+    if !opened {
+        eprintln!("faro-agent: could not open {url}");
+    }
 }
 
 fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retained<NSMenuItem> {
@@ -311,6 +345,19 @@ fn run_in_front(mtm: MainThreadMarker, alert: &NSAlert) -> bool {
     #[allow(deprecated)]
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     alert.runModal() == NSAlertFirstButtonReturn
+}
+
+/// The words of a notice that offers to open a System Settings pane (see
+/// [`UiHandle::show_settings_notice`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsNotice {
+    pub title: String,
+    pub body: String,
+    /// The first button: opens `url`.
+    pub open: String,
+    /// The second button: only closes the notice.
+    pub later: String,
+    pub url: String,
 }
 
 /// The words of a two-field window (see [`UiHandle::ask_enroll_target`]).
@@ -464,6 +511,19 @@ impl UiHandle {
             let a = alert(mtm, title, body, warning);
             a.addButtonWithTitle(ns_string!("OK"));
             run_in_front(mtm, &a);
+        });
+    }
+
+    /// Show a warning with a button that opens a System Settings pane, for
+    /// example Screen Recording when Faro doesn't have it. Doesn't block,
+    /// and doesn't replace the monitoring notice in the menu.
+    pub fn show_settings_notice(&self, notice: SettingsNotice) {
+        DispatchQueue::main().exec_async(move || {
+            UI.with(|ui| {
+                if let Some(ui) = ui.get() {
+                    ui.present_settings(&notice);
+                }
+            });
         });
     }
 

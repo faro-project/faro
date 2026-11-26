@@ -18,6 +18,7 @@
 //! | [`enroll_server`] | enrolling from the agent: the enroll socket, an administrator's approval |
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
 //! | [`model`] | the image classifier: the packaged model, its checks, `model-check` |
+//! | [`thresholds`] | `[dev_thresholds]`: lower detection thresholds, in `dev` builds only |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
 //! | [`update`] | client self-update: verify against the project root, download, install; models and blocklists from the same channel ([`update::artifacts`]) |
 //! | [`logging`] | where the log goes (the packaged service's log file) and how much |
@@ -39,8 +40,9 @@
 //!    member-signed endorsement, never trust-on-first-use.
 //! 3. **Tamper can't be silenced.** Tamper signals become urgent `tamper`
 //!    events (urgency floors applied by `faro-core`); settings changes are
-//!    announced; detector thresholds are not configurable and tamper
-//!    thresholds can only be tightened. The agent is accepted only with a
+//!    announced; detector thresholds are not configurable (only a `dev`
+//!    build can lower them, [`thresholds`]) and tamper thresholds can only
+//!    be tightened. The agent is accepted only with a
 //!    valid code signature (root service), its departures are classified by
 //!    the service rather than by what it says, a session without an agent
 //!    becomes an urgent `unmonitored_user_session` event, and a session at
@@ -63,6 +65,7 @@ pub mod model;
 pub mod runtime;
 pub mod source;
 pub mod state;
+pub mod thresholds;
 pub mod update;
 
 pub use config::Config;

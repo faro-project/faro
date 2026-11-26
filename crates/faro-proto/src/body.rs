@@ -152,8 +152,14 @@ pub fn account_label(name: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "signal", rename_all = "snake_case")]
 pub enum TamperSignal {
+    /// A permission Faro needs is off. `never_granted` means the service
+    /// never saw it granted to this account on this enrollment (a new
+    /// install, or a reinstall that dropped the grant) rather than saw it
+    /// turned off (§3.7). Bodies without the field read as `false`.
     PermissionRevoked {
         permission: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        never_granted: bool,
     },
     AgentKilledRepeatedly {
         count: u32,
@@ -192,6 +198,10 @@ pub enum TamperSignal {
     VpnActive,
     VirtualMachine,
     RemoteDesktop,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl TamperSignal {
@@ -318,6 +328,7 @@ mod tests {
         let b = EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
                 permission: "screen_recording".into(),
+                never_granted: false,
             },
             account: Some("alex".into()),
         };
@@ -338,6 +349,32 @@ mod tests {
         let b: EventBody = serde_json::from_str(old).unwrap();
         assert_eq!(b, EventBody::tamper(TamperSignal::VpnActive));
         assert!(!serde_json::to_string(&b).unwrap().contains("account"));
+    }
+
+    #[test]
+    fn never_granted_is_optional_on_the_wire() {
+        // Bodies written before the field existed read as "turned off", and
+        // a signal without it encodes exactly as before, so older readers
+        // see the same JSON.
+        let old = r#"{"signal":"permission_revoked","permission":"screen_recording"}"#;
+        let s: TamperSignal = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            s,
+            TamperSignal::PermissionRevoked {
+                permission: "screen_recording".into(),
+                never_granted: false,
+            }
+        );
+        assert_eq!(serde_json::to_string(&s).unwrap(), old);
+        let missing = TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: true,
+        };
+        let j = serde_json::to_value(&missing).unwrap();
+        assert_eq!(j["signal"], "permission_revoked");
+        assert_eq!(j["never_granted"], true);
+        assert_eq!(serde_json::from_value::<TamperSignal>(j).unwrap(), missing);
+        assert!(!missing.is_context_only());
     }
 
     #[test]

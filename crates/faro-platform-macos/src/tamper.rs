@@ -65,11 +65,13 @@ pub fn edges(prev: &TamperObservation, next: &TamperObservation) -> Vec<TamperSi
     if prev.screen_recording && !next.screen_recording {
         out.push(TamperSignal::PermissionRevoked {
             permission: PERMISSION_SCREEN_RECORDING.into(),
+            never_granted: false,
         });
     }
     if prev.accessibility && !next.accessibility {
         out.push(TamperSignal::PermissionRevoked {
             permission: PERMISSION_ACCESSIBILITY.into(),
+            never_granted: false,
         });
     }
     if !prev.virtual_machine && next.virtual_machine {
@@ -274,6 +276,7 @@ mod tests {
     fn revoked(p: &str) -> TamperSignal {
         TamperSignal::PermissionRevoked {
             permission: p.into(),
+            never_granted: false,
         }
     }
 
