@@ -87,7 +87,7 @@ Every OS runs the same three processes.
 |---|---|---|---|
 | **Faro Service** | root / SYSTEM | Boot to shutdown | Owns state, keys, the classifier, the event log, the outbox, uploads and updates. Watches over the agent. Sends heartbeats. |
 | **Session Agent** | Logged-in user | One per interactive session, for **every** OS account | Screen capture, active window and app info, idle and lock state, browser-extension bridge. Shows the tray icon and the login notice (§12). Holds as little state as possible. |
-| **Tray UI** (Tauri) | Logged-in user | Optional | Status, pausing (which allies are told about), ally management, viewing your own reports. |
+| **Tray UI** (Tauri) | Logged-in user | Optional | Status, pausing (which allies are told about), ally management, viewing your own reports. *Status ([#89](https://github.com/faro-project/faro/issues/89)): on macOS the status part lives in the session agent's menu-bar menu, not a separate app: what Faro is doing ("Monitoring", "Paused until …", "Not enrolled", "Waiting for approval in the web app", or a problem such as "Screen Recording is off" or "Can't reach *instance*") and what to do, with an item that opens the fix, plus "Open Faro" and "About Faro…". It only shows state: nothing on it stops, pauses or hides monitoring. Pausing, ally management and reports stay in the web app.* |
 
 **Why split it:** screen capture *has* to happen inside the user's graphical session. Keys, the queue of unsent events and the classifier live in the privileged service, which a standard user cannot touch. If the agent is killed, the service relaunches it and logs `agent_restarted`. If the service is killed, the instance sees heartbeats stop.
 
@@ -101,6 +101,7 @@ Every OS runs the same three processes.
 - macOS and Linux: Unix domain sockets in a root-owned directory, one per account (`agent.<uid>.sock`, owned by that account, mode 0600), with peer-credential checks and verification of the connecting binary's code signature. The agent's `Hello` names its session, which must be one the OS lists for that account.
 - Windows: a named pipe with a DACL, plus an Authenticode check on the client's image.
 - Protocol: length-prefixed, versioned `serde` messages using `postcard` or CBOR.
+- Status: the service sends each agent `ServiceMsg::Status`, a view of its status scoped to that agent's session and the computer (`faro_ipc::MemberStatus::for_session`), for the status menu. It never names another account or session, and nothing the agent sends changes it. Before the agent's socket exists (not enrolled, or waiting for approval), the agent asks the enroll socket's `Status` instead.
 - Frame transfer: the agent downscales to a longest side of 768 px and sends **raw pixels**, so the service never decodes image formats it didn't produce.
 
 ### 3.2 Code layout: one Rust core plus platform crates
@@ -574,7 +575,7 @@ Institutions running instances (churches, colleges) make consent even more impor
 6. `faro-server` skeleton on SQLite with built-in ACME, running on a Raspberry Pi.
 
 **Phase 1: MVP (macOS + Windows clients, self-hostable server)**
-Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college).
+Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college). *Status of the tray UI: on macOS, the agent's menu-bar status menu ([#89](https://github.com/faro-project/faro/issues/89), §3.1); no separate tray app, and nothing yet on Windows.*
 
 **Phase 2: Hardening, Linux, institutions**
 Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
