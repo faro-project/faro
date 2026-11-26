@@ -43,10 +43,30 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("member_manifests", "member_id", Clears::Rows),
     ("admin_log", "user_id", Clears::SetNull),
     ("admin_log", "actor_id", Clears::SetNull),
+    ("accountability_groups", "created_by", Clears::SetNull),
+    ("accountability_groups", "archived_by", Clears::SetNull),
+    (
+        "accountability_groups",
+        "facilitator_offer_user_id",
+        Clears::SetNull,
+    ),
+    ("group_participants", "user_id", Clears::Rows),
+    ("group_participants", "invited_by", Clears::SetNull),
+    ("group_history", "subject_id", Clears::SetNull),
+    ("group_history", "actor_id", Clears::SetNull),
+    ("group_invites", "inviter_id", Clears::Rows),
+    ("group_invites", "user_id", Clears::Rows),
+    ("group_invites", "used_by", Clears::SetNull),
+    ("group_notices", "recipient_id", Clears::Rows),
+    ("group_notices", "actor_id", Clears::SetNull),
 ];
 
 /// Columns holding the user's email address rather than their id.
-pub const EMAIL_COLUMNS: &[(&str, &str)] = &[("invites", "email"), ("magic_links", "email")];
+pub const EMAIL_COLUMNS: &[(&str, &str)] = &[
+    ("invites", "email"),
+    ("magic_links", "email"),
+    ("group_invites", "email"),
+];
 
 /// What happens to rows naming the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +115,21 @@ pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM invites WHERE inviter_id = $1",
     "DELETE FROM magic_links WHERE user_id = $1",
     "DELETE FROM sessions WHERE user_id = $1",
+    // Groups (GROUPS.md §18). Alliances formed in a group are ally links,
+    // removed above; history keeps its entries without the person
+    // ("Someone left").
+    "UPDATE accountability_groups SET created_by = NULL WHERE created_by = $1",
+    "UPDATE accountability_groups SET archived_by = NULL WHERE archived_by = $1",
+    "UPDATE accountability_groups SET facilitator_offer_user_id = NULL WHERE facilitator_offer_user_id = $1",
+    "UPDATE group_history SET subject_id = NULL WHERE subject_id = $1",
+    "UPDATE group_history SET actor_id = NULL WHERE actor_id = $1",
+    "UPDATE group_participants SET invited_by = NULL WHERE invited_by = $1",
+    "DELETE FROM group_participants WHERE user_id = $1",
+    "UPDATE group_invites SET used_by = NULL WHERE used_by = $1",
+    "DELETE FROM group_invites WHERE inviter_id = $1",
+    "DELETE FROM group_invites WHERE user_id = $1",
+    "UPDATE group_notices SET actor_id = NULL WHERE actor_id = $1",
+    "DELETE FROM group_notices WHERE recipient_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations
@@ -102,6 +137,7 @@ pub const PURGE_BY_ID: &[&str] = &[
 pub const PURGE_BY_EMAIL: &[&str] = &[
     "DELETE FROM invites WHERE email = $1",
     "DELETE FROM magic_links WHERE email = $1",
+    "DELETE FROM group_invites WHERE email = $1",
 ];
 
 /// The notice kinds the purge waits for (see [`notices_final`]).
@@ -236,6 +272,11 @@ pub async fn delete_rows(
     // A device enrolled in a race with the start of the purge is refused
     // like the others.
     insert_device_tombstones(&mut *conn, user, now_ms).await?;
+    // Groups first: a group the person was the last facilitator of is
+    // offered to its earliest participant (GROUPS.md §9), who is told.
+    for (_, offered) in super::groups::before_user_purge(&mut *conn, user, now_ms).await? {
+        crate::groups::tell_offered(&mut *conn, &offered, now_ms).await?;
+    }
     for &sql in PURGE_BY_ID {
         sqlx::query(sql)
             .bind(user.as_str())

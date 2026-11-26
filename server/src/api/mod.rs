@@ -8,6 +8,7 @@ pub mod branding;
 pub mod devices;
 pub mod events;
 pub mod feed;
+pub mod groups;
 pub mod heartbeat;
 pub mod invites;
 pub mod keys;

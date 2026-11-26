@@ -13,6 +13,8 @@ pub mod devices;
 pub mod enroll_codes;
 pub mod events;
 pub mod feed;
+pub mod group_notices;
+pub mod groups;
 pub mod instance;
 pub mod invites;
 pub mod liveness;
