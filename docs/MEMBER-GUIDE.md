@@ -27,7 +27,7 @@ Faro shows a window titled **"Enroll this computer with *name*?"**. Check:
 - The **name** and **address** are your Faro instance. If you don't recognize them, click **Cancel**.
 - The list of **accounts**. Faro monitors every account on this Mac, including ones added later. If the guest account is on, Faro says so: anyone could use the Mac without a password, so consider turning it off in System Settings > Users & Groups.
 
-On Windows, TODO(windows): what the confirmation window shows, whether it lists the accounts and warns about the guest account, and the name of its button.
+On Windows, the preview and confirmation windows show the same content and button names as on a Mac, as ordinary Windows dialog windows: the name and address, the list of accounts, the guest-account warning, and the **Enroll** button.
 
 Click **Enroll**.
 
@@ -55,7 +55,7 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | Faro can't reach your instance | Check that the Mac is online and the address is right. |
 | Not approved | Nothing changed. Try again when an administrator can type their password. |
 | Enrollment stopped to keep you safe | The instance answered with a key that doesn't match your link. Don't continue. Remove the new computer in the web app if it appears there, and tell whoever runs your instance. |
-| This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. On Windows, TODO(windows): the command an administrator runs instead. |
+| This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. On Windows, an administrator can run `& "C:\Program Files\Faro\faro-service.exe" enroll --link '…'` in a terminal opened as administrator, with your link. |
 | Faro can't see one of your windows | An app (it names it) keeps a window out of screenshots and screen recordings, so Faro can't check it, and your allies are told which app. Close the window if you don't need it, or turn off the app's setting that hides its windows from screen sharing, if it has one. |
 | Nothing happens when you click the link | Restart the computer, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the Faro icon (the eye icon on a Mac, the tray icon on Windows) and paste the link. |
 
@@ -106,7 +106,7 @@ It shows what Faro is doing, never what was on the screen. The lines to look at:
 | **Image model:** none | Faro can't check images on this Mac and rates the screen from the apps and websites in use only. Reinstall Faro, and tell whoever runs your instance if it stays. |
 | **Updates:** last check … failed | Faro couldn't check for updates. It tries again later; if it keeps failing, tell whoever runs your instance. |
 
-On Windows, TODO(windows): how to check the same details, and the command that takes the place of `faro-service status`.
+On Windows, run `& "C:\Program Files\Faro\faro-service.exe" status` in a terminal opened as administrator. It shows the same details.
 
 ## Reporting a problem
 
@@ -143,4 +143,4 @@ The zip holds one folder of plain-text files, so you can open any of them before
 - To save it somewhere else than the Desktop: `sudo /Library/Faro/bin/faro-service diagnose --output ~/Documents`.
 - To read it all in Terminal without saving anything: `sudo /Library/Faro/bin/faro-service diagnose --print`.
 - Fewer or more log lines: `--lines 500`.
-- On Windows: TODO(windows): how a problem report is made there, where the file goes, and what it contains.
+- On Windows: run `& "C:\Program Files\Faro\faro-service.exe" diagnose` in a terminal opened as administrator, and approve the administrator prompt. Faro lists the report's contents before it writes anything, as on a Mac. The file is saved on your Desktop as `faro-report-….zip`, or use `--output <folder>` to save it elsewhere. The tray menu's **Report a problem…** explains this and copies the command.
