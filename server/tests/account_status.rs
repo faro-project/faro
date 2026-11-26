@@ -240,3 +240,133 @@ async fn only_admins_can_change_account_status() {
         }
     }
 }
+
+/// Make `user` an admin, as `admin` does in the console.
+async fn grant_admin(t: &TestApp, admin: &str, user: &UserId) {
+    let r = t
+        .call(
+            axum::http::Method::PUT,
+            &format!("/admin/api/users/{user}/admin"),
+            Some(json!({ "admin": true })),
+            Some(admin),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+}
+
+async fn admin_log(t: &TestApp, session: &str) -> Vec<serde_json::Value> {
+    let r = t.get("/admin/api/log", Some(session)).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    r.body.as_array().expect("array").clone()
+}
+
+#[tokio::test]
+async fn disabling_and_enabling_are_logged_and_told_to_the_other_admins() {
+    let t = TestApp::new().await;
+    let name = t.state.config().instance.name.clone();
+    let (admin, admin_s) = t.setup_admin("admin@example.org").await;
+    let (kim, kim_s) = t.sign_in("kim@example.org").await;
+    let (lee, _lee_s) = t.sign_in("lee@example.org").await;
+    let (sam, _sam_s) = t.sign_in("sam@example.org").await;
+    grant_admin(&t, &admin_s, &kim).await;
+    grant_admin(&t, &admin_s, &lee).await;
+    t.notify_now().await;
+    t.mailer.clear();
+    t.clock.advance_ms(1000);
+
+    // Admin disables sam: kim and lee are told at once, in words; Admin,
+    // who did it, is not.
+    let r = set_status(&t, &admin_s, &sam, "disable").await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    t.notify_now().await;
+    for to in ["kim@example.org", "lee@example.org"] {
+        let m = mails(&t, to, "sam's account on");
+        assert_eq!(m.len(), 1, "{to}: {:?}", t.mail_to(to));
+        assert_eq!(
+            m[0].subject,
+            format!("sam's account on {name} was disabled")
+        );
+        assert!(
+            m[0].text
+                .starts_with("Admin disabled the Faro account of sam (sam@example.org)"),
+            "{}",
+            m[0].text
+        );
+        assert!(m[0].text.contains("keep reporting"), "{}", m[0].text);
+        assert!(m[0].text.contains("/admin/people"), "{}", m[0].text);
+    }
+    assert!(t.mail_to("admin@example.org").is_empty());
+    // sam hears only their own notice, not the admin log.
+    let sam_mail = t.mail_to("sam@example.org");
+    assert_eq!(sam_mail.len(), 1, "{sam_mail:?}");
+    assert!(sam_mail[0].subject.starts_with("Your account on"));
+
+    let entries = admin_log(&t, &kim_s).await;
+    assert_eq!(entries[0]["action"], "account_disabled");
+    assert_eq!(entries[0]["user"]["id"], sam.as_str());
+    assert_eq!(entries[0]["actor"]["id"], admin.as_str());
+    assert_eq!(entries[0]["via"], "console");
+    let n = entries.len();
+
+    // Refusals are not logged.
+    let r = set_status(&t, &admin_s, &sam, "disable").await;
+    assert_eq!(r.error_code(), "already_disabled");
+    let r = set_status(&t, &admin_s, &admin, "disable").await;
+    assert_eq!(r.error_code(), "cannot_disable_self");
+    assert_eq!(admin_log(&t, &kim_s).await.len(), n);
+
+    // kim disables lee, an admin: admin is told; lee, now disabled, only
+    // hears their own notice; kim, who did it, nothing.
+    t.mailer.clear();
+    t.clock.advance_ms(1000);
+    let r = set_status(&t, &kim_s, &lee, "disable").await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    t.notify_now().await;
+    let m = mails(&t, "admin@example.org", "lee's account on");
+    assert_eq!(m.len(), 1, "{:?}", t.mail_to("admin@example.org"));
+    assert!(
+        m[0].text
+            .starts_with("kim disabled the Faro account of lee (lee@example.org)"),
+        "{}",
+        m[0].text
+    );
+    assert!(t.mail_to("kim@example.org").is_empty());
+    let lee_mail = t.mail_to("lee@example.org");
+    assert_eq!(lee_mail.len(), 1, "{lee_mail:?}");
+    assert!(lee_mail[0].subject.starts_with("Your account on"));
+
+    // kim re-enables sam: admin is told at once (lee is disabled).
+    t.mailer.clear();
+    t.clock.advance_ms(1000);
+    let r = set_status(&t, &kim_s, &sam, "enable").await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    t.notify_now().await;
+    let m = mails(&t, "admin@example.org", "sam's account on");
+    assert_eq!(m.len(), 1, "{:?}", t.mail_to("admin@example.org"));
+    assert_eq!(
+        m[0].subject,
+        format!("sam's account on {name} was re-enabled")
+    );
+    assert!(
+        m[0].text
+            .starts_with("kim re-enabled the Faro account of sam (sam@example.org)"),
+        "{}",
+        m[0].text
+    );
+    assert!(t.mail_to("kim@example.org").is_empty());
+    assert!(t.mail_to("lee@example.org").is_empty());
+
+    let entries = admin_log(&t, &admin_s).await;
+    assert_eq!(entries.len(), n + 2, "{entries:?}");
+    assert_eq!(entries[0]["action"], "account_enabled");
+    assert_eq!(entries[0]["user"]["id"], sam.as_str());
+    assert_eq!(entries[0]["actor"]["id"], kim.as_str());
+    assert_eq!(entries[1]["action"], "account_disabled");
+    assert_eq!(entries[1]["user"]["id"], lee.as_str());
+    assert_eq!(entries[1]["actor"]["id"], kim.as_str());
+
+    // Mail is only sent once.
+    t.mailer.clear();
+    t.notify_now().await;
+    assert!(t.mail_to("admin@example.org").is_empty());
+}
