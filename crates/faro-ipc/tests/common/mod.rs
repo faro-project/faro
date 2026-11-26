@@ -23,6 +23,7 @@ pub fn all_tamper_signals() -> Vec<TamperSignal> {
     vec![
         TamperSignal::PermissionRevoked {
             permission: "screen".into(),
+            never_granted: false,
         },
         TamperSignal::AgentKilledRepeatedly {
             count: 3,
@@ -193,7 +194,11 @@ pub fn arb_wire_frame() -> impl Strategy<Value = WireFrame> {
 
 pub fn arb_tamper() -> impl Strategy<Value = TamperSignal> {
     prop_oneof![
-        text().prop_map(|permission| TamperSignal::PermissionRevoked { permission }),
+        // `never_granted` is not carried over IPC (the service decides it).
+        text().prop_map(|permission| TamperSignal::PermissionRevoked {
+            permission,
+            never_granted: false
+        }),
         (any::<u32>(), any::<u64>()).prop_map(|(count, window_secs)| {
             TamperSignal::AgentKilledRepeatedly { count, window_secs }
         }),
