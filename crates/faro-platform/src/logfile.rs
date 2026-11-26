@@ -21,6 +21,53 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Words that name private data in a log call: a URL, a window title, an
+/// email address, text, anything from a frame. Matched, ignoring case,
+/// against each `_`- or `.`-separated word of a field or variable name.
+///
+/// Two things use it. `tests/log_privacy.rs` fails on an `info!`, `warn!`
+/// or `error!` call that logs such a name, and on a `debug!` or `trace!`
+/// call that logs private data under a name without one of these words.
+/// `faro-service diagnose` removes the value of every log field whose
+/// name has one, so the debug lines in a problem report keep their shape
+/// but not their private values.
+pub const PRIVATE_LOG_WORDS: &[&str] = &[
+    "title",
+    "titles",
+    "url",
+    "urls",
+    "email",
+    "emails",
+    "domain",
+    "domains",
+    "host",
+    "hostname",
+    "browser",
+    "tab",
+    "app",
+    "apps",
+    "window",
+    "frame",
+    "frames",
+    "pixel",
+    "pixels",
+    "thumbnail",
+    "image",
+    "body",
+    "text",
+    "ocr",
+    "clipboard",
+    "keystroke",
+    "keystrokes",
+];
+
+/// Whether a field or variable name has a word from [`PRIVATE_LOG_WORDS`]
+/// (`window_title`, `ctx.url`, `Title`).
+pub fn is_private_log_name(name: &str) -> bool {
+    name.split(['_', '.'])
+        .any(|w| PRIVATE_LOG_WORDS.iter().any(|p| p.eq_ignore_ascii_case(w)))
+}
+
 /// When to rotate, how many old files to keep, and their permissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rotation {
