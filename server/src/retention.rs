@@ -571,7 +571,7 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
     {
         let mut conn = state.db().pool().acquire().await?;
         let g = crate::db::repo::groups::sweep(&mut conn, now).await?;
-        s.other += g.groups_deleted;
+        s.other += g.groups_deleted + g.requests_deleted;
         s.expired_secrets += g.invites_deleted;
     }
 

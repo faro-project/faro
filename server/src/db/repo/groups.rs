@@ -269,6 +269,10 @@ pub struct GroupUpdate {
     pub who_can_invite: Option<Option<WhoCanInvite>>,
     /// `Some(None)` removes the limit.
     pub max_participants: Option<Option<i64>>,
+    /// Raw JSON; `Some(None)` clears the meeting.
+    pub meeting_json: Option<Option<String>>,
+    pub listing_json: Option<String>,
+    pub listed: Option<bool>,
 }
 
 pub async fn update(
@@ -300,6 +304,27 @@ pub async fn update(
     if let Some(m) = u.max_participants {
         sqlx::query("UPDATE accountability_groups SET max_participants = $1 WHERE id = $2")
             .bind(m)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    if let Some(m) = &u.meeting_json {
+        sqlx::query("UPDATE accountability_groups SET meeting_json = $1 WHERE id = $2")
+            .bind(m.clone())
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    if let Some(l) = &u.listing_json {
+        sqlx::query("UPDATE accountability_groups SET listing_json = $1 WHERE id = $2")
+            .bind(l)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    if let Some(l) = u.listed {
+        sqlx::query("UPDATE accountability_groups SET listed = $1 WHERE id = $2")
+            .bind(i64::from(l))
             .bind(id)
             .execute(&mut *conn)
             .await?;
@@ -1239,6 +1264,7 @@ pub async fn before_user_purge(
                     .bind(&g)
                     .execute(&mut *conn)
                     .await?;
+                super::group_listing::void_open(&mut *conn, &g, now_ms).await?;
                 offered.push((g, next));
             }
             None => {
@@ -1254,6 +1280,8 @@ pub async fn before_user_purge(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SweepSummary {
     pub groups_deleted: u64,
+    /// Join requests and meeting notices past their retention.
+    pub requests_deleted: u64,
     pub offers_expired: u64,
     pub invites_deleted: u64,
 }
@@ -1280,6 +1308,15 @@ pub async fn sweep(
     .execute(&mut *conn)
     .await?
     .rows_affected();
+    sqlx::query(
+        "UPDATE group_join_requests SET state = 'void', decided_at = $1
+         WHERE state = 'open' AND group_id IN
+            (SELECT id FROM accountability_groups
+             WHERE facilitator_offer_until IS NOT NULL AND facilitator_offer_until <= $1)",
+    )
+    .bind(now_ms)
+    .execute(&mut *conn)
+    .await?;
     let offers_expired = sqlx::query(
         "UPDATE accountability_groups
          SET facilitator_offer_user_id = NULL, facilitator_offer_until = NULL, listed = 0
@@ -1294,7 +1331,9 @@ pub async fn sweep(
         .execute(&mut *conn)
         .await?
         .rows_affected();
+    let requests_deleted = super::group_listing::sweep(&mut *conn, now_ms).await?;
     Ok(SweepSummary {
+        requests_deleted,
         groups_deleted,
         offers_expired,
         invites_deleted,
