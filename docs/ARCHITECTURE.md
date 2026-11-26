@@ -251,7 +251,9 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Signal | Detected by | Urgency | Ally sees |
 |---|---|---|---|
 | No heartbeat for longer than the grace period | Instance liveness monitor | urgent (after the grace period) | "Laptop-X hasn't checked in for 3h" plus the last known state (asleep or shut down) |
-| Screen-recording / portal permission revoked | Agent | urgent | Immediate alert |
+| Screen-recording / portal permission revoked | Agent / service (`permission_revoked`) | urgent | Immediate alert: "Screen Recording is off on Laptop-X", with the steps that turn it back on |
+| Captures keep failing because Screen Recording is off, but the service never saw it granted to this account on this enrollment (a new install, or a reinstall that dropped the grant) | Service (`permission_revoked`, `never_granted`) | urgent | "Screen Recording is off on Laptop-X": Faro doesn't have the permission, so it can't see the screen; with the same steps |
+| Captures keep failing for any other reason (5 in a row by default) | Service (`capture_failing`) | urgent | "Faro couldn't see the screen 5 times in a row" |
 | Agent repeatedly killed | Service | urgent | Alert with a count |
 | An interactive session (any OS account) with no connected agent for 90 s | Service | urgent | "Faro isn't running in the account *alex* on Laptop-X" |
 | The session at the screen has its agent connected, nothing pauses capture, and no capture is attempted for a few capture intervals (5 min at the default mean) | Service (`capture_failing`) | urgent | "Faro couldn't see the screen 5 times in a row", for that account |
@@ -266,6 +268,8 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
 
 Every urgent signal in this table, and removing an ally, reaches people as a tamper-class alert: it can be moved to the digest but not switched off (§5.4). Settings changes and pauses can be switched off.
+
+**One cause, one signal.** A run of failed captures is reported once. When Screen Recording is off (the agent reports it denied, or a capture fails with `permission denied: screen_recording`), it is `permission_revoked` rather than `capture_failing`: sent at once when the service sees it go from granted to off, or at the failure threshold otherwise, and never followed by `capture_failing` for the same run. The person at the screen is told too: the agent shows "Faro can't see the screen" with a button that opens System Settings → Privacy & Security → Screen & System Audio Recording, once per agent run and again after a capture has worked in between.
 
 **Instance downtime vs. device tamper.** On a self-hosted instance, the server itself can go down (a power cut, a Pi reboot). The liveness monitor records its own uptime. After an instance restart it waits for the grace period before judging any device, and it never treats a gap that overlaps its own downtime as device silence. Devices queue events offline and upload them later, and the hash chain shows whether anything is missing.
 

@@ -503,6 +503,7 @@ async fn full_lifecycle_against_mock_instance() {
     script.with(|s| {
         s.tamper.push(TamperSignal::PermissionRevoked {
             permission: "screen_recording".into(),
+            never_granted: false,
         });
         s.tamper.push(TamperSignal::VpnActive);
     });

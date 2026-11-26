@@ -285,9 +285,31 @@ const RETENTION_NAME: Record<string, string> = {
 	alert_days: 'alerts'
 };
 
+/** What the member does when Screen Recording is off for Faro. */
+export const SCREEN_RECORDING_FIX =
+	'To fix it, the member opens System Settings → Privacy & Security → Screen & System Audio Recording on that computer and turns on Faro Agent. If it is already on (after Faro was reinstalled, for example), they remove it with the − button and add it again.';
+
+function screenRecordingOff(s: TamperSignal): boolean {
+	return s.signal === 'permission_revoked' && s.permission === 'screen_recording';
+}
+
+/**
+ * A title for a decrypted event that says more than its kind's, or
+ * `undefined` to keep the kind's ("Possible tampering").
+ */
+export function bodyTitle(b: EventBody, device: string): string | undefined {
+	if (b.type === 'tamper' && screenRecordingOff(b.signal))
+		return `Screen Recording is off on ${device}`;
+	return undefined;
+}
+
 export function describeTamper(s: TamperSignal): string {
 	switch (s.signal) {
 		case 'permission_revoked':
+			if (screenRecordingOff(s))
+				return s.never_granted
+					? "Faro doesn't have Screen Recording permission on this computer, so it can't see the screen."
+					: "Screen Recording was turned off for Faro, so it can't see the screen.";
 			return `A permission Faro needs was turned off (${s.permission.replaceAll('_', ' ')}).`;
 		case 'agent_killed_repeatedly':
 			return `Faro was stopped ${s.count} times in ${duration(s.window_secs * 1000)}.`;
@@ -341,7 +363,11 @@ export function describeBody(b: EventBody): string[] {
 			return out;
 		}
 		case 'tamper':
-			return [describeTamper(b.signal), ...(b.account ? [`In the account “${b.account}”.`] : [])];
+			return [
+				describeTamper(b.signal),
+				...(b.account ? [`In the account “${b.account}”.`] : []),
+				...(screenRecordingOff(b.signal) ? [SCREEN_RECORDING_FIX] : [])
+			];
 		case 'settings_change':
 			return b.changes.map(
 				(c) => `${c.key.replaceAll('_', ' ')}: ${c.old ?? 'unset'} → ${c.new ?? 'unset'}`
