@@ -303,7 +303,7 @@ An instance can have several admins. Two is a good idea: if one admin loses acce
 
 - Nobody can change their own admin role, and the last enabled admin can't lose it.
 - A disabled account can't be made an admin. Nothing can be changed on an account that is being deleted.
-- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
+- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists accounts disabled or re-enabled (emailed to every admin except the one who did it), deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
 - Being an admin gives no access to anyone's reports, alerts or screenshots.
 
 **If nobody can sign in as an admin** (for example, the only admin lost access to their email address), make another account an admin from the server itself:

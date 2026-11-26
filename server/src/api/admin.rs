@@ -290,8 +290,9 @@ pub async fn cancel_user_deletion(
 pub const LOG_LIMIT: i64 = 200;
 
 /// `GET /admin/api/log`: the most recent admin log entries, newest first
-/// (who was made an admin or stopped being one, which deletions admins
-/// asked for or were cancelled, by whom, and when).
+/// (who was made an admin or stopped being one, which accounts were
+/// disabled or re-enabled, which deletions admins asked for or were
+/// cancelled, by whom, and when).
 pub async fn log(
     State(state): State<AppState>,
     s: SessionUser,
