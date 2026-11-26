@@ -74,6 +74,12 @@ jobs:
         run: |
           cargo test -p faro-service --features dev --lib update::signature
           FARO_TEAM_ID=ABCDE12345 cargo test -p faro-service --lib update::signature
+      # Development-only detection thresholds: a dev build lowers them, the
+      # workspace run above checks a release build never does
+      # (crates/faro-service/src/thresholds.rs).
+      - name: Development thresholds (dev build)
+        if: runner.os == 'macOS'
+        run: cargo test -p faro-service --features dev --lib thresholds
       # The ONNX Runtime classifier and the model benchmark harness, run on
       # a synthetic set and a tiny graph the tests generate, and the
       # service's model loading as the package builds it. The `onnx`
