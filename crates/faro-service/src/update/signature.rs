@@ -520,8 +520,14 @@ mod tests {
     ) -> Result<Accepted, PackageCheckError> {
         let mut calls = Vec::new();
         let mut run = canned(pkgutil, spctl, &mut calls);
-        check_with(policy, Path::new("/var/faro/updates/ab.pkg"), &mut run)
+        check_with(policy, Path::new(PKG), &mut run)
     }
+
+    /// An absolute path on the platform running the tests.
+    #[cfg(unix)]
+    const PKG: &str = "/var/faro/updates/ab.pkg";
+    #[cfg(windows)]
+    const PKG: &str = r"C:\faro\updates\ab.pkg";
 
     const REQUIRE: PackagePolicy = PackagePolicy::Require { team_id: TEAM };
 
