@@ -80,3 +80,37 @@ It shows what Faro is doing, never what was on the screen. The lines to look at:
 | **Permissions:** Screen Recording denied, or **Failures:** permission denied: screen_recording | Open System Settings > Privacy & Security > Screen Recording (Screen & System Audio Recording on newer macOS) in that account and turn on **Faro Agent**. |
 | **Image model:** none | Faro can't check images on this Mac and rates the screen from the apps and websites in use only. Reinstall Faro, and tell whoever runs your instance if it stays. |
 | **Updates:** last check … failed | Faro couldn't check for updates. It tries again later; if it keeps failing, tell whoever runs your instance. |
+
+## Reporting a problem
+
+If Faro isn't working and you'd like help, make a **problem report**: one file with what Faro is doing on your Mac and its recent logs, with private details taken out. Someone who knows an administrator password runs, in Terminal, from your account:
+
+```sh
+sudo /Library/Faro/bin/faro-service diagnose
+```
+
+1. Faro gathers the report and lists the files in it, with what each one is. Nothing is written yet.
+2. Type **s** to read everything in it first, **y** to write it, or **n** to stop.
+3. It writes **`faro-report-`*date*`-`*time*`Z.zip`** to your **Desktop** (for example `faro-report-20261125-101500Z.zip`; the time is in UTC). The file is yours, and only your account can open it.
+4. Send that file to **[where to send problem reports: to be added]**. Say what went wrong and when.
+
+The zip holds one folder of plain-text files, so you can open any of them before you send it:
+
+| File | What it says |
+|---|---|
+| `README.txt` | what the report is and when it was made |
+| `status.txt`, `status.json` | what `faro-service status` shows ([Checking that Faro is working](#checking-that-faro-is-working)) |
+| `permissions.txt` | whether Faro Agent may record the screen |
+| `system.txt` | the versions of Faro and macOS, the Mac's model, and free disk space |
+| `launchd.txt` | whether Faro's service and agent are running, and how often they restarted |
+| `package.txt` | which Faro package is installed, and its signatures |
+| `files.txt` | the names, sizes and permissions of Faro's files, never what is in them |
+| `config.txt` | Faro's settings on this Mac |
+| `logs/faro-service.log`, `logs/faro-agent.log` | the last 2000 lines of the service's log and of **your** account's agent log ([Faro's logs](#faros-logs)) |
+| `logs/update-install.log` | if Faro has updated itself, what the installer said |
+
+**Taken out of every file:** web addresses, email addresses, and the names and addresses of other computers and websites (your Faro instance's address stays), window titles and app names. **Never in it:** keys, passwords, what Faro recorded or reported (events, reports, screenshots or thumbnails), and other accounts' logs.
+
+- To save it somewhere else than the Desktop: `sudo /Library/Faro/bin/faro-service diagnose --output ~/Documents`.
+- To read it all in Terminal without saving anything: `sudo /Library/Faro/bin/faro-service diagnose --print`.
+- Fewer or more log lines: `--lines 500`.

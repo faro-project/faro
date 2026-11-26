@@ -13,40 +13,18 @@
 //! unless [`ALLOWED`] lists that file and identifier with the reason it is
 //! safe. It is a guard against mistakes, not a proof: a value that is
 //! private but named otherwise gets through, so review log calls too.
+//!
+//! `debug!` and `trace!` may log private data, but only as named fields
+//! whose names say so (`title = ?t`, never `x = ?t` or `"{t}"`), so that
+//! `faro-service diagnose` can remove those values from a problem report
+//! by name ([`debug_calls_name_their_private_values`]).
 
 use std::path::{Path, PathBuf};
 
-/// Words that name private data. Matched against each `_`-separated word
-/// of an identifier, ignoring case.
-const FORBIDDEN: &[&str] = &[
-    "title",
-    "titles",
-    "url",
-    "urls",
-    "email",
-    "emails",
-    "domain",
-    "domains",
-    "host",
-    "hostname",
-    "browser",
-    "tab",
-    "app",
-    "apps",
-    "window",
-    "frame",
-    "frames",
-    "pixel",
-    "pixels",
-    "thumbnail",
-    "image",
-    "body",
-    "text",
-    "ocr",
-    "clipboard",
-    "keystroke",
-    "keystrokes",
-];
+/// Words that name private data, matched against each `_`-separated word
+/// of an identifier, ignoring case. The list is shared with `faro-service
+/// diagnose`, which removes the values of log fields so named.
+const FORBIDDEN: &[&str] = faro_platform::logfile::PRIVATE_LOG_WORDS;
 
 /// (file, identifier, why it is safe). Every entry must still match a log
 /// call, so the list can't go stale.
@@ -123,9 +101,14 @@ fn is_ident(b: u8) -> bool {
 /// The arguments of every `info!(`, `warn!(` and `error!(` call in `src`,
 /// with the line each starts on.
 fn log_calls(src: &str) -> Vec<(usize, &str)> {
+    calls(src, &["info!", "warn!", "error!"])
+}
+
+/// The arguments of every call of one of the macros `names` in `src`.
+fn calls<'a>(src: &'a str, names: &[&str]) -> Vec<(usize, &'a str)> {
     let bytes = src.as_bytes();
     let mut out = Vec::new();
-    for name in ["info!", "warn!", "error!"] {
+    for &name in names {
         let mut from = 0;
         while let Some(at) = src[from..].find(name) {
             let start = from + at;
@@ -254,6 +237,12 @@ fn forbidden(ident: &str) -> bool {
         .any(|w| FORBIDDEN.iter().any(|f| f.eq_ignore_ascii_case(w)))
 }
 
+/// A field name (`window.title`, `app_name`) that names private data, as
+/// `faro-service diagnose` decides it.
+fn forbidden_name(name: &str) -> bool {
+    faro_platform::logfile::is_private_log_name(name)
+}
+
 fn findings(file: &str, src: &str) -> Vec<Finding> {
     let mut out = Vec::new();
     for (line, args) in log_calls(src) {
@@ -345,6 +334,144 @@ fn the_scan_finds_what_it_should() {
             (2, "window_title".to_owned()),
             (4, "email".to_owned()),
             (3, "url".to_owned()),
+        ]
+    );
+}
+
+/// A call's arguments, split at the commas outside strings and brackets.
+fn split_args(args: &str) -> Vec<&str> {
+    let b = args.as_bytes();
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut i) = (0i32, 0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' => i = string_end(b, i).unwrap_or(b.len() - 1),
+            b'r' if (i == 0 || !is_ident(b[i - 1]))
+                && matches!(b.get(i + 1), Some(b'"' | b'#')) =>
+            {
+                i = string_end(b, i).unwrap_or(b.len() - 1)
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(args[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(args[start..].trim());
+    out.retain(|a| !a.is_empty());
+    out
+}
+
+fn is_string_literal(arg: &str) -> bool {
+    let b = arg.as_bytes();
+    b[0] == b'"' || (b[0] == b'r' && matches!(b.get(1), Some(b'"' | b'#')))
+}
+
+/// Why a `debug!` or `trace!` call's private values could get past
+/// `faro-service diagnose`: a placeholder in its message, or a field whose
+/// value names private data but whose own name doesn't.
+fn debug_findings(file: &str, src: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut push = |line: usize, ident: String| {
+        out.push(Finding {
+            file: file.to_owned(),
+            line,
+            ident,
+        })
+    };
+    for (line, args) in calls(src, &["debug!", "trace!"]) {
+        for arg in split_args(args) {
+            if is_string_literal(arg) {
+                let mut rest = arg;
+                while let Some(at) = rest.find('{') {
+                    rest = &rest[at + 1..];
+                    if let Some(r) = rest.strip_prefix('{') {
+                        rest = r;
+                        continue;
+                    }
+                    push(line, "a placeholder in the message".to_owned());
+                    break;
+                }
+                continue;
+            }
+            // `target: "x"` and the like are the macro's own settings.
+            if ["target:", "parent:", "name:"]
+                .iter()
+                .any(|k| arg.starts_with(k))
+            {
+                continue;
+            }
+            let b = arg.as_bytes();
+            let Some(eq) = arg.find('=').filter(|&k| b.get(k + 1) != Some(&b'=')) else {
+                // `title`, `?reason`, `%self.url`: named after the value.
+                continue;
+            };
+            let name = arg[..eq].trim().trim_matches('"');
+            if forbidden_name(name) {
+                continue;
+            }
+            for ident in logged_idents(&arg[eq + 1..]) {
+                if forbidden(&ident) {
+                    push(line, format!("{name} = {ident}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn debug_calls_name_their_private_values() {
+    let root = workspace();
+    let mut files = Vec::new();
+    for c in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+        rust_files(&c.path().join("src"), &mut files);
+    }
+    files.sort();
+    assert!(files.len() > 50, "found only {} source files", files.len());
+    let mut bad = Vec::new();
+    for f in &files {
+        let rel = f
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        bad.extend(debug_findings(&rel, &std::fs::read_to_string(f).unwrap()));
+    }
+    assert!(
+        bad.is_empty(),
+        "debug!/trace! calls that log private data where `faro-service diagnose` can't \
+         remove it (put the value in a field named for what it is, such as \
+         `title = ?t`, not in the message or under another name):\n{}",
+        bad.iter()
+            .map(|f| format!("  {}:{}: {}", f.file, f.line, f.ident))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn the_debug_scan_finds_what_it_should() {
+    let src = r#"
+        tracing::debug!(app = ?fg.0, title = ?fg.1, "foreground");
+        tracing::debug!("visited {}", page);
+        tracing::trace!(target: "x", what = %ctx.window_title, n = 1, "seen");
+        tracing::debug!(title, %url, ?self.body, "fine");
+        tracing::debug!(seq, kind = %h.kind, "event {{committed}}");
+    "#;
+    let got: Vec<_> = debug_findings("x.rs", src)
+        .into_iter()
+        .map(|f| (f.line, f.ident))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (3, "a placeholder in the message".to_owned()),
+            (4, "what = window_title".to_owned()),
         ]
     );
 }
