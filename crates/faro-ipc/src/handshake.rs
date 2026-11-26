@@ -416,6 +416,8 @@ mod tests {
             gid: 20,
             pid: Some(4242),
             macos_audit_token: None,
+            windows_sid: None,
+            windows_session_id: None,
         };
         let mut svc: ServiceConnection<_> = Connection::with_peer(a, Some(peer));
         let mut agent: AgentConnection<_> = Connection::new(b);
