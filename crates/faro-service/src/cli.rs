@@ -618,6 +618,7 @@ fn cmd_status(config: &Config) -> Result<(), CliError> {
         Ok(e) => e,
         Err(crate::state::StateError::NotEnrolled) => {
             println!("Not enrolled. State directory: {}", dir.path().display());
+            print_thresholds(config);
             return Ok(());
         }
         Err(e) => return Err(e.into()),
@@ -658,7 +659,17 @@ fn cmd_status(config: &Config) -> Result<(), CliError> {
         "Outbox:       {} events ({} bytes), {} reports queued; next seq {}",
         stats.events, stats.event_bytes, stats.reports, head.next_seq
     );
+    print_thresholds(config);
     Ok(())
+}
+
+/// A note when `[dev_thresholds]` is set: lowered (a development build) or
+/// ignored. `installers/macos/check-pkg.sh` reads it.
+fn print_thresholds(config: &Config) {
+    if let Some(line) = crate::thresholds::build_use(config.dev_thresholds.as_ref()).status_line()
+    {
+        println!("{line}");
+    }
 }
 
 #[cfg(test)]
