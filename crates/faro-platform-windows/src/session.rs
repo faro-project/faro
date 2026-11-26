@@ -61,8 +61,9 @@ use windows::Win32::System::RemoteDesktop::{
     WTS_CONNECTSTATE_CLASS, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
 };
 use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop,
-    DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, HDESK, UOI_NAME,
+    CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop,
+    DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW,
+    DESKTOP_ENUMERATE, DESKTOP_READOBJECTS, DESKTOP_WRITEOBJECTS, HDESK, UOI_NAME,
 };
 use windows::Win32::System::SystemInformation::{GetTickCount, GetTickCount64};
 use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
@@ -119,6 +120,121 @@ impl InputDesktop {
     pub fn is_ours(&self) -> bool {
         matches!(self, InputDesktop::Ours)
     }
+}
+
+impl InputDesktop {
+    /// Whether this is a desktop the OS itself uses and a user process can
+    /// not capture: a benign pause, not something a user set up. The real
+    /// secure desktop (`Winlogon`) can't be opened at all by a user process
+    /// and shows up as [`InputDesktop::Inaccessible`]; the names here cover
+    /// the other system-owned desktops. Any other desktop that *can* be
+    /// opened was created by a user (`CreateDesktop` + `SwitchDesktop`, e.g.
+    /// Sysinternals Desktops) and must be captured, not treated as a pause.
+    pub fn is_benign_pause(&self) -> bool {
+        match self {
+            InputDesktop::Ours => false,
+            InputDesktop::Inaccessible => true,
+            InputDesktop::Other(name) => is_system_desktop_name(name),
+        }
+    }
+}
+
+/// Names of desktops the system creates (never a user's own).
+pub fn is_system_desktop_name(name: &str) -> bool {
+    ["Winlogon", "Screen-saver", "Disconnect"]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
+/// Why the thread could not follow the input desktop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachError {
+    pub desktop: String,
+    /// `"open"` or `"attach"`.
+    pub stage: &'static str,
+    pub code: u32,
+}
+
+/// The calling thread is attached to the input desktop; dropping this
+/// puts it back on the desktop it was on. GDI and DXGI Desktop Duplication
+/// act on the calling thread's desktop, so this is what lets a capture,
+/// the foreground window or a UI Automation read see a desktop other than
+/// `Default`. It must stay on the thread that made it.
+pub struct DesktopGuard {
+    previous: HDESK,
+    current: HDESK,
+}
+
+impl Drop for DesktopGuard {
+    fn drop(&mut self) {
+        // SAFETY: `previous` is the thread's own desktop handle (owned by
+        // the system, not closed) and `current` came from OpenInputDesktop.
+        unsafe {
+            let _ = SetThreadDesktop(self.previous);
+            let _ = CloseDesktop(self.current);
+        }
+    }
+}
+
+/// Name of the desktop this thread is on.
+pub fn current_thread_desktop_name() -> Option<String> {
+    // SAFETY: returns a system-owned handle; we only read its name.
+    unsafe { GetThreadDesktop(GetCurrentThreadId()) }
+        .ok()
+        .and_then(|h| object_name(HANDLE(h.0)))
+}
+
+/// Put this thread on the input desktop for the guard's lifetime. `Ok(None)`
+/// when the thread already is on it (nothing to restore). Fails when the
+/// desktop can't be opened, or the thread owns windows or hooks (the OS
+/// refuses `SetThreadDesktop` then).
+pub fn attach_input_desktop() -> Result<Option<DesktopGuard>, AttachError> {
+    let name = match input_desktop() {
+        InputDesktop::Ours => return Ok(None),
+        InputDesktop::Other(n) => n,
+        InputDesktop::Inaccessible => String::new(),
+    };
+    let fail = |stage, e: windows::core::Error| AttachError {
+        desktop: name.clone(),
+        stage,
+        code: e.code().0 as u32,
+    };
+    let rights = DESKTOP_ACCESS_FLAGS(
+        DESKTOP_READOBJECTS.0
+            | DESKTOP_WRITEOBJECTS.0
+            | DESKTOP_ENUMERATE.0
+            | DESKTOP_CREATEWINDOW.0
+            | DESKTOP_CREATEMENU.0,
+    );
+    // SAFETY: no pointer arguments; the handle is closed by the guard or below.
+    let current = unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, rights) }
+        .or_else(|_| {
+            // SAFETY: as above.
+            unsafe {
+                OpenInputDesktop(
+                    DESKTOP_CONTROL_FLAGS(0),
+                    false,
+                    DESKTOP_ACCESS_FLAGS(DESKTOP_READOBJECTS.0 | DESKTOP_ENUMERATE.0),
+                )
+            }
+        })
+        .map_err(|e| fail("open", e))?;
+    // SAFETY: returns the system-owned handle of this thread's desktop.
+    let previous = match unsafe { GetThreadDesktop(GetCurrentThreadId()) } {
+        Ok(h) => h,
+        Err(e) => {
+            // SAFETY: `current` is ours and closed once.
+            let _ = unsafe { CloseDesktop(current) };
+            return Err(fail("attach", e));
+        }
+    };
+    // SAFETY: `current` is a valid desktop handle.
+    if let Err(e) = unsafe { SetThreadDesktop(current) } {
+        // SAFETY: `current` is ours and closed once.
+        let _ = unsafe { CloseDesktop(current) };
+        return Err(fail("attach", e));
+    }
+    Ok(Some(DesktopGuard { previous, current }))
 }
 
 /// The name of a desktop or window-station handle.
@@ -438,6 +554,17 @@ impl SessionState for WinSession {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_system_desktops_are_a_benign_pause() {
+        assert!(InputDesktop::Inaccessible.is_benign_pause());
+        assert!(InputDesktop::Other("Winlogon".into()).is_benign_pause());
+        assert!(InputDesktop::Other("screen-saver".into()).is_benign_pause());
+        // A desktop a user made with CreateDesktop must be captured.
+        assert!(!InputDesktop::Other("Desktop2".into()).is_benign_pause());
+        assert!(!InputDesktop::Other("Default".into()).is_benign_pause());
+        assert!(!InputDesktop::Ours.is_benign_pause());
+    }
+
     use super::*;
     use SessionChange::*;
 

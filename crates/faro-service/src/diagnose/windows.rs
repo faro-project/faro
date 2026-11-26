@@ -146,6 +146,88 @@ pub fn desktop_folder() -> io::Result<PathBuf> {
     s.map(PathBuf::from).map_err(io::Error::other)
 }
 
+/// A path as the OS reports it for a handle, made comparable: no verbatim
+/// prefix, `\` separators, no trailing separator, lowercase.
+fn comparable(p: &str) -> String {
+    let p = p.replace('/', "\\");
+    let p = if let Some(r) = p.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{r}")
+    } else {
+        p.strip_prefix(r"\\?\").unwrap_or(&p).to_owned()
+    };
+    p.trim_end_matches('\\').to_lowercase()
+}
+
+/// `path` with any 8.3 short names (`ZIMMER~1`) spelled out, which the OS
+/// does for a handle's path too. Does not follow links.
+fn long_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut buf = vec![0u16; 4096];
+    // SAFETY: NUL-terminated input and an output buffer of the stated length.
+    let n =
+        unsafe { GetLongPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+    if n == 0 || n > buf.len() {
+        return path.to_path_buf();
+    }
+    String::from_utf16_lossy(&buf[..n]).into()
+}
+
+/// Refuses `handle` (opened from `requested`) when it is not at exactly
+/// that path: some folder on the way is a junction or symbolic link, which
+/// a user can plant in their own profile to aim the elevated command
+/// somewhere else. Checks every component, on the handle that is read, so
+/// there is no gap to race (the last component is also refused by the
+/// caller's reparse-point test on the open itself).
+pub fn verify_no_links(
+    handle: &impl std::os::windows::io::AsRawHandle,
+    requested: &std::path::Path,
+) -> io::Result<()> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, GETFINALPATHNAMEBYHANDLE_FLAGS,
+    };
+    let mut buf = vec![0u16; 4096];
+    // SAFETY: a live handle and a buffer of the stated length.
+    let n = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(handle.as_raw_handle()),
+            &mut buf,
+            GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0),
+        )
+    } as usize;
+    if n == 0 || n > buf.len() {
+        return Err(io::Error::other("cannot resolve the path"));
+    }
+    let actual = String::from_utf16_lossy(&buf[..n]);
+    let wanted = long_path(&std::path::absolute(requested)?);
+    if comparable(&actual) != comparable(&wanted.to_string_lossy()) {
+        return Err(io::Error::other(
+            "a folder on the way is a link (junction or symbolic link)",
+        ));
+    }
+    Ok(())
+}
+
+/// Opens a directory without following links and checks its whole path
+/// with [`verify_no_links`].
+pub fn check_dir_no_links(dir: &std::path::Path) -> io::Result<()> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    // A handle on a link itself reports the link's own path, so the last
+    // component is refused by its attribute.
+    if f.metadata()?.file_attributes() & 0x400 != 0 {
+        return Err(io::Error::other("it is a link (junction or symbolic link)"));
+    }
+    verify_no_links(&f, dir)
+}
+
 /// Each signed-in account's agent log (and the folder to list), and notes
 /// on the ones that can't be reached.
 pub fn agent_logs() -> (Vec<(String, LogSource)>, Vec<PathBuf>, String) {
@@ -184,6 +266,19 @@ pub fn agent_logs() -> (Vec<(String, LogSource)>, Vec<PathBuf>, String) {
             Some(local) => {
                 let path = layout::agent_log(&local);
                 if let Some(dir) = path.parent() {
+                    // The account owns this folder: a junction anywhere on
+                    // the way would aim this elevated command elsewhere.
+                    if let Err(e) = check_dir_no_links(dir) {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            let _ = writeln!(
+                                notes,
+                                "{}'s agent log skipped: {}: {e}",
+                                s.user,
+                                dir.display()
+                            );
+                            continue;
+                        }
+                    }
                     dirs.push(dir.to_path_buf());
                 }
                 logs.push((
@@ -392,6 +487,50 @@ pub fn package() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_paths_compare_without_prefixes_or_case() {
+        assert_eq!(
+            comparable(r"\\?\C:\Users\Alex\"),
+            comparable("c:/users/alex")
+        );
+        assert_eq!(comparable(r"\\?\UNC\srv\share"), r"\\srv\share");
+    }
+
+    fn junction(link: &std::path::Path, target: &std::path::Path) {
+        let st = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "mklink: {st:?}");
+    }
+
+    #[test]
+    fn a_junction_anywhere_on_the_path_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("real");
+        std::fs::create_dir_all(real.join("Faro")).unwrap();
+        std::fs::write(real.join("Faro").join("agent.log"), "x").unwrap();
+        let plain = real.join("Faro");
+        check_dir_no_links(&plain).expect("a plain folder passes");
+        // A junction in the middle of the path (not the last component).
+        let link = t.path().join("Local");
+        junction(&link, &real);
+        let through = link.join("Faro");
+        let e = check_dir_no_links(&through).expect_err("junction in the middle");
+        assert!(e.to_string().contains("link"), "{e}");
+        // ...and as the last component.
+        let leaf = t.path().join("leaf");
+        junction(&leaf, &plain);
+        assert!(check_dir_no_links(&leaf).is_err());
+        // The file read refuses it too.
+        let f = std::fs::File::open(through.join("agent.log")).unwrap();
+        assert!(verify_no_links(&f, &through.join("agent.log")).is_err());
+        let f = std::fs::File::open(plain.join("agent.log")).unwrap();
+        verify_no_links(&f, &plain.join("agent.log")).unwrap();
+    }
 
     #[test]
     fn a_profile_folder_belongs_to_its_account() {

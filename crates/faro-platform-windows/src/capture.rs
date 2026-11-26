@@ -56,6 +56,16 @@
 //! checks run before each capture and again after a failure, because the
 //! desktop can switch mid-capture (that is what `ACCESS_LOST` usually means).
 //!
+//! Only the secure desktop (which a user process can't open) and the
+//! system's own desktops count as a pause. A desktop the user created with
+//! `CreateDesktop` + `SwitchDesktop` can be opened, so it is **captured**:
+//! the platform thread attaches to it with `SetThreadDesktop` for the
+//! duration of the capture ([`session::attach_input_desktop`]) and goes
+//! back afterwards. If it can't, the capture fails with
+//! [`CaptureError::OtherDesktop`], a failure (not `Unavailable`), so the
+//! service counts it toward `CaptureFailing` instead of treating it as a
+//! pause. The foreground, browser and hidden-window reads attach the same way.
+//!
 //! # Display ids
 //!
 //! A frame's `display_id` is the number in the monitor's GDI device name
@@ -108,7 +118,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::session::{self, InputDesktop, WtsLock};
+use crate::session::{self, WtsLock};
 
 /// `E_ACCESSDENIED`: what `DuplicateOutput` returns on the secure desktop.
 const E_ACCESSDENIED: HRESULT = HRESULT(0x8007_0005_u32 as i32);
@@ -138,6 +148,16 @@ pub enum CaptureError {
     /// another desktop has the input.
     #[error("the secure desktop is showing")]
     SecureDesktop,
+    /// A desktop a user created (`CreateDesktop` + `SwitchDesktop`) has the
+    /// input and this thread could not follow it, so nothing can be seen.
+    /// Not an expected pause: it is reported as a failure, and the service
+    /// raises `CaptureFailing` for it.
+    #[error("input desktop {desktop:?} can't be captured ({stage} failed, {code:#010x})")]
+    OtherDesktop {
+        desktop: String,
+        stage: &'static str,
+        code: u32,
+    },
     #[error("the session is locked")]
     Locked,
     /// The session isn't at a screen (switched away from, or its remote
@@ -219,9 +239,13 @@ pub fn screen_unavailable() -> Option<CaptureError> {
             return Some(CaptureError::Locked);
         }
     }
-    match session::input_desktop() {
-        InputDesktop::Ours => None,
-        InputDesktop::Other(_) | InputDesktop::Inaccessible => Some(CaptureError::SecureDesktop),
+    let desktop = session::input_desktop();
+    if desktop.is_benign_pause() {
+        Some(CaptureError::SecureDesktop)
+    } else {
+        // `Ours`, or a desktop a user created: capture it (the caller
+        // attaches the thread to it with `session::attach_input_desktop`).
+        None
     }
 }
 
@@ -918,6 +942,68 @@ fn gdi_blit(
 // The trait implementation
 // ---------------------------------------------------------------------------
 
+/// Consecutive captures a display may fail, while others succeed, before
+/// it is reported as failing.
+pub const DISPLAY_FAIL_AFTER: u32 = 3;
+
+#[derive(Debug, Default)]
+struct HealthState {
+    /// Consecutive failed captures per display.
+    failing: std::collections::HashMap<u32, u32>,
+    /// Displays already reported, until they capture again or go away.
+    reported: std::collections::HashSet<u32>,
+}
+
+/// Shared between [`WinScreenCapture`] (writer) and the platform's
+/// [`crate::tamper::WinTamper`] (reader): both are separate objects in
+/// `AgentPlatform`, so `WinPlatform::agent_platform` creates one and hands a
+/// clone to each. Capture records every partial-success round; tamper polls
+/// [`DisplayHealth::take_edges`], which is edge-triggered (a display is
+/// reported once, and again only after it has captured successfully).
+#[derive(Debug, Clone, Default)]
+pub struct DisplayHealth(std::sync::Arc<std::sync::Mutex<HealthState>>);
+
+impl DisplayHealth {
+    /// One round in which at least one display captured. `ok` and `failed`
+    /// are display ids; displays in neither (unplugged) are forgotten.
+    pub fn record(&self, ok: &[u32], failed: &[u32]) {
+        if ok.is_empty() {
+            // Nothing captured at all: that is an error the caller already
+            // reports; it says nothing about one display.
+            return;
+        }
+        let mut st = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let gone = |id: &u32| !ok.contains(id) && !failed.contains(id);
+        st.failing.retain(|id, _| !gone(id));
+        st.reported.retain(|id| !gone(id));
+        for id in ok {
+            st.failing.remove(id);
+            st.reported.remove(id);
+        }
+        for id in failed {
+            let n = st.failing.entry(*id).or_insert(0);
+            *n = n.saturating_add(1);
+        }
+    }
+
+    /// Displays that have just reached [`DISPLAY_FAIL_AFTER`] consecutive
+    /// failures, as `(display id, failures in a row)`, once each.
+    pub fn take_edges(&self) -> Vec<(u32, u32)> {
+        let mut st = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<(u32, u32)> = st
+            .failing
+            .iter()
+            .filter(|(id, n)| **n >= DISPLAY_FAIL_AFTER && !st.reported.contains(id))
+            .map(|(id, n)| (*id, *n))
+            .collect();
+        out.sort_unstable();
+        for (id, _) in &out {
+            st.reported.insert(*id);
+        }
+        out
+    }
+}
+
 /// [`ScreenCapture`] for Windows. Holds the open duplications between
 /// calls; every D3D/DXGI object in it is free-threaded (the `windows` crate
 /// marks them `Send`), so it can move to the agent's platform thread.
@@ -925,6 +1011,9 @@ pub struct WinScreenCapture {
     dxgi: Option<Dxgi>,
     force_gdi: bool,
     last_failures: Vec<DisplayFailure>,
+    /// Name of the desktop `dxgi` was opened on.
+    desktop: Option<String>,
+    health: DisplayHealth,
 }
 
 impl std::fmt::Debug for WinScreenCapture {
@@ -953,7 +1042,16 @@ impl WinScreenCapture {
             dxgi: None,
             force_gdi: false,
             last_failures: Vec::new(),
+            desktop: None,
+            health: DisplayHealth::default(),
         }
+    }
+
+    /// Report per-display failures into `health`, which the platform's
+    /// tamper source reads (see [`DisplayHealth`]).
+    pub fn with_health(mut self, health: DisplayHealth) -> Self {
+        self.health = health;
+        self
     }
 
     /// Never use desktop duplication (probes and tests of the fallback).
@@ -986,7 +1084,27 @@ impl WinScreenCapture {
         if let Some(why) = screen_unavailable() {
             // Desktop switches invalidate duplications; start fresh after.
             self.dxgi = None;
+            self.desktop = None;
             return Err(why);
+        }
+        // Follow the input desktop (a user-created one) for this capture.
+        let _desktop = match session::attach_input_desktop() {
+            Ok(g) => g,
+            Err(e) => {
+                self.dxgi = None;
+                self.desktop = None;
+                return Err(CaptureError::OtherDesktop {
+                    desktop: e.desktop,
+                    stage: e.stage,
+                    code: e.code,
+                });
+            }
+        };
+        // Duplications belong to the desktop they were opened on.
+        let on = session::current_thread_desktop_name();
+        if self.desktop != on {
+            self.dxgi = None;
+            self.desktop = on;
         }
         let mut out = Vec::new();
         if !self.force_gdi {
@@ -1060,9 +1178,13 @@ impl ScreenCapture for WinScreenCapture {
         let results = self.capture_each()?;
         let mut frames = Vec::with_capacity(results.len());
         let mut failures = Vec::new();
+        let mut seen_ok = Vec::new();
         for d in results {
             match d.result {
-                Ok(f) => frames.push(f),
+                Ok(f) => {
+                    seen_ok.push(d.display_id);
+                    frames.push(f);
+                }
                 Err(error) => failures.push(DisplayFailure {
                     display_id: d.display_id,
                     error,
@@ -1077,7 +1199,12 @@ impl ScreenCapture for WinScreenCapture {
             }
         }
         // Partial success: frames from working displays are more useful to
-        // allies than a blanket failure caused by one flaky monitor.
+        // allies than a blanket failure caused by one flaky monitor. A
+        // display that keeps failing is reported through `health`.
+        self.health.record(
+            &seen_ok,
+            &failures.iter().map(|f| f.display_id).collect::<Vec<_>>(),
+        );
         self.last_failures = failures;
         Ok(frames)
     }
@@ -1096,6 +1223,43 @@ pub fn is_supported_format(f: DXGI_FORMAT) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_display_that_keeps_failing_is_reported_once() {
+        let h = DisplayHealth::default();
+        for _ in 0..DISPLAY_FAIL_AFTER - 1 {
+            h.record(&[1], &[2]);
+        }
+        assert!(h.take_edges().is_empty(), "not yet");
+        h.record(&[1], &[2]);
+        assert_eq!(h.take_edges(), vec![(2, DISPLAY_FAIL_AFTER)]);
+        h.record(&[1], &[2]);
+        assert!(h.take_edges().is_empty(), "edge-triggered");
+        h.record(&[1, 2], &[]);
+        for _ in 0..DISPLAY_FAIL_AFTER {
+            h.record(&[1], &[2]);
+        }
+        assert_eq!(h.take_edges().len(), 1, "re-armed after a success");
+    }
+
+    #[test]
+    fn failures_must_be_consecutive_and_total_failure_is_not_counted() {
+        let h = DisplayHealth::default();
+        h.record(&[1], &[2]);
+        h.record(&[1], &[2]);
+        h.record(&[1, 2], &[]);
+        h.record(&[1], &[2]);
+        assert!(h.take_edges().is_empty());
+        for _ in 0..10 {
+            h.record(&[], &[1, 2]);
+        }
+        assert!(h.take_edges().is_empty());
+        // An unplugged display is forgotten.
+        h.record(&[1], &[2]);
+        h.record(&[1], &[]);
+        h.record(&[1], &[2]);
+        assert!(h.take_edges().is_empty());
+    }
 
     #[test]
     fn display_ids_from_gdi_names() {
