@@ -33,10 +33,18 @@ pub enum NoticeKind {
     GroupUnlisted,
     /// The group meets soon. To each participant who wants it.
     MeetingReminder,
+    /// Someone asked the person to be their ally (a request).
+    AllianceRequested,
+    /// Someone offered to be the person's ally.
+    AllianceOffered,
+    /// Someone asked the person to partner up.
+    AlliancePartnership,
+    /// The person's proposal was accepted: compare safety codes to finish.
+    AllianceAccepted,
 }
 
 impl NoticeKind {
-    pub const ALL: [NoticeKind; 9] = [
+    pub const ALL: [NoticeKind; 13] = [
         NoticeKind::GroupJoined,
         NoticeKind::GroupLeft,
         NoticeKind::GroupRemoved,
@@ -46,6 +54,10 @@ impl NoticeKind {
         NoticeKind::GroupJoinAccepted,
         NoticeKind::GroupUnlisted,
         NoticeKind::MeetingReminder,
+        NoticeKind::AllianceRequested,
+        NoticeKind::AllianceOffered,
+        NoticeKind::AlliancePartnership,
+        NoticeKind::AllianceAccepted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -59,6 +71,10 @@ impl NoticeKind {
             NoticeKind::GroupJoinAccepted => "group_join_accepted",
             NoticeKind::GroupUnlisted => "group_unlisted",
             NoticeKind::MeetingReminder => "meeting_reminder",
+            NoticeKind::AllianceRequested => "alliance_requested",
+            NoticeKind::AllianceOffered => "alliance_offered",
+            NoticeKind::AlliancePartnership => "alliance_partnership",
+            NoticeKind::AllianceAccepted => "alliance_accepted",
         }
     }
 

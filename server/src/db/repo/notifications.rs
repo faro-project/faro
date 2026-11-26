@@ -118,6 +118,9 @@ pub struct GroupNoticeInfo {
     pub kind: String,
     /// A daily summary rather than one notice per change.
     pub summary: bool,
+    /// The display name of the person who caused it, for the notices that
+    /// name them (proposals); `None` once their account is deleted.
+    pub actor_name: Option<String>,
     /// A meeting reminder's time (see `group_notices.detail`).
     pub detail: Option<String>,
 }
@@ -154,6 +157,7 @@ pub async fn due<'e>(
                 al.action AS log_action, al.via AS log_via, al.actor_id AS log_actor_id,
                 act.display_name AS log_actor_name,
                 gn.kind AS group_kind, gn.summary AS group_summary, gn.detail AS group_detail,
+                gna.display_name AS group_actor_name,
                 CASE WHEN n.admin_log_id IS NOT NULL
                        OR n.group_notice_id IS NOT NULL
                        OR n.recipient_id = COALESCE(a.member_id, rp.member_id)
@@ -168,6 +172,7 @@ pub async fn due<'e>(
          LEFT JOIN reports rp ON rp.id = n.report_id
          LEFT JOIN admin_log al ON al.id = n.admin_log_id
          LEFT JOIN group_notices gn ON gn.id = n.group_notice_id
+         LEFT JOIN users gna ON gna.id = gn.actor_id
          JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id)
          LEFT JOIN devices d ON d.id = COALESCE(a.device_id, rp.device_id)
          LEFT JOIN users ab ON ab.id = a.about_user_id
@@ -228,6 +233,7 @@ pub async fn due<'e>(
                             kind,
                             summary: r.try_get::<Option<i64>, _>("group_summary")?.unwrap_or(0)
                                 != 0,
+                            actor_name: r.try_get("group_actor_name")?,
                             detail: r.try_get("group_detail")?,
                         })
                     })

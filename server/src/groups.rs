@@ -5,12 +5,15 @@
 //! [`crate::api::groups`]. This module holds what both need:
 //!
 //! * **Notices** (§14). `group_joined` / `group_left` (to facilitators),
-//!   `group_removed`, `group_archived` and `group_facilitator_offered` are
-//!   written as [`group_notices`] with a notification row each, sent by the
-//!   notifier like any other email. They are ordinary "normal" notices (the
-//!   recipient's preference for normal urgency applies, and they can be
-//!   switched off), **never tamper-class**, and **never name the group or
-//!   anything about it** (principle 7: email passes through third parties).
+//!   `group_removed`, `group_archived`, `group_facilitator_offered` and the
+//!   alliance kinds (`alliance_requested`, `alliance_offered`,
+//!   `alliance_partnership`, `alliance_accepted`, which name the other
+//!   person but never the group) are written as [`group_notices`] with a
+//!   notification row each, sent by the notifier like any other email. They
+//!   are ordinary "normal" notices (the recipient's preference for normal
+//!   urgency applies, and they can be switched off), **never tamper-class**,
+//!   and **never name the group or anything about it** (principle 7: email
+//!   passes through third parties).
 //!   Above [`LARGE_GROUP`] participants, join and leave notices become one
 //!   daily summary per facilitator.
 //! * **Archiving** ([`archive`]), used by a facilitator, an admin, and the
@@ -134,6 +137,20 @@ pub async fn tell_offered(
     .await
 }
 
+/// An alliance notice (`alliance_requested`, `alliance_offered`,
+/// `alliance_partnership`, `alliance_accepted`) to `recipient`, naming
+/// `actor` and never the group. Declines, expiries and withdrawals send
+/// nothing (§14).
+pub async fn tell_alliance(
+    conn: &mut sqlx::AnyConnection,
+    kind: NoticeKind,
+    recipient: &UserId,
+    actor: &UserId,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    tell(conn, kind, recipient, Some(actor), None, now_ms).await
+}
+
 /// `group_join_requested` to each of the group's facilitators.
 pub async fn tell_join_requested(
     conn: &mut sqlx::AnyConnection,
@@ -238,6 +255,7 @@ pub async fn tell_meeting_reminder(
 /// Archive `group`: read-only for 30 days, then deleted by the retention
 /// worker. Unlists it, withdraws a facilitator offer, writes the history
 /// entry and tells everyone in it (`group_archived`) except `by`, who knows.
+/// Open alliance proposals in it become void ([`groups::archive`]).
 /// False if it was already archived (nothing is written then).
 ///
 /// Never touches `ally_links`: alliances formed in the group stay, with

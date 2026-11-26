@@ -30,6 +30,7 @@ use crate::db::repo::admin_log;
 use crate::db::repo::alerts::{self, AlertSource, NewAlert};
 use crate::db::repo::invites::InviteKind;
 use crate::db::repo::notifications::{self, DeliveryCounts};
+use crate::db::repo::proposals::{self, VoidScope};
 use crate::db::repo::stats::{self, DeviceCounts, LastSeenBuckets, StorageBytes, UserCounts};
 use crate::db::repo::{allies, groups, instance, sessions, users};
 use crate::error::{AppError, AppResult};
@@ -369,6 +370,9 @@ async fn set_account_disabled(
     }
     if disabled {
         sessions::delete_for_user(&mut *tx, &target).await?;
+        // A disabled account can't send or receive alliance proposals: the
+        // open ones end now (GROUPS.md §7.6, §9). Links stay as they are.
+        proposals::void(&mut tx, VoidScope::User(&target)).await?;
     }
 
     let (own, as_ally) = if disabled {

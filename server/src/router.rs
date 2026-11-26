@@ -29,7 +29,7 @@
 
 use crate::api::{
     account, admin, allies, auth, branding, devices, events, feed, group_listing, groups,
-    heartbeat, invites, keys, manifests, prefs, privacy, reports, setup, well_known,
+    heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -166,6 +166,18 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/v1/groups/{id}/facilitator-offer/decline",
             post(groups::decline_facilitator_offer),
+        )
+        // Alliance proposals (GROUPS.md §7). None of these activates a
+        // link: only `POST /v1/me/allies/{ally_id}/approve` does.
+        .route("/v1/groups/{id}/proposals", post(proposals::create))
+        .route("/v1/me/proposals", get(proposals::list_mine))
+        .route("/v1/proposals/{id}", delete(proposals::withdraw))
+        .route("/v1/proposals/{id}/accept", post(proposals::accept))
+        .route("/v1/proposals/{id}/decline", post(proposals::decline))
+        .route("/v1/me/proposal-blocks", get(proposals::list_blocks))
+        .route(
+            "/v1/me/proposal-blocks/{user_id}",
+            put(proposals::put_block).delete(proposals::delete_block),
         )
         .route("/v1/group-directory", get(group_listing::directory))
         .route(
