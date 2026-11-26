@@ -10,8 +10,9 @@
 //! told: the detector thresholds, the idle threshold that pauses capture, and
 //! the urgency floors. (The one exception is `[dev_thresholds]`, which only a
 //! service built with the `dev` feature acts on, and which can only lower
-//! thresholds: [`crate::thresholds`]. A release build ignores it.) The tamper-detection knobs in `[capture]` exist but
-//! can only be made stricter than their defaults. Member-facing settings (capture interval, urgency
+//! thresholds: [`crate::thresholds`]. A release build ignores it.) The
+//! tamper-detection knobs in `[capture]` exist but can only be made stricter
+//! than their defaults. Member-facing settings (capture interval, urgency
 //! mapping, report sharing) *are* read from `[member_settings]`, but every
 //! change to them is announced to allies as a `settings_change` event when
 //! the service starts ([`crate::runtime`]).

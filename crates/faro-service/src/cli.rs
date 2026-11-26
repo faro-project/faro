@@ -666,8 +666,7 @@ fn cmd_status(config: &Config) -> Result<(), CliError> {
 /// A note when `[dev_thresholds]` is set: lowered (a development build) or
 /// ignored. `installers/macos/check-pkg.sh` reads it.
 fn print_thresholds(config: &Config) {
-    if let Some(line) = crate::thresholds::build_use(config.dev_thresholds.as_ref()).status_line()
-    {
+    if let Some(line) = crate::thresholds::build_use(config.dev_thresholds.as_ref()).status_line() {
         println!("{line}");
     }
 }

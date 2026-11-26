@@ -221,7 +221,7 @@ mod tests {
     #[cfg(not(feature = "dev"))]
     #[test]
     fn a_release_build_never_lowers_the_thresholds() {
-        assert!(!BUILD_ALLOWS_DEV_THRESHOLDS);
+        const { assert!(!BUILD_ALLOWS_DEV_THRESHOLDS) };
         assert_eq!(
             build_use(Some(&SWIMWEAR)),
             DevThresholdsUse::Ignored(SWIMWEAR)
@@ -248,7 +248,7 @@ mod tests {
     fn a_dev_build_lowers_the_thresholds() {
         use faro_detect::{ImageScores, PolicyEngine};
         use faro_proto::body::Rating;
-        assert!(BUILD_ALLOWS_DEV_THRESHOLDS);
+        const { assert!(BUILD_ALLOWS_DEV_THRESHOLDS) };
         let cfg = crate::Config::from_toml_str(
             "[dev_thresholds]\nexplicit_high = 0.5\nexplicit_medium = 0.05\nany_low = 0.03",
         )
