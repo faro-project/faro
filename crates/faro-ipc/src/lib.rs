@@ -77,7 +77,7 @@ pub use messages::{
 #[cfg(unix)]
 pub use peer::AllowSameUid;
 pub use peer::{AllowUids, PeerInfo, PeerVerifier};
-pub use status::{StatusReport, STATUS_SCHEMA};
+pub use status::{MemberStatus, StatusReport, STATUS_SCHEMA};
 #[cfg(unix)]
 pub use transport::{resolve_agent_socket, session_socket_path, BindOptions, IpcClient, IpcServer};
 pub use wire_frame::{WireFrame, WirePixelFormat, MAX_FRAME_BYTES};
