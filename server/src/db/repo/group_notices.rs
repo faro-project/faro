@@ -25,15 +25,39 @@ pub enum NoticeKind {
     /// The last facilitator's account was deleted and the person was
     /// offered the role.
     GroupFacilitatorOffered,
+    /// Someone asked to join a listed group. To its facilitators.
+    GroupJoinRequested,
+    /// A facilitator accepted the person's join request.
+    GroupJoinAccepted,
+    /// An admin removed the group from the directory. To its facilitators.
+    GroupUnlisted,
+    /// The group meets soon. To each participant who wants it.
+    MeetingReminder,
+    /// Someone asked the person to be their ally (a request).
+    AllianceRequested,
+    /// Someone offered to be the person's ally.
+    AllianceOffered,
+    /// Someone asked the person to partner up.
+    AlliancePartnership,
+    /// The person's proposal was accepted: compare safety codes to finish.
+    AllianceAccepted,
 }
 
 impl NoticeKind {
-    pub const ALL: [NoticeKind; 5] = [
+    pub const ALL: [NoticeKind; 13] = [
         NoticeKind::GroupJoined,
         NoticeKind::GroupLeft,
         NoticeKind::GroupRemoved,
         NoticeKind::GroupArchived,
         NoticeKind::GroupFacilitatorOffered,
+        NoticeKind::GroupJoinRequested,
+        NoticeKind::GroupJoinAccepted,
+        NoticeKind::GroupUnlisted,
+        NoticeKind::MeetingReminder,
+        NoticeKind::AllianceRequested,
+        NoticeKind::AllianceOffered,
+        NoticeKind::AlliancePartnership,
+        NoticeKind::AllianceAccepted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -43,6 +67,14 @@ impl NoticeKind {
             NoticeKind::GroupRemoved => "group_removed",
             NoticeKind::GroupArchived => "group_archived",
             NoticeKind::GroupFacilitatorOffered => "group_facilitator_offered",
+            NoticeKind::GroupJoinRequested => "group_join_requested",
+            NoticeKind::GroupJoinAccepted => "group_join_accepted",
+            NoticeKind::GroupUnlisted => "group_unlisted",
+            NoticeKind::MeetingReminder => "meeting_reminder",
+            NoticeKind::AllianceRequested => "alliance_requested",
+            NoticeKind::AllianceOffered => "alliance_offered",
+            NoticeKind::AlliancePartnership => "alliance_partnership",
+            NoticeKind::AllianceAccepted => "alliance_accepted",
         }
     }
 
@@ -59,6 +91,9 @@ pub struct NewNotice<'a> {
     /// A daily summary: at most one per `dedupe_key`.
     pub summary: bool,
     pub dedupe_key: Option<String>,
+    /// The one thing a notice says that is not about the group (a meeting
+    /// reminder's time).
+    pub detail: Option<String>,
     /// `None` records it as suppressed (the person switched it off).
     pub mode: Option<Mode>,
     pub due_at_ms: i64,
@@ -73,8 +108,8 @@ pub async fn insert(
 ) -> Result<bool, sqlx::Error> {
     let id = new_hex_id();
     let r = sqlx::query(
-        "INSERT INTO group_notices (id, kind, recipient_id, actor_id, summary, dedupe_key, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "INSERT INTO group_notices (id, kind, recipient_id, actor_id, summary, dedupe_key, created_at, detail)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (dedupe_key) DO NOTHING",
     )
     .bind(&id)
@@ -84,6 +119,7 @@ pub async fn insert(
     .bind(i64::from(n.summary))
     .bind(n.dedupe_key.clone())
     .bind(n.now_ms)
+    .bind(n.detail.clone())
     .execute(&mut *conn)
     .await?;
     if r.rows_affected() == 0 {

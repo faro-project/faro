@@ -28,8 +28,9 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, branding, devices, events, feed, group_roster, groups, heartbeat,
-    invites, keys, manifests, prefs, privacy, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, group_listing, group_roster,
+    groups, heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup,
+    well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -170,6 +171,40 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             "/v1/groups/{id}/facilitator-offer/decline",
             post(groups::decline_facilitator_offer),
         )
+        // Alliance proposals (GROUPS.md §7). None of these activates a
+        // link: only `POST /v1/me/allies/{ally_id}/approve` does.
+        .route("/v1/groups/{id}/proposals", post(proposals::create))
+        .route("/v1/me/proposals", get(proposals::list_mine))
+        .route("/v1/proposals/{id}", delete(proposals::withdraw))
+        .route("/v1/proposals/{id}/accept", post(proposals::accept))
+        .route("/v1/proposals/{id}/decline", post(proposals::decline))
+        .route("/v1/me/proposal-blocks", get(proposals::list_blocks))
+        .route(
+            "/v1/me/proposal-blocks/{user_id}",
+            put(proposals::put_block).delete(proposals::delete_block),
+        )
+        .route("/v1/group-directory", get(group_listing::directory))
+        .route(
+            "/v1/groups/{id}/join-requests",
+            get(group_listing::list_requests).post(group_listing::create_request),
+        )
+        .route(
+            "/v1/groups/{id}/join-requests/me",
+            delete(group_listing::withdraw_request),
+        )
+        .route("/v1/me/join-requests", get(group_listing::my_requests))
+        .route(
+            "/v1/join-requests/{id}/accept",
+            post(group_listing::accept_request),
+        )
+        .route(
+            "/v1/join-requests/{id}/decline",
+            post(group_listing::decline_request),
+        )
+        .route(
+            "/v1/groups/{id}/me/meeting-reminders",
+            put(group_listing::set_reminders),
+        )
         .route("/v1/me/group-invites", get(groups::my_invites))
         .route(
             "/v1/group-invites/{token}",
@@ -249,6 +284,10 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/admin/api/log", get(admin::log))
         .route("/admin/api/groups", get(admin::list_groups))
         .route("/admin/api/groups/{id}", delete(admin::archive_group))
+        .route(
+            "/admin/api/groups/{id}/listed",
+            put(admin::set_group_listed),
+        )
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),

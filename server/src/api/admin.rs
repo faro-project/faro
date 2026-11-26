@@ -30,6 +30,7 @@ use crate::db::repo::admin_log;
 use crate::db::repo::alerts::{self, AlertSource, NewAlert};
 use crate::db::repo::invites::InviteKind;
 use crate::db::repo::notifications::{self, DeliveryCounts};
+use crate::db::repo::proposals::{self, VoidScope};
 use crate::db::repo::stats::{self, DeviceCounts, LastSeenBuckets, StorageBytes, UserCounts};
 use crate::db::repo::{allies, groups, instance, sessions, users};
 use crate::error::{AppError, AppResult};
@@ -369,6 +370,9 @@ async fn set_account_disabled(
     }
     if disabled {
         sessions::delete_for_user(&mut *tx, &target).await?;
+        // A disabled account can't send or receive alliance proposals: the
+        // open ones end now (GROUPS.md §7.6, §9). Links stay as they are.
+        proposals::void(&mut tx, VoidScope::User(&target)).await?;
     }
 
     let (own, as_ally) = if disabled {
@@ -460,6 +464,104 @@ pub async fn list_groups(
 ) -> AppResult<Json<Vec<groups::AdminGroupRow>>> {
     s.require_admin()?;
     Ok(Json(groups::list_for_admin(state.db().pool()).await?))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetListed {
+    pub listed: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GroupListed {
+    pub id: String,
+    pub listed: bool,
+}
+
+/// `PUT /admin/api/groups/{id}/listed`: an admin removes a group from the
+/// directory (`{"listed": false}`): open join requests become "Not
+/// accepted", the admin log records it, and the facilitators are told
+/// ("An admin removed your group from the directory", without naming it).
+/// `{"listed": true}` is allowed only where the instance lets admins list
+/// (a facilitator asks, an admin lists, GROUPS.md §13). Unlisting a group
+/// that isn't listed changes and tells nobody.
+pub async fn set_group_listed(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+    super::ApiJson(req): super::ApiJson<SetListed>,
+) -> AppResult<Json<GroupListed>> {
+    s.require_admin()?;
+    let now = state.now_ms();
+    let mut tx = state.db().begin_write().await?;
+    let group = groups::by_id(&mut *tx, &id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if group.is_archived() {
+        return Err(AppError::conflict(
+            "group_archived",
+            "this group is archived",
+        ));
+    }
+    if group.listed != req.listed {
+        if req.listed {
+            let settings = state.settings().groups;
+            if !settings.enabled
+                || settings.who_can_list != crate::settings::WhoCanListGroups::Admins
+            {
+                return Err(AppError::conflict(
+                    "listing_not_allowed",
+                    "on this instance, groups are listed by their facilitators",
+                ));
+            }
+            if groups::facilitators(&mut *tx, &id).await?.is_empty() {
+                return Err(AppError::conflict(
+                    "no_facilitator",
+                    "a group without a facilitator can't be listed",
+                ));
+            }
+        }
+        groups::update(
+            &mut tx,
+            &id,
+            &groups::GroupUpdate {
+                listed: Some(req.listed),
+                listing_json: (req.listed && group.listing_json.is_none())
+                    .then(|| super::group_listing::Listing::default().to_json()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let kind = if req.listed {
+            groups::HistoryKind::Listed
+        } else {
+            groups::HistoryKind::Unlisted
+        };
+        groups::add_history(&mut *tx, &id, kind, None, Some(&s.user.id), now).await?;
+        admin_log::insert_for_group(
+            &mut *tx,
+            if req.listed {
+                admin_log::Action::GroupListed
+            } else {
+                admin_log::Action::GroupUnlisted
+            },
+            &id,
+            &s.user.id,
+            admin_log::Via::Console,
+            now,
+        )
+        .await?;
+        if !req.listed {
+            crate::db::repo::group_listing::void_open(&mut tx, &id, now).await?;
+            crate::groups::tell_unlisted(&mut tx, &id, &s.user.id, now).await?;
+        }
+    }
+    tx.commit().await?;
+    tracing::info!(admin = %s.user.id, group = %id, listed = req.listed, "group listing changed by an admin");
+    Ok(Json(GroupListed {
+        id,
+        listed: req.listed,
+    }))
 }
 
 /// `DELETE /admin/api/groups/{id}`: archive a group, for example over an

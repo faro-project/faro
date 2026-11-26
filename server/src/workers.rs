@@ -16,7 +16,7 @@ use crate::db::repo::uptime;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::tokens::new_hex_id;
-use crate::{deletion, liveness, notify, retention};
+use crate::{deletion, liveness, meetings, notify, retention};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +231,19 @@ pub fn spawn_all(
                     notify::dispatch(&state).await?;
                     notify::send_digests(&state).await.map(|_| ())
                 }
+            },
+        ));
+    }
+    {
+        let state = state.clone();
+        handles.push(spawn_periodic(
+            "meeting-reminders",
+            Duration::from_secs(10),
+            Duration::from_secs(meetings::REMINDER_INTERVAL_SECS),
+            cancel.clone(),
+            move || {
+                let state = state.clone();
+                async move { meetings::run_once(&state).await.map(|_| ()) }
             },
         ));
     }

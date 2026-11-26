@@ -702,6 +702,13 @@ fn admin_log_text(
                 people,
             );
         }
+        Action::GroupListed | Action::GroupUnlisted => {
+            return (
+                format!("A group on {instance} was listed or unlisted"),
+                format!("{who} changed whether a group is listed on {instance}."),
+                people,
+            );
+        }
         Action::AdminGranted | Action::AdminRevoked => {}
     }
     if n.recipient_id == n.member_id {
@@ -722,7 +729,9 @@ fn admin_log_text(
             | Action::AccountCreated
             | Action::AccountDisabled
             | Action::AccountEnabled
-            | Action::GroupArchived => (
+            | Action::GroupArchived
+            | Action::GroupListed
+            | Action::GroupUnlisted => (
                 format!("You are no longer an admin of {instance}"),
                 format!(
                     "{who} removed your admin role on {instance}{how}. You can still sign in, and \
@@ -749,7 +758,9 @@ fn admin_log_text(
         | Action::AccountCreated
         | Action::AccountDisabled
         | Action::AccountEnabled
-        | Action::GroupArchived => (
+        | Action::GroupArchived
+        | Action::GroupListed
+        | Action::GroupUnlisted => (
             format!("{person} is no longer an admin of {instance}"),
             format!(
                 "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \
@@ -953,6 +964,7 @@ pub(crate) fn group_notice_text(
     g: &crate::db::repo::notifications::GroupNoticeInfo,
 ) -> (String, String) {
     use crate::db::repo::group_notices::NoticeKind;
+    let who = g.actor_name.as_deref().unwrap_or("Someone");
     let (subject, line) = match (NoticeKind::parse(&g.kind), g.summary) {
         (Some(NoticeKind::GroupJoined | NoticeKind::GroupLeft), true) => (
             format!("People joined or left a group you facilitate on {instance}"),
@@ -981,6 +993,43 @@ pub(crate) fn group_notice_text(
             "A group you're in has no facilitator. Open Faro to take it on, within 14 days."
                 .to_owned(),
         ),
+        // Proposals name the person (never the group): "Sam asked you to
+        // be their ally."
+        (Some(NoticeKind::AllianceRequested), _) => (
+            format!("{who} asked you to be their ally on {instance}"),
+            format!("{who} asked you to be their ally. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AllianceOffered), _) => (
+            format!("{who} offered to be your ally on {instance}"),
+            format!("{who} offered to be your ally. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AlliancePartnership), _) => (
+            format!("{who} asked to partner up on {instance}"),
+            format!("{who} asked to partner up: to be each other's allies. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AllianceAccepted), _) => (
+            format!("{who} accepted on {instance}"),
+            format!("{who} accepted. Compare safety codes with them in Faro to finish."),
+        ),
+        (Some(NoticeKind::GroupJoinRequested), _) => (
+            format!("Someone asked to join a group you facilitate on {instance}"),
+            "Someone asked to join your group. Open Faro to answer.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupJoinAccepted), _) => (
+            format!("You were added to a group on {instance}"),
+            "You've been added to a group you asked to join.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupUnlisted), _) => (
+            format!("An admin removed a group you facilitate from the directory on {instance}"),
+            "An admin removed your group from the directory.".to_owned(),
+        ),
+        (Some(NoticeKind::MeetingReminder), _) => {
+            let when = crate::meetings::reminder_words(g.detail.as_deref());
+            (
+                format!("Your group on {instance} meets {when}"),
+                format!("Your group on {instance} meets {when}."),
+            )
+        }
         (None, _) => (
             format!("News about a group on {instance}"),
             "There is news about a group you're in. Open Faro to see.".to_owned(),
