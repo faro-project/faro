@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::connection::Connection;
+use crate::endpoint::AccountId;
 use crate::error::{IpcError, Result};
 use crate::messages::WireMessage;
 
@@ -61,31 +62,33 @@ pub const MAX_ACCOUNTS: usize = 256;
 /// Longest account name in a preview.
 pub const MAX_ACCOUNT_LEN: usize = 256;
 
-/// The enroll socket for `uid`, next to the agent socket `agent_base`:
-/// `enroll.<uid>.sock` (a root service binds one per account, owned by that
-/// account, mode 0600), or `enroll.sock` for `None` (a non-root development
-/// service).
-pub fn enroll_socket_path(agent_base: &Path, uid: Option<u32>) -> PathBuf {
+/// The enroll endpoint for `account`, next to the agent endpoint
+/// `agent_base`: `enroll.<uid>.sock` / `\\.\pipe\faro\enroll.<SID>` (a
+/// privileged service binds one per account that only that account can
+/// connect to), or `enroll.sock` / `\\.\pipe\faro\enroll` for `None` (a
+/// development service running as the user). See [`crate::endpoint`].
+pub fn enroll_socket_path(agent_base: &Path, account: Option<AccountId>) -> PathBuf {
     let ext = agent_base
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    let name = match uid {
-        Some(uid) => format!("enroll.{uid}{ext}"),
+    let name = match account {
+        Some(account) => format!("enroll.{account}{ext}"),
         None => format!("enroll{ext}"),
     };
     agent_base.with_file_name(name)
 }
 
-/// Where an agent running as `uid` should connect: its own enroll socket if
-/// the service has bound one, else the development service's.
-#[cfg(unix)]
-pub fn resolve_enroll_socket(agent_base: &Path, uid: u32) -> PathBuf {
-    use std::os::unix::fs::FileTypeExt;
-    let own = enroll_socket_path(agent_base, Some(uid));
-    match std::fs::symlink_metadata(&own) {
-        Ok(md) if md.file_type().is_socket() => own,
-        _ => enroll_socket_path(agent_base, None),
+/// Where an agent running as `account` should connect: its own enroll
+/// endpoint if the service has bound one, else the development service's.
+/// As with [`resolve_agent_socket`](crate::resolve_agent_socket), who
+/// listens there is checked when connecting.
+pub fn resolve_enroll_socket(agent_base: &Path, account: AccountId) -> PathBuf {
+    let own = enroll_socket_path(agent_base, Some(account));
+    if crate::endpoint::endpoint_exists(&own) {
+        own
+    } else {
+        enroll_socket_path(agent_base, None)
     }
 }
 
@@ -497,6 +500,7 @@ mod tests {
         assert!(encode(&r).is_ok());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn socket_names() {
         let base = Path::new("/var/run/faro/agent.sock");
@@ -512,10 +516,28 @@ mod tests {
             enroll_socket_path(Path::new("/run/faro/agent"), Some(1000)),
             Path::new("/run/faro/enroll.1000")
         );
-        #[cfg(unix)]
         assert_eq!(
             resolve_enroll_socket(Path::new("/nonexistent-faro/agent.sock"), 501),
             Path::new("/nonexistent-faro/enroll.sock")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_names() {
+        let sid: crate::Sid = "S-1-5-21-1-2-3-1001".parse().unwrap();
+        let base = Path::new(r"\\.\pipe\faro\agent");
+        assert_eq!(
+            enroll_socket_path(base, Some(sid)),
+            Path::new(r"\\.\pipe\faro\enroll.S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(
+            enroll_socket_path(base, None),
+            Path::new(r"\\.\pipe\faro\enroll")
+        );
+        assert_eq!(
+            resolve_enroll_socket(Path::new(r"\\.\pipe\faro-nonexistent-test\agent"), sid),
+            Path::new(r"\\.\pipe\faro-nonexistent-test\enroll")
         );
     }
 }
