@@ -237,6 +237,9 @@ fi
 app="$root/Library/Faro/Faro Agent.app"
 install -d -m 755 "$app/Contents/MacOS"
 install -m 755 "$bin/faro-agent" "$app/Contents/MacOS/faro-agent"
+# The icon Finder, Login Items and the Screen Recording settings show.
+install -d -m 755 "$app/Contents/Resources"
+install -m 644 "$here/../../assets/brand/faro-icon.icns" "$app/Contents/Resources/Faro.icns"
 sed "s/@BUNDLE_VERSION@/$bundle_version/g" "$here/Info.plist.in" > "$app/Contents/Info.plist"
 plutil -lint -s "$app/Contents/Info.plist"
 

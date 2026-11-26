@@ -7,7 +7,7 @@
 | `payload/` | The launchd plists, laid out as installed. Generated; see `crates/faro-platform-macos/tests/installer_plists.rs` |
 | `fetch-onnxruntime.sh` | Downloads ONNX Runtime's static library for each architecture and its licence files, checked against pinned SHA-256 digests; `build-pkg.sh` links faro-service with it |
 | `faro-uninstall` | Installed as `/Library/Faro/bin/faro-uninstall`: stops Faro, sends allies a `goodbye`, then removes everything |
-| `Info.plist.in` | `Faro Agent.app`'s Info.plist (`@VERSION@` is filled in) |
+| `Info.plist.in` | `Faro Agent.app`'s Info.plist (`@VERSION@` is filled in). Its icon is `assets/brand/faro-icon.icns` |
 | `Distribution.xml.in` | The Installer definition: whole-computer install only, macOS 13+ |
 | `resources/` | The Installer's welcome and conclusion pages |
 | `test-uninstall.sh` | Checks `faro-uninstall`'s decisions on a fake `/Library` with stubbed `launchctl` and `faro-service` (CI runs it) |

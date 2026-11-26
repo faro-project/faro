@@ -5,7 +5,7 @@
 ## Before you start
 
 - **In the closed beta,** read [BETA.md](BETA.md) first: where to download Faro, the permissions to grant, and the alerts your allies may see while you set up.
-- **Faro is installed** on the computer, from the official installer. After installing, the Faro icon is in the menu bar (the eye icon on a Mac) or in the notification area (the tray icon on Windows). Faro monitors nothing until you finish the steps below.
+- **Faro is installed** on the computer, from the official installer. After installing, the Faro icon is in the menu bar on a Mac (a lighthouse) or in the notification area on Windows (the tray icon). Faro monitors nothing until you finish the steps below.
 - **Your member key is set up** in the web app (the **Keys** page).
 
 ## 1. Get an enrollment link
@@ -18,7 +18,7 @@
 
 - **If the web app is open on the Mac:** click **Open in Faro**.
 - **On Windows:** click the link in the web app. It opens the running Faro Agent.
-- **If it is open on another device** (a phone, say): click **Copy link** and send the link to the Mac, for example by email to yourself. On the Mac, click the eye icon in the menu bar, choose **Enroll this computer…**, paste the link into the first field and click **Continue**. You can also type your Faro address in the first field and the code in the second. On Windows, the tray icon's menu has the same **Enroll this computer…** item.
+- **If it is open on another device** (a phone, say): click **Copy link** and send the link to the Mac, for example by email to yourself. On the Mac, click the Faro icon in the menu bar, choose **Enroll this computer…**, paste the link into the first field and click **Continue**. You can also type your Faro address in the first field and the code in the second. On Windows, the tray icon's menu has the same **Enroll this computer…** item.
 
 ## 3. Check and confirm
 
@@ -57,7 +57,7 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | Enrollment stopped to keep you safe | The instance answered with a key that doesn't match your link. Don't continue. Remove the new computer in the web app if it appears there, and tell whoever runs your instance. |
 | This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. On Windows, an administrator can run `& "C:\Program Files\Faro\faro-service.exe" enroll --link '…'` in a terminal opened as administrator, with your link. |
 | Faro can't see one of your windows | An app (it names it) keeps a window out of screenshots and screen recordings, so Faro can't check it, and your allies are told which app. Close the window if you don't need it, or turn off the app's setting that hides its windows from screen sharing, if it has one. |
-| Nothing happens when you click the link | Restart the computer, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the Faro icon (the eye icon on a Mac, the tray icon on Windows) and paste the link. |
+| Nothing happens when you click the link | Restart the computer, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the Faro icon (in the menu bar on a Mac, the tray icon on Windows) and paste the link. |
 
 ### Faro's logs
 
@@ -72,7 +72,7 @@ Open them in the Console app (under **Log Reports**), or follow them in Terminal
 
 ## Checking that Faro is working
 
-Click the eye icon in the menu bar (the tray icon in the notification area on Windows). The line under **This computer is monitored by Faro** says what Faro is doing. Click it to see what it means and what to do; when something can fix it, an item just below opens it.
+Click the Faro icon in the menu bar (the tray icon in the notification area on Windows). The line under **This computer is monitored by Faro** says what Faro is doing. Click it to see what it means and what to do; when something can fix it, an item just below opens it.
 
 | The menu says | What to do |
 |---|---|
@@ -116,7 +116,7 @@ If Faro isn't working and you'd like help, make a **problem report**: one file w
 sudo /Library/Faro/bin/faro-service diagnose
 ```
 
-**Report a problem…** in the eye icon's menu shows these steps too, and its **Copy Command** button puts that line on the clipboard, ready to paste into Terminal.
+**Report a problem…** in the Faro icon's menu shows these steps too, and its **Copy Command** button puts that line on the clipboard, ready to paste into Terminal.
 
 1. Faro gathers the report and lists the files in it, with what each one is. Nothing is written yet.
 2. Type **s** to read everything in it first, **y** to write it, or **n** to stop.

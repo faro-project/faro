@@ -395,10 +395,10 @@
 									</div>
 									<p class="muted small">
 										Using another device? Copy the link and send it to the computer. There, choose
-										<strong>Enroll this computer…</strong> from the Faro icon (the eye icon in the menu
-										bar on a Mac, the tray icon in the notification area on Windows) and paste it. An
-										administrator of the computer approves: on a Mac with their name and password, on
-										Windows in the administrator prompt.
+										<strong>Enroll this computer…</strong> from the Faro icon (in the menu bar on a Mac,
+										the tray icon in the notification area on Windows) and paste it. An administrator
+										of the computer approves: on a Mac with their name and password, on Windows in the
+										administrator prompt.
 									</p>
 									<details>
 										<summary>Or use a terminal</summary>
