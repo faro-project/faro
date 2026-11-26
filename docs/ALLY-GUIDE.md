@@ -157,7 +157,7 @@ Anyone who controls their own computer can switch Faro off. Faro can't prevent t
 | ***Computer*'s clock is wrong** | The computer's time is very different from the server's. |
 | ***Computer* was removed** | The member removed the computer from Faro, so it no longer reports. |
 
-Some of these have innocent causes: a system update can switch a permission off, for example. Others are hard to explain away. Either way, the right response is to ask.
+Some of these have innocent causes: a system update can switch a permission off, for example. During the closed beta, setting up Faro also causes some of them: [BETA.md](BETA.md#4-known-limitations-and-false-alarms) says which to expect. Others are hard to explain away. Either way, the right response is to ask.
 
 ### Missed check-ins
 
