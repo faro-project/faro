@@ -520,7 +520,13 @@ mod tests {
     ) -> Result<Accepted, PackageCheckError> {
         let mut calls = Vec::new();
         let mut run = canned(pkgutil, spctl, &mut calls);
-        check_with(policy, Path::new("/var/faro/updates/ab.pkg"), &mut run)
+        // Absolute on every OS the tests run on.
+        let pkg = if cfg!(windows) {
+            r"C:\faro\ab.pkg"
+        } else {
+            "/var/faro/updates/ab.pkg"
+        };
+        check_with(policy, Path::new(pkg), &mut run)
     }
 
     const REQUIRE: PackagePolicy = PackagePolicy::Require { team_id: TEAM };
@@ -708,7 +714,11 @@ mod tests {
         let mut fail =
             |_: Tool, _: &Path| -> Result<ToolOutput, String> { Err("no such file".into()) };
         assert!(matches!(
-            check_with(REQUIRE, Path::new("/p.pkg"), &mut fail),
+            check_with(
+                REQUIRE,
+                Path::new(if cfg!(windows) { "C:/p.pkg" } else { "/p.pkg" }),
+                &mut fail
+            ),
             Err(Unconfirmed(_))
         ));
         // A relative path is never handed to a tool.
@@ -727,7 +737,7 @@ mod tests {
         let mut calls = Vec::new();
         let r = check_with(
             REQUIRE,
-            Path::new("/p.pkg"),
+            Path::new(if cfg!(windows) { "C:/p.pkg" } else { "/p.pkg" }),
             &mut canned(
                 exit(1, "Status: no signature"),
                 ok(spctl_ok(TEAM)),
@@ -739,7 +749,7 @@ mod tests {
         calls.clear();
         let r = check_with(
             REQUIRE,
-            Path::new("/p.pkg"),
+            Path::new(if cfg!(windows) { "C:/p.pkg" } else { "/p.pkg" }),
             &mut canned(ok(pkgutil_ok(TEAM)), ok(spctl_ok(TEAM)), &mut calls),
         );
         assert!(r.is_ok());

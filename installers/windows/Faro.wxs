@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Faro's Windows installer (ARCHITECTURE.md §3.3 "Windows", §3.8). Built by
+  build-msi.ps1 with WiX 5 (`wix build -arch x64`); checked by check-msi.ps1.
+
+  Preprocessor variables (build-msi.ps1 defines them all):
+    Payload        the staged files, laid out as installed under Program Files
+    ProductVersion major.minor.patch (Windows Installer versions are numeric)
+    FaroVersion    the full semver version (0.1.0-beta.1); the updater reads it
+    HasUpdateRoot  1 when the payload has update-root.json
+    HasModel       1 when the payload has the image model (an `onnx` build)
+    NoticeRtf      the first page's text (notice.rtf, with a banner for -Dev)
+    Dev            1 for an unsigned development package
+
+  The paths are faro_platform_windows::layout's. The directories are private
+  properties (mixed case), so they can't be moved from the command line.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- Never change the UpgradeCode: Windows Installer finds the installed Faro
+       by it, and the updater refuses an MSI with another one
+       (crates/faro-service/src/update/msi.rs, UPGRADE_CODE). -->
+  <Package Name="Faro"
+           Manufacturer="Faro Project"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="07FB4D24-3048-4FE8-AFCF-2C9549BC9982"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+
+    <SummaryInformation Description="Faro screen accountability $(var.FaroVersion)" />
+
+    <!-- ProductVersion can't hold a pre-release, so 0.1.0-beta.1 and 0.1.0 are
+         both 0.1.0: same-version upgrades must be allowed. The updater orders
+         versions by FaroVersion (semver) and never goes back. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of Faro is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="FaroVersion" Value="$(var.FaroVersion)" />
+
+    <!-- Windows 10 22H2 (build 19045) or later, 64-bit. VersionNT is 603 on
+         every Windows 10 and 11 (Windows Installer has no manifest), so the
+         build number comes from the registry. -->
+    <Property Id="FAROWINBUILD">
+      <RegistrySearch Id="FaroWinBuild" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR VersionNT64"
+            Message="Faro needs 64-bit Windows." />
+    <Launch Condition="Installed OR (FAROWINBUILD AND FAROWINBUILD &gt;= 19045)"
+            Message="Faro needs Windows 10 version 22H2 or Windows 11." />
+
+    <!-- Apps & features. Nothing to modify (WixUI_Minimal sets ARPNOMODIFY); removing it tells allies first. -->
+    <Property Id="ARPCONTACT" Value="Faro Project" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/faro-project/faro" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/faro-project/faro/blob/main/docs/BETA.md" />
+    <Property Id="ARPCOMMENTS" Value="Screen accountability for every account on this computer. Uninstalling tells your allies." />
+
+    <!-- The first page says what Faro does, as the macOS installer's welcome
+         page does (ARCHITECTURE.md §12). No choices: the layout is fixed. -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.NoticeRtf)" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="FaroProgramDir" Name="Faro">
+        <Directory Id="FaroModelsDir" Name="models">
+          <Directory Id="FaroModelDir" Name="opennsfw" />
+        </Directory>
+        <Directory Id="FaroDomainsDir" Name="domains" />
+        <Directory Id="FaroNoticesDir" Name="notices" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="FaroDataDir" Name="Faro">
+        <Directory Id="FaroLogDir" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Faro" Title="Faro" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="Programs" />
+      <ComponentGroupRef Id="Data" />
+      <ComponentGroupRef Id="State" />
+    </Feature>
+
+    <!-- ===== Programs ===================================================== -->
+    <ComponentGroup Id="Programs" Directory="FaroProgramDir">
+      <!-- The service: LocalSystem, started at boot, restarted when it fails.
+           Its DACL lets only SYSTEM and Administrators start, stop, change or
+           delete it; other accounts may only query it (§3.3, §3.7). -->
+      <Component Id="FaroService">
+        <File Id="faro_service.exe" Source="$(var.Payload)\faro-service.exe" KeyPath="yes" />
+        <ServiceInstall Id="FaroService"
+                        Name="FaroService"
+                        DisplayName="Faro Service"
+                        Description="Faro screen accountability: watches every session and reports to your allies."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Arguments="run-service"
+                        Vital="yes">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="restart"
+                              RestartServiceDelayInSeconds="10"
+                              ResetPeriodInDays="1" />
+          <PermissionEx Sddl="D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;AU)" />
+        </ServiceInstall>
+        <!-- Wait="yes": an install whose new service doesn't start fails and
+             rolls back to the old one, which is started again. The updater
+             relies on that. -->
+        <ServiceControl Id="FaroService" Name="FaroService"
+                        Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+
+      <Component Id="FaroAgent">
+        <File Id="faro_agent.exe" Source="$(var.Payload)\faro-agent.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- faro:// links (enrollment from the web app) open the agent, for
+           every account. -->
+      <Component Id="UrlHandler">
+        <RegistryKey Root="HKLM" Key="Software\Classes\faro">
+          <RegistryValue Type="string" Value="URL:Faro" KeyPath="yes" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryKey Key="DefaultIcon">
+            <RegistryValue Type="string" Value="&quot;[FaroProgramDir]faro-agent.exe&quot;,0" />
+          </RegistryKey>
+          <RegistryKey Key="shell\open\command">
+            <RegistryValue Type="string" Value="&quot;[FaroProgramDir]faro-agent.exe&quot; open-url &quot;%1&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+
+      <Component Id="ServiceTomlDefault">
+        <File Id="service.toml.default" Source="$(var.Payload)\service.toml.default" KeyPath="yes" />
+      </Component>
+
+<?if $(var.HasUpdateRoot) = 1 ?>
+      <Component Id="UpdateRoot">
+        <File Id="update_root.json" Source="$(var.Payload)\update-root.json" KeyPath="yes" />
+      </Component>
+<?endif?>
+    </ComponentGroup>
+
+    <!-- ===== The model, the domain list and the notices ==================== -->
+    <ComponentGroup Id="Data">
+<?if $(var.HasModel) = 1 ?>
+      <Component Id="ModelManifest" Directory="FaroModelDir">
+        <File Id="model_manifest.json" Name="manifest.json" Source="$(var.Payload)\models\opennsfw\manifest.json" KeyPath="yes" />
+      </Component>
+      <Component Id="ModelFile" Directory="FaroModelDir">
+        <File Id="opennsfw_int8.onnx" Source="$(var.Payload)\models\opennsfw\opennsfw-int8.onnx" KeyPath="yes" />
+      </Component>
+      <Component Id="NoticeModel" Directory="FaroNoticesDir">
+        <File Id="notice_opennsfw.txt" Source="$(var.Payload)\notices\opennsfw.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="NoticeOrtLicense" Directory="FaroNoticesDir">
+        <File Id="notice_ort_license.txt" Source="$(var.Payload)\notices\onnxruntime-LICENSE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="NoticeOrtThirdParty" Directory="FaroNoticesDir">
+        <File Id="notice_ort_tpn.txt" Source="$(var.Payload)\notices\onnxruntime-ThirdPartyNotices.txt" KeyPath="yes" />
+      </Component>
+<?endif?>
+      <Component Id="DomainsManifest" Directory="FaroDomainsDir">
+        <File Id="domains_manifest.json" Source="$(var.Payload)\domains\domains.manifest.json" KeyPath="yes" />
+      </Component>
+      <Component Id="DomainsBin" Directory="FaroDomainsDir">
+        <File Id="domains.bin" Source="$(var.Payload)\domains\domains.bin" KeyPath="yes" />
+      </Component>
+      <Component Id="NoticeDomains" Directory="FaroNoticesDir">
+        <File Id="notice_domains.txt" Source="$(var.Payload)\notices\domains.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="NoticeThirdParty" Directory="FaroNoticesDir">
+        <File Id="notice_third_party.txt" Source="$(var.Payload)\notices\third-party.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ===== The state directory =========================================== -->
+    <!-- %ProgramData%\Faro holds the device key, the outbox and the journal:
+         SYSTEM and Administrators only, not inherited from ProgramData (whose
+         Users may create files). The logs: SYSTEM writes, Administrators read.
+         Permanent, so an upgrade (which removes the old product first) never
+         touches them; a real uninstall removes the whole directory below. -->
+    <ComponentGroup Id="State">
+      <Component Id="StateDir" Directory="FaroDataDir" Permanent="yes" Guid="0354DEFA-63C5-465A-8F52-A6B9D05B0763">
+        <CreateFolder>
+          <PermissionEx Sddl="O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+        </CreateFolder>
+      </Component>
+      <Component Id="LogDir" Directory="FaroLogDir" Permanent="yes" Guid="CC4B9051-91AB-49DE-9980-FC3F207C7014">
+        <CreateFolder>
+          <PermissionEx Sddl="O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FR;;;BA)" />
+        </CreateFolder>
+      </Component>
+      <!-- The default config, only if there is none (an administrator may
+           have edited it). -->
+      <Component Id="ServiceToml" Directory="FaroDataDir" Permanent="yes" NeverOverwrite="yes" Guid="310C5D77-E6DB-40E2-A2D2-F31F1F96CC56">
+        <File Id="service.toml" Name="service.toml" Source="$(var.Payload)\service.toml.default" KeyPath="yes" />
+      </Component>
+      <!-- A real uninstall (not an upgrade) removes the state directory and
+           everything in it: the device key, the outbox, downloaded updates,
+           the logs. -->
+      <Component Id="StateCleanup" Directory="FaroDataDir" Guid="38A6862C-8798-4507-830A-1082DD1E1B52">
+        <RegistryValue Root="HKLM" Key="Software\Faro" Name="StateDir" Type="string" Value="[FaroDataDir]" KeyPath="yes" />
+        <util:RemoveFolderEx On="uninstall" Property="FARODATADIR" Condition="NOT UPGRADINGPRODUCTCODE" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- RemoveFolderEx reads the path from a property before costing; read it
+         back from where the install recorded it. -->
+    <Property Id="FARODATADIR">
+      <RegistrySearch Id="FaroDataDirSearch" Root="HKLM" Key="Software\Faro"
+                      Name="StateDir" Type="raw" Bitness="always64" />
+    </Property>
+
+    <!-- ===== Custom actions ================================================= -->
+    <!-- Stop every session's agent once the service has stopped, so its file
+         can be replaced or removed (the macOS preinstall and faro-uninstall
+         boot the agents out too). None running is fine. -->
+    <SetProperty Id="FaroStopAgents"
+                 Value="&quot;[System64Folder]taskkill.exe&quot; /F /T /IM faro-agent.exe"
+                 Before="FaroStopAgents" Sequence="execute" />
+    <CustomAction Id="FaroStopAgents" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Uninstall only (not an upgrade): tell the allies first, as
+         faro-uninstall does on macOS (ARCHITECTURE.md §3.7, §12). The service
+         is stopped by then (StopServices), since `goodbye` takes the state
+         lock that a running service holds; it runs before the service is
+         deleted and before any file is removed. It never fails the uninstall:
+         offline, nothing is delivered and allies see a missed check-in
+         instead. Its output goes to the MSI log. -->
+    <SetProperty Id="FaroGoodbye"
+                 Value="&quot;[FaroProgramDir]faro-service.exe&quot; goodbye --reason uninstalled --within 30"
+                 Before="FaroGoodbye" Sequence="execute" />
+    <CustomAction Id="FaroGoodbye" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="FaroStopAgents" After="StopServices" />
+      <Custom Action="FaroGoodbye" After="FaroStopAgents"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

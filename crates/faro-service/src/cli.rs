@@ -700,6 +700,7 @@ struct DiagnoseOptions {
     yes: bool,
     print: bool,
     /// `--state-dir` was given: a development run, which needn't be root.
+    #[cfg_attr(not(unix), allow(dead_code))]
     development: bool,
 }
 
