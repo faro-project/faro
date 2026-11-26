@@ -655,10 +655,20 @@ jobs:
         run: |
           dist="$RUNNER_TEMP/dist"
           (cd "$dist" && sha256sum -- * > SHA256SUMS)
+          # A dry run may lack a server binary whose build couldn't run
+          # (`layout` warned); its notes say so. A release has both.
+          missing=()
+          for arch in aarch64 x86_64; do
+            [[ -f "$dist/faro-server-$VERSION-linux-$arch" ]] || missing+=("linux/$arch")
+          done
           {
             if [[ "$DRY_RUN" == true ]]; then
               echo "> [!CAUTION]"
-              echo "> **Dry run. Do not publish this release.** The package is an unsigned development build whose service accepts any program as the agent: never install it on anyone's computer. The update layout is signed with throwaway keys (\`update-layout.tar.gz\`, root in \`dry-run-root.json\`)."
+              echo "> **Dry run. Do not publish this release.** The package is an unsigned development build whose service accepts any program as the agent: never install it on anyone's computer. The update layout is signed with throwaway keys (\`update-layout.tar.gz\`, root in \`dry-run-root.json\`). No container image was pushed."
+              if (( ${#missing[@]} )); then
+                echo ">"
+                echo "> No \`faro-server\` for ${missing[*]}: its build couldn't run in this dry run. A release needs it."
+              fi
               echo
             fi
             echo "## Faro $VERSION"
