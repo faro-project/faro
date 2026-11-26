@@ -196,7 +196,8 @@ crates/faro-detect/models/opennsfw/build.sh --parity target/models   # and check
 - **Pinned outputs.** `manifest.json` (int8) and `manifest-fp32.json` pin each model's BLAKE3, and `build.sh` refuses a conversion that doesn't match. The same tools give the same bytes on the same kind of Mac. The quantizer runs the fp32 model to calibrate, so another CPU or tool version can give different bytes: `build.sh` then stops and prints the new hash. Check that run with `--parity` before changing a pin.
 - **Parity** (`parity.py`, with `--parity`). OpenCV's Caffe importer runs Yahoo's original files as the reference, and both models get the same tensors for 14 synthetic, non-explicit images (solid colours, gradients, UI windows with text). It fails if p(nsfw) differs by more than 1e-4 (fp32) or 0.05 (int8). `check-pkg.sh` repeats the three solid-colour cases with the packaged service, on each architecture it can run.
 - **Licence and attribution.** The manifests carry `license_text` (Yahoo's `LICENSE.md`, word for word; `notice.py` checks) and `attribution` (author, copyright line, source and licence URLs, and the changes above). `load_model` refuses a manifest without what its licence asks for, with the same rules as the domain bundle compiler (`faro_detect::attribution`). The package installs `notices/opennsfw.txt` from them.
-- **Labels.** `sfw` and `nsfw`. The default policy reads `nsfw` as explicit; `sfw` is ignored. There is no `suggestive` output. Faro resizes the whole frame to 224×224; Yahoo's script resizes to 256 and crops the centre. Whether that matters on screenshots is for the maintainer's eval on the real set ([Model benchmark](#model-benchmark)).
+- **Labels.** `sfw` and `nsfw`. The default policy reads `nsfw` as explicit; `sfw` is ignored. There is no `suggestive` output.
+- **Preprocessing.** The manifest's `resize` says how a frame becomes the 224×224 input. `"direct"` (also what a manifest without `resize` means, which includes both shipped manifests) resizes the whole frame to 224×224 and keeps a screenshot's edges. `{"resize_crop": {"side": 256}}` resizes it to 256×256 and takes the centre 224×224, dropping a 16-pixel border, as Yahoo's script does. Both resample by area averaging and ignore the aspect ratio (Yahoo's script resizes with PIL's bilinear filter and re-encodes the result as JPEG, so scores can still differ a little from its own). `preprocess` applies it, so the service and `model-bench` do the same thing. The package ships `direct`; whether to switch is for the maintainer's eval on the real set ([Comparing preprocessing](#comparing-preprocessing)).
 - **Caches.** Downloads and models are cached by digest in `~/Library/Caches/faro-models` (`FARO_MODEL_CACHE`) and checked again on every use, so a repeat build only reinstalls the tools.
 - **In the service.** `faro-service` built with `--features onnx` loads `/Library/Faro/models/opennsfw/manifest.json` (`pkg_layout::MODEL_MANIFEST`) with `load_model`'s checks and runs it on ONNX Runtime's CPU provider, one thread. Without a model it rates frames from context signals only. When the packaged service's model is missing, altered or can't be loaded, it does the same and reports an urgent `integrity_failure` (`image model (missing)`, `(changed)` or `(cannot load)`) once it runs. `faro-service model-check [--manifest PATH]` loads a model the same way and prints its scores for a few synthetic frames and its latency. A newer model from the update channel replaces the packaged one without a restart ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)); the packaged one stays as the fallback.
 
@@ -223,7 +224,7 @@ $B --manifest target/models/manifest.json --set target/synthetic        # int8, 
 $B --manifest target/models/manifest-fp32.json --set target/synthetic   # fp32
 ```
 
-The manifest is the same `ModelInfo` JSON the update channel ships, and the same checks apply: the licence must be on `ALLOWED_MODEL_LICENSES` and `blake3` must match the weights (`b3sum candidate.onnx`). `--policy policy.json` benchmarks other thresholds (a partial `PolicyConfig`; the default is the built-in policy).
+The manifest is the same `ModelInfo` JSON the update channel ships, and the same checks apply: the licence must be on `ALLOWED_MODEL_LICENSES` and `blake3` must match the weights (`b3sum candidate.onnx`). `--policy policy.json` benchmarks other thresholds (a partial `PolicyConfig`; the default is the built-in policy). `--resize MODE` benchmarks another preprocessing than the manifest's (`direct` or `resize_crop:SIDE`, see [The image model](#the-image-model)).
 
 **Test-set layout.** One folder per true class, PNG files only:
 
@@ -244,7 +245,7 @@ Classes are the policy's kinds, not a model's labels, so one set measures models
 - *Ratings per class* (clean, low, medium, high): the operating point, e.g. how many explicit images reach `medium`, where thumbnails and alerts start.
 - *Latency:* p50, p95, mean and max of `Classifier::classify` (preprocessing and inference on ONNX Runtime's CPU provider, one intra-op thread) per frame, after 3 untimed warm-up runs. Images are downscaled to 768 px first, as `Detector::process` does.
 
-**The gate** exits 1 when recall on `explicit` drops by more than `--max-recall-drop` (absolute, default 0.02) or p95 latency rises by more than `--max-p95-increase` (relative, default 0.25). It exits 2 when the reports can't be compared: the set's digest differs (an image was added, removed, edited or moved to another class) or a report has no explicit images. A different model, policy or machine is printed as a note. Latency only compares on the same machine and build, so the baseline comes from the CI runner.
+**The gate** exits 1 when recall on `explicit` drops by more than `--max-recall-drop` (absolute, default 0.02) or p95 latency rises by more than `--max-p95-increase` (relative, default 0.25). It exits 2 when the reports can't be compared: the set's digest differs (an image was added, removed, edited or moved to another class) or a report has no explicit images. A different model, preprocessing (`resize`), policy or machine is printed as a note. Latency only compares on the same machine and build, so the baseline comes from the CI runner.
 
 **The baseline** is `models/eval-baseline.json`: a results file from the macOS runner, metrics only, so it is safe to commit. There is none until the maintainer picks a model and the set is on the runner; until then the CI job warns and passes. To create or update it, download the `model-eval-metrics-<sha>` artifact of the run you accept and commit its `results.json` as the baseline, in the same pull request that changes the model, the set or the policy (or accepts a regression), and say why.
 
@@ -263,6 +264,31 @@ It uploads `results.json` and nothing else.
 - **Adults only, obtained lawfully.** Anything that might depict a minor stays out of the set, without exception.
 - **The tool writes metrics only.** Images enter through `Frame`, one at a time, and are zeroized when dropped (`privacy_tests::benchmark_frames_are_zeroized`); no image, thumbnail or per-image result is written, and the set appears only as a digest. It deliberately doesn't list which images were missed. File names can appear in error messages, and so in CI logs: name files neutrally (`0001.png`).
 - **The runner can read it.** Keeping `model-eval` off pull requests stops unreviewed harness changes from running on the set, but it is not a sandbox: anyone who can push a branch can run any code on the macOS runner (see CI runners), and so read the set. Keep push access to maintainers, and remove `FARO_MODEL_EVAL_SET` (and the set itself) from the runner before the repository goes public or that changes.
+
+### Comparing preprocessing
+
+Whether OpenNSFW sees the whole screenshot (`direct`, what the package ships) or Yahoo's resize-and-crop (`resize_crop:256`) is the maintainer's choice, made on the real screenshot set during the release checklist's model evaluation (section 5). Yahoo's way scored one real photo 0.150 where Faro's scored 0.061, with the same weights; Faro's way keeps the screen's edges, where a small window or a thumbnail may sit. Only the real set says which matters more on screens. Run it on your own Mac, with the set on its encrypted volume and the rules above:
+
+```sh
+crates/faro-detect/models/opennsfw/build.sh target/models
+B="cargo run --release -p faro-detect --features onnx --example model-bench --"
+$B --manifest target/models/manifest.json --set /Volumes/FaroEval/set \
+   --resize direct,resize_crop:256 --json target/resize.json           # int8, as shipped
+$B --manifest target/models/manifest-fp32.json --set /Volumes/FaroEval/set \
+   --resize direct,resize_crop:256                                     # fp32, to rule out quantization
+```
+
+- **What it does.** The same verified model runs once per mode over the same images, with the same policy (`--policy` applies to both). It prints each run's full report, then a comparison with one column per mode: precision, recall and ratings (clean/low/medium/high) for every class, and p95 latency. If the set's digest differs between the runs (a file changed meanwhile), it stops. `--json target/resize.json` writes `target/resize.direct.json` and `target/resize.resize_crop-256.json`, metrics only, like every report.
+- **What to weigh.** Explicit recall, and how many explicit images reach `medium` (where thumbnails and alerts start), against neutral images rated `low` or above (false alarms). Look at precision and recall per class, not only explicit. `resize_crop` resamples to 256×256 rather than 224×224, so its preprocessing takes a little longer; inference is the same.
+- **Gating one mode.** Each JSON gates on its own: `$B --results target/resize.resize_crop-256.json --baseline models/eval-baseline.json`. A baseline taken with the other mode is compared, with a note.
+
+**To switch** (in a pull request that says why, with the comparison's numbers):
+
+1. Add `"resize": {"resize_crop": {"side": 256}}` to `crates/faro-detect/models/opennsfw/manifest.json` and `manifest-fp32.json`, and bump both versions (`1.0.1+int8`, `1.0.1+fp32`): the weights' BLAKE3 stays the same, but the manifest's bytes change, and so do the update-channel bundle, its target hash and its signature at the next release.
+2. Publish it with `min_client` set to the first release whose `faro-detect` reads `resize` (`release/build-layout.sh --data model:<version>=…`). Older clients reject any manifest field they don't know, so they would refuse the bundle, record it as rejected and keep their model; `min_client` keeps it from being offered to them at all.
+3. Update the baseline from a run with the new manifest, as for any model change.
+
+A manifest without `resize` keeps meaning `direct`, and a `direct` manifest is written without it, so switching back is the same steps with the field removed.
 
 ## The macOS installer
 

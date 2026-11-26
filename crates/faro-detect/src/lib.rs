@@ -78,7 +78,7 @@ pub use attribution::Attribution;
 pub use classifier::onnx::OnnxClassifier;
 pub use classifier::{
     load_model, load_model_at, ChannelOrder, Classifier, ImageScores, InputSize, ModelInfo,
-    NullClassifier, OutputActivation, ScriptedClassifier, TensorLayout, VerifiedModel,
+    NullClassifier, OutputActivation, Resize, ScriptedClassifier, TensorLayout, VerifiedModel,
     ALLOWED_MODEL_LICENSES,
 };
 pub use context::{AppRule, ContextAnalyzer, ContextConfig, ContextFinding, ContextSignals};
