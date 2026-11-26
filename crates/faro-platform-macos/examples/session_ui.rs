@@ -6,7 +6,9 @@
 //! ```
 //!
 //! The notice appears after a second; the process exits after SECONDS
-//! (default 30) or when asked to quit.
+//! (default 30) or when asked to quit. The menu shows a sample status
+//! ("Screen Recording is off", with its fix; `FARO_SAMPLE_STATUS=ok` for
+//! "Monitoring"), "Open Faro" and "About Faro…".
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -58,6 +60,36 @@ fn main() {
                 );
             }
         });
+    });
+    // A sample status menu: a problem with its fix, "Open Faro" and About.
+    // `FARO_SAMPLE_STATUS=ok` shows "Monitoring" instead.
+    let problem = std::env::var("FARO_SAMPLE_STATUS").as_deref() != Ok("ok");
+    handle.set_status(faro_platform_macos::ui::StatusMenu {
+        line: if problem {
+            "Screen Recording is off".into()
+        } else {
+            "Monitoring".into()
+        },
+        detail: if problem {
+            "Faro can't see the screen, and your allies are told. Open System Settings \
+             \u{2192} Privacy & Security \u{2192} Screen & System Audio Recording and switch on \
+             Faro Agent."
+                .into()
+        } else {
+            "Faro is working on this Mac. There is nothing to do.".into()
+        },
+        problem,
+        fix: problem.then(|| faro_platform_macos::ui::StatusFix {
+            label: "Open Screen Recording Settings\u{2026}".into(),
+            url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                .into(),
+        }),
+        web_app: Some("https://faro.example.org/".into()),
+        about_title: "About Faro".into(),
+        about_body: "Faro Agent 0.1.0-beta.1 (sample)\nInstance: Example Instance \
+                     (https://faro.example.org/)\n\nThird-party notices are in \
+                     /Library/Faro/notices."
+            .into(),
     });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(1));
