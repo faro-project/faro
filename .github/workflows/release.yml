@@ -10,14 +10,16 @@
 #   macos-pkg      the universal .pkg: signed and notarized for a release,
 #                  an unsigned development package for a dry run; and the
 #                  image model it ships, for the update channel
-#   blocklist      the domain list (domains-compile) for the update channel
+#   blocklist      the domain list (domains-compile) for the update channel,
+#                  the same list the package ships
 #   server         the container image and the faro-server binary, natively
 #                  on each architecture (images are pushed by digest only)
 #   layout         targets.json with every artifact (the model and the
 #                  domain list as data bundles, PROTOCOL.md §8.1), signed with the targets
 #                  key, and a timestamp signed with the timestamp key, then
 #                  `faro-release verify` of the whole set. A dry run signs
-#                  with throwaway keys made in the job
+#                  with throwaway keys made in the job. It first checks that
+#                  the package's domain list is the one `blocklist` built
 #   publish-layout the layout to https://updates.faro-project.org/
 #                  (release/publish-layout.sh), then checks what is served
 #   publish        the image tags, then the GitHub Release (notes and
@@ -144,6 +146,10 @@ jobs:
     env:
       DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
       VERSION: ${{ needs.prepare.outputs.version }}
+    outputs:
+      # The SHA-256 of the domain list manifest the package ships: `layout`
+      # checks it is the one `blocklist` built for the update channel.
+      domains_manifest_sha256: ${{ steps.domains.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -212,6 +218,17 @@ jobs:
           fi
           mkdir -p dist
           mv "$pkg" dist/
+      # The domain list in the package, the fallback for the one on the
+      # update channel: the same pinned sources must give the same bytes.
+      - name: The domain list the package ships
+        id: domains
+        run: |
+          x="$RUNNER_TEMP/pkg-expanded"
+          rm -rf "$x"
+          pkgutil --expand-full dist/Faro-*.pkg "$x"
+          m="$x/faro-component.pkg/Payload/Library/Faro/domains/domains.manifest.json"
+          echo "sha256=$(shasum -a 256 "$m" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          rm -rf "$x"
       - name: Lock the signing keychain
         if: always() && steps.sign.outputs.mode == 'release' && vars.FARO_MACOS_KEYCHAIN != ''
         env:
@@ -243,7 +260,9 @@ jobs:
 
   # The domain list for the update channel, from the approved, pinned
   # sources in crates/faro-detect/domains/sources.toml. The same sources
-  # always give the same bytes; `bundle_version` there names them.
+  # always give the same bytes; `bundle_version` there names them. The
+  # package ships the same list (build-pkg.sh), and `layout` checks the two
+  # are identical.
   blocklist:
     needs: prepare
     runs-on: [self-hosted, Linux, ARM64]
@@ -411,6 +430,8 @@ jobs:
           merge-multiple: true
       - name: Artifacts
         id: artifacts
+        env:
+          PKG_DOMAINS_SHA256: ${{ needs.macos-pkg.outputs.domains_manifest_sha256 }}
         run: |
           dist="$RUNNER_TEMP/dist"
           data="$RUNNER_TEMP/data"
@@ -435,6 +456,17 @@ jobs:
           # --data model:<version>=... (release/build-layout.sh).
           args+=(--data "model=$data/model/manifest.json")
           args+=(--data "blocklist=$data/blocklist/domains.manifest.json")
+          # The package's domain list is the fallback for this one: they
+          # must be the same list (the manifest pins the bundle's BLAKE3).
+          if command -v sha256sum >/dev/null; then
+            got="$(sha256sum "$data/blocklist/domains.manifest.json" | awk '{print $1}')"
+          else
+            got="$(shasum -a 256 "$data/blocklist/domains.manifest.json" | awk '{print $1}')"
+          fi
+          if [[ -z "$PKG_DOMAINS_SHA256" || "$got" != "$PKG_DOMAINS_SHA256" ]]; then
+            echo "::error title=Domain lists differ::The package's domain list manifest (sha256 ${PKG_DOMAINS_SHA256:-none}) is not the one built for the update channel ($got). The same pinned sources must give the same bytes (docs/DEVELOPMENT.md \"The domain category bundle\")."
+            exit 1
+          fi
           printf '%s\n' "${args[@]}" > "$RUNNER_TEMP/artifact-args"
       - name: Keys
         env:

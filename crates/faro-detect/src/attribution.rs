@@ -46,6 +46,23 @@ pub struct Attribution {
     pub changes: String,
 }
 
+impl Attribution {
+    /// The attribution as plain-text notice lines (author, copyright,
+    /// source, licence, changes), each ending in a newline. Only manifest
+    /// text: the package's and the update channel's notices are made with it.
+    pub fn notice_lines(&self) -> String {
+        let mut out = format!("Author:  {}\n", self.author);
+        for c in &self.copyright {
+            out.push_str(&format!("         {c}\n"));
+        }
+        out.push_str(&format!(
+            "Source:  {}\nLicence: {}\nChanges: {}\n",
+            self.source_url, self.license_url, self.changes
+        ));
+        out
+    }
+}
+
 /// Why an attribution doesn't satisfy its licence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributionError {

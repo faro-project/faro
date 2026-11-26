@@ -148,6 +148,27 @@ impl DomainsManifest {
         }
         Ok(())
     }
+
+    /// The plain-text notice for the bundle: `heading`, the manifest's
+    /// [`notice`](Self::notice), then each source with where it comes from
+    /// and its attribution, then the licence texts. Only manifest text, so
+    /// the notice says exactly what the manifest does. The package installs
+    /// it as `notices/domains.txt`, and the service writes one for a list
+    /// from the update channel.
+    pub fn notice_text(&self, heading: &str) -> String {
+        let mut out = format!("{heading}\n{}\n", self.notice);
+        for s in &self.sources {
+            out.push_str(&format!("\n{} ({}, {})\n", s.name, s.category, s.license));
+            out.push_str(&format!("From:    {}\n", s.origin));
+            if let Some(a) = &s.attribution {
+                out.push_str(&a.notice_lines());
+            }
+        }
+        for (id, text) in &self.license_texts {
+            out.push_str(&format!("\n--- {id} ---\n{}\n", text.trim_end()));
+        }
+        out
+    }
 }
 
 /// A domain bundle checked against its manifest.
@@ -302,6 +323,24 @@ mod tests {
         v["extra"] = serde_json::json!(true);
         std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(matches!(load_domains(&p), Err(DetectError::Manifest(_))));
+    }
+
+    #[test]
+    fn the_notice_carries_every_attribution_and_licence_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = load_domains(write(dir.path(), |_| {})).unwrap().manifest;
+        let text = m.notice_text("Domain list 1.0.0.");
+        assert_eq!(
+            text,
+            "Domain list 1.0.0.\nTest.\n\
+             \na (adult, MIT)\n\
+             From:    a.txt\n\
+             Author:  A\n         Copyright (c) 2026 A\n\
+             Source:  https://example.org/a\n\
+             Licence: https://example.org/a/LICENSE\n\
+             Changes: Parsed into a bundle.\n\
+             \n--- MIT ---\nPermission is hereby granted\n"
+        );
     }
 
     #[test]
