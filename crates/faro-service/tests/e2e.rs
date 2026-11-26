@@ -1030,6 +1030,7 @@ async fn the_service_switches_to_a_model_and_domain_list_from_its_instance() {
             width: 8,
             height: 8,
         },
+        resize: Default::default(),
         labels: vec!["nsfw".into()],
         mean: [0.0; 3],
         std: [1.0; 3],

@@ -101,6 +101,8 @@ Context-only signals (VPN, VM, remote desktop, browser without the extension) ar
 
 An interactive session of any OS account with no connected agent for 90 s **is** a `tamper` event (urgent floor), `unmonitored_user_session` with the account's short name: every account on the computer is monitored (ARCHITECTURE §3.1).
 
+A `capture_failing` tamper event is raised for repeated failed captures, and also when the session at the screen has a connected agent that nothing is captured from: no capture attempt for the longest regular interval plus two mean intervals of awake time, while no member pause, lock, idle or sleep explains it. `consecutive_failures` then counts the captures missed at the mean interval.
+
 `flag` and `tamper` bodies carry an optional `account` field: the short name of the OS account the event came from, when it concerns one session (ARCHITECTURE §3.6). Report flagged moments, tamper records and timeline spans carry it too. It is inside the encrypted body, so the instance never sees it. Readers must accept bodies without it.
 
 ## 4. Encryption

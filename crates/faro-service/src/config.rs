@@ -60,6 +60,13 @@ pub struct Config {
     /// Default instance for `faro-service enroll` when `--instance` is not
     /// given. After enrollment the pinned enrollment record is authoritative.
     pub instance_url: Option<String>,
+    /// How much `faro-service` logs, as a `RUST_LOG`-style filter (`info`,
+    /// `debug`, `faro_service=debug,info`, …). Unset means `info`. The
+    /// `RUST_LOG` environment variable and `-v` take precedence. At `info`
+    /// and above the log never holds URLs, window titles, notice texts or
+    /// anything from a frame; `debug` and `trace` may.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
     pub capture: CaptureConfig,
     pub ipc: IpcConfig,
     pub network: NetworkConfig,
@@ -77,6 +84,7 @@ impl Default for Config {
         Config {
             state_dir: default_state_dir(),
             instance_url: None,
+            log_level: None,
             capture: CaptureConfig::default(),
             ipc: IpcConfig::default(),
             network: NetworkConfig::default(),
@@ -309,6 +317,14 @@ impl Config {
             crate::link::parse_instance_url(u)
                 .map_err(|e| invalid("instance_url", e.to_string()))?;
         }
+        if let Some(l) = &self.log_level {
+            if l.len() > 1024 {
+                return Err(invalid("log_level", "must be at most 1024 bytes"));
+            }
+            tracing_subscriber::EnvFilter::builder()
+                .parse(l)
+                .map_err(|e| invalid("log_level", e.to_string()))?;
+        }
         let c = &self.capture;
         // Tamper-detection knobs may only be tightened (see CaptureConfig).
         if !(5..=DEFAULT_AGENT_PING_SECS).contains(&c.agent_ping_secs) {
@@ -491,6 +507,7 @@ mod tests {
         let toml = r#"
             state_dir = '@STATE@'
             instance_url = "https://faro.example.org"
+            log_level = "faro_service=debug,info"
             [capture]
             agent_kill_threshold = 2
             [ipc]
@@ -508,6 +525,7 @@ mod tests {
         .replace("@STATE@", state);
         let c = Config::from_toml_str(&toml).unwrap();
         assert_eq!(c.state_dir, Path::new(state));
+        assert_eq!(c.log_level.as_deref(), Some("faro_service=debug,info"));
         assert_eq!(c.capture.agent_kill_threshold, 2);
         assert_eq!(c.capture.agent_ping_secs, 30, "unset fields keep defaults");
         assert_eq!(c.ipc.allowed_uids, vec![501]);
@@ -543,6 +561,13 @@ mod tests {
             "[capture]\nagent_kill_threshold = 2\nagent_kill_window_secs = 3600\ncapture_failure_threshold = 2\nagent_ping_secs = 10",
         )
         .unwrap();
+        assert!(matches!(
+            Config::from_toml_str("log_level = \"faro_service=loud\""),
+            Err(ConfigError::Invalid {
+                field: "log_level",
+                ..
+            })
+        ));
         assert!(matches!(
             Config::from_toml_str("state_dir = \"relative/dir\""),
             Err(ConfigError::Invalid {

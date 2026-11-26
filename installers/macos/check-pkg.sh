@@ -15,7 +15,8 @@
 # from release/notices/third-party.sh). faro-service must link ONNX Runtime statically,
 # and the slice for this Mac's architecture must load the model (licence,
 # attribution and digest checks) and score three solid colours within
-# MODEL_TOLERANCE of Yahoo's original Caffe model.
+# MODEL_TOLERANCE of Yahoo's original Caffe model. Each program must name
+# its log file, and neither launchd job may send output to a file.
 #
 #   installers/macos/check-pkg.sh target/pkg/Faro-<version>[-dev].pkg
 #   installers/macos/check-pkg.sh --arch arm64 target/pkg/Faro-<version>-dev.pkg
@@ -200,6 +201,19 @@ if [[ "$(basename "$pkg")" != *-dev.pkg ]]; then
             || fail "faro-service ($a) was built without the Team ID $team (FARO_TEAM_ID)"
     done
 fi
+# The logs (faro_platform_macos::pkg_layout): the programs write them
+# themselves, rotated, so launchd must not open them as the jobs' stdout or
+# stderr. Each program names its log.
+service_log=/Library/Logs/Faro/faro-service.log
+agent_log=Library/Logs/Faro/faro-agent.log
+LC_ALL=C grep -qaF "$service_log" "$service" || fail "faro-service does not log to $service_log"
+LC_ALL=C grep -qaF "$agent_log" "$work/payload/Library/Faro/Faro Agent.app/Contents/MacOS/faro-agent" \
+    || fail "faro-agent does not log to ~/$agent_log"
+for plist in Library/LaunchDaemons/org.faro.service.plist Library/LaunchAgents/org.faro.agent.plist; do
+    if grep -qE 'Standard(Out|Error)Path' "$work/payload/$plist"; then
+        fail "/$plist sends output to a file; the programs keep their own logs"
+    fi
+done
 if otool -L "$service" | grep -qi onnxruntime; then
     fail "faro-service loads ONNX Runtime dynamically: $(otool -L "$service" | grep -i onnxruntime)"
 fi

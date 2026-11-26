@@ -19,15 +19,90 @@ fn main() -> ExitCode {
     run(args)
 }
 
+/// Logs to stderr, or, for the packaged agent started by launchd, to
+/// `~/Library/Logs/Faro/faro-agent.log` (`pkg_layout::agent_log`; 0600,
+/// rotated at 5 MiB, three old files kept). The agent writes the file
+/// itself because its plist is one global LaunchAgent for every account,
+/// and launchd doesn't expand `~` in `StandardErrorPath`.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
-    // Default to `info`: titles and notice bodies are logged only at
-    // `debug`, so a default log never contains them.
+    // Default to `info`: window titles, URLs and notice bodies are logged
+    // only at `debug`, so a default log never contains them.
     let filter = EnvFilter::try_from_env("FARO_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    #[cfg(target_os = "macos")]
+    if let Some(log) = packaged_log() {
+        match open_log(&log) {
+            Ok(file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .init();
+                // launchd discards the agent's stderr, where the default
+                // hook writes panics.
+                let previous = std::panic::take_hook();
+                std::panic::set_hook(Box::new(move |panic| {
+                    tracing::error!(target: "panic", "{panic}");
+                    previous(panic);
+                }));
+                return;
+            }
+            Err(e) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::io::stderr)
+                    .init();
+                tracing::error!(error = %e, "cannot open the log file; logging to stderr");
+                return;
+            }
+        }
+    }
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// The log file, for the packaged agent with no terminal on stderr and a
+/// home directory to log in.
+#[cfg(target_os = "macos")]
+fn packaged_log() -> Option<std::path::PathBuf> {
+    use faro_platform_macos::pkg_layout;
+    use std::io::IsTerminal;
+    let packaged = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .is_some_and(|p| p == std::path::Path::new(pkg_layout::AGENT_PROGRAM));
+    if !packaged || std::io::stderr().is_terminal() {
+        return None;
+    }
+    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+    home.is_absolute().then(|| pkg_layout::agent_log(&home))
+}
+
+/// Open the agent's log, creating `~/Library/Logs/Faro` (0700) if needed.
+#[cfg(target_os = "macos")]
+fn open_log(log: &std::path::Path) -> std::io::Result<faro_platform::logfile::RotatingFile> {
+    use faro_platform_macos::pkg_layout;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let dir = log
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no log directory"))?;
+    if let Some(logs) = dir.parent() {
+        std::fs::create_dir_all(logs)?; // ~/Library/Logs, normally there
+    }
+    match std::fs::DirBuilder::new()
+        .mode(pkg_layout::AGENT_LOG_DIR_MODE)
+        .create(dir)
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    std::fs::set_permissions(
+        dir,
+        std::fs::Permissions::from_mode(pkg_layout::AGENT_LOG_DIR_MODE),
+    )?;
+    faro_platform::logfile::RotatingFile::open(log, pkg_layout::agent_log_rotation())
 }
 
 #[cfg(unix)]

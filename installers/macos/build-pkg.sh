@@ -216,6 +216,10 @@ plutil -lint -s "$app/Contents/Info.plist"
 {
     echo "# Faro service configuration (installed by the package)."
     echo "# See crates/faro-service/src/config.rs for every setting."
+    echo "#"
+    echo "# How much goes to /Library/Logs/Faro/faro-service.log (restart the"
+    echo "# service after changing it). debug and trace may log private details."
+    echo "# log_level = \"info\""
     if (( dev )); then
         echo "# Development package: no agent_requirement; the dev build accepts"
         echo "# agents by uid alone."
