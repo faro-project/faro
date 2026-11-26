@@ -980,6 +980,161 @@ async fn a_rejected_update_package_is_reported_as_tamper() {
     dev.shutdown().await;
 }
 
+/// Stands in for ONNX Runtime: a classifier with the verified manifest
+/// that finds nothing.
+#[derive(Debug, Default)]
+struct StandInRuntime;
+
+struct StandIn(faro_detect::ModelInfo);
+
+impl faro_detect::Classifier for StandIn {
+    fn info(&self) -> &faro_detect::ModelInfo {
+        &self.0
+    }
+    fn classify(
+        &mut self,
+        _frame: &faro_platform::Frame,
+    ) -> Result<faro_detect::ImageScores, faro_detect::DetectError> {
+        Ok(faro_detect::ImageScores::empty())
+    }
+}
+
+impl faro_service::model::ModelRuntime for StandInRuntime {
+    fn open(
+        &self,
+        model: faro_detect::VerifiedModel,
+    ) -> Result<Box<dyn faro_detect::Classifier>, faro_detect::DetectError> {
+        Ok(Box::new(StandIn(model.info().clone())))
+    }
+}
+
+/// A model and a domain list published by the project reach the running
+/// service through the real instance's mirror, and the detector switches
+/// to them without a restart. The notices are written next to the others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_service_switches_to_a_model_and_domain_list_from_its_instance() {
+    use faro_update::testing::{Artifact, ToyProject, DAY_MS};
+    use faro_update::TargetKind;
+    let now = faro_core::Clock::wall_ms(&faro_core::SystemClock::new());
+    let project_dir = tempfile::tempdir().unwrap();
+    let mut project = ToyProject::new(now + 365 * DAY_MS);
+    let root_file = project_dir.path().join("root.json");
+    std::fs::write(&root_file, project.first_root()).unwrap();
+
+    let weights = b"model weights".to_vec();
+    let info = faro_detect::ModelInfo {
+        name: "channel".into(),
+        version: "2.0.0".into(),
+        file: "channel.onnx".into(),
+        input_size: faro_detect::InputSize {
+            width: 8,
+            height: 8,
+        },
+        labels: vec!["nsfw".into()],
+        mean: [0.0; 3],
+        std: [1.0; 3],
+        channel_order: faro_detect::ChannelOrder::Rgb,
+        layout: faro_detect::TensorLayout::Nchw,
+        input_scale: 1.0,
+        output: faro_detect::OutputActivation::Probabilities,
+        license: "CC0-1.0".into(),
+        license_text: None,
+        attribution: None,
+        blake3: blake3::hash(&weights).to_hex().to_string(),
+    };
+    let model =
+        faro_update::bundle::bundle_bytes(&serde_json::to_vec(&info).unwrap(), &weights).unwrap();
+    let mut b = faro_detect::DomainCategorizerBuilder::new();
+    b.add_domain("adult.test", faro_detect::Category::Adult)
+        .unwrap();
+    let list = b.build().unwrap().to_bytes();
+    let manifest = serde_json::json!({
+        "format": faro_detect::DOMAINS_MANIFEST_FORMAT,
+        "notice": "Test list.",
+        "version": "1.0.0",
+        "bundle": {"file": "domains.bin", "bytes": list.len(),
+                   "blake3": blake3::hash(&list).to_hex().to_string()},
+        "domains": 1,
+        "unapproved_included": false,
+        "sources": [{"name": "test", "category": "adult", "format": "domains",
+                     "license": "CC0-1.0", "approved": true, "origin": "test.txt",
+                     "blake3": "0".repeat(64), "lines": 1, "domains": 1, "skipped": 0}],
+        "license_texts": {},
+    });
+    let list =
+        faro_update::bundle::bundle_bytes(&serde_json::to_vec(&manifest).unwrap(), &list).unwrap();
+    let release = project_dir.path().join("release");
+    project
+        .publish(
+            &release,
+            &[
+                Artifact::new(
+                    "model/any/channel-2.0.0-stable.data",
+                    TargetKind::Model,
+                    "any",
+                    "any",
+                    "2.0.0",
+                    &model,
+                ),
+                Artifact::new(
+                    "blocklist/any/domains-1.0.0-stable.data",
+                    TargetKind::Blocklist,
+                    "any",
+                    "any",
+                    "1.0.0",
+                    &list,
+                ),
+            ],
+            now + 7 * DAY_MS,
+        )
+        .unwrap();
+    let w = World::with_server_config(move |c| c.updates.root = Some(root_file)).await;
+    w.state()
+        .updates()
+        .expect("mirror configured")
+        .refresh_from(
+            &faro_server::updates::upstream::Upstream::Dir(release),
+            now,
+            &faro_update::Channel::stable(),
+            faro_server::updates::Prefetch::Selected,
+        )
+        .await
+        .unwrap();
+
+    let mut dev = w.enroll_device().await;
+    let notices = project_dir.path().join("notices");
+    dev.updates = faro_service::UpdateOverrides {
+        model_runtime: Some(std::sync::Arc::new(StandInRuntime)),
+        notices_dir: Some(notices.clone()),
+        ..update_overrides(
+            project.first_root(),
+            std::sync::Arc::new(RecordingInstaller::default()),
+        )
+    };
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    assert_eq!(dev.status().model.as_deref(), Some("null 0"));
+    w.endorse(&dev).await;
+    dev.wait("the switch", |s| {
+        s.phase == Phase::Running
+            && s.model.as_deref() == Some("channel 2.0.0")
+            && s.blocklist.as_deref() == Some("domains 1.0.0")
+    })
+    .await;
+    let notice = std::fs::read_to_string(
+        notices.join(faro_service::update::artifacts::MODEL_NOTICE),
+    )
+    .unwrap();
+    assert!(notice.contains("Image model channel 2.0.0"), "{notice}");
+    assert!(notices
+        .join(faro_service::update::artifacts::BLOCKLIST_NOTICE)
+        .exists());
+    dev.shutdown().await;
+}
+
 /// 12. A computer the instance already retired has nothing left to tell:
 ///     its member removed it (allies got `device_removed`), or the account
 ///     it reported to was deleted (allies got `account_deleted`). `goodbye`
