@@ -1,7 +1,13 @@
 // Groups: wording and logic shared by the pages (docs/GROUPS.md), kept free
 // of the DOM and Svelte so `npm test` can cover it.
 
-import type { GroupPerson, HistoryEntry, HistoryKind, RosterRelationship } from './types.ts';
+import type {
+	GroupPerson,
+	HistoryEntry,
+	HistoryKind,
+	RosterRelationship,
+	StatusDot
+} from './types.ts';
 
 /** Limits the server enforces (server/src/api/groups.rs). */
 export const GROUP_LIMITS = { name: 100, description: 1000, invitesPerRequest: 50 } as const;
@@ -216,6 +222,8 @@ const MESSAGES: Record<string, string> = {
 	cannot_accept: "This person can't join right now. You can try again later, or say no.",
 	listing_needs_admin: 'On this instance only an admin can list a group.',
 	listing_disabled: 'Listing groups is switched off on this instance.',
+	invalid_pairs: 'A pairing needs two different people, and a request holds at most 200 pairs.',
+	not_a_participant: 'Everyone in a pairing must be in this group.',
 	invalid_meeting: "That meeting time doesn't look right. Check the day, time and place."
 };
 
@@ -274,4 +282,48 @@ export function clearPendingGroupInvite() {
 	} catch {
 		// Nothing to clear.
 	}
+}
+
+// ---- Sharing and pairing suggestions (GROUPS.md §8.2, §8.5) ---------------
+
+/** The words for each dot. `not_shared` is also what a turned-off dot reads. */
+export const STATUS_LABEL: Record<StatusDot, string> = {
+	monitoring_on: 'Monitoring on',
+	paused: 'Paused',
+	not_checked_in: 'Not checked in',
+	no_computer: 'No computer yet',
+	not_shared: 'Not shared'
+};
+
+/** "28 people in this group": who would see a choice. */
+export function audienceText(n: number): string {
+	return `${n} ${n === 1 ? 'person' : 'people'} in this group`;
+}
+
+/**
+ * Pasted pairings, one per line: two names split by a comma, a semicolon, a
+ * tab, " and ", " & ", " + " or " - ". Blank lines are skipped. A line that
+ * doesn't have exactly two different names comes back in `bad` by line
+ * number.
+ */
+export function parsePairs(text: string): { pairs: [string, string][]; bad: number[] } {
+	const pairs: [string, string][] = [];
+	const bad: number[] = [];
+	text.split(/\r?\n/).forEach((raw, i) => {
+		const line = raw.trim();
+		if (!line) return;
+		const parts = line
+			.split(/\s*(?:[,;\t]|\s&\s|\s\+\s|\s-\s|\sand\s)\s*/i)
+			.map((p) => p.trim())
+			.filter(Boolean);
+		if (parts.length === 2 && parts[0].toLowerCase() !== parts[1].toLowerCase()) {
+			pairs.push([parts[0], parts[1]]);
+		} else bad.push(i + 1);
+	});
+	return { pairs, bad };
+}
+
+/** What a suggestion card offers first. */
+export function suggestionPrompt(name: string): string {
+	return `Partner up with ${name}?`;
 }

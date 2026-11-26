@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+	audienceText,
 	collapseHistory,
 	describeHistory,
 	describeInvited,
@@ -12,7 +13,10 @@ import {
 	joinNames,
 	leaveConfirmation,
 	parseEmails,
+	parsePairs,
 	relationshipOf,
+	STATUS_LABEL,
+	suggestionPrompt,
 	tokenFromHash
 } from './groups.ts';
 import type { HistoryEntry, HistoryKind } from './types.ts';

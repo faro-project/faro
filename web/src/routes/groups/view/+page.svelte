@@ -25,6 +25,7 @@
 	import InvitePeople from '#lib/ui/groups/InvitePeople.svelte';
 	import ManageGroup from '#lib/ui/groups/ManageGroup.svelte';
 	import MeetingCard from '#lib/ui/groups/MeetingCard.svelte';
+	import PairingCards from '#lib/ui/groups/PairingCards.svelte';
 	import Roster from '#lib/ui/groups/Roster.svelte';
 	import RosterPersonActions from '#lib/ui/groups/RosterPersonActions.svelte';
 	import SharingSettings from '#lib/ui/groups/SharingSettings.svelte';
@@ -285,6 +286,7 @@
 					onarchived={() => goto(resolve('/groups'))}
 				/>
 			{:else}
+				<PairingCards groupId={group.id} {readOnly} />
 				<WaitingForYou groupId={group.id} {readOnly} />
 				<MeetingCard {group} />
 
@@ -310,7 +312,12 @@
 					<GroupHistory groupId={group.id} version={historyVersion} />
 				</section>
 
-				<SharingSettings groupId={group.id} />
+				<SharingSettings
+					groupId={group.id}
+					audience={group.participant_count}
+					initial={group.my_sharing}
+					{readOnly}
+				/>
 
 				{#if !user.roles.member}
 					<p class="muted small">

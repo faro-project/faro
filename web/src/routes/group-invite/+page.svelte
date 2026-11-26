@@ -27,7 +27,7 @@
 	import { groupError } from '#lib/groups-api.ts';
 	import { describeSchedule } from '#lib/meetings.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { GroupInviteInfo, GroupView } from '#lib/types.ts';
+	import type { GroupInviteInfo, GroupView, MySharing } from '#lib/types.ts';
 	import SharingSettings from '#lib/ui/groups/SharingSettings.svelte';
 
 	type View = 'loading' | 'missing' | 'invalid' | 'signin' | 'ok' | 'error';
@@ -39,6 +39,8 @@
 	let busy = $state(false);
 	let actionError = $state('');
 	let declined = $state(false);
+	/** What they chose to show the group, saved once they have joined. */
+	let sharing = $state<MySharing>({ share_status: false, share_allies: false });
 
 	function readToken() {
 		// Keep the token out of the address bar (and history), but in memory.
@@ -102,6 +104,12 @@
 		try {
 			const g = await api.post<GroupView>(`/v1/group-invites/${seg(token)}/accept`);
 			clearPendingGroupInvite();
+			// Only if they chose something: all off is already what joining does.
+			if (sharing.share_status || sharing.share_allies) {
+				await api.put(`/v1/groups/${seg(g.id)}/me/sharing`, sharing).catch(() => {
+					// They are in the group; they can set it from the group page.
+				});
+			}
 			await goto(`${resolve('/groups/view')}?id=${encodeURIComponent(g.id)}`);
 		} catch (e) {
 			actionError = groupError(e);
@@ -195,12 +203,12 @@
 			<div class="notice info">
 				<p>
 					<strong>Joining shares nothing about your computer.</strong> Nobody in the group sees your reports,
-					your alerts or whether Faro is running. Everyone in the group can see your name, and that you
-					joined. You can leave at any time.
+					your alerts or whether Faro is running, unless you choose to below. Everyone in the group can
+					see your name, and that you joined. You can leave at any time.
 				</p>
 			</div>
 
-			<SharingSettings />
+			<SharingSettings audience={info.participant_count} onchange={(s) => (sharing = s)} />
 
 			<p class="muted">The invitation is valid until {date(info.expires_at_ms)}.</p>
 

@@ -66,6 +66,9 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("alliance_proposals", "to_id", Clears::Rows),
     ("proposal_blocks", "user_id", Clears::Rows),
     ("proposal_blocks", "blocked_id", Clears::Rows),
+    ("pairing_suggestions", "facilitator_id", Clears::SetNull),
+    ("pairing_suggestions", "user_a", Clears::Rows),
+    ("pairing_suggestions", "user_b", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -144,6 +147,10 @@ pub const PURGE_BY_ID: &[&str] = &[
     // Links started from a proposal are ally links, removed above.
     "DELETE FROM alliance_proposals WHERE from_id = $1 OR to_id = $1",
     "DELETE FROM proposal_blocks WHERE user_id = $1 OR blocked_id = $1",
+    // Pairing suggestions naming them (§8.5).
+    "UPDATE pairing_suggestions SET facilitator_id = NULL WHERE facilitator_id = $1",
+    "DELETE FROM pairing_suggestions WHERE user_a = $1",
+    "DELETE FROM pairing_suggestions WHERE user_b = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

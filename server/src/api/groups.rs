@@ -208,6 +208,15 @@ pub struct GroupView {
     pub facilitator_offer_until_ms: Option<i64>,
     /// Groups are switched off on this instance: read-only.
     pub groups_disabled: bool,
+    /// What the caller shows this group (§8.2). Only their own choices:
+    /// nobody is ever told how many others have shared anything.
+    pub my_sharing: MySharing,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MySharing {
+    pub share_status: bool,
+    pub share_allies: bool,
 }
 
 pub(crate) async fn view(
@@ -251,6 +260,10 @@ pub(crate) async fn view(
         delete_after_ms: group.delete_after_ms,
         facilitator_offer_until_ms: offer,
         groups_disabled: !settings.enabled,
+        my_sharing: MySharing {
+            share_status: me.share_status,
+            share_allies: me.share_allies,
+        },
     })
 }
 
@@ -400,9 +413,10 @@ pub async fn roster(
 ) -> AppResult<Json<Page<RosterEntry>>> {
     load(&state, &s, &id).await?;
     let cursor = cursor_of(&q.cursor)?;
-    Ok(Json(
-        groups::roster(state.db().pool(), &id, &s.user.id, q.q.as_deref(), cursor).await?,
-    ))
+    let mut page =
+        groups::roster(state.db().pool(), &id, &s.user.id, q.q.as_deref(), cursor).await?;
+    super::group_sharing::fill_statuses(&state, &id, &mut page.items).await?;
+    Ok(Json(page))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1167,6 +1181,9 @@ pub struct InviteInfo {
     pub meeting: Option<serde_json::Value>,
     pub instance_name: String,
     pub expires_at_ms: i64,
+    /// How many people are in the group now, so the invitee can see who
+    /// would see what they choose to share ("28 people in this group").
+    pub participant_count: i64,
 }
 
 async fn invite_info(
@@ -1179,6 +1196,7 @@ async fn invite_info(
         .into_iter()
         .map(|p| p.display_name)
         .collect();
+    let participant_count = groups::count_active(state.db().pool(), &i.invite.group_id).await?;
     Ok(InviteInfo {
         facilitators,
         meeting: group
@@ -1192,6 +1210,7 @@ async fn invite_info(
         inviter_display_name: i.inviter_name,
         instance_name: state.config().instance.name.clone(),
         expires_at_ms: i.invite.expires_at_ms,
+        participant_count,
     })
 }
 
