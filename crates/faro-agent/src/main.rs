@@ -196,6 +196,30 @@ impl faro_agent::NoticeSink for MacNotices {
                 url: n.url.to_owned(),
             });
     }
+
+    fn status(&mut self, seen: &faro_agent::status_menu::Seen) {
+        use faro_agent::status_menu::{about, local_utc_offset_secs, status_menu};
+        use faro_platform_macos::ui::{StatusFix, StatusMenu};
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let menu = status_menu(seen, now_ms, local_utc_offset_secs(now_ms));
+        let about = about(faro_agent::AGENT_VERSION, seen);
+        // The status line is a state, never content: fine at `info`.
+        tracing::info!(status = %menu.line, "status menu");
+        self.0.set_status(StatusMenu {
+            detail: menu.detail().to_owned(),
+            line: menu.line,
+            problem: menu.problem,
+            fix: menu.fix.map(|f| StatusFix {
+                label: f.label,
+                url: f.url,
+            }),
+            web_app: menu.web_app,
+            about_title: about.title,
+            about_body: about.body,
+        });
+    }
 }
 
 /// `faro://enroll` links and "Enroll this computer…" (issue #62): each runs

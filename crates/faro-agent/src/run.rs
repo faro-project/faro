@@ -42,6 +42,7 @@ use crate::pending::{Pending, Signal};
 use crate::platform::{
     AccessibilityProbe, Capture, CaptureOutcome, Observation, PlatformWorker, WorkerGone,
 };
+use crate::status_menu::{Enrollment, Seen};
 
 /// The version this agent reports in `Hello`.
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -52,6 +53,10 @@ const MAX_REASON_LEN: usize = 256;
 
 /// How long a best-effort `Goodbye` may take before the agent exits anyway.
 const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long the enroll socket may take to say whether the computer is
+/// enrolled, for the status menu (`Status` reads two files).
+const ENROLL_STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Why [`Agent::run`] returned normally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +134,7 @@ impl Agent {
             observing: None,
             poll,
             screen_off_noticed: false,
+            seen: Seen::Starting,
         };
         rt.run(pin!(stop)).await
     }
@@ -193,6 +199,8 @@ struct Runtime {
     /// says granted while captures are still refused, the notice must not
     /// come back with every capture.)
     screen_off_noticed: bool,
+    /// What the notice sink was last told of the service (status menu).
+    seen: Seen,
 }
 
 /// Await an optional one-shot; pending forever when there is none, so it can
@@ -276,6 +284,14 @@ impl Runtime {
                 }
                 Err(Fail::Fatal(e)) => return Err(e),
             }
+            // Not connected: the status menu says why, from the enroll
+            // socket (enrolled? approved?).
+            let enrollment = tokio::select! {
+                biased;
+                () = &mut stop => return Ok(ExitReason::Stopped),
+                e = self.enrollment() => e,
+            };
+            self.tell(Seen::NotConnected(enrollment));
             if self.wait(delay, stop.as_mut()).await? {
                 return Ok(ExitReason::Stopped);
             }
@@ -337,6 +353,32 @@ impl Runtime {
                 _ = self.poll.tick() => self.start_observe()?,
             }
         }
+    }
+
+    /// Tell the notice sink what is known of the service, if it changed.
+    fn tell(&mut self, seen: Seen) {
+        if seen != self.seen {
+            self.notices.status(&seen);
+            self.seen = seen;
+        }
+    }
+
+    /// Ask the enroll socket whether the computer is enrolled and approved
+    /// (`Status`, which changes nothing).
+    async fn enrollment(&mut self) -> Enrollment {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let socket = faro_ipc::resolve_enroll_socket(&self.config.socket_path, uid);
+        let answer = crate::enroll::enrollment_status(
+            &socket,
+            self.config.service_trust,
+            ENROLL_STATUS_TIMEOUT,
+        )
+        .await;
+        if let Err(e) = &answer {
+            tracing::debug!(error = %e, "no enrollment status from the service");
+        }
+        Enrollment::from_status(answer.as_ref().map_err(String::as_str))
     }
 
     fn start_observe(&mut self) -> Result<(), WorkerGone> {
@@ -427,6 +469,9 @@ impl Runtime {
                     ServiceMsg::Welcome { .. } => {
                         tracing::warn!("ignoring an unexpected Welcome from the service");
                     }
+                    // Shown, never acted on: nothing in it changes what the
+                    // agent does.
+                    ServiceMsg::Status(s) => self.tell(Seen::Connected(s)),
                 },
                 out = recv_opt(&mut capture) => {
                     capture = None;
