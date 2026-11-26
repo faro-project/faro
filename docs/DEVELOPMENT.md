@@ -356,7 +356,7 @@ Pages caches files for about 10 minutes. That is fine: the timestamp is re-signe
 | `FARO_SIGN_IDENTITY`, `FARO_INSTALLER_IDENTITY`, `FARO_TEAM_ID`, `FARO_NOTARY_PROFILE` | none: a real release fails without them |
 | `FARO_MACOS_KEYCHAIN` | none (use the default keychains) |
 | `FARO_SIGNING_RUNNER` | `"ubuntu-24.04"` |
-| `FARO_LINUX_X64_RUNNER` | `"ubuntu-24.04"` |
+| `FARO_LINUX_X64_RUNNER` | `"ubuntu-24.04"` in `release.yml`; `["self-hosted", "macOS", "X64"]` in `container.yml` ([CI runners](#ci-runners)) |
 | `FARO_UPDATES_URL` | `https://updates.faro-project.org/` |
 | `FARO_RELEASE_ENVIRONMENT`, `FARO_TIMESTAMP_ENVIRONMENT` | none |
 
@@ -474,17 +474,24 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 | Labels | Machine | Jobs |
 |---|---|---|
 | `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
-| `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel` |
-| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the arm64 container build, the nightly `fuzz` workflow; in `release.yml` the arm64 server build, a dry run's signing, and the image tags and GitHub Release; the `check` and `alert` jobs of `update-timestamp.yml` |
+| `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel`, the amd64 container build (in colima's x86_64 Linux VM) |
+| `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the arm64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` the arm64 server build, a dry run's signing, and the image tags and GitHub Release; the `check` and `alert` jobs of `update-timestamp.yml` |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
 
-There is no x86_64 Linux runner yet, so the amd64 container build and the multi-arch publish still run on GitHub's `ubuntu-24.04`. So do the jobs that read the update signing keys ([Releasing](#releasing)).
+`container.yml` uses no GitHub-hosted runner. There is no x86_64 Linux runner, so its amd64 build runs on the Intel Mac, inside colima's Linux VM: that VM is x86_64 and hardware-virtualised, so the build is native, not emulated. The repository variable `FARO_LINUX_X64_RUNNER` (JSON, for example `["self-hosted", "Linux", "X64"]`, or `"ubuntu-24.04"` once GitHub's runners can start again) moves it; `release.yml`'s amd64 build reads the same variable, but there it defaults to `ubuntu-24.04`. The jobs that read the update signing keys still run on GitHub's `ubuntu-24.04` by default ([Releasing](#releasing)).
+
+The other way to build amd64 without GitHub, under QEMU emulation on the Pi, wasn't chosen. It hasn't been measured, but the Pi builds the arm64 image natively in about 7 minutes, and emulated `rustc` is usually 5 to 20 times slower, so an emulated build would take somewhere between 40 minutes and a few hours. The Pi takes one job at a time and runs `fmt`, `test (linux)`, `web` and `deny` for every pull request, so each push to `main` would hold all of them up for that long. Cross-compiling on the Pi (the builder stage on `$BUILDPLATFORM` with an x86_64 linker) would be fast, but needs a different Dockerfile.
+
+**While the Intel Mac is off,** the amd64 job of a push to `main` waits for it, and the publish waits too (GitHub fails a job that has waited a day), so `:main` stops moving for arm64 as well. A newer push cancels the waiting run. To publish arm64 alone meanwhile, set `FARO_LINUX_X64_RUNNER` to `"ubuntu-24.04"`: while the spending limit is reached that job fails at once, and the publish goes on with arm64 and a warning. Delete the variable when the Mac is back.
+
+**Registry credentials.** The image is pushed with the job's `GITHUB_TOKEN`; there is no other registry secret. Only the `build` job (pushes to `main` and manual runs) and the `publish multi-arch image` job have `packages: write`, and only they log in to `ghcr.io`, logging out when the job ends. On a pull request the `test` job builds and smoke-tests both platforms with a read-only token, and pushes nothing. Both jobs show as `build (linux/amd64)` and `build (linux/arm64)`.
 
 Each runner runs one job at a time, and a new push to a pull request cancels its older CI run. The workflows install Rust (`dtolnay/rust-toolchain`) and Node (`actions/setup-node`) themselves. Each machine needs:
 
 - **All:** `git`, `curl`, and a C compiler and linker for the crates with C code.
-- **Linux:** `build-essential`, `pkg-config` and `jq` (for the release scripts). Docker with Buildx for the container build. If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
+- **Linux:** `build-essential`, `pkg-config` and `jq` (for the release scripts and the image publish). Docker with Buildx for the container build, usable by the runner's user without `sudo` (the `docker` group). If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
 - **Windows:** Git for Windows in its default location (the `test` job puts `C:\Program Files\Git\bin` first on `PATH`, ahead of WSL's `bash`, for the toolchain action's bash steps), and the Visual Studio Build Tools C++ workload for the MSVC linker.
 - **macOS:** Xcode Command Line Tools. On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
+- **Intel Mac, for the amd64 container build:** colima, the Docker CLI and Buildx: `brew install colima docker docker-buildx`, then add `"cliPluginsExtraDirs": ["/usr/local/lib/docker/cli-plugins"]` to the runner user's `~/.docker/config.json` so `docker buildx` is found, with no `credsStore` there (the keychain helper can't be used from the runner's service). Start the VM with enough memory for a release build, `colima start --cpu 4 --memory 6 --disk 60`, and keep it running across reboots with `brew services start colima`. The VM is x86_64 because the Mac is. Check with `docker version --format '{{.Server.Arch}}'` (`amd64`) as the runner's user; the job's `Docker` step runs the same check.
 
 Jobs aren't sandboxed: anyone who can push a branch can run code on these machines as the runner's user, and files stay between jobs. Keep the runners in an account with nothing else on it where you can, and never let them take jobs from a public repository.
