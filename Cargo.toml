@@ -8,6 +8,7 @@ members = [
     "crates/faro-ipc",
     "crates/faro-platform",
     "crates/faro-platform-macos",
+    "crates/faro-platform-windows",
     "crates/faro-update",
     "crates/faro-service",
     "crates/faro-agent",
@@ -29,6 +30,7 @@ faro-detect = { path = "crates/faro-detect", version = "0.1.0-beta.1" }
 faro-ipc = { path = "crates/faro-ipc", version = "0.1.0-beta.1" }
 faro-platform = { path = "crates/faro-platform", version = "0.1.0-beta.1" }
 faro-platform-macos = { path = "crates/faro-platform-macos", version = "0.1.0-beta.1" }
+faro-platform-windows = { path = "crates/faro-platform-windows", version = "0.1.0-beta.1" }
 faro-update = { path = "crates/faro-update", version = "0.1.0-beta.1" }
 
 # Serialization

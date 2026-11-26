@@ -382,7 +382,7 @@
 								{:else}
 									<p class="code-display big">{code.code}</p>
 									<p class="muted small">Works once, for the next {remainingText}.</p>
-									<p>On the Mac, with Faro installed, open the enrollment link:</p>
+									<p>On the computer, with Faro installed, open the enrollment link:</p>
 									<div class="actions inline">
 										<a class="button primary small" href={link}>Open in Faro</a>
 										<button
@@ -394,13 +394,15 @@
 										</button>
 									</div>
 									<p class="muted small">
-										Using another device? Copy the link and send it to the Mac. There, click the eye
-										icon in the menu bar, choose <strong>Enroll this computer…</strong> and paste it.
-										An administrator of the Mac approves with their name and password.
+										Using another device? Copy the link and send it to the computer. There, choose
+										<strong>Enroll this computer…</strong> from the Faro icon (in the menu bar on a Mac,
+										the tray icon in the notification area on Windows) and paste it. An administrator
+										of the computer approves: on a Mac with their name and password, on Windows in the
+										administrator prompt.
 									</p>
 									<details>
-										<summary>Or use Terminal</summary>
-										<p>Run this in Terminal on that computer:</p>
+										<summary>Or use a terminal</summary>
+										<p>On a Mac, run this in Terminal:</p>
 										<pre class="command"><code
 												>sudo /Library/Faro/bin/faro-service enroll --link '{link}'</code
 											></pre>
@@ -415,6 +417,23 @@
 													)}
 											>
 												{copied === 'command' ? '✓ Copied' : 'Copy command'}
+											</button>
+										</div>
+										<p>On Windows, run this in a terminal opened as administrator:</p>
+										<pre class="command"><code
+												>&amp; "C:\Program Files\Faro\faro-service.exe" enroll --link '{link}'</code
+											></pre>
+										<div class="actions inline">
+											<button
+												class="secondary small"
+												type="button"
+												onclick={() =>
+													copy(
+														`& "C:\\Program Files\\Faro\\faro-service.exe" enroll --link '${link}'`,
+														'command-windows'
+													)}
+											>
+												{copied === 'command-windows' ? '✓ Copied' : 'Copy command'}
 											</button>
 										</div>
 									</details>

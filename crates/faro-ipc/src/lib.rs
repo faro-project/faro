@@ -14,8 +14,13 @@
 //!   (§9).
 //! * [`connection`] — a typed, cancellation-safe [`Connection`] over any
 //!   async byte stream.
-//! * [`transport`] (Unix) — a hardened Unix-domain-socket server/client with
+//! * `transport` (Unix) — a hardened Unix-domain-socket server/client with
 //!   kernel peer credentials and a pluggable [`PeerVerifier`].
+//! * `named_pipe` (Windows) — the same API ([`IpcServer`], [`IpcClient`],
+//!   [`BindOptions`]) over named pipes with a DACL, a first-instance guard
+//!   and kernel-reported client pid, session and account.
+//! * [`endpoint`] — per-account endpoint names, shared by both transports.
+//! * [`peer`] / [`sid`] — peer identity and the verifiers that judge it.
 //! * [`handshake`] — `Hello`/`Welcome` with a deadline, and ping/pong
 //!   liveness for detecting a hung agent.
 //! * [`enroll`] — the separate request/response protocol on the enroll
@@ -30,24 +35,28 @@
 //! is redacted, it is zeroized on drop, and every codec buffer that can hold
 //! pixels is [`zeroize::Zeroizing`]. Errors never carry message content.
 //!
-//! ## Windows
+//! ## Platforms
 //!
-//! TODO(windows): the named-pipe transport (a pipe with a DACL restricted to
-//! SYSTEM and the session user, `GetNamedPipeClientProcessId` for the peer
-//! pid, and an Authenticode check of the client image) is not implemented
-//! yet. It cannot be compiled or tested on the platforms this crate is
-//! currently developed on, and unverified security code is worse than none.
-//! The codec, messages, [`Connection`] and [`handshake`] are
-//! platform-independent and will be reused unchanged over a
-//! `tokio::net::windows::named_pipe` stream.
+//! The transport is chosen by the target: Unix sockets on macOS and Linux,
+//! named pipes on Windows. Both export the same names ([`IpcServer`],
+//! [`IpcClient`], [`BindOptions`], [`session_socket_path`],
+//! [`resolve_agent_socket`], [`resolve_enroll_socket`], [`AccountId`],
+//! [`ServerStream`], [`ClientStream`]), and the verifiers
+//! [`AllowSystemService`] and [`AllowSameUser`] mean the same thing on
+//! both, so most call sites need no `cfg`. What differs is how accounts are
+//! named (a uid or a [`Sid`]) and what [`BindOptions`] holds.
 
 pub mod codec;
 pub mod connection;
+pub mod endpoint;
 pub mod enroll;
 pub mod error;
 pub mod handshake;
 pub mod messages;
+#[cfg(windows)]
+pub mod named_pipe;
 pub mod peer;
+pub mod sid;
 pub mod status;
 #[cfg(unix)]
 pub mod transport;
@@ -58,11 +67,12 @@ pub use codec::{
     MAX_PAYLOAD_LEN, PROTOCOL_VERSION,
 };
 pub use connection::{AgentConnection, Connection, ServiceConnection};
-#[cfg(unix)]
-pub use enroll::resolve_enroll_socket;
+#[cfg(any(unix, windows))]
+pub use endpoint::current_account;
+pub use endpoint::{resolve_agent_socket, session_socket_path, AccountId};
 pub use enroll::{
-    enroll_socket_path, EnrollClientConnection, EnrollDone, EnrollPreview, EnrollRequest,
-    EnrollResponse, EnrollServerConnection, EnrollStatus, EnrollTarget, FailureKind,
+    enroll_socket_path, resolve_enroll_socket, EnrollClientConnection, EnrollDone, EnrollPreview,
+    EnrollRequest, EnrollResponse, EnrollServerConnection, EnrollStatus, EnrollTarget, FailureKind,
     AUTHORIZATION_LEN,
 };
 pub use error::{IpcError, Result, WireFrameError};
@@ -74,10 +84,31 @@ pub use messages::{
     AgentMsg, CaptureReason, ServiceMsg, ShutdownReason, WireMessage, WirePermissionState,
     WireSessionChange,
 };
+#[cfg(windows)]
+pub use named_pipe::{BindOptions, IpcClient, IpcServer, PendingConnection};
 #[cfg(unix)]
 pub use peer::AllowSameUid;
-pub use peer::{AllowUids, PeerInfo, PeerVerifier};
+pub use peer::{AllowSameUser, AllowSids, AllowSystemService, AllowUids, PeerInfo, PeerVerifier};
+pub use sid::{ParseSidError, Sid};
 pub use status::{MemberStatus, StatusReport, STATUS_SCHEMA};
 #[cfg(unix)]
-pub use transport::{resolve_agent_socket, session_socket_path, BindOptions, IpcClient, IpcServer};
+pub use transport::{BindOptions, IpcClient, IpcServer};
 pub use wire_frame::{WireFrame, WirePixelFormat, MAX_FRAME_BYTES};
+
+/// The stream type of a connection the service accepted
+/// ([`IpcServer::accept`]): a Unix socket, or the server end of a pipe.
+#[cfg(unix)]
+pub type ServerStream = tokio::net::UnixStream;
+/// The stream type of a connection the service accepted
+/// ([`IpcServer::accept`]): a Unix socket, or the server end of a pipe.
+#[cfg(windows)]
+pub type ServerStream = tokio::net::windows::named_pipe::NamedPipeServer;
+
+/// The stream type of a connection the agent opened
+/// ([`IpcClient::connect`]): a Unix socket, or the client end of a pipe.
+#[cfg(unix)]
+pub type ClientStream = tokio::net::UnixStream;
+/// The stream type of a connection the agent opened
+/// ([`IpcClient::connect`]): a Unix socket, or the client end of a pipe.
+#[cfg(windows)]
+pub type ClientStream = tokio::net::windows::named_pipe::NamedPipeClient;

@@ -27,8 +27,9 @@ cargo deny check                                        # licenses, bans, source
 | `faro-crypto` | Signing, sealed boxes, item encryption, passphrase wrapping, chain verification | `faro-proto` |
 | `faro-platform` | Zeroizing `Frame`, OS traits, synthetic implementations | `faro-proto` |
 | `faro-platform-macos` | macOS implementation of the platform traits | `faro-platform` |
+| `faro-platform-windows` | Windows implementation of the platform traits: capture, foreground window, browser, session, tamper, the service host and SCM, ACLs, Authenticode, tray UI | `faro-platform` |
 | `faro-detect` | dHash, classifier, domain categories, fusion, blurred thumbnails | `faro-platform`, `faro-proto` |
-| `faro-ipc` | Agent ↔ service protocol and transport | `faro-platform`, `faro-proto` |
+| `faro-ipc` | Agent ↔ service protocol and transport (Unix sockets on macOS, named pipes on Windows) | `faro-platform`, `faro-proto` |
 | `faro-core` | Scheduler, urgency, recipients, event writer, outbox, reports | `faro-proto`, `faro-crypto` |
 | `faro-update` | TUF-style signed update verification | `faro-proto`, `faro-crypto` |
 | `faro-service` / `faro-agent` | Client binaries | most of the above |
@@ -176,7 +177,7 @@ cargo run -p faro-detect --example domains-compile -- build --config crates/faro
 
 ## Testing without real hardware
 
-`faro_platform::synthetic::Script` drives a fake screen, foreground app, session state and tamper signals. Use it for anything above the OS layer. Tests that need real OS permissions (for example macOS Screen Recording) are `#[ignore]`d and say so in their name or doc comment.
+`faro_platform::synthetic::Script` drives a fake screen, foreground app, session state and tamper signals. Use it for anything above the OS layer. Tests that need real OS permissions (for example macOS Screen Recording) are `#[ignore]`d and say so in their name or doc comment. Tests that need SYSTEM or elevation on Windows skip themselves.
 
 On macOS the agent binary shows a menu-bar icon, the status menu and the service's notices, which needs a GUI session. `cargo run -p faro-platform-macos --example session_ui` shows that UI with a sample notice and a sample status ("Screen Recording is off"; `FARO_SAMPLE_STATUS=ok` for "Monitoring") and no service. A `dev` agent started outside a GUI session (over SSH, for example) can skip it with `--no-ui`. AppKit's main thread can't be driven from `cargo test`, so the UI has no automated tests.
 
@@ -326,6 +327,43 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 - **Updates:** `FARO_UPDATE_ROOT` (a signed root document, for example from `cargo run -p faro-update --example faro-release -- sign-root …`) is installed as `/Library/Faro/update-root.json`. A release package requires it; a `--dev` one may have it. With it, the service checks its instance's mirror about every 6 hours (`[updates] check_secs`) and installs newer client packages through the one-shot launchd job `org.faro.update` (`faro_platform_macos::update_job`). It runs as its own job because the package's preinstall stops the service, which would kill an `installer` running as its child. Only the packaged service, run as root from `/Library/Faro/bin/faro-service`, installs anything. A development build checks and logs, nothing more. Before installing, the service checks the package's own signature (PROTOCOL.md §8.2, step 5): Faro's Developer ID Installer certificate and notarization, with the Team ID compiled in from `FARO_TEAM_ID` (`build-pkg.sh` passes it to `cargo`). A `--dev` package's service has the `dev` feature and no Team ID, so it skips that check and dev packages can update each other. A service built without either refuses every package. Then it reads the full semver version inside the package (`PackageInfo` and the Distribution, step 6), and refuses the package unless it is the version the metadata names and above the running one. Development builds do this too, so keep `pkgbuild --version` and the Distribution's `@VERSION@` the full version. To run both checks by hand: `FARO_TEAM_ID=<team> cargo run -p faro-service --example check_package -- <pkg>` (it prints the version). The job's output goes to `update-install.log` in the state directory, and `update-attempts.json` there records the pending install and failed packages. Models and blocklists come through the same check ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)); their notices go to `/Library/Faro/notices/update-model.txt` and `update-blocklist.txt`.
 - **The status menu** (issue #89) is in the agent's menu-bar icon, not a separate tray app: see [The status menu](#the-status-menu). There is no tray app beyond it.
 
+## The Windows client
+
+The Windows client is `faro-platform-windows`, which holds the capture, foreground-window, browser, session, tamper, service host (SCM), ACL, Authenticode and tray UI code. The binaries are `faro-service` and `faro-agent`, and they talk over named pipes in `faro-ipc`. It supports Windows 10 22H2 (build 19045) and Windows 11, x64 only.
+
+- **Pipes.** Each account's agent uses `\\.\pipe\faro\agent.<SID>`. Enrollment uses `\\.\pipe\faro\enroll`. Administrator approval uses `\\.\pipe\faro\enroll.S-1-5-32-544`, the Administrators group's SID.
+- **Logs and state.** The service logs to `C:\ProgramData\Faro\logs\faro-service.log`, and each agent to `%LOCALAPPDATA%\Faro\Logs\faro-agent.log`. Both rotate at 5 MiB, with 3 old files kept. The state directory, `C:\ProgramData\Faro`, is readable by SYSTEM and Administrators only.
+- **Commands.** `install-service` and `uninstall-service` are for development and need an elevated shell. `run-service` is the entry point the SCM starts; from a console it runs in the foreground.
+
+```powershell
+faro-service run                              # foreground
+faro-service run-service                      # the SCM entry point; from a console, foreground
+faro-service install-service                  # dev, elevated
+faro-service uninstall-service                # dev, elevated
+faro-service approve-enroll --request <hex>   # the UAC helper
+faro-agent run
+faro-agent open-url <link>
+```
+
+- **Probes.** `cargo run -p faro-platform-windows --example <name>` runs `capture_probe`, `browser_probe`, `hidden_window_probe`, `sessions_probe` or `session_ui`.
+- **Capture cost.** Spike results on one 2400×1600 monitor: DXGI takes about 17 ms, and under 16 ms of CPU, per warm capture; the first capture takes about 400 ms. The D3D driver adds about 70–80 MiB of working set (GDI alone adds about 27 MiB), which is significant against the 150 MB budget in ARCHITECTURE.md §3.4.
+
+## The Windows installer
+
+`installers/windows/build-msi.ps1` builds a per-machine x64 MSI (WiX 5.0.2: `dotnet tool install --global wix --version 5.0.2`) and `installers/windows/check-msi.ps1` checks one. CI's `windows-msi` job builds the unsigned development MSI on every pull request, checks it, and keeps it for 14 days as `faro-dev-msi-<sha>`; in an elevated session `check-msi.ps1` also installs it, checks the service, its DACL, the `faro://` handler and the state directory's ACL, uninstalls it and checks nothing is left (the runner's account must be an administrator for that part; otherwise the static checks run and the install is skipped with a message). Everything about the package, including what it assumes of `faro-service` and `faro-agent`, is in [installers/windows/README.md](../installers/windows/README.md).
+
+```powershell
+installers\windows\build-msi.ps1 -Dev -NoOnnx           # unsigned, without the image classifier
+installers\windows\build-msi.ps1 -Dev -ModelDir <dir>   # with it; <dir> is the macOS build's model output
+installers\windows\check-msi.ps1 target\msi\Faro-*-dev-x64.msi
+```
+
+- **The image model** ships in release MSIs; the release job builds them with the macOS job's model (`-ModelDir`). CI has no model build, so its per-PR MSI is `-NoOnnx`, but the Windows `test` job lints and tests the classifier with `installers/windows/test-onnx.ps1`, which links Microsoft's `onnxruntime.dll` and copies it next to each test binary: Windows' own older copy in `System32` would otherwise load first and fail with "Failed to initialize ORT API". The installed service isn't affected, since the MSI puts the DLL in its own directory.
+
+- **Signing** is behind `installers/windows/sign.ps1`, chosen by the Actions variable `FARO_WINDOWS_SIGNING`: `signpath` (SignPath Foundation) or `trusted-signing` (Azure Trusted Signing); the variables each needs are in the script's help. A release also needs `FARO_WINDOWS_SIGNER` (the signer requirement compiled into the service; see the README) and `release/update-root.json`. With no provider, `release.yml`'s `windows-msi` job warns "UNSIGNED BUILD" and a real release has no Windows package; a dry run builds the unsigned `-Dev` MSI. No signing provider is chosen yet.
+- **Updates.** The service installs the MSI with `msiexec`, started detached so it outlives the service the MSI stops. Before installing, `crates/faro-service/src/update/msi.rs` checks the Authenticode signer, Faro's UpgradeCode and the version inside the MSI. `release/build-layout.sh` lists the MSI as the target `client/windows/Faro-<version>-x64.msi` (`client:windows:x86_64:10.0.19045`).
+- **Runner.** The `windows-msi` job does not run for pull requests from forks, and `check-msi.ps1` installs and uninstalls the package (as an administrator) only when the runner's environment sets `FARO_CHECK_MSI_INSTALL=1`; leave it unset on a runner that is not a disposable test machine, since any branch's code runs there. The `self-hosted, Windows, X64` runner needs the .NET SDK (for WiX), Git for Windows, the MSVC build tools and network access for the first build (ONNX Runtime from NuGet, WiX extensions, the domain sources).
+
 ## Testing the whole flag path
 
 To see a flag go all the way through (the service flags a frame, the encrypted event reaches the instance, the ally's feed shows it with a blurred thumbnail, the email arrives), the model has to rate a screen at least `medium`. OpenNSFW rates an ordinary swimwear photo about 0.06–0.15, and the default `explicit_medium` is 0.60. So a development build can lower the thresholds in `service.toml`:
@@ -408,6 +446,8 @@ Most licences of the software Faro is built from (MIT, Apache-2.0, BSD, ISC, Zli
 
 The agent's menu-bar menu says what Faro is doing, for the person at the screen (issue #89). Under "This computer is monitored by Faro" it shows **Status: …**, and clicking that explains it and what to do. When something fixes the problem, an item below opens it. Then **Open Faro** (the instance's web app), **Show the monitoring notice…**, **Enroll this computer…**, **Report a problem…** (how to make a report with `faro-service diagnose`, with a button that copies the command; see [Problem reports](#problem-reports)) and **About Faro…** (the agent's and the service's versions, the instance, and a button that opens the third-party notices in `/Library/Faro/notices`). Nothing on the menu stops monitoring, pauses it or hides anything; pausing stays in the existing flow that allies are told about.
 
+On Windows the same menu is in the agent's tray icon; the tray UI is in `faro-platform-windows`.
+
 ```text
 faro-service (root)                         agent (user session)
   ServiceStatus ─ feed_loop ─▶ IpcFrameSource
@@ -458,6 +498,7 @@ faro-service (root)                         agent (user session)
   At the default `info` level the logs hold none of this to begin with; the redaction is what keeps a report safe when someone turned `debug` on. It is a filter, not a proof: a new kind of private value that matches none of these rules would get through, so keep private values out of `info` and in named fields at `debug`.
 - **Reading as root for an account.** The agent log is in the member's home, which they control. It is opened with `O_NOFOLLOW` and read only if it is a regular file the account owns, so a link from `~/Library/Logs/Faro/faro-agent.log` to the device key reads nothing; the service's log must be owned by root. At most the last 8 MiB of each file is read.
 - **From the menu.** **Report a problem…** in the agent's menu ([The status menu](#the-status-menu)) only explains how to run `diagnose` in Terminal and offers to copy the command; it sends the service nothing. Not there yet: having the service collect the report for the agent and reveal the file, which needs an IPC request (and then the service should hand the report to the agent rather than write into the member's home itself).
+- On Windows, `diagnose` runs from an administrator terminal as `& "C:\Program Files\Faro\faro-service.exe" diagnose`, and the report is saved to the Desktop as `faro-report-….zip` (or to `--output <folder>`). It holds the same kind of content as on macOS, with private details removed: status, versions, the service state, sessions and agents, and recent service and agent logs. The tray menu's **Report a problem…** copies the command. The file list above is for macOS.
 
 ## Releasing
 
@@ -513,6 +554,7 @@ Pages caches files for about 10 minutes. That is fine: the timestamp is re-signe
 | Variable | Default |
 |---|---|
 | `FARO_SIGN_IDENTITY`, `FARO_INSTALLER_IDENTITY`, `FARO_TEAM_ID`, `FARO_NOTARY_PROFILE` | none: a real release fails without them |
+| `FARO_WINDOWS_SIGNING`, `FARO_WINDOWS_SIGNER` | none: a real release builds no Windows package without them ([The Windows installer](#the-windows-installer)) |
 | `FARO_MACOS_KEYCHAIN` | none (use the default keychains) |
 | `FARO_SIGNING_RUNNER` | `"ubuntu-24.04"` |
 | `FARO_LINUX_X64_RUNNER` | `"ubuntu-24.04"` in `release.yml`; `["self-hosted", "macOS", "X64"]` in `container.yml` ([CI runners](#ci-runners)) |
@@ -628,6 +670,8 @@ agent (user session)                       faro-service (root)
 - **By hand,** on a test Mac with a `--dev` package installed: create a code on the web app's **Computers** page, click **Open in Faro**, and check the confirm window, the macOS password dialog (its text names the instance), and the result. Then try **Enroll this computer…** from the menu (paste the link, or the address and the code), Cancel at each step, a wrong password, and an already enrolled computer. `security authorizationdb read org.faro.enroll` shows the rule the service wrote.
 - **Not covered:** if the agent isn't running when a link is opened, LaunchServices starts a second copy with no arguments, which exits. The member then uses the menu item, or logs out and in. A fake password dialog drawn by another app is outside what Faro can prevent.
 
+**On Windows** the approval is the UAC prompt instead of the macOS dialog. The UAC helper is `faro-service approve-enroll --request <hex>`, and the service checks the approval itself. Cancelling the prompt cancels enrolling. See [The Windows client](#the-windows-client).
+
 ## CI runners
 
 CI runs on the project's self-hosted runners, registered to the `faro-project` org and matched by label:
@@ -637,7 +681,7 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 | `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
 | `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel`, the amd64 container build (in colima's x86_64 Linux VM) |
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the arm64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` the arm64 server build, a dry run's signing, and the image tags and GitHub Release; the `check` and `alert` jobs of `update-timestamp.yml` |
-| `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
+| `self-hosted, Windows, X64` | Windows PC | `test (windows)`, `windows-msi`, the release MSI (`release.yml`) |
 
 `container.yml` uses no GitHub-hosted runner. There is no x86_64 Linux runner, so its amd64 build runs on the Intel Mac, inside colima's Linux VM: that VM is x86_64 and hardware-virtualised, so the build is native, not emulated. The repository variable `FARO_LINUX_X64_RUNNER` (JSON, for example `["self-hosted", "Linux", "X64"]`, or `"ubuntu-24.04"` once GitHub's runners can start again) moves it; `release.yml`'s amd64 build reads the same variable, but there it defaults to `ubuntu-24.04`. The jobs that read the update signing keys still run on GitHub's `ubuntu-24.04` by default ([Releasing](#releasing)).
 

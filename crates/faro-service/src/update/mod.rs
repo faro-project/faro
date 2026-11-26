@@ -2,7 +2,8 @@
 //!
 //! The service asks *its instance* for updates and trusts only the
 //! project. It holds the project's root of trust (shipped in the package,
-//! `/Library/Faro/update-root.json` on macOS) and a persisted
+//! `/Library/Faro/update-root.json` on macOS, `C:\Program
+//! Files\Faro\update-root.json` on Windows) and a persisted
 //! [`TrustedState`] (`update-trust.json` in the state directory), and on
 //! each [`ClientUpdater::check`]:
 //!
@@ -20,7 +21,8 @@
 //!    then installs it. On macOS that is Faro's Developer ID signature and
 //!    notarization ([`signature`]), then the version inside the package,
 //!    which must be the target's and above the running one
-//!    ([`package_version`]).
+//!    ([`package_version`]). On Windows it is the MSI's Authenticode
+//!    signer, its UpgradeCode and the full version it carries (`msi`).
 //!
 //! The trust state is saved after every verification step, `Ok` or `Err`
 //! (a rejected document can still raise the observed-time mark that stops
@@ -44,7 +46,8 @@
 //! pending. A check that can't conclude installs nothing and is tried
 //! again at the next check.
 //!
-//! **Who installs.** Only a packaged, root-run service has an installer
+//! **Who installs.** Only a packaged service run as root (macOS) or as
+//! LocalSystem (Windows, from `C:\Program Files\Faro`) has an installer
 //! ([`install::platform_installer`]). Anywhere else (a development build,
 //! Linux, where packages will come from the project's repository) the
 //! updater still checks and logs what is available, but installs nothing.
@@ -52,6 +55,8 @@
 pub mod artifacts;
 pub mod fetch;
 pub mod install;
+#[cfg(windows)]
+pub mod msi;
 pub mod package_version;
 pub mod signature;
 
@@ -76,8 +81,8 @@ pub const TRUST_FILE: &str = "update-trust.json";
 pub const ATTEMPTS_FILE: &str = "update-attempts.json";
 /// Downloaded packages, in the state directory.
 pub const DOWNLOAD_DIR: &str = "updates";
-/// The `org.faro.update` job's output (`installer`), in the state
-/// directory.
+/// The install's output, in the state directory: the `org.faro.update`
+/// job's (`installer`) on macOS, `msiexec`'s verbose log on Windows.
 pub const INSTALL_LOG: &str = "update-install.log";
 /// Largest package accepted.
 pub const MAX_PACKAGE_BYTES: u64 = 1 << 30;

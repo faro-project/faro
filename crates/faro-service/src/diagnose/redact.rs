@@ -11,6 +11,10 @@
 //!   `name.tld`), and IPv4 addresses other than loopback. Faro's own names
 //!   (`org.faro.service`), file names with the extensions Faro uses
 //!   (`service.toml`, `faro-service.log`) and version numbers stay.
+//! - **Windows user paths** (`C:\Users\alex\…` becomes `C:\Users\[user]\…`)
+//!   and, when given with [`Redactor::with_local_names`], this computer's
+//!   name, its domain and the account's name wherever they appear
+//!   (`ALEX-PC`, `CORP\alex`, `\\ALEX-PC\share`).
 //! - **The values of log fields that name private data**: a field whose
 //!   name has a word from [`PRIVATE_LOG_WORDS`] (`title=…`, `app=…`,
 //!   `body=…`) or [`EXTRA_PRIVATE_WORDS`], in `name=value` form or as a
@@ -38,6 +42,8 @@ pub const EMAIL: &str = "[email]";
 pub const HOST: &str = "[host]";
 /// What a removed IP address becomes.
 pub const IP: &str = "[ip]";
+/// What a removed user name (in a path or `DOMAIN\user`) becomes.
+pub const USER: &str = "[user]";
 /// What a removed field value becomes.
 pub const VALUE: &str = "[redacted]";
 /// What is left of another library's `debug` or `trace` line.
@@ -64,11 +70,11 @@ pub const EXTRA_PRIVATE_WORDS: &[&str] = &[
 ];
 
 /// File extensions that look like a top-level domain but are file names
-/// Faro logs (`faro-service.log`, `service.toml`).
+/// Faro logs (`faro-service.log`, `service.toml`, `faro-service.exe`).
 const FILE_EXTENSIONS: &[&str] = &[
     "log", "toml", "json", "plist", "sock", "pkg", "txt", "bin", "onnx", "lock", "zip", "sh", "rs",
     "gz", "sqlite", "sqlite3", "db", "xml", "html", "md", "tmp", "partial", "key", "pem",
-    "default", "bak", "old", "new",
+    "default", "bak", "old", "new", "exe", "msi", "dll",
 ];
 
 /// Removes private data from a report's text ([module docs](self)).
@@ -76,6 +82,9 @@ const FILE_EXTENSIONS: &[&str] = &[
 pub struct Redactor {
     /// The instance's host name, lowercase, which stays.
     instance_host: Option<String>,
+    /// This computer's names (computer, domain, account), lowercase, with
+    /// what each becomes.
+    local_names: Vec<(String, &'static str)>,
 }
 
 impl Redactor {
@@ -86,7 +95,34 @@ impl Redactor {
             instance_host: instance_host
                 .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
                 .filter(|h| !h.is_empty()),
+            local_names: Vec::new(),
         }
+    }
+
+    /// Also remove these names of this computer wherever they appear as a
+    /// word: host-like ones (computer name, domain names) become [`HOST`],
+    /// the account's name becomes [`USER`]. Names that are too short to be
+    /// told from words, and Windows' own (`SYSTEM`, `WORKGROUP`, ...), are
+    /// ignored.
+    pub fn with_local_names(mut self, hosts: &[&str], users: &[&str]) -> Self {
+        const OWN: &[&str] = &[
+            "system",
+            "administrator",
+            "administrators",
+            "workgroup",
+            "nt authority",
+            "local service",
+            "network service",
+        ];
+        for (names, with) in [(hosts, HOST), (users, USER)] {
+            for n in names {
+                let n = n.trim().trim_matches('\\').to_lowercase();
+                if n.len() >= 3 && !OWN.contains(&n.as_str()) {
+                    self.local_names.push((n, with));
+                }
+            }
+        }
+        self
     }
 
     /// Redact plain text (the status, command output), line by line.
@@ -131,10 +167,55 @@ impl Redactor {
     }
 
     fn line(&self, s: &str) -> String {
-        let s = redact_fields(s);
+        let s = user_paths(s);
+        let s = redact_fields(&s);
         let s = self.urls(&s);
         let s = emails(&s);
-        self.hosts(&s)
+        let s = self.hosts(&s);
+        // After the host-shaped names, so `pc.corp.example` is one host.
+        self.names(&s)
+    }
+
+    /// The local names, as whole words, any case.
+    fn names(&self, s: &str) -> String {
+        if self.local_names.is_empty() {
+            return s.to_owned();
+        }
+        let lower = s.to_lowercase();
+        // Lowercasing can change byte lengths for odd characters; then the
+        // offsets don't line up and the names are not matched.
+        if lower.len() != s.len() {
+            return s.to_owned();
+        }
+        let b = s.as_bytes();
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c >= 0x80;
+        let mut hits: Vec<(usize, usize, &'static str)> = Vec::new();
+        for (name, with) in &self.local_names {
+            let mut from = 0;
+            while let Some(at) = lower[from..].find(name.as_str()) {
+                let start = from + at;
+                let end = start + name.len();
+                from = end;
+                let before = start > 0 && word(b[start - 1]);
+                let after = end < b.len() && word(b[end]);
+                if !before && !after {
+                    hits.push((start, end, with));
+                }
+            }
+        }
+        hits.sort_unstable_by_key(|h| (h.0, std::cmp::Reverse(h.1)));
+        let mut out = String::with_capacity(s.len());
+        let mut copied = 0;
+        for (start, end, with) in hits {
+            if start < copied {
+                continue;
+            }
+            out.push_str(&s[copied..start]);
+            out.push_str(with);
+            copied = end;
+        }
+        out.push_str(&s[copied..]);
+        out
     }
 
     fn is_instance(&self, host: &str) -> bool {
@@ -283,6 +364,47 @@ impl Redactor {
         }
         Some(HOST)
     }
+}
+
+/// `C:\Users\alex\…` and `C:/Users/alex/…`: the user folder becomes
+/// [`USER`]. (`Public` and `Default` are not anyone's.)
+fn user_paths(s: &str) -> String {
+    let b = s.as_bytes();
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut from = 0;
+    let sep = |c: u8| matches!(c, b'\\' | b'/');
+    while from < lower.len() {
+        let Some(at) = lower[from..].find("users") else {
+            break;
+        };
+        let at = from + at;
+        from = at + 5;
+        let after = at + 5;
+        if at == 0 || !sep(b[at - 1]) || after >= b.len() || !sep(b[after]) {
+            continue;
+        }
+        let name_start = after + 1;
+        let mut name_end = name_start;
+        while name_end < b.len()
+            && !sep(b[name_end])
+            && !b[name_end].is_ascii_whitespace()
+            && !matches!(b[name_end], b'"' | b'\'' | b'<' | b'>' | b'|' | b'*' | b'?')
+        {
+            name_end += 1;
+        }
+        let name = &lower[name_start..name_end];
+        if name.is_empty() || matches!(name, "public" | "default" | "[user]") {
+            continue;
+        }
+        out.push_str(&s[copied..name_start]);
+        out.push_str(USER);
+        copied = name_end;
+        from = name_end;
+    }
+    out.push_str(&s[copied..]);
+    out
 }
 
 /// `user@example.org` → [`EMAIL`].
@@ -494,6 +616,48 @@ mod tests {
 
     fn r() -> Redactor {
         Redactor::new(Some("Faro.Example.org"))
+    }
+
+    #[test]
+    fn windows_user_paths_lose_the_account() {
+        let r = r();
+        assert_eq!(
+            r.text(r"opened C:\Users\Alex\AppData\Local\Faro\agent.log"),
+            r"opened C:\Users\[user]\AppData\Local\Faro\agent.log"
+        );
+        assert_eq!(
+            r.text(r"d:\users\alex.CORP\Desktop and C:/Users/bob/x"),
+            r"d:\users\[user]\Desktop and C:/Users/[user]/x"
+        );
+        assert_eq!(
+            r.text(r#"path="C:\Users\alex""#),
+            r#"path="C:\Users\[user]""#
+        );
+        // Not anyone's, and not paths.
+        assert_eq!(r.text(r"C:\Users\Public\x"), r"C:\Users\Public\x");
+        assert_eq!(r.text(r"C:\Users"), r"C:\Users");
+        assert_eq!(r.text("Users alex are fine"), "Users alex are fine");
+        // Through the log path too.
+        let log =
+            r.log("2026-11-25T10:15:00Z  INFO faro_agent: using C:\\Users\\Alex\\AppData\\x\n");
+        assert!(!log.contains("Alex"), "{log}");
+    }
+
+    #[test]
+    fn local_names_go_wherever_they_are_a_word() {
+        let r = Redactor::new(None)
+            .with_local_names(&["ALEX-PC", "CORP", "SYSTEM", "pc"], &["Alexander"]);
+        let out = r.text(
+            r"host alex-pc, user CORP\alexander, share \\ALEX-PC\c$, ALEX-PCX and corporate stay",
+        );
+        assert_eq!(
+            out,
+            r"host [host], user [host]\[user], share \\[host]\c$, ALEX-PCX and corporate stay"
+        );
+        // Windows' own names and short ones are left alone.
+        assert_eq!(r.text(r"NT AUTHORITY\SYSTEM pc"), r"NT AUTHORITY\SYSTEM pc");
+        // A domain-joined name written as a host is a host.
+        assert_eq!(r.text("alex-pc.corp.example"), "[host]");
     }
 
     #[test]

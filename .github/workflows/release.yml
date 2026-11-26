@@ -10,6 +10,11 @@
 #   macos-pkg      the universal .pkg: signed and notarized for a release,
 #                  an unsigned development package for a dry run; and the
 #                  image model it ships, for the update channel
+#   windows-msi    the x64 .msi, built on a Windows runner: signed through
+#                  installers/windows/sign.ps1 (SignPath or Azure Trusted
+#                  Signing) for a release, an unsigned development MSI for a
+#                  dry run; nothing, with a loud warning, when no signing
+#                  provider is configured
 #   blocklist      the domain list (domains-compile) for the update channel,
 #                  the same list the package ships
 #   server         the container image and the faro-server binary, natively
@@ -248,7 +253,7 @@ jobs:
         run: |
           rm -rf data "$RUNNER_TEMP/models" && mkdir -p data/model
           crates/faro-detect/models/opennsfw/build.sh "$RUNNER_TEMP/models"
-          cp "$RUNNER_TEMP/models/manifest.json" "$RUNNER_TEMP/models/opennsfw-int8.onnx" data/model/
+          cp "$RUNNER_TEMP/models/manifest.json" "$RUNNER_TEMP/models/opennsfw-int8.onnx" "$RUNNER_TEMP/models/NOTICE.txt" data/model/
       - uses: actions/upload-artifact@v4
         with:
           name: data-model
@@ -257,6 +262,133 @@ jobs:
           retention-days: 7
       - if: always()
         run: rm -rf dist data target/pkg "$RUNNER_TEMP/models"
+
+  # The Windows MSI, built on a Windows runner. Signing is behind
+  # installers/windows/sign.ps1: the SignPath Foundation or Azure Trusted
+  # Signing, chosen by the Actions variable FARO_WINDOWS_SIGNING (signpath or
+  # trusted-signing; sign.ps1 lists the other variables each needs). A real
+  # release also needs FARO_WINDOWS_SIGNER (the signer the service checks
+  # updates against) and release/update-root.json. With no provider chosen, a
+  # real release builds nothing here and warns loudly (UNSIGNED BUILD): an
+  # unsigned MSI is never shipped. A dry run builds the unsigned development
+  # MSI. The image model is the one the macOS job built.
+  windows-msi:
+    needs: [prepare, macos-pkg]
+    runs-on: [self-hosted, Windows, X64]
+    environment: ${{ needs.prepare.outputs.environment }}
+    timeout-minutes: 120
+    env:
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    outputs:
+      # Whether an MSI was built, and the SHA-256 of the domain list manifest
+      # it ships (`layout` checks it is the one `blocklist` built).
+      built: ${{ steps.mode.outputs.mode != 'skip' }}
+      domains_manifest_sha256: ${{ steps.domains.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+      - shell: powershell
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\Git\bin'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Signing configuration
+        id: mode
+        shell: bash
+        env:
+          FARO_WINDOWS_SIGNING: ${{ vars.FARO_WINDOWS_SIGNING }}
+          FARO_WINDOWS_SIGNER: ${{ vars.FARO_WINDOWS_SIGNER }}
+        run: |
+          if [[ "$DRY_RUN" == true ]]; then
+            echo "::warning title=UNSIGNED WINDOWS PACKAGE::Dry run: building an unsigned development MSI (-Dev). Its service accepts any program as the agent. Never install it on anyone's computer."
+            echo "mode=dev" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$FARO_WINDOWS_SIGNING" ]]; then
+            echo "::warning title=UNSIGNED BUILD::FARO_WINDOWS_SIGNING is not set (signpath or trusted-signing): this release has NO Windows package. Choose a signing provider (installers/windows/README.md) and re-run."
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$FARO_WINDOWS_SIGNER" ]]; then
+            echo "::error title=No Windows signer::A release needs the Actions variable FARO_WINDOWS_SIGNER (subject=\"...\", installers/windows/README.md)."
+            exit 1
+          fi
+          if [[ ! -f release/update-root.json ]]; then
+            echo "::error title=No root of trust::release/update-root.json is missing (docs/KEY-CEREMONY.md, \"Shipping root 1\")."
+            exit 1
+          fi
+          echo "mode=release" >> "$GITHUB_OUTPUT"
+      - if: steps.mode.outputs.mode != 'skip'
+        uses: actions/download-artifact@v4
+        with:
+          name: data-model
+          path: ${{ runner.temp }}/model
+      - name: cargo-about and WiX
+        if: steps.mode.outputs.mode != 'skip'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $about = (& 'C:\Program Files\Git\bin\bash.exe' -o igncr release/notices/third-party.sh --cargo-about-version).Trim()
+          cargo install --locked cargo-about --features cli --version $about
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-about' }
+          $want = (Select-String -Path installers/windows/build-msi.ps1 -Pattern "^.WixVersion = '(.*)'").Matches[0].Groups[1].Value
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          $have = if (Get-Command wix -ErrorAction SilentlyContinue) { (& wix --version) -replace '\+.*$', '' } else { '' }
+          if ($have -ne $want) {
+            dotnet tool update --global wix --version $want
+            if ($LASTEXITCODE -ne 0) { dotnet tool install --global wix --version $want }
+            if ($LASTEXITCODE -ne 0) { throw 'wix' }
+          }
+      - name: Build the MSI
+        if: steps.mode.outputs.mode != 'skip'
+        shell: powershell
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          FARO_UPDATE_ROOT: ${{ steps.mode.outputs.mode == 'release' && 'release/update-root.json' || '' }}
+          FARO_WINDOWS_SIGNING: ${{ steps.mode.outputs.mode == 'release' && vars.FARO_WINDOWS_SIGNING || '' }}
+          FARO_WINDOWS_SIGNER: ${{ steps.mode.outputs.mode == 'release' && vars.FARO_WINDOWS_SIGNER || '' }}
+          SIGNPATH_API_TOKEN: ${{ steps.mode.outputs.mode == 'release' && secrets.SIGNPATH_API_TOKEN || '' }}
+          FARO_SIGNPATH_ORGANIZATION_ID: ${{ vars.FARO_SIGNPATH_ORGANIZATION_ID }}
+          FARO_SIGNPATH_PROJECT: ${{ vars.FARO_SIGNPATH_PROJECT }}
+          FARO_SIGNPATH_POLICY: ${{ vars.FARO_SIGNPATH_POLICY }}
+          FARO_SIGNPATH_CONFIG_EXE: ${{ vars.FARO_SIGNPATH_CONFIG_EXE }}
+          FARO_SIGNPATH_CONFIG_MSI: ${{ vars.FARO_SIGNPATH_CONFIG_MSI }}
+          FARO_TRUSTED_SIGNING_ENDPOINT: ${{ vars.FARO_TRUSTED_SIGNING_ENDPOINT }}
+          FARO_TRUSTED_SIGNING_ACCOUNT: ${{ vars.FARO_TRUSTED_SIGNING_ACCOUNT }}
+          FARO_TRUSTED_SIGNING_PROFILE: ${{ vars.FARO_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TENANT_ID: ${{ steps.mode.outputs.mode == 'release' && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ steps.mode.outputs.mode == 'release' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ steps.mode.outputs.mode == 'release' && secrets.AZURE_CLIENT_SECRET || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          Remove-Item -Recurse -Force target\msi -ErrorAction SilentlyContinue
+          $model = Join-Path $env:RUNNER_TEMP 'model\model'
+          if ($env:MODE -eq 'dev') {
+            installers\windows\build-msi.ps1 -Dev -ModelDir $model
+          } else {
+            installers\windows\build-msi.ps1 -ModelDir $model
+          }
+          $msi = (Get-Item target\msi\Faro-*.msi).FullName
+          installers\windows\check-msi.ps1 $msi
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Move-Item $msi dist\
+      - name: The domain list the package ships
+        id: domains
+        if: steps.mode.outputs.mode != 'skip'
+        shell: powershell
+        run: |
+          $m = 'target\msi\work\payload\domains\domains.manifest.json'
+          $h = (Get-FileHash -Algorithm SHA256 $m).Hash.ToLowerInvariant()
+          "sha256=$h" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+      - if: steps.mode.outputs.mode != 'skip'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-msi
+          path: dist/Faro-*.msi
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        shell: powershell
+        run: Remove-Item -Recurse -Force dist, target\msi, "$env:RUNNER_TEMP\model" -ErrorAction SilentlyContinue
 
   # The domain list for the update channel, from the approved, pinned
   # sources in crates/faro-detect/domains/sources.toml. The same sources
@@ -389,13 +521,14 @@ jobs:
           if [[ "$DRY_RUN" == true ]]; then docker image rm -f "$IMG" || true; fi
 
   layout:
-    needs: [prepare, macos-pkg, blocklist, server]
+    needs: [prepare, macos-pkg, windows-msi, blocklist, server]
     # always(): run when only a dry run's amd64 build failed (that job is
     # continue-on-error, so `server` still succeeds); never otherwise.
     if: >-
       always()
       && needs.prepare.result == 'success'
       && needs.macos-pkg.result == 'success'
+      && needs.windows-msi.result == 'success'
       && needs.blocklist.result == 'success'
       && needs.server.result == 'success'
     runs-on: ${{ fromJSON(needs.prepare.outputs.signing_runner) }}
@@ -432,6 +565,8 @@ jobs:
         id: artifacts
         env:
           PKG_DOMAINS_SHA256: ${{ needs.macos-pkg.outputs.domains_manifest_sha256 }}
+          MSI_BUILT: ${{ needs.windows-msi.outputs.built }}
+          MSI_DOMAINS_SHA256: ${{ needs.windows-msi.outputs.domains_manifest_sha256 }}
         run: |
           dist="$RUNNER_TEMP/dist"
           data="$RUNNER_TEMP/data"
@@ -440,6 +575,15 @@ jobs:
           args=()
           pkg="$(ls "$dist"/Faro-*.pkg)"
           args+=(--artifact "client:macos:any:$min_os=$pkg")
+          # The Windows MSI (absent when the release has no signing provider).
+          # The minimum is Windows 10 22H2, which the MSI's launch condition
+          # also enforces (installers/windows/Faro.wxs).
+          if [[ "$MSI_BUILT" == true ]]; then
+            msi="$(ls "$dist"/Faro-*.msi)"
+            args+=(--artifact "client:windows:x86_64:10.0.19045=$msi")
+          else
+            echo "::warning title=No Windows package::This release has no Windows MSI (FARO_WINDOWS_SIGNING is not set, so it was not built)."
+          fi
           for arch in aarch64 x86_64; do
             f="$dist/faro-server-$VERSION-linux-$arch"
             if [[ -f "$f" ]]; then
@@ -462,6 +606,10 @@ jobs:
             got="$(sha256sum "$data/blocklist/domains.manifest.json" | awk '{print $1}')"
           else
             got="$(shasum -a 256 "$data/blocklist/domains.manifest.json" | awk '{print $1}')"
+          fi
+          if [[ "$MSI_BUILT" == true && "$got" != "$MSI_DOMAINS_SHA256" ]]; then
+            echo "::error title=Domain lists differ::The Windows MSI's domain list manifest (sha256 ${MSI_DOMAINS_SHA256:-none}) is not the one built for the update channel (sha256 $got)."
+            exit 1
           fi
           if [[ -z "$PKG_DOMAINS_SHA256" || "$got" != "$PKG_DOMAINS_SHA256" ]]; then
             echo "::error title=Domain lists differ::The package's domain list manifest (sha256 ${PKG_DOMAINS_SHA256:-none}) is not the one built for the update channel ($got). The same pinned sources must give the same bytes (docs/DEVELOPMENT.md \"The domain category bundle\")."
@@ -680,6 +828,9 @@ jobs:
             fi
             echo
             echo "- **macOS** (13 or later, Apple Silicon and Intel): \`$(cd "$dist" && ls Faro-*.pkg)\`. Computers enrolled in an instance update themselves through it."
+            if ls "$dist"/Faro-*.msi > /dev/null 2>&1; then
+              echo "- **Windows** (10 22H2 or later, 64-bit): \`$(cd "$dist" && ls Faro-*.msi)\`. Computers enrolled in an instance update themselves through it."
+            fi
             echo "- **Instances:** the container image \`$IMAGE:$VERSION\`, or the \`faro-server\` binaries for Linux (glibc 2.41 or newer, as in Debian 13), each with its third-party licences (\`-third-party.txt\`). See SELF-HOSTING.md."
             echo
             echo "Every file is also listed, with its length and BLAKE3, in the signed update metadata at ${FARO_UPDATES_URL}targets.json. SHA-256 checksums:"

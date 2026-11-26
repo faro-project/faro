@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::connection::Connection;
+use crate::endpoint::AccountId;
 use crate::error::{IpcError, Result};
 use crate::messages::WireMessage;
 
@@ -61,31 +62,33 @@ pub const MAX_ACCOUNTS: usize = 256;
 /// Longest account name in a preview.
 pub const MAX_ACCOUNT_LEN: usize = 256;
 
-/// The enroll socket for `uid`, next to the agent socket `agent_base`:
-/// `enroll.<uid>.sock` (a root service binds one per account, owned by that
-/// account, mode 0600), or `enroll.sock` for `None` (a non-root development
-/// service).
-pub fn enroll_socket_path(agent_base: &Path, uid: Option<u32>) -> PathBuf {
+/// The enroll endpoint for `account`, next to the agent endpoint
+/// `agent_base`: `enroll.<uid>.sock` / `\\.\pipe\faro\enroll.<SID>` (a
+/// privileged service binds one per account that only that account can
+/// connect to), or `enroll.sock` / `\\.\pipe\faro\enroll` for `None` (a
+/// development service running as the user). See [`crate::endpoint`].
+pub fn enroll_socket_path(agent_base: &Path, account: Option<AccountId>) -> PathBuf {
     let ext = agent_base
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    let name = match uid {
-        Some(uid) => format!("enroll.{uid}{ext}"),
+    let name = match account {
+        Some(account) => format!("enroll.{account}{ext}"),
         None => format!("enroll{ext}"),
     };
     agent_base.with_file_name(name)
 }
 
-/// Where an agent running as `uid` should connect: its own enroll socket if
-/// the service has bound one, else the development service's.
-#[cfg(unix)]
-pub fn resolve_enroll_socket(agent_base: &Path, uid: u32) -> PathBuf {
-    use std::os::unix::fs::FileTypeExt;
-    let own = enroll_socket_path(agent_base, Some(uid));
-    match std::fs::symlink_metadata(&own) {
-        Ok(md) if md.file_type().is_socket() => own,
-        _ => enroll_socket_path(agent_base, None),
+/// Where an agent running as `account` should connect: its own enroll
+/// endpoint if the service has bound one, else the development service's.
+/// As with [`resolve_agent_socket`](crate::resolve_agent_socket), who
+/// listens there is checked when connecting.
+pub fn resolve_enroll_socket(agent_base: &Path, account: AccountId) -> PathBuf {
+    let own = enroll_socket_path(agent_base, Some(account));
+    if crate::endpoint::endpoint_exists(&own) {
+        own
+    } else {
+        enroll_socket_path(agent_base, None)
     }
 }
 
@@ -133,6 +136,22 @@ pub enum EnrollRequest {
         /// with no rights.
         authorization: [u8; AUTHORIZATION_LEN],
     },
+    /// Windows only: an elevated administrator's helper
+    /// (`faro-service approve-enroll`) asks the service to record that it
+    /// approved the enrollment the agent will request with `request` as its
+    /// `authorization`. The service checks the helper's own token. Appended
+    /// last, so the encodings of the other variants are unchanged.
+    ///
+    /// `binding` is SHA-256 over a domain-separated encoding of the
+    /// instance URL and name the administrator was shown and the `request`
+    /// (see `faro_service::enroll_approval::approval_binding`). The service
+    /// keeps it with the approval and on `Enroll` recomputes it from the
+    /// instance it discovered, so an approval is good only for the target
+    /// the approver saw.
+    ApproveEnroll {
+        request: [u8; AUTHORIZATION_LEN],
+        binding: [u8; 32],
+    },
 }
 
 impl fmt::Debug for EnrollRequest {
@@ -149,6 +168,8 @@ impl fmt::Debug for EnrollRequest {
                 .field("target", target)
                 .field("confirmed_instance", &clip(confirmed_instance, 80))
                 .finish_non_exhaustive(),
+            // The request id is the secret the approval is redeemed with.
+            EnrollRequest::ApproveEnroll { .. } => f.write_str("ApproveEnroll(..)"),
         }
     }
 }
@@ -160,6 +181,7 @@ impl EnrollRequest {
             EnrollRequest::Status => "Status",
             EnrollRequest::Preview(_) => "Preview",
             EnrollRequest::Enroll { .. } => "Enroll",
+            EnrollRequest::ApproveEnroll { .. } => "ApproveEnroll",
         }
     }
 }
@@ -245,7 +267,13 @@ pub enum EnrollResponse {
     Status(EnrollStatus),
     Preview(EnrollPreview),
     Enrolled(EnrollDone),
-    Failed { kind: FailureKind, detail: String },
+    Failed {
+        kind: FailureKind,
+        detail: String,
+    },
+    /// The answer to `ApproveEnroll`: the approval was recorded. A refusal
+    /// is `Failed { kind: NotApproved, .. }`. Appended last.
+    Approved,
 }
 
 impl EnrollResponse {
@@ -256,6 +284,7 @@ impl EnrollResponse {
             EnrollResponse::Preview(_) => "Preview",
             EnrollResponse::Enrolled(_) => "Enrolled",
             EnrollResponse::Failed { .. } => "Failed",
+            EnrollResponse::Approved => "Approved",
         }
     }
 
@@ -309,7 +338,7 @@ impl EnrollTarget {
 impl WireMessage for EnrollRequest {
     fn validate(&self) -> Result<()> {
         match self {
-            EnrollRequest::Status => Ok(()),
+            EnrollRequest::Status | EnrollRequest::ApproveEnroll { .. } => Ok(()),
             EnrollRequest::Preview(t) => t.validate(),
             EnrollRequest::Enroll {
                 target,
@@ -365,6 +394,7 @@ impl WireMessage for EnrollResponse {
                 check_len("member_fingerprint", &d.member_fingerprint, MAX_TEXT_LEN)
             }
             EnrollResponse::Failed { detail, .. } => check_len("detail", detail, MAX_DETAIL_LEN),
+            EnrollResponse::Approved => Ok(()),
         }
     }
 
@@ -393,6 +423,10 @@ mod tests {
                 confirmed_identity: [7; 32],
                 authorization: [9; AUTHORIZATION_LEN],
             },
+            EnrollRequest::ApproveEnroll {
+                request: [9; AUTHORIZATION_LEN],
+                binding: [5; 32],
+            },
         ]
     }
 
@@ -420,6 +454,7 @@ mod tests {
                 member_key_checked: true,
             }),
             EnrollResponse::failed(FailureKind::WrongCode, "nope"),
+            EnrollResponse::Approved,
         ]
     }
 
@@ -497,6 +532,7 @@ mod tests {
         assert!(encode(&r).is_ok());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn socket_names() {
         let base = Path::new("/var/run/faro/agent.sock");
@@ -512,10 +548,28 @@ mod tests {
             enroll_socket_path(Path::new("/run/faro/agent"), Some(1000)),
             Path::new("/run/faro/enroll.1000")
         );
-        #[cfg(unix)]
         assert_eq!(
             resolve_enroll_socket(Path::new("/nonexistent-faro/agent.sock"), 501),
             Path::new("/nonexistent-faro/enroll.sock")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_names() {
+        let sid: crate::Sid = "S-1-5-21-1-2-3-1001".parse().unwrap();
+        let base = Path::new(r"\\.\pipe\faro\agent");
+        assert_eq!(
+            enroll_socket_path(base, Some(sid)),
+            Path::new(r"\\.\pipe\faro\enroll.S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(
+            enroll_socket_path(base, None),
+            Path::new(r"\\.\pipe\faro\enroll")
+        );
+        assert_eq!(
+            resolve_enroll_socket(Path::new(r"\\.\pipe\faro-nonexistent-test\agent"), sid),
+            Path::new(r"\\.\pipe\faro-nonexistent-test\enroll")
         );
     }
 }

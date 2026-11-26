@@ -37,7 +37,7 @@ pub fn init(cli: &Cli) {
         .ok()
         .and_then(|c| c.log_level);
     let filter = filter(cli.verbose, config_level.as_deref());
-    if matches!(cli.command, Command::Run { .. }) && packaged_and_detached() {
+    if is_service_command(&cli.command) && packaged_and_detached() {
         match open_service_log() {
             Ok(file) => {
                 let ok = tracing_subscriber::fmt()
@@ -77,9 +77,24 @@ pub fn log_file() -> Option<&'static str> {
     {
         Some(faro_platform_macos::pkg_layout::SERVICE_LOG)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        Some(faro_platform_windows::layout::SERVICE_LOG)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         None
+    }
+}
+
+/// The commands that run the service: `run` (launchd, or by hand) and
+/// `run-service` (the Windows SCM).
+fn is_service_command(c: &Command) -> bool {
+    match c {
+        Command::Run { .. } => true,
+        #[cfg(windows)]
+        Command::RunService => true,
+        _ => false,
     }
 }
 
@@ -130,7 +145,14 @@ fn packaged_and_detached() -> bool {
     packaged && !std::io::stderr().is_terminal()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: the service (LocalSystem, as under the SCM) with no terminal.
+#[cfg(windows)]
+fn packaged_and_detached() -> bool {
+    use std::io::IsTerminal;
+    faro_platform_windows::acl::running_as_system() && !std::io::stderr().is_terminal()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn packaged_and_detached() -> bool {
     false
 }
@@ -166,7 +188,16 @@ fn open_service_log() -> std::io::Result<faro_platform::logfile::RotatingFile> {
     Ok(file)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Open `SERVICE_LOG` after the state and log directories are created and
+/// protected ([`crate::win::prepare_dirs`]).
+#[cfg(windows)]
+fn open_service_log() -> std::io::Result<faro_platform::logfile::RotatingFile> {
+    use faro_platform_windows::layout;
+    crate::win::prepare_dirs()?;
+    faro_platform::logfile::RotatingFile::open(layout::SERVICE_LOG, layout::service_log_rotation())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn open_service_log() -> std::io::Result<faro_platform::logfile::RotatingFile> {
     Err(std::io::Error::other("no log file on this system"))
 }

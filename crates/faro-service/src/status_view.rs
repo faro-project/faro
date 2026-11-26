@@ -139,7 +139,28 @@ fn process_alive(pid: u32) -> bool {
         let r = unsafe { libc::kill(pid, 0) };
         r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        if pid == 0 {
+            return false;
+        }
+        // SAFETY: a process handle we close; the exit code goes to a local.
+        unsafe {
+            let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                // Access denied still means it exists; anything else, not.
+                return std::io::Error::last_os_error().raw_os_error() == Some(5);
+            };
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code).is_ok();
+            let _ = CloseHandle(h);
+            !ok || code == STILL_ACTIVE.0 as u32
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         true

@@ -23,6 +23,7 @@
 //! | [`status_view`] | `status`: the state directory and the running service's [`runtime::status`] report, as text or JSON |
 //! | [`diagnose`] | `diagnose`: a redacted problem report the member sees before it is written |
 //! | [`update`] | client self-update: verify against the project root, download, install; models and blocklists from the same channel ([`update::artifacts`]) |
+//! | [`win`] | Windows only: SYSTEM or not, sessions, which sessions have an agent, pipe-client tokens |
 //! | [`logging`] | where the log goes (the packaged service's log file) and how much |
 //! | [`cli`] | the command line |
 //!
@@ -61,6 +62,8 @@ pub mod client;
 pub mod config;
 pub mod diagnose;
 pub mod enroll;
+#[cfg(windows)]
+pub mod enroll_approval;
 pub mod enroll_server;
 pub mod link;
 pub mod logging;
@@ -71,10 +74,13 @@ pub mod state;
 pub mod status_view;
 pub mod thresholds;
 pub mod update;
+#[cfg(windows)]
+pub mod win;
 
 pub use config::Config;
 pub use runtime::{
     say_goodbye, AgentSpawn, GoodbyeError, GoodbyeOptions, GoodbyeOutcome, PauseRequest, Phase,
-    Service, ServiceBuilder, ServiceError, ServiceHandle, ServiceStatus, UpdateOverrides,
+    Service, ServiceBuilder, ServiceError, ServiceHandle, ServiceSignals, ServiceStatus,
+    UpdateOverrides,
 };
 pub use source::{FrameSource, InProcessFrameSource, SourceCommand, SourceEvent, SourceIo};

@@ -93,6 +93,14 @@ jobs:
           cargo test -p faro-detect --features onnx
           cargo clippy -p faro-service --features onnx --all-targets -- -D warnings
           cargo test -p faro-service --features onnx --lib model
+      # The same on Windows, which ships the model too. ONNX Runtime comes
+      # from Microsoft's NuGet package (checked like the MSI's copy), and
+      # the script puts onnxruntime.dll next to each test binary, because
+      # Windows' own older copy in System32 would otherwise load first.
+      - name: faro-detect and faro-service with ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installers\windows\test-onnx.ps1
 
   # The SvelteKit web app (web/): format, types and the static build (which
   # fails if a bundled npm package's licence is missing or not on
@@ -213,6 +221,62 @@ jobs:
           done
       - if: always()
         run: rm -rf pkg-intel
+
+  # The Windows installer: build the unsigned development MSI (a release one
+  # needs a signing provider, installers/windows/sign.ps1) and run check-msi.ps1
+  # on it: its tables and files, then, when the runner is elevated, a real
+  # install, the service, its DACL, the faro:// handler and the state
+  # directory's ACL, and an uninstall that leaves nothing behind.
+  # -NoOnnx: CI has no copy of the image model (it is built on macOS), so
+  # the MSI here is the one without the classifier. The release job ships
+  # the model (-ModelDir) and the classifier.
+  #
+  # Not for pull requests from forks: the job runs the PR's own code, and
+  # `check-msi.ps1` installs and uninstalls a service as SYSTEM on a shared,
+  # unsandboxed runner. The install half also runs only where the runner sets
+  # FARO_CHECK_MSI_INSTALL=1 (docs/DEVELOPMENT.md "CI runners").
+  windows-msi:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      # The toolchain action's steps use `shell: bash`; see `test`.
+      - shell: powershell
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\Git\bin'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo-about and WiX
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $about = (& 'C:\Program Files\Git\bin\bash.exe' -o igncr release/notices/third-party.sh --cargo-about-version).Trim()
+          cargo install --locked cargo-about --features cli --version $about
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-about' }
+          # build-msi.ps1 checks the version and adds the WiX extensions.
+          $want = (Select-String -Path installers/windows/build-msi.ps1 -Pattern "^.WixVersion = '(.*)'").Matches[0].Groups[1].Value
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          $have = if (Get-Command wix -ErrorAction SilentlyContinue) { (& wix --version) -replace '\+.*$', '' } else { '' }
+          if ($have -ne $want) {
+            dotnet tool update --global wix --version $want
+            if ($LASTEXITCODE -ne 0) { dotnet tool install --global wix --version $want }
+            if ($LASTEXITCODE -ne 0) { throw 'wix' }
+          }
+      - name: Build the development MSI
+        shell: powershell
+        run: installers\windows\build-msi.ps1 -Dev -NoOnnx
+      - name: Check the MSI
+        shell: powershell
+        run: installers\windows\check-msi.ps1 (Get-Item target\msi\Faro-*-dev-x64.msi).FullName
+      # For installing on a test machine. Unsigned, and its service accepts any
+      # program running in a signed-in account as the agent: never use it on
+      # anyone.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: faro-dev-msi-${{ github.sha }}
+          path: target/msi/Faro-*-dev-x64.msi
+          if-no-files-found: error
+          retention-days: 14
 
   # The model regression gate on the real, maintainer-curated test set
   # (docs/DEVELOPMENT.md "Model benchmark"). The set holds explicit imagery
