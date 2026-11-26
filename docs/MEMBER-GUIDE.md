@@ -52,6 +52,15 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. |
 | Nothing happens when you click the link | Restart the Mac, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the eye icon and paste the link. |
 
+### Faro's logs
+
+If something doesn't work and you want to see why, or someone helping you asks for the logs, Faro keeps them on the Mac:
+
+- **The service:** `/Library/Logs/Faro/faro-service.log`. Any administrator of the Mac can read it.
+- **The menu-bar agent, for each account:** `~/Library/Logs/Faro/faro-agent.log`, readable only by that account.
+
+Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.
+
 ## Checking that Faro is working
 
 Someone who knows an administrator password can check in Terminal:
@@ -64,7 +73,7 @@ It shows what Faro is doing, never what was on the screen. The lines to look at:
 
 | It says | What it means |
 |---|---|
-| **Service:** not running | Faro's service has stopped. Restart the Mac. If it still says so, tell whoever runs your instance. |
+| **Service:** not running | Faro's service has stopped. Restart the Mac. If it still says so, tell whoever runs your instance; the **Log** line names the file that says why ([Faro's logs](#faros-logs)). |
 | **Capture:** active | Faro is working. `paused` because the screen is locked, the Mac is asleep or nobody is using it is normal too. |
 | **Capture:** none: the agent of *account* is not connected | Faro Agent isn't running in that account. Log out of it and in again. Your allies are told if this lasts. |
 | **Permissions:** Screen Recording denied, or **Failures:** permission denied: screen_recording | Open System Settings > Privacy & Security > Screen Recording (Screen & System Audio Recording on newer macOS) in that account and turn on **Faro Agent**. |

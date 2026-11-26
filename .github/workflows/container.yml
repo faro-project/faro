@@ -11,18 +11,36 @@
 # after the release's update metadata is verified, so this workflow no
 # longer runs on v* tags.
 #
-# Each platform builds natively on its own runner (ubuntu-24.04 and
-# ubuntu-24.04-arm), so there is no slow QEMU emulation. Each job pushes its
-# image by digest only; the merge job then joins the digests into one
-# manifest list and applies the tags. Pull requests that touch the container
-# files build both platforms and smoke-test them, but push nothing.
+# Everything runs on the project's self-hosted runners (docs/DEVELOPMENT.md,
+# "CI runners"), never on GitHub's hosted ones:
+#
+#   linux/arm64   natively on the Raspberry Pi (self-hosted, Linux, ARM64)
+#   linux/amd64   natively on the Intel Mac (self-hosted, macOS, X64), in
+#                 the x86_64 Linux VM of colima, which is hardware
+#                 virtualised, not emulated. The repository variable
+#                 FARO_LINUX_X64_RUNNER (JSON, the same one release.yml
+#                 reads) moves it, for example to an x86_64 Linux runner.
+#   publish       the merge job, on the Pi
+#
+# No platform is built under QEMU emulation: an emulated amd64 build on the
+# Pi would hold that runner, which every pull request also needs, for an
+# hour or more per push.
+#
+# Pull requests that touch the container files build both platforms and
+# smoke-test them (the `test` job), with a read-only token and no registry
+# login. Pushes to main and manual runs build in the `build` job instead,
+# the only jobs here whose token can write packages: each pushes its image
+# by digest only, and the merge job joins the digests into one manifest
+# list and applies the tags. Both jobs show as `build (<platform>)`.
 #
 # If one platform's build fails on a push to main, the merge job still
 # publishes the platforms that built (with a warning naming the missing
-# one), so a broken amd64 build on GitHub's runners doesn't hold back the
-# arm64 image for Raspberry Pis. The tags then point at an image without
-# that platform until the next good build. (A release, in release.yml, needs
-# every platform: it is never published half-built.)
+# one), so a broken amd64 build doesn't hold back the arm64 image for
+# Raspberry Pis. The tags then point at an image without that platform
+# until the next good build. A runner that is offline is different: its
+# job waits for it (GitHub fails it after a day), and so does the publish.
+# (A release, in release.yml, needs every platform: it is never published
+# half-built.)
 
 name: Container image
 
@@ -48,22 +66,77 @@ permissions:
 
 env:
   IMAGE: ghcr.io/faro-project/faro-server
-  PUSH: ${{ github.event_name != 'pull_request' }}
 
 jobs:
-  build:
+  # Pull requests: build each platform into the runner's Docker daemon and
+  # smoke-test it. Nothing is pushed, and the token can't write packages.
+  test:
     name: build (${{ matrix.platform }})
+    if: github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
+        # Keep in step with the `build` job's matrix.
         include:
-          # No self-hosted x86_64 Linux runner yet, so amd64 stays on
-          # GitHub's runners; arm64 builds natively on the Raspberry Pi.
           - platform: linux/amd64
-            runner: ubuntu-24.04
+            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '["self-hosted", "macOS", "X64"]' }}
           - platform: linux/arm64
-            runner: [self-hosted, Linux, ARM64]
-    runs-on: ${{ matrix.runner }}
+            runner: '["self-hosted", "Linux", "ARM64"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      REF: faro-server:ci-${{ github.run_id }}-${{ strategy.job-index }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Docker
+        run: |
+          docker version --format 'Docker {{.Server.Version}} on {{.Server.Os}}/{{.Server.Arch}}' || {
+            echo "::error::No Docker daemon on this runner. See docs/DEVELOPMENT.md, CI runners."
+            exit 1
+          }
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=docker,name=${{ env.REF }}
+
+      # The builder stage already runs `faro-server version`; this runs it
+      # again in the runtime stage, which checks the glibc match and that
+      # the unprivileged user can execute it, natively on each architecture.
+      - name: Smoke test
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          docker run --rm --platform "$PLATFORM" "$REF" version
+          docker run --rm --platform "$PLATFORM" --entrypoint uname "$REF" -m
+
+      # Self-hosted runners keep their Docker images between jobs.
+      - if: always()
+        run: docker image rm -f "$REF" || true
+
+  # Pushes to main and manual runs: build each platform and push it by
+  # digest only; `merge` applies the tags.
+  build:
+    name: build (${{ matrix.platform }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in step with the `test` job's matrix and with PLATFORMS in
+        # the merge job.
+        include:
+          - platform: linux/amd64
+            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '["self-hosted", "macOS", "X64"]' }}
+          - platform: linux/arm64
+            runner: '["self-hosted", "Linux", "ARM64"]'
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -76,10 +149,18 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
 
+      - name: Docker
+        run: |
+          docker version --format 'Docker {{.Server.Version}} on {{.Server.Os}}/{{.Server.Arch}}' || {
+            echo "::error::No Docker daemon on this runner. See docs/DEVELOPMENT.md, CI runners."
+            exit 1
+          }
+
       - uses: docker/setup-buildx-action@v3
 
+      # Logs out again when the job ends (the action's default), so the
+      # token isn't left in the runner's Docker config.
       - uses: docker/login-action@v3
-        if: env.PUSH == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -91,16 +172,6 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
 
-      # Push builds go to the registry by digest. PR builds load into the
-      # local Docker daemon instead, so the smoke test below can run them.
-      - id: output
-        run: |
-          if [ "$PUSH" = true ]; then
-            echo "spec=type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "spec=type=docker,name=faro-server:ci" >> "$GITHUB_OUTPUT"
-          fi
-
       - id: build
         uses: docker/build-push-action@v6
         with:
@@ -108,20 +179,18 @@ jobs:
           file: deploy/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: ${{ steps.output.outputs.spec }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
-      # The builder stage already runs `faro-server version`; this runs it
-      # again in the runtime stage, which checks the glibc match and that
-      # the unprivileged user can execute it, natively on each architecture.
+      # As in the `test` job, on the image just pushed.
       - name: Smoke test
         env:
-          REF: ${{ env.PUSH == 'true' && format('{0}@{1}', env.IMAGE, steps.build.outputs.digest) || 'faro-server:ci' }}
+          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          docker run --rm "$REF" version
-          docker run --rm --entrypoint uname "$REF" -m
+          docker run --rm --platform "$PLATFORM" "$REF" version
+          docker run --rm --platform "$PLATFORM" --entrypoint uname "$REF" -m
 
       - name: Export digest
-        if: env.PUSH == 'true'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -129,12 +198,19 @@ jobs:
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
 
       - uses: actions/upload-artifact@v4
-        if: env.PUSH == 'true'
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
+
+      # Self-hosted runners keep their Docker images between jobs.
+      - if: always() && steps.build.outputs.digest != ''
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker image rm -f "$REF" || true
+          rm -rf "$RUNNER_TEMP/digests"
 
   merge:
     name: publish multi-arch image
@@ -145,7 +221,7 @@ jobs:
       && github.event_name != 'pull_request'
       && needs.build.result != 'cancelled'
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, ARM64]
     permissions:
       contents: read
       packages: write
@@ -210,3 +286,6 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: docker buildx imagetools inspect "$IMAGE:$VERSION"
+
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/digests"

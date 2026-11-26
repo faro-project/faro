@@ -88,7 +88,9 @@ jobs:
           cargo clippy -p faro-service --features onnx --all-targets -- -D warnings
           cargo test -p faro-service --features onnx --lib model
 
-  # The SvelteKit web app (web/): format, types and the static build, then
+  # The SvelteKit web app (web/): format, types and the static build (which
+  # fails if a bundled npm package's licence is missing or not on
+  # deny.toml's allowlist, web/scripts/third-party.ts), then
   # faro-server built with that bundle embedded (FARO_REQUIRE_WEB=1 fails
   # the build if a page is missing) and its web-serving tests.
   web:
@@ -127,6 +129,15 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny --all-features check licenses bans sources advisories
+      # The third-party notices the server and the macOS package ship
+      # (release/notices/third-party.sh): fails if a crate's licence can't
+      # be read or isn't on deny.toml's allowlist.
+      - name: Third-party notices
+        run: |
+          cargo install --locked cargo-about --features cli --version "$(release/notices/third-party.sh --cargo-about-version)"
+          release/notices/third-party.sh server "$RUNNER_TEMP/notices/server.txt"
+          release/notices/third-party.sh macos "$RUNNER_TEMP/notices/macos.txt"
+          rm -rf "$RUNNER_TEMP/notices"
 
   # The release scripts (release/, docs/DEVELOPMENT.md "Releasing"), end to
   # end: throwaway keys, fake artifacts and a local git repository standing
@@ -152,6 +163,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked cargo-about --features cli --version "$(release/notices/third-party.sh --cargo-about-version)"
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
       - run: installers/macos/test-uninstall.sh

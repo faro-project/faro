@@ -58,6 +58,9 @@ fn main() {
             "admin/people.html",
             "admin/settings.html",
             "admin/email.html",
+            "licenses.html",
+            // The bundled npm packages' licences (web/scripts/third-party.ts).
+            "third-party-licenses.txt",
             "404.html",
         ] {
             assert!(

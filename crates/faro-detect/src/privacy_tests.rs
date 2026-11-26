@@ -403,16 +403,23 @@ fn preprocess_output_is_zeroized() {
         width: 224,
         height: 224,
     };
-    audit::arm();
-    let pixels = pattern_bytes();
-    audit::watch(pixels.as_ptr(), pixels.len());
-    let frame = Frame::new(W, H, PixelFormat::Rgba8, 0, pixels).unwrap();
-    let tensor = crate::classifier::preprocess(&frame, &info);
-    assert_eq!(tensor.len(), 3 * 224 * 224);
-    drop(tensor);
-    drop(frame);
-    let r = audit::disarm();
-    assert_clean_report(&r, 3);
+    // Resized and cropped, the larger intermediate is zeroized too.
+    for resize in [
+        crate::Resize::Direct,
+        crate::Resize::ResizeCrop { side: 256 },
+    ] {
+        info.resize = resize;
+        audit::arm();
+        let pixels = pattern_bytes();
+        audit::watch(pixels.as_ptr(), pixels.len());
+        let frame = Frame::new(W, H, PixelFormat::Rgba8, 0, pixels).unwrap();
+        let tensor = crate::classifier::preprocess(&frame, &info);
+        assert_eq!(tensor.len(), 3 * 224 * 224);
+        drop(tensor);
+        drop(frame);
+        let r = audit::disarm();
+        assert_clean_report(&r, 3);
+    }
 }
 
 /// The model benchmark reads images from disk: the file bytes, the decode

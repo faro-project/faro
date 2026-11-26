@@ -346,6 +346,7 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
     assert!(e.to_string().contains("not an email address"), "{e}");
 
     // Disabled, or being deleted.
+    t.clock.advance_ms(1000);
     let r = t
         .post(
             &format!("/admin/api/users/{sam}/disable"),
@@ -371,7 +372,10 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
         .await
         .expect_err("deleting");
     assert!(e.to_string().contains("being deleted"), "{e}");
-    assert_eq!(log(&t, &admin_s).await.len(), 1);
+    // Only the grant and disabling sam: the refusals logged nothing.
+    let entries = log(&t, &admin_s).await;
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0]["action"], "account_disabled");
 }
 
 #[tokio::test]
@@ -575,8 +579,10 @@ async fn create_still_refuses_disabled_and_deleting_accounts() {
         .await
         .expect_err("deleting");
     assert!(e.to_string().contains("being deleted"), "{e}");
-    // Nothing was created or logged.
-    assert!(log(&t, &admin_s).await.is_empty());
+    // Nothing was created or logged, beyond disabling sam.
+    let entries = log(&t, &admin_s).await;
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["action"], "account_disabled");
     assert_eq!(count(&t.state, "SELECT COUNT(*) AS n FROM users").await, 3);
 }
 

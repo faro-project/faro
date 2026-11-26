@@ -26,10 +26,17 @@ chmod 755 "$stubs"/*
 install_fake() {
     local root="$1"
     mkdir -p "$root/Library/LaunchDaemons" "$root/Library/LaunchAgents" \
-        "$root/Library/Faro/bin" "$root/Library/Application Support/Faro"
+        "$root/Library/Faro/bin" "$root/Library/Application Support/Faro" \
+        "$root/Library/Logs/Faro" "$root/Users/ana/Library/Logs/Faro"
     touch "$root/Library/LaunchDaemons/org.faro.service.plist" \
         "$root/Library/LaunchAgents/org.faro.agent.plist" \
-        "$root/Library/Application Support/Faro/device.key"
+        "$root/Library/Application Support/Faro/device.key" \
+        "$root/Library/Logs/Faro/faro-service.log" \
+        "$root/Users/ana/Library/Logs/Faro/faro-agent.log"
+    # An account whose ~/Library/Logs points elsewhere: never followed.
+    mkdir -p "$root/elsewhere/Faro" "$root/Users/eve/Library"
+    touch "$root/elsewhere/Faro/keep"
+    ln -s "$root/elsewhere" "$root/Users/eve/Library/Logs"
     cat > "$root/Library/Faro/bin/faro-service" <<'EOF'
 #!/bin/bash
 echo "faro-service $*" >> "$CALLS"
@@ -41,6 +48,8 @@ EOF
         -e "s|^AGENT_PLIST=/|AGENT_PLIST=$root/|" \
         -e "s|^FARO_DIR=/|FARO_DIR=$root/|" \
         -e "s|^STATE_DIR=\"/|STATE_DIR=\"$root/|" \
+        -e "s|^LOG_DIR=/|LOG_DIR=$root/|" \
+        -e "s|^USERS_DIR=/|USERS_DIR=$root/|" \
         "$here/faro-uninstall" > "$root/Library/Faro/bin/faro-uninstall"
     chmod 755 "$root/Library/Faro/bin/faro-uninstall"
     grep -q "^FARO_DIR=$root/" "$root/Library/Faro/bin/faro-uninstall" || fail "could not redirect the paths"
@@ -68,6 +77,9 @@ removed() {
     [[ ! -e "$root/Library/Application Support/Faro" ]] || fail "$1: the state directory is still there"
     [[ ! -e "$root/Library/LaunchDaemons/org.faro.service.plist" ]] || fail "$1: the daemon plist is still there"
     [[ ! -e "$root/Library/LaunchAgents/org.faro.agent.plist" ]] || fail "$1: the agent plist is still there"
+    [[ ! -e "$root/Library/Logs/Faro" ]] || fail "$1: the service's log is still there"
+    [[ ! -e "$root/Users/ana/Library/Logs/Faro" ]] || fail "$1: an account's agent log is still there"
+    [[ -e "$root/elsewhere/Faro/keep" ]] || fail "$1: followed a symbolic link in an account's home"
     grep -q "^launchctl bootout gui/501/org.faro.agent" <<< "$calls" || fail "$1: the agent was not stopped"
     if grep -q "gui/0/" <<< "$calls"; then fail "$1: touched the login window's session"; fi
     grep -q "^pkgutil --forget org.faro.pkg" <<< "$calls" || fail "$1: the receipt was not forgotten"
@@ -76,6 +88,7 @@ kept() {
     [[ -e "$root/Library/Faro/bin/faro-service" ]] || fail "$1: the programs were removed"
     [[ -e "$root/Library/Application Support/Faro/device.key" ]] || fail "$1: the state was removed"
     [[ -e "$root/Library/LaunchDaemons/org.faro.service.plist" ]] || fail "$1: the daemon plist was removed"
+    [[ -e "$root/Library/Logs/Faro/faro-service.log" ]] || fail "$1: the service's log was removed"
 }
 not_restarted() {
     if grep -q "^launchctl bootstrap" <<< "$calls"; then fail "$1: the service was started again"; fi

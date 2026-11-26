@@ -56,6 +56,9 @@ pub struct StatusReport {
     pub detection: DetectionReport,
     pub updates: UpdatesReport,
     pub health: HealthReport,
+    /// The log file the service writes (`/Library/Logs/Faro/faro-service.log`),
+    /// or `None` when it logs to stderr (a development run).
+    pub log_file: Option<String>,
 }
 
 /// How often the service rewrites the status file when nothing changed.
@@ -76,6 +79,7 @@ impl Default for StatusReport {
             detection: DetectionReport::default(),
             updates: UpdatesReport::default(),
             health: HealthReport::default(),
+            log_file: None,
         }
     }
 }
@@ -343,6 +347,7 @@ mod tests {
                 acked_through: Some(3),
                 ..HealthReport::default()
             },
+            log_file: Some("/Library/Logs/Faro/faro-service.log".into()),
             ..StatusReport::default()
         }
     }

@@ -20,7 +20,8 @@
 //! alerts that cannot be switched off (see [`crate::notify`]). A disabled
 //! account can't sign in and its sessions end, but its devices keep
 //! reporting and alerting allies: disabling an account is not a way to stop
-//! anyone being monitored.
+//! anyone being monitored. Disabling and re-enabling are also written to the
+//! admin log and emailed to every other enabled admin.
 
 use super::ApiJson;
 use crate::auth::normalize_email;
@@ -289,8 +290,9 @@ pub async fn cancel_user_deletion(
 pub const LOG_LIMIT: i64 = 200;
 
 /// `GET /admin/api/log`: the most recent admin log entries, newest first
-/// (who was made an admin or stopped being one, which deletions admins
-/// asked for or were cancelled, by whom, and when).
+/// (who was made an admin or stopped being one, which accounts were
+/// disabled or re-enabled, which deletions admins asked for or were
+/// cancelled, by whom, and when).
 pub async fn log(
     State(state): State<AppState>,
     s: SessionUser,
@@ -418,6 +420,28 @@ async fn set_account_disabled(
         )
         .await?;
     }
+    // The admin log, emailed to every other enabled admin. Not the person:
+    // they were told above, and a disabled account hears nothing more.
+    let action = if disabled {
+        admin_log::Action::AccountDisabled
+    } else {
+        admin_log::Action::AccountEnabled
+    };
+    let entry = admin_log::insert(
+        &mut *tx,
+        action,
+        &target,
+        Some(&s.user.id),
+        admin_log::Via::Console,
+        now,
+    )
+    .await?;
+    let admins: Vec<UserId> = users::enabled_admin_ids_except(&mut *tx, &target)
+        .await?
+        .into_iter()
+        .filter(|a| *a != s.user.id)
+        .collect();
+    crate::roles::tell(&mut tx, entry, &admins, now).await?;
     tx.commit().await?;
     tracing::info!(admin = %s.user.id, user = %target, disabled, "account status changed");
     Ok(Json(AccountStatus {

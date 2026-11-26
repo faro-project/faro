@@ -262,6 +262,9 @@ impl StatusView {
                 phase(r.phase)
             );
         }
+        if let Some(log) = &r.log_file {
+            let _ = writeln!(o, "Log:          {log}");
+        }
 
         let target = r.capture.target_account.as_deref().map(account);
         let state = if self.service_running {
@@ -530,6 +533,7 @@ mod tests {
                 last_result: Some("up to date".into()),
                 ..UpdatesReport::default()
             },
+            log_file: Some("/Library/Logs/Faro/faro-service.log".into()),
             ..StatusReport::default()
         }
     }
@@ -539,6 +543,7 @@ mod tests {
         let t = view(report(), true).text(100_000);
         for want in [
             "Service:      running since 1 min ago (version 0.1.0-beta.1, pid 7)",
+            "Log:          /Library/Logs/Faro/faro-service.log",
             "Capture:      active, from alex",
             "Last capture: attempted 1 min ago, succeeded never",
             "Failures:     2 in a row; last 1 min ago: permission denied: screen_recording",

@@ -152,6 +152,7 @@ impl ServiceStatus {
                 identity_mismatch: self.identity_mismatch,
                 last_error: self.last_error.clone(),
             },
+            log_file: crate::logging::log_file().map(str::to_owned),
         }
     }
 }

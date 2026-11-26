@@ -60,6 +60,7 @@ fn model_info(version: &str, license: &str, weights: &[u8]) -> ModelInfo {
             width: 8,
             height: 8,
         },
+        resize: Default::default(),
         labels: vec!["sfw".into(), "nsfw".into()],
         mean: [0.0; 3],
         std: [1.0; 3],

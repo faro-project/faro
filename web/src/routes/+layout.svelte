@@ -40,7 +40,7 @@
 
 	// Pages that are a single form or message read better narrow.
 	let narrow = $derived(
-		/\/(signin|auth\/verify|invite|setup|keys|privacy)$/.test(page.url.pathname)
+		/\/(signin|auth\/verify|invite|setup|keys|privacy|licenses)$/.test(page.url.pathname)
 	);
 
 	type NavItem = {
@@ -205,6 +205,7 @@
 		<span>{footerText}</span>
 		<SupportContact contact={branding.info?.support} />
 		<a href={resolve('/privacy')}>What this instance can see</a>
+		<a href={resolve('/licenses')}>Licences</a>
 	</div>
 </footer>
 

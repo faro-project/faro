@@ -177,7 +177,7 @@ sudo docker compose pull faro
 sudo docker compose up -d
 ```
 
-Leave out `--build` from now on, because `--build` compiles Faro on the Pi again. `:main` is the latest development code. Once releases exist, use a version tag instead, such as `:0.1.0`.
+Leave out `--build` from now on, because `--build` compiles Faro on the Pi again. `:main` is the latest development code. Once releases exist, use a version tag instead, such as `:0.1.0`. Each build of `main` is also tagged `sha-` plus the first 7 characters of its commit, such as `:sha-94f020f`, if you want to stay on one build. If one architecture's build fails, `:main` is published with only the other until the next good build, so on an amd64 server a `pull` can then say there is no matching manifest: keep running the image you have, or use an older `sha-` tag.
 
 If `pull` says `unauthorized` or `denied`, the image is private (it is while the Faro repository is private). Create a GitHub personal access token (classic) with only the `read:packages` scope, then log in once on the Pi and pull again:
 
@@ -303,7 +303,7 @@ An instance can have several admins. Two is a good idea: if one admin loses acce
 
 - Nobody can change their own admin role, and the last enabled admin can't lose it.
 - A disabled account can't be made an admin. Nothing can be changed on an account that is being deleted.
-- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
+- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists accounts disabled or re-enabled (emailed to every admin except the one who did it), deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
 - Being an admin gives no access to anyone's reports, alerts or screenshots.
 
 **If nobody can sign in as an admin** (for example, the only admin lost access to their email address), make another account an admin from the server itself:

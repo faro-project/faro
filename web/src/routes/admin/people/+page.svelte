@@ -149,8 +149,9 @@
 			users = users.map((u) => (u.id === user.id ? { ...u, disabled: disable } : u));
 		}
 		statusDone = disable
-			? `${user.display_name}'s account was disabled. Faro is emailing ${user.display_name} and their accountability partners.`
-			: `${user.display_name}'s account was re-enabled. Faro is emailing ${user.display_name} and their accountability partners.`;
+			? `${user.display_name}'s account was disabled. Faro is emailing ${user.display_name}, their accountability partners and every other admin.`
+			: `${user.display_name}'s account was re-enabled. Faro is emailing ${user.display_name}, their accountability partners and every other admin.`;
+		await loadLog();
 	}
 
 	async function changeAdmin(user: AdminUserRow, admin: boolean) {
@@ -262,7 +263,7 @@
 		return a.id === session.user?.id ? 'you' : a.display_name;
 	}
 
-	/** The account a deletion entry is about, as the end of a sentence. */
+	/** The account an entry other than a role change is about, as the end of a sentence. */
 	function accountOf(e: AdminLogEntry): string {
 		if (!e.user) return 'an account that has since been deleted';
 		if (e.user.id === session.user?.id) return 'your account';
@@ -522,9 +523,10 @@
 <section class="log" aria-labelledby="admin-log">
 	<h2 id="admin-log">Admin log</h2>
 	<p class="muted">
-		Every time someone is made an admin or stops being one, every deletion an admin asks for, and
-		every account created from the command line. Faro emails the admins about each one. Entries are
-		never removed, but a deleted account's name is taken out of them.
+		Every time someone is made an admin or stops being one, every account disabled or re-enabled,
+		every deletion an admin asks for, and every account created from the command line. Faro emails
+		the admins about each one. Entries are never removed, but a deleted account's name is taken out
+		of them.
 	</p>
 	{#if logError}
 		<div class="notice error" role="alert">{logError}</div>
@@ -547,6 +549,10 @@
 							asked to delete <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{:else if e.action === 'account_created'}
 							created <strong title={e.user?.email}>{accountOf(e)}</strong>
+						{:else if e.action === 'account_disabled'}
+							disabled <strong title={e.user?.email}>{accountOf(e)}</strong>
+						{:else if e.action === 'account_enabled'}
+							re-enabled <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{:else}
 							cancelled the deletion of <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{/if}
@@ -588,7 +594,7 @@
 			<p>
 				Faro will email {name} and everyone in an accountability partnership with them right away: their
 				allies, and the members they are an ally for, with those members' other allies. These emails can't
-				be switched off.
+				be switched off. Every other admin is emailed too.
 			</p>
 			<p class="muted">
 				Disabling doesn't stop monitoring: {name}'s computers keep reporting and alerting their
@@ -597,8 +603,8 @@
 		{:else if pending.change === 'enable'}
 			<h2 id="status-title">Re-enable {name}'s account?</h2>
 			<p>
-				{name} ({pending.user.email}) will be able to sign in again. Faro will email {name} and their
-				accountability partners.
+				{name} ({pending.user.email}) will be able to sign in again. Faro will email {name}, their
+				accountability partners and every other admin.
 			</p>
 		{:else if pending.change === 'delete'}
 			<h2 id="status-title">Delete {name}'s account?</h2>

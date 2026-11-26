@@ -108,7 +108,8 @@ pub struct LaunchdJob {
     /// Items show the job under the Faro app instead of an anonymous entry.
     pub associated_bundle_ids: Vec<String>,
     /// `StandardOutPath` / `StandardErrorPath`. Unset for production jobs
-    /// (they log through the unified log); handy for spike tools.
+    /// (they write their own rotated log files, `pkg_layout::SERVICE_LOG`
+    /// and `pkg_layout::agent_log`); handy for spike tools.
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
     /// `StartInterval`: also start the job every N seconds (spike tools).
@@ -312,6 +313,68 @@ pub mod pkg_layout {
     /// Licences and attribution for the third-party parts of the package
     /// (the image model, ONNX Runtime).
     pub const NOTICES_DIR: &str = "/Library/Faro/notices";
+
+    // ---- logs ---------------------------------------------------------
+    //
+    // The packaged programs write their own log files (`init_logging` in
+    // each binary, through `faro_platform::logfile::RotatingFile`), not
+    // launchd's `StandardErrorPath`: the agent's plist is one global
+    // LaunchAgent for every account and launchd doesn't expand `~` in it,
+    // and a file launchd opens can't be rotated under a running job. What
+    // reads the logs (`faro-service diagnose`, the docs, `check-pkg.sh`)
+    // takes the paths from here. Rotated files are `<log>.1` … `<log>.<LOG_KEEP>`
+    // (`faro_platform::logfile::log_files`).
+
+    /// The service's log directory: root:admin, 0750.
+    pub const LOG_DIR: &str = "/Library/Logs/Faro";
+    /// The service's log: root:admin, 0640, so an administrator of the Mac
+    /// can read it without `sudo`.
+    pub const SERVICE_LOG: &str = "/Library/Logs/Faro/faro-service.log";
+    /// The service's log mode.
+    pub const SERVICE_LOG_MODE: u32 = 0o640;
+    /// The service's log directory mode.
+    pub const LOG_DIR_MODE: u32 = 0o750;
+    /// The group that may read the service's log: macOS's `admin`, which
+    /// is always gid 80.
+    pub const LOG_GID: u32 = 80;
+    /// Each account's agent log directory, relative to its home.
+    pub const AGENT_LOG_DIR_IN_HOME: &str = "Library/Logs/Faro";
+    /// Each account's agent log, relative to its home ([`agent_log`]):
+    /// owned by the account, 0600 in a 0700 directory.
+    pub const AGENT_LOG_IN_HOME: &str = "Library/Logs/Faro/faro-agent.log";
+    /// The agent's log mode.
+    pub const AGENT_LOG_MODE: u32 = 0o600;
+    /// The agent's log directory mode.
+    pub const AGENT_LOG_DIR_MODE: u32 = 0o700;
+    /// A log is rotated before it grows past this.
+    pub const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+    /// Rotated files kept next to each log, so each takes at most
+    /// `(LOG_KEEP + 1) * LOG_MAX_BYTES`.
+    pub const LOG_KEEP: u32 = 3;
+
+    /// The agent's log for the account whose home is `home`
+    /// (`~/Library/Logs/Faro/faro-agent.log`).
+    pub fn agent_log(home: &std::path::Path) -> std::path::PathBuf {
+        home.join(AGENT_LOG_IN_HOME)
+    }
+
+    /// The service log's rotation policy.
+    pub fn service_log_rotation() -> faro_platform::logfile::Rotation {
+        faro_platform::logfile::Rotation {
+            max_bytes: LOG_MAX_BYTES,
+            keep: LOG_KEEP,
+            mode: SERVICE_LOG_MODE,
+        }
+    }
+
+    /// The agent log's rotation policy.
+    pub fn agent_log_rotation() -> faro_platform::logfile::Rotation {
+        faro_platform::logfile::Rotation {
+            max_bytes: LOG_MAX_BYTES,
+            keep: LOG_KEEP,
+            mode: AGENT_LOG_MODE,
+        }
+    }
 }
 
 /// The daemon job the `.pkg` installs ([`pkg_layout`]).

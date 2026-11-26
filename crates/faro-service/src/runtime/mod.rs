@@ -30,7 +30,7 @@ pub mod status;
 pub mod supervisor;
 mod updates;
 
-pub use self::core::{PauseRequest, AGENT_ABSENT_MS};
+pub use self::core::{capture_stall_ms, PauseRequest, AGENT_ABSENT_MS};
 pub use goodbye::{say_goodbye, GoodbyeError, GoodbyeOptions, GoodbyeOutcome};
 pub use spawn::AgentSpawn;
 pub use status::{Phase, ServiceStatus};

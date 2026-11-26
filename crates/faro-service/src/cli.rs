@@ -47,7 +47,8 @@ pub struct Cli {
     /// State directory override, for development and tests.
     #[arg(long, global = true, env = "FARO_STATE_DIR")]
     pub state_dir: Option<PathBuf>,
-    /// More logging (-v debug, -vv trace). `RUST_LOG` overrides.
+    /// More logging (-v debug, -vv trace). `RUST_LOG` overrides; without
+    /// either, `log_level` in the config ([`crate::logging`]).
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
     #[command(subcommand)]
@@ -188,7 +189,7 @@ enum CliError {
 /// Entry point for the binary.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
+    crate::logging::init(&cli);
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -196,35 +197,21 @@ pub fn main() -> ExitCode {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("faro-service: {e}");
+            crate::logging::fail(&e);
             return ExitCode::FAILURE;
         }
     };
     match rt.block_on(dispatch(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e @ CliError::GoodbyeQueued { .. }) => {
-            eprintln!("faro-service: {e}");
+            crate::logging::fail(&e);
             ExitCode::from(EXIT_GOODBYE_QUEUED)
         }
         Err(e) => {
-            eprintln!("faro-service: {e}");
+            crate::logging::fail(&e);
             ExitCode::FAILURE
         }
     }
-}
-
-fn init_logging(verbose: u8) {
-    let default = match verbose {
-        0 => "info",
-        1 => "debug",
-        _ => "trace",
-    };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
 }
 
 fn load_config(cli: &Cli) -> Result<Config, CliError> {
