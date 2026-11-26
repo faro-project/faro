@@ -76,7 +76,9 @@ pub mod platform;
 mod run;
 
 pub use config::{AgentConfig, Backoff, ServiceTrust, DEFAULT_SOCKET_PATH};
-pub use notice::{LogNotices, NoticeSink, SettingsNotice, SCREEN_RECORDING_OFF};
+pub use notice::{
+    window_hidden_notice, LogNotices, NoticeSink, SettingsNotice, SCREEN_RECORDING_OFF,
+};
 pub use platform::{AccessibilityProbe, PlatformWorker, WorkerGone};
 #[cfg(unix)]
 pub use run::{Agent, AgentError, ExitReason, AGENT_VERSION};

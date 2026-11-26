@@ -8,7 +8,7 @@
 //! | `ScreenCapture` | [`MacScreenCapture`]: ScreenCaptureKit `SCScreenshotManager` (14+), `CGDisplayCreateImage` (13) | agent |
 //! | `ForegroundInfo` | [`MacForeground`]: window list + fresh `NSRunningApplication`; titles and browser tab URLs ([`browser`]) via Accessibility | agent |
 //! | `SessionState` | [`MacSession`]: CGEventSource idle, CGSession lock, display/system sleep | agent |
-//! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN (edge-triggered) | agent |
+//! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN, windows hidden from capture ([`hidden_windows`]) (edge-triggered) | agent |
 //! | `ServiceHost` | [`MacServiceHost`]: launchd plists, `SMAppService`, console sessions | service |
 //!
 //! [`ui`] is the agent's menu-bar icon, monitoring notice (§12) and
@@ -53,6 +53,8 @@ mod cf;
 pub mod convert;
 #[cfg(target_os = "macos")]
 pub mod foreground;
+#[cfg(target_os = "macos")]
+pub mod hidden_windows;
 #[cfg(target_os = "macos")]
 pub mod service;
 #[cfg(target_os = "macos")]

@@ -1,7 +1,8 @@
 //! User-visible notices from the service (`ShowNotice`), e.g. the monthly
 //! consent notice listing the member's current allies and the instance
 //! operator (ARCHITECTURE.md §12), and the agent's own notice that Screen
-//! Recording is off ([`SCREEN_RECORDING_OFF`]).
+//! Recording is off ([`SCREEN_RECORDING_OFF`]) and that an app hides a
+//! window from it ([`window_hidden_notice`]).
 //!
 //! The agent hands them to a [`NoticeSink`]. On macOS the binary's sink
 //! shows them in a window and keeps them in the menu-bar icon's menu
@@ -36,6 +37,24 @@ pub const SCREEN_RECORDING_OFF: SettingsNotice = SettingsNotice {
     later: "Later",
     url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
 };
+
+/// The title and text shown when the agent reports
+/// `window_hidden_from_capture` for `app` (ARCHITECTURE.md §3.7): the
+/// member's side of the alert their allies get. The tracker in the
+/// platform layer reports each app once, so this isn't shown on every poll.
+pub fn window_hidden_notice(app: &str) -> (String, String) {
+    (
+        "Faro can't see one of your windows".to_owned(),
+        format!(
+            "\u{201c}{app}\u{201d} keeps one of its windows out of screenshots and screen \
+             recordings, so Faro can't check what that window shows. The member's allies \
+             are told which app it is.\n\n\
+             If you don't need that window, close it. Some apps have a setting that hides \
+             their windows from screen sharing; turning it off makes the window visible \
+             to Faro again."
+        ),
+    )
+}
 
 /// Something that can show a notice to the session user.
 pub trait NoticeSink: Send {
