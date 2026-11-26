@@ -309,6 +309,8 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
     if let Command::DomainsCheck { manifest } = &cli.command {
         return cmd_domains_check(manifest.clone());
     }
+    #[cfg(windows)]
+    windows::require_administrator(&cli)?;
     let config = load_config(&cli)?;
     match cli.command {
         Command::Enroll {
@@ -787,6 +789,30 @@ mod windows {
     /// other accounts.
     const INTEGRITY_EVERY: Duration = Duration::from_secs(60);
 
+    /// `status`, `enroll`, `goodbye` and `diagnose` read or write the
+    /// service's state directory, which only administrators can open. From
+    /// a terminal that is not elevated, say so rather than let the first
+    /// file access fail with "access denied". A development run with its
+    /// own `--state-dir` needs no administrator.
+    pub(super) fn require_administrator(cli: &Cli) -> Result<(), CliError> {
+        let name = match &cli.command {
+            Command::Status { .. } => "status",
+            Command::Enroll { .. } => "enroll",
+            Command::Goodbye { .. } => "goodbye",
+            Command::Diagnose { .. } => "diagnose",
+            _ => return Ok(()),
+        };
+        if cli.state_dir.is_some() || faro_platform_windows::acl::running_elevated() {
+            return Ok(());
+        }
+        Err(CliError::Usage(format!(
+            "`faro-service {name}` needs an administrator, because Faro's files are open to \
+             administrators only. Run this in a terminal opened as administrator: right-click \
+             Start, choose Terminal (Admin) or Windows PowerShell (Admin), approve the prompt, \
+             and run it again."
+        )))
+    }
+
     #[allow(clippy::result_large_err)]
     pub(super) fn early(cli: Cli) -> Result<ExitCode, Cli> {
         match &cli.command {
@@ -1154,10 +1180,14 @@ fn cmd_diagnose(config: &Config, config_file: PathBuf, o: DiagnoseOptions) -> Re
         }
         None => {
             let m = member.as_ref().ok_or_else(|| {
-                CliError::Usage(
+                CliError::Usage(if cfg!(windows) {
+                    "this is running as the SYSTEM account, which has no Desktop to put the \
+                     report on; choose a folder with --output"
+                        .into()
+                } else {
                     "can't tell whose Desktop the report goes on; choose a folder with --output"
-                        .into(),
-                )
+                        .into()
+                })
             })?;
             diagnose::desktop(m)?
         }
@@ -1174,7 +1204,7 @@ fn cmd_diagnose(config: &Config, config_file: PathBuf, o: DiagnoseOptions) -> Re
     if !o.yes {
         if !std::io::stdin().is_terminal() {
             return Err(CliError::Usage(
-                "nothing written: run it in Terminal to see what is in the report first, \
+                "nothing written: run it in a terminal to see what is in the report first, \
                  or add --yes"
                     .into(),
             ));

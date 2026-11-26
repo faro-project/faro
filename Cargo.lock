@@ -1250,6 +1250,7 @@ dependencies = [
  "axum",
  "blake3",
  "clap",
+ "crc32fast",
  "faro-agent",
  "faro-core",
  "faro-crypto",

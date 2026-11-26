@@ -1321,7 +1321,8 @@ async fn a_problem_report_names_the_instance_and_holds_no_secret() {
     let sources = Sources {
         config_file: dev.state_dir.join("service.toml"),
         service_log: None,
-        agent_log: None,
+        agent_logs: Vec::new(),
+        agent_log_notes: String::new(),
         lines: 100,
         listings: vec![dev.state_dir.clone()],
         system: false,

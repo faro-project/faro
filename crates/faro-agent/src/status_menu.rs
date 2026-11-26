@@ -86,8 +86,15 @@ pub struct StatusMenu {
     pub problem: bool,
 }
 
+/// What the computer is called in the menu's words.
+pub const COMPUTER: &str = if cfg!(windows) { "PC" } else { "Mac" };
+
 /// Shown when the status line is clicked and nothing needs doing.
-pub const NOTHING_TO_DO: &str = "Faro is working on this Mac. There is nothing to do.";
+pub const NOTHING_TO_DO: &str = if cfg!(windows) {
+    "Faro is working on this PC. There is nothing to do."
+} else {
+    "Faro is working on this Mac. There is nothing to do."
+};
 
 impl StatusMenu {
     /// What the line means and what to do, for when it is clicked.
@@ -99,10 +106,16 @@ impl StatusMenu {
 /// The About window's title.
 pub const ABOUT_TITLE: &str = "About Faro";
 /// Where the package installs the third-party notices
-/// (`faro_platform_macos::pkg_layout::NOTICES_DIR`).
-pub const NOTICES_DIR: &str = "/Library/Faro/notices";
+/// (`faro_platform_macos::pkg_layout::NOTICES_DIR`, on Windows
+/// `faro_platform_windows::layout::NOTICES_DIR`).
+pub const NOTICES_DIR: &str = if cfg!(windows) {
+    r"C:\Program Files\Faro\notices"
+} else {
+    "/Library/Faro/notices"
+};
 
-/// The System Settings pane for Accessibility.
+/// The System Settings pane for Accessibility (macOS; Windows has no such
+/// permission).
 pub const ACCESSIBILITY_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
@@ -156,20 +169,28 @@ fn connected(m: &MemberStatus, now_ms: i64, offset: i64) -> StatusMenu {
     let mut menu = if stopping {
         plain(
             "Faro is stopping",
-            Some(
-                "The Faro service is stopping, for an update or a restart. It starts again \
-                 by itself. If this lasts more than a few minutes, restart the Mac."
-                    .to_owned(),
-            ),
+            Some(format!(
+                "The Faro service is stopping, for an update or a restart. It starts \
+                     again by itself. If this lasts more than a few minutes, restart the \
+                     {COMPUTER}."
+            )),
         )
     } else if m.identity_mismatch {
         problem(
             format!("Faro stopped sending to {name}"),
             format!(
-                "{name} doesn't have the identity this Mac was enrolled with, so Faro sends \
-                 it nothing. Your allies will see that this Mac stopped checking in. Tell \
-                 whoever runs your instance."
+                "{name} doesn't have the identity this {COMPUTER} was enrolled with, so \
+                 Faro sends it nothing. Your allies will see that this {COMPUTER} stopped \
+                 checking in. Tell whoever runs your instance."
             ),
+        )
+    } else if m.screen_recording == Some(WirePermissionState::Denied) && cfg!(windows) {
+        // Windows has no Screen Recording permission, so this is not
+        // expected; still, never leave the member without words.
+        problem(
+            "Faro can't see the screen",
+            "Faro can't see the screen, and your allies are told. Restart the PC. If it \
+             still says so, tell whoever runs your instance.",
         )
     } else if m.screen_recording == Some(WirePermissionState::Denied) {
         StatusMenu {
@@ -188,16 +209,19 @@ fn connected(m: &MemberStatus, now_ms: i64, offset: i64) -> StatusMenu {
     } else if m.consecutive_failures >= FAILING_AFTER {
         problem(
             "Faro can't take screenshots",
-            "Screenshots keep failing on this Mac, and your allies are told if this goes \
-             on. Restart the Mac. If it still says so, tell whoever runs your instance.",
+            format!(
+                "Screenshots keep failing on this {COMPUTER}, and your allies are told if \
+                 this goes on. Restart the {COMPUTER}. If it still says so, tell whoever \
+                 runs your instance."
+            ),
         )
     } else if m.unreachable_since_ms.is_some() {
         problem(
             format!("Can't reach {name}"),
             format!(
-                "Check that this Mac is online. Faro keeps monitoring and keeps what it \
-                 records on this Mac, encrypted, and sends it once {name} answers. If this \
-                 lasts, your allies see that this Mac stopped checking in."
+                "Check that this {COMPUTER} is online. Faro keeps monitoring and keeps what \
+                 it records on this {COMPUTER}, encrypted, and sends it once {name} answers. \
+                 If this lasts, your allies see that this {COMPUTER} stopped checking in."
             ),
         )
     } else if m.capture == Some(CaptureState::Paused) {
@@ -213,7 +237,7 @@ fn connected(m: &MemberStatus, now_ms: i64, offset: i64) -> StatusMenu {
         plain(&line, Some(hint.to_owned()))
     } else if m.capture == Some(CaptureState::NotStarted) {
         plain("Starting\u{2026}", None)
-    } else if m.accessibility == Some(false) {
+    } else if m.accessibility == Some(false) && cfg!(not(windows)) {
         StatusMenu {
             fix: Some(Fix {
                 label: "Open Accessibility Settings\u{2026}".to_owned(),
@@ -249,12 +273,11 @@ fn not_connected(e: &Enrollment) -> StatusMenu {
     match e {
         Enrollment::NotEnrolled => plain(
             "Not enrolled",
-            Some(
-                "Faro monitors nothing on this Mac yet. To enroll it, create an enrollment \
-                 code on the Computers page of your Faro web app, then choose Enroll this \
-                 computer\u{2026} in this menu and paste the link."
-                    .to_owned(),
-            ),
+            Some(format!(
+                "Faro monitors nothing on this {COMPUTER} yet. To enroll it, create an \
+                 enrollment code on the Computers page of your Faro web app, then choose \
+                 Enroll this computer\u{2026} in this menu and paste the link."
+            )),
         ),
         Enrollment::AwaitingApproval { name, url } => {
             let computers = web_app_url(url, "computers");
@@ -267,9 +290,9 @@ fn not_connected(e: &Enrollment) -> StatusMenu {
                 ..plain(
                     "Waiting for approval in the web app",
                     Some(format!(
-                        "This Mac is enrolled with {}. Open the Computers page of the web \
-                         app, check that it shows the same code this Mac showed, and \
-                         approve the computer. Monitoring starts then.",
+                        "This {COMPUTER} is enrolled with {}. Open the Computers page of the \
+                         web app, check that it shows the same code this {COMPUTER} showed, \
+                         and approve the computer. Monitoring starts then.",
                         instance(name)
                     )),
                 )
@@ -279,16 +302,17 @@ fn not_connected(e: &Enrollment) -> StatusMenu {
             web_app: web_app_url(url, ""),
             ..plain(
                 "Connecting to the Faro service\u{2026}",
-                Some(
+                Some(format!(
                     "If this lasts more than a few minutes, log out and back in, or restart \
-                     the Mac. Your allies are told if this account goes unmonitored."
-                        .to_owned(),
-                ),
+                     the {COMPUTER}. Your allies are told if this account goes unmonitored."
+                )),
             )
         },
         Enrollment::NoService => problem(
             "The Faro service isn't running",
-            "Restart the Mac. If it still says so, tell whoever runs your instance.",
+            format!(
+                "Restart the {COMPUTER}. If it still says so, tell whoever runs your instance."
+            ),
         ),
     }
 }
@@ -365,7 +389,14 @@ pub fn about(agent_version: &str, seen: &Seen) -> About {
 
 /// The command that makes a problem report (`faro-service diagnose`,
 /// DEVELOPMENT.md "Problem reports").
-pub const DIAGNOSE_COMMAND: &str = "sudo /Library/Faro/bin/faro-service diagnose";
+///
+/// macOS: `sudo` in Terminal. Windows: in an administrator terminal (the
+/// `&` is PowerShell's call operator, needed to run a quoted path).
+pub const DIAGNOSE_COMMAND: &str = if cfg!(windows) {
+    r#"& "C:\Program Files\Faro\faro-service.exe" diagnose"#
+} else {
+    "sudo /Library/Faro/bin/faro-service diagnose"
+};
 
 /// The "Report a problem…" window: how to make a report, and a button that
 /// copies [`DIAGNOSE_COMMAND`]. It only explains: the agent asks the
@@ -381,15 +412,27 @@ pub struct ReportProblem {
 
 /// The "Report a problem…" window.
 pub fn report_problem() -> ReportProblem {
+    let steps = if cfg!(windows) {
+        format!(
+            "1. Right-click Start and choose Terminal (Admin) or Windows PowerShell \
+             (Admin).\n\
+             2. Paste this command and press Enter:\n    {DIAGNOSE_COMMAND}\n\
+             3. Approve the administrator prompt.\n"
+        )
+    } else {
+        format!(
+            "1. Open Terminal (in Applications \u{2192} Utilities).\n\
+             2. Paste this command and press Return:\n    {DIAGNOSE_COMMAND}\n\
+             3. Type an administrator's password when asked.\n"
+        )
+    };
     ReportProblem {
         title: "Report a problem".to_owned(),
         body: format!(
             "To get help, make a problem report: one file with what Faro is doing on this \
-             Mac and its recent logs, with private details such as web addresses and window \
-             titles taken out.\n\n\
-             1. Open Terminal (in Applications \u{2192} Utilities).\n\
-             2. Paste this command and press Return:\n    {DIAGNOSE_COMMAND}\n\
-             3. Type an administrator's password when asked.\n\
+             {COMPUTER} and its recent logs, with private details such as web addresses and \
+             window titles taken out.\n\n\
+             {steps}\
              4. Faro lists what is in the report before it writes anything. Type s to read \
              all of it, y to write it, or n to stop.\n\n\
              The report is saved on your Desktop as faro-report-\u{2026}.zip. Send it to \
@@ -536,6 +579,24 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_has_no_screen_recording_or_accessibility_settings() {
+        let s = menu(MemberStatus {
+            screen_recording: Some(WirePermissionState::Denied),
+            ..running()
+        });
+        assert!(s.problem && s.fix.is_none());
+        assert!(!s.detail().contains("System Settings"), "{}", s.detail());
+        // Accessibility is a macOS permission: nothing to fix here.
+        let s = menu(MemberStatus {
+            accessibility: Some(false),
+            ..running()
+        });
+        assert_eq!((s.line.as_str(), s.fix.is_none()), ("Monitoring", true));
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn screen_recording_off_links_to_its_settings() {
         let s = menu(MemberStatus {
@@ -635,12 +696,15 @@ mod tests {
 
     #[test]
     fn accessibility_and_updates_are_hints_under_monitoring() {
-        let s = menu(MemberStatus {
-            accessibility: Some(false),
-            ..running()
-        });
-        assert_eq!(s.line, "Monitoring");
-        assert_eq!(s.fix.unwrap().url, ACCESSIBILITY_SETTINGS);
+        #[cfg(not(windows))]
+        {
+            let s = menu(MemberStatus {
+                accessibility: Some(false),
+                ..running()
+            });
+            assert_eq!(s.line, "Monitoring");
+            assert_eq!(s.fix.unwrap().url, ACCESSIBILITY_SETTINGS);
+        }
         let s = menu(MemberStatus {
             updates_failing: true,
             ..running()
@@ -745,16 +809,110 @@ mod tests {
         assert!(a.body.contains("Instance: not enrolled"), "{}", a.body);
         #[cfg(target_os = "macos")]
         assert_eq!(NOTICES_DIR, faro_platform_macos::pkg_layout::NOTICES_DIR);
+        #[cfg(windows)]
+        assert_eq!(NOTICES_DIR, faro_platform_windows::layout::NOTICES_DIR);
     }
 
     #[test]
     fn report_a_problem_explains_the_command() {
         let r = report_problem();
-        assert_eq!(r.command, "sudo /Library/Faro/bin/faro-service diagnose");
+        #[cfg(not(windows))]
+        {
+            assert_eq!(r.command, "sudo /Library/Faro/bin/faro-service diagnose");
+            assert!(r.body.contains("Open Terminal"), "{}", r.body);
+            assert!(r.body.contains("this Mac"), "{}", r.body);
+            assert!(!r.body.contains("PowerShell"), "{}", r.body);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                r.command,
+                r#"& "C:\Program Files\Faro\faro-service.exe" diagnose"#
+            );
+            assert!(r.body.contains("Terminal (Admin)"), "{}", r.body);
+            assert!(r.body.contains("Windows PowerShell (Admin)"), "{}", r.body);
+            assert!(
+                r.body.contains("Approve the administrator prompt"),
+                "{}",
+                r.body
+            );
+            assert!(r.body.contains("this PC"), "{}", r.body);
+            assert!(
+                !r.body.contains("Mac") && !r.body.contains("sudo"),
+                "{}",
+                r.body
+            );
+        }
         assert!(r.body.contains(&r.command), "{}", r.body);
         assert!(r.body.contains("Desktop"), "{}", r.body);
         assert!(r.body.contains("faro-report-"), "{}", r.body);
+        assert!(
+            r.body.contains("Type s to read all of it, y to write it"),
+            "{}",
+            r.body
+        );
         assert_eq!(r.copy, "Copy Command");
+    }
+
+    #[test]
+    fn the_words_name_this_computer_for_its_os() {
+        let every_text = |seen: &Seen| {
+            let m = status_menu(seen, 0, 0);
+            format!(
+                "{} {} {}",
+                m.line,
+                m.detail(),
+                m.fix.as_ref().map_or("", |f| f.label.as_str())
+            )
+        };
+        let states = [
+            Seen::Connected(MemberStatus {
+                phase: ServicePhase::Stopped,
+                ..running()
+            }),
+            Seen::Connected(MemberStatus {
+                identity_mismatch: true,
+                ..running()
+            }),
+            Seen::Connected(MemberStatus {
+                screen_recording: Some(WirePermissionState::Denied),
+                ..running()
+            }),
+            Seen::Connected(MemberStatus {
+                consecutive_failures: 9,
+                ..running()
+            }),
+            Seen::Connected(MemberStatus {
+                accessibility: Some(false),
+                ..running()
+            }),
+            Seen::NotConnected(Enrollment::NotEnrolled),
+            Seen::NotConnected(Enrollment::NoService),
+            Seen::NotConnected(Enrollment::Approved {
+                name: "x".into(),
+                url: "https://faro.example.org".into(),
+            }),
+        ];
+        for s in &states {
+            let t = every_text(s);
+            #[cfg(windows)]
+            for word in [
+                "Mac",
+                "System Settings",
+                "Privacy",
+                "Accessibility",
+                "Terminal enroll",
+            ] {
+                assert!(!t.contains(word), "{word:?} in {t:?}");
+            }
+            #[cfg(not(windows))]
+            assert!(!t.contains("PC"), "{t:?}");
+        }
+        #[cfg(windows)]
+        {
+            let t = every_text(&Seen::NotConnected(Enrollment::NoService));
+            assert!(t.contains("Restart the PC"), "{t}");
+        }
     }
 
     #[test]
