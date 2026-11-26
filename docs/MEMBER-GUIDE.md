@@ -51,3 +51,22 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | Enrollment stopped to keep you safe | The instance answered with a key that doesn't match your link. Don't continue. Remove the new computer in the web app if it appears there, and tell whoever runs your instance. |
 | This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. |
 | Nothing happens when you click the link | Restart the Mac, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the eye icon and paste the link. |
+
+## Checking that Faro is working
+
+Someone who knows an administrator password can check in Terminal:
+
+```sh
+sudo /Library/Faro/bin/faro-service status
+```
+
+It shows what Faro is doing, never what was on the screen. The lines to look at:
+
+| It says | What it means |
+|---|---|
+| **Service:** not running | Faro's service has stopped. Restart the Mac. If it still says so, tell whoever runs your instance. |
+| **Capture:** active | Faro is working. `paused` because the screen is locked, the Mac is asleep or nobody is using it is normal too. |
+| **Capture:** none: the agent of *account* is not connected | Faro Agent isn't running in that account. Log out of it and in again. Your allies are told if this lasts. |
+| **Permissions:** Screen Recording denied, or **Failures:** permission denied: screen_recording | Open System Settings > Privacy & Security > Screen Recording (Screen & System Audio Recording on newer macOS) in that account and turn on **Faro Agent**. |
+| **Image model:** none | Faro can't check images on this Mac and rates the screen from the apps and websites in use only. Reinstall Faro, and tell whoever runs your instance if it stays. |
+| **Updates:** last check … failed | Faro couldn't check for updates. It tries again later; if it keeps failing, tell whoever runs your instance. |
