@@ -48,3 +48,83 @@ pub mod session;
 pub mod tamper;
 #[cfg(windows)]
 pub mod ui;
+
+// ---------------------------------------------------------------------------
+// Agent side: the session agent's platform bundle.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+pub use browser::Browser;
+#[cfg(windows)]
+pub use capture::{CaptureBackend, CaptureError, DisplayCapture, DisplayFailure, WinScreenCapture};
+#[cfg(windows)]
+pub use foreground::WinForeground;
+#[cfg(windows)]
+pub use session::WinSession;
+#[cfg(windows)]
+pub use tamper::WinTamper;
+
+/// Constructors for the Windows platform bundle.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WinPlatform;
+
+#[cfg(windows)]
+impl WinPlatform {
+    /// Everything the session agent needs. Construction is cheap and opens
+    /// nothing that is tied to the calling thread: DXGI duplications are
+    /// opened on the first capture and the UI Automation client on the
+    /// first browser read, both on the thread that drives the platform
+    /// (the agent's dedicated platform thread). It registers the
+    /// display-state callback and samples the session baseline.
+    pub fn agent_platform() -> faro_platform::AgentPlatform {
+        faro_platform::AgentPlatform {
+            capture: Box::new(WinScreenCapture::new()),
+            foreground: Box::new(WinForeground::new()),
+            session: Box::new(WinSession::new()),
+            tamper: Box::new(WinTamper::new()),
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod agent_tests {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn agent_components_are_send() {
+        assert_send::<WinScreenCapture>();
+        assert_send::<WinForeground>();
+        assert_send::<WinSession>();
+        assert_send::<WinTamper>();
+    }
+
+    #[test]
+    fn agent_platform_constructs_and_answers() {
+        let mut p = WinPlatform::agent_platform();
+        assert_eq!(
+            p.capture.permission_state(),
+            faro_platform::PermissionState::NotRequired
+        );
+        let _ = p.foreground.active_app();
+        let _ = p.session.idle_secs();
+        let _ = p.session.is_locked();
+        let _ = p.session.poll_changes();
+        let _ = p.tamper.poll();
+    }
+
+    #[test]
+    fn agent_platform_runs_on_another_thread() {
+        // The agent builds the bundle on one thread and drives it on its
+        // platform thread.
+        let mut p = WinPlatform::agent_platform();
+        std::thread::spawn(move || {
+            let _ = p.foreground.browser();
+            let _ = p.capture.capture_all_displays();
+        })
+        .join()
+        .unwrap();
+    }
+}

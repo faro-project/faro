@@ -49,6 +49,13 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # Agent side: sleep clock (`session`), cloaked windows (`tamper`),
+    # network adapters for the VPN signal (`tamper`).
+    "Win32_System_WindowsProgramming",
+    "Win32_Graphics_Dwm",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
 ] }
 
 [dev-dependencies]
