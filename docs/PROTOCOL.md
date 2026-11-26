@@ -47,6 +47,11 @@ Tags in use:
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
 | `faro/key-rewrap/v1` | Member-signed replacement of their wrapped keys (§4.3) |
 | `faro/ally-key-rewrap/v1` | Challenge-proven replacement of an ally's wrapped key (§4.3) |
+| `faro/group-roster/v1` | Facilitator-signed group roster entry (§10.2) |
+| `faro/group-roster-genesis/v1` | `prev_hash` of a group's first roster entry (§10.2) |
+| `faro/group-roster-snapshot/v1` | Facilitator-signed roster snapshot (§10.5) |
+| `faro/group-epoch-key/v1` | Commitment to a group epoch key (§10.3) |
+| `faro/group-safety-code/v1` | Group safety code (§10.8) |
 
 ## 3. Events and the hash chain
 
@@ -379,3 +384,132 @@ The mirror is configured with the same root of trust (`updates.root`) and runs t
 | Hash chain input | header + ciphertext | header only, which commits to `body_hash` | Chain stays verifiable after body blobs expire |
 | `heartbeat` kind | An event kind | A separate signed message | Keeps the chain small, and liveness doesn't depend on upload order |
 | Context signals | Listed in the tamper table | Daily report only | The `tamper` kind is floored to `urgent` |
+
+## 10. Group roster log
+
+**Status:** Phase C of [GROUPS.md](GROUPS.md) (§10.3, §10.5). Needs maintainer sign-off before it reaches `main`. Reference implementation: `faro_proto::roster` (structure) and `faro_crypto::roster` (signatures and epoch keys); the web app's port is `web/src/lib/crypto/roster.ts`, and both check the `roster` sections of the shared vectors.
+
+Sending to "the whole group" means sealing to keys the instance hands out, and an instance could slip in a key of its own. The roster log closes that the way recipient manifests do for devices (§5.1): the instance stores and serves a signed, versioned record of who may read, but can't add a reader, roll it back or fork it without clients noticing.
+
+### 10.1 Keys
+
+Every participant needs an X25519 encryption key, and every facilitator an Ed25519 signing key:
+
+| Who | Encryption key | Signing key |
+|---|---|---|
+| Member | Their member encryption key | Their member signing key |
+| Ally (no member keys) | Their ally key | Made when they become a facilitator (`PUT /v1/me/group-sign-key`) |
+| Neither | Made when they first open a group (`PUT /v1/me/ally-key`), stored as an ally key in the §4.3 format: passphrase copy plus `recovery` | As for an ally |
+
+An ally-only person's signing key is a fresh Ed25519 seed, sealed (`crypto_box_seal`) to their own encryption key and stored with its public half and the encryption key it is sealed to. Their passphrase or recovery code unlocks the encryption key, which opens the seed, so a passphrase change (§4.3) keeps it working. The browser checks that the opened seed has the stored public key, and signs only once the roster lists that key for them.
+
+### 10.2 Entries
+
+A `RosterEntry` is one facilitator-signed change set:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `group_id` | string | 1 to 64 of `[A-Za-z0-9_-]` |
+| `seq` | u64 | 0 for the first entry, then +1 each |
+| `prev_hash` | 32 bytes | The previous entry's hash, or the genesis hash for `seq = 0` |
+| `at_ms` | i64 | The signer's clock; informational, not checked for order |
+| `signer` | string | `usr_…` |
+| `changes` | list | At most 256, sorted strictly by `user_id` (one change per person per entry) |
+| `epoch` | `{epoch, key_check}` or null | A new epoch key (§10.3) |
+
+A change is one of:
+
+| `kind` | Fields | Encoding after `.str(kind).str(user_id)` |
+|---|---|---|
+| `join` | `role`, `enc_pubkey`, `sign_pubkey` (or null) | `.str(role).fixed(enc_pubkey).bytes(sign_pubkey or empty)` |
+| `leave` | | (nothing) |
+| `remove` | | (nothing); also used when the person's account was deleted |
+| `role` | `role` | `.str(role)` |
+| `keys` | `enc_pubkey`, `sign_pubkey` (or null) | `.fixed(enc_pubkey).bytes(sign_pubkey or empty)` |
+
+`role` is `facilitator` or `participant`. An optional key is a length-prefixed byte string of 0 or 32 bytes.
+
+- **Encoding:** `signing_bytes = Canonical("faro/group-roster/v1").str(instance_id).str(group_id).u64(seq).fixed(prev_hash).i64(at_ms).str(signer).u64(len(changes))`, then each change, then the epoch as an `Option<u64>` (`0`, or `epoch + 1` followed by `.fixed(key_check)`).
+- **Identity:** `hash = BLAKE3(signing_bytes)`. The next entry's `prev_hash` must equal it. A `RosterHead` is `{seq, hash}`.
+- **Genesis hash:** `BLAKE3(Canonical("faro/group-roster-genesis/v1").str(instance_id).str(group_id))`.
+- **On the wire:** the entry's JSON fields flattened with `sig` (base64url Ed25519), like an endorsement.
+
+**Structure** (`validate()`, before any key work): well-formed ids, at most 256 changes, sorted and unique by user, not empty unless it starts an epoch, and **every `join`, `leave`, `remove` and `keys` change comes with a new epoch** in the same entry. A `role` change alone doesn't rotate.
+
+**Against the roster as of the previous entry** (`RosterState::check`):
+
+1. same instance and group;
+2. `seq` is the next one (lower: **rollback**; higher: an entry is **missing**) and `prev_hash` is the head (otherwise a **fork**);
+3. the signer was a **facilitator with a signing key** in that roster, and the signature verifies with that key. For the first entry, the signer joins in it as a facilitator with the signing key it is signed with, and the entry may only add people;
+4. a `join` names someone not in the roster; every other change someone who is; a `role` or `keys` change changes something;
+5. a new epoch is the current epoch + 1 (the first entry starts epoch 1);
+6. no key is a small-order X25519 point or an unusable Ed25519 key.
+
+Applying it adds, removes and updates the people it names, sets the epoch, and moves the head.
+
+### 10.3 Epoch keys
+
+Whole-group content is sealed with the group's current **epoch key**, a random 32 bytes, so each item costs one envelope whatever the group's size (GROUPS.md §10.5).
+
+- The entry that starts epoch `e` carries `key_check = BLAKE3(Canonical("faro/group-epoch-key/v1").str(instance_id).str(group_id).u64(e).fixed(key))`, never the key.
+- The facilitator's browser seals the key (`crypto_box_seal`, 80 bytes) to the encryption key of **everyone in the roster after the entry**, the facilitator included, and uploads the sealed copies with the entry.
+- A participant opens their copy and **checks it against `key_check`** from the entry they verified. A key the instance made up, or one moved from another epoch or group, fails.
+- Joiners get a copy of the new epoch only, so they can't read what came before. Someone who leaves gets no copy of the epoch their departure starts.
+
+### 10.4 Client rules
+
+Each browser persists a checkpoint per user and group: the head it last accepted, with the roster as of that entry (in `localStorage`; if the roster doesn't fit, the head alone, and the roster is rebuilt from the latest snapshot at or below it and replayed up to the head, which must match exactly).
+
+On every visit it fetches `GET /v1/groups/{id}/roster?after_seq=<checkpoint seq>`:
+
+- a reported head below the checkpoint is a **rollback**, and one at the checkpoint's `seq` with another hash a **fork**;
+- each entry is checked as in §10.2, in order;
+- entries that end before the reported head mean the instance is **withholding** some.
+
+On any refusal the browser keeps every entry it accepted before it, keeps using that roster, stops, and shows a warning. It never moves its checkpoint back or sideways. Page bodies and snapshots are capped at 8 MiB before parsing.
+
+**Bootstrapping.** A browser with no checkpoint (a first visit, another browser) has nothing to compare with. It starts from the latest facilitator-signed snapshot (or from the first entry when there is none) and checks everything after it. That is trust on first use, as for a device without an anchor (§5.1): an instance could serve a whole parallel log signed by a facilitator key of its own. The group safety code (§10.8) is how people find out.
+
+### 10.5 Snapshots
+
+A `RosterSnapshot` is the full roster at one entry: `{instance_id, group_id, seq, head, at_ms, signer, epoch, epoch_key_check, members}`, members sorted strictly by `user_id`, each `{user_id, role, enc_pubkey, sign_pubkey}`, at most 100,000. `signing_bytes = Canonical("faro/group-roster-snapshot/v1").str(instance_id).str(group_id).u64(seq).fixed(head).i64(at_ms).str(signer).u64(epoch).fixed(epoch_key_check).u64(len(members))`, then `.str(user_id).str(role).fixed(enc_pubkey).bytes(sign_pubkey or empty)` for each. It is signed by a facilitator with a signing key **listed in it**.
+
+A facilitator's browser signs one at the head whenever the head is 256 or more entries past the last one. A browser with a checkpoint never jumps to a snapshot above it; it replays entries.
+
+### 10.6 What the instance stores and checks
+
+| Route | |
+|---|---|
+| `GET /v1/groups/{id}/roster?after_seq=` | `{head, epoch, latest_snapshot_seq, entries, more}`, 100 entries per page |
+| `GET /v1/groups/{id}/roster/snapshot?max_seq=` | The latest snapshot at or below `max_seq`, byte for byte |
+| `GET /v1/groups/{id}/roster/pending` | `{head, epoch, changes, waiting_for_keys, posting_paused, snapshot_due, latest_snapshot_seq}` |
+| `POST /v1/groups/{id}/roster` | `{entry, epoch_keys: [{user_id, sealed_key}]}`, facilitators |
+| `POST /v1/groups/{id}/roster/snapshot` | A signed snapshot, facilitators |
+| `GET /v1/groups/{id}/epoch-key?epoch=` | `{epoch, seq, key_check, sealed_key}`: the caller's copy |
+| `PUT /v1/me/ally-key` | `{enc_pubkey, wrapped_privkey}`: an encryption key for someone with none |
+| `GET`, `PUT /v1/me/group-sign-key` | `{sign_pubkey, enc_pubkey, sealed_seed}` |
+
+The instance runs the §10.2 checks on uploads against its own copy of the roster, but only to keep garbage out: clients don't rely on it. It also ties the roster to the group: a `join` or `keys` change must carry the keys the instance holds for that person and their current role, a `leave` or `remove` must name someone no longer active, and a new epoch must come with exactly one sealed copy for each person in the roster after the entry, **all of them active participants**. Everything here answers `404` to anyone who isn't an active participant, from the moment they leave or are removed, before any facilitator has signed anything.
+
+### 10.7 Facilitators' pending work
+
+`/roster/pending` compares the roster with who is in the group and lists the changes to sign. A facilitator's browser checks them against the roster it verified, and when it opens the group with the facilitator's keys unlocked:
+
+- **signs on its own** leaves, removals and role changes, and changes to the facilitator's own keys (checked against the keys it holds), departures in the first entries so no new epoch is ever sealed to someone who left;
+- **asks first** before joins and other people's key changes, showing names and key ids: they add a reader, with a key the instance supplied;
+- never signs a change that gives the facilitator keys that aren't theirs.
+
+While `posting_paused` (someone who left is still in the roster, or someone's keys changed), clients pause whole-group posting: "Waiting for a facilitator to update the group". Nothing is escalated to admins (GROUPS.md decision 9).
+
+### 10.8 Group safety code
+
+`h = BLAKE3(Canonical("faro/group-safety-code/v1").str(instance_id).str(group_id).u64(seq).fixed(hash))` of the roster head, printed like a safety code (§4.2): 60 bytes of BLAKE3 XOF output from `h`, each byte mod 10, in 12 groups of 5 digits. Two people whose browsers show the same code hold the same roster history.
+
+### 10.9 Limits
+
+- **Facilitators choose who reads.** A facilitator can add anyone; every addition is in the signed log, which every participant's browser holds.
+- **Keys come from the instance the first time.** A facilitator adds someone with the key the instance holds for them, and a new browser starts from whatever signed history it is served. Approving joins in the browser and comparing the group safety code are the checks; neither is automatic.
+- **Withholding.** The instance can delay entries (clients report a short log) or stop serving the group, but can't forge, reorder or roll back entries for a browser that has a checkpoint.
+- **Removal is forward-only.** Someone who leaves keeps the epoch keys they already had. The instance stops serving them group items at once; the next epoch is never sealed to them.
+- **Checkpoints are per browser.** Clearing site data or using another browser starts again from §10.4's bootstrapping.

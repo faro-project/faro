@@ -14,6 +14,7 @@ pub mod enroll_codes;
 pub mod events;
 pub mod feed;
 pub mod group_notices;
+pub mod group_roster;
 pub mod groups;
 pub mod instance;
 pub mod invites;

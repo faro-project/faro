@@ -59,6 +59,8 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("group_invites", "used_by", Clears::SetNull),
     ("group_notices", "recipient_id", Clears::Rows),
     ("group_notices", "actor_id", Clears::SetNull),
+    ("participant_sign_keys", "user_id", Clears::Rows),
+    ("group_epoch_keys", "user_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -130,6 +132,11 @@ pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM group_invites WHERE user_id = $1",
     "UPDATE group_notices SET actor_id = NULL WHERE actor_id = $1",
     "DELETE FROM group_notices WHERE recipient_id = $1",
+    // Phase C: their sealed copies of group epoch keys and their group
+    // signing key. Signed roster entries keep their opaque id and public
+    // keys until a facilitator signs their removal.
+    "DELETE FROM group_epoch_keys WHERE user_id = $1",
+    "DELETE FROM participant_sign_keys WHERE user_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

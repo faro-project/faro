@@ -64,7 +64,11 @@ fn group_settings(state: &AppState) -> GroupSettings {
 }
 
 /// The caller's group, or `404`. See the module docs.
-async fn load(state: &AppState, s: &SessionUser, id: &str) -> AppResult<(Group, Participant)> {
+pub(crate) async fn load(
+    state: &AppState,
+    s: &SessionUser,
+    id: &str,
+) -> AppResult<(Group, Participant)> {
     load_in(state.db().pool(), &s.user.id, id).await
 }
 
@@ -80,7 +84,7 @@ async fn load_in<'e>(
     Ok((group, me))
 }
 
-fn require_facilitator(me: &Participant) -> AppResult<()> {
+pub(crate) fn require_facilitator(me: &Participant) -> AppResult<()> {
     if me.role == Role::Facilitator {
         Ok(())
     } else {
@@ -89,7 +93,7 @@ fn require_facilitator(me: &Participant) -> AppResult<()> {
 }
 
 /// Changes are refused on an archived group and while groups are off.
-fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
+pub(crate) fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
     if group.is_archived() {
         return Err(AppError::conflict(
             "group_archived",
@@ -476,7 +480,7 @@ pub async fn patch(
 }
 
 /// [`load`] inside a write transaction.
-async fn load_in_tx(
+pub(crate) async fn load_in_tx(
     tx: &mut sqlx::AnyConnection,
     user: &UserId,
     id: &str,

@@ -15,6 +15,7 @@ pub mod event;
 pub mod ids;
 pub mod keys;
 pub mod report;
+pub mod roster;
 
 pub use encoding::{EncPublicKey, Hash32, Nonce24, SignPublicKey, Signature};
 pub use event::{
