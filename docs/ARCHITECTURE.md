@@ -254,6 +254,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Screen-recording / portal permission revoked | Agent | urgent | Immediate alert |
 | Agent repeatedly killed | Service | urgent | Alert with a count |
 | An interactive session (any OS account) with no connected agent for 90 s | Service | urgent | "Faro isn't running in the account *alex* on Laptop-X" |
+| The session at the screen has its agent connected, nothing pauses capture, and no capture is attempted for a few capture intervals (5 min at the default mean) | Service (`capture_failing`) | urgent | "Faro couldn't see the screen 5 times in a row", for that account |
 | Chain gap or invalid signature | Instance | urgent | Alert |
 | Heartbeats claim events the instance never received, for longer than the grace period | Instance (`upload_stalled`) | urgent | "Laptop-X isn't sending what it records" |
 | An active computer removed by its member | Instance (`device_removed`) | urgent | "Laptop-X was removed" |
