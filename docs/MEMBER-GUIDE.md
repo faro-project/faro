@@ -79,7 +79,7 @@ Click the eye icon in the menu bar. The line under **This computer is monitored 
 | **Status: Faro stopped sending to** *your instance* | Your instance no longer has the identity this Mac was enrolled with. Tell whoever runs your instance. |
 | **Status: The Faro service isn't running** | Restart the Mac. If it still says so, tell whoever runs your instance. |
 
-The menu also has **Open Faro** (your Faro web app) and **About Faro…** (the versions, your instance, and the licences of the software Faro includes). Nothing on the menu turns Faro off, pauses it or hides anything.
+The menu also has **Open Faro** (your Faro web app), **Report a problem…** ([Reporting a problem](#reporting-a-problem)) and **About Faro…** (the versions, your instance, and the licences of the software Faro includes). Nothing on the menu turns Faro off, pauses it or hides anything.
 
 For more detail, someone who knows an administrator password can check in Terminal:
 
@@ -105,6 +105,8 @@ If Faro isn't working and you'd like help, make a **problem report**: one file w
 ```sh
 sudo /Library/Faro/bin/faro-service diagnose
 ```
+
+**Report a problem…** in the eye icon's menu shows these steps too, and its **Copy Command** button puts that line on the clipboard, ready to paste into Terminal.
 
 1. Faro gathers the report and lists the files in it, with what each one is. Nothing is written yet.
 2. Type **s** to read everything in it first, **y** to write it, or **n** to stop.

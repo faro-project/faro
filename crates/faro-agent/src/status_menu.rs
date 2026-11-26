@@ -363,6 +363,43 @@ pub fn about(agent_version: &str, seen: &Seen) -> About {
     }
 }
 
+/// The command that makes a problem report (`faro-service diagnose`,
+/// DEVELOPMENT.md "Problem reports").
+pub const DIAGNOSE_COMMAND: &str = "sudo /Library/Faro/bin/faro-service diagnose";
+
+/// The "Report a problem…" window: how to make a report, and a button that
+/// copies [`DIAGNOSE_COMMAND`]. It only explains: the agent asks the
+/// service for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportProblem {
+    pub title: String,
+    pub body: String,
+    /// The button that copies `command`.
+    pub copy: String,
+    pub command: String,
+}
+
+/// The "Report a problem…" window.
+pub fn report_problem() -> ReportProblem {
+    ReportProblem {
+        title: "Report a problem".to_owned(),
+        body: format!(
+            "To get help, make a problem report: one file with what Faro is doing on this \
+             Mac and its recent logs, with private details such as web addresses and window \
+             titles taken out.\n\n\
+             1. Open Terminal (in Applications \u{2192} Utilities).\n\
+             2. Paste this command and press Return:\n    {DIAGNOSE_COMMAND}\n\
+             3. Type an administrator's password when asked.\n\
+             4. Faro lists what is in the report before it writes anything. Type s to read \
+             all of it, y to write it, or n to stop.\n\n\
+             The report is saved on your Desktop as faro-report-\u{2026}.zip. Send it to \
+             whoever helps you with Faro, and say what went wrong and when."
+        ),
+        copy: "Copy Command".to_owned(),
+        command: DIAGNOSE_COMMAND.to_owned(),
+    }
+}
+
 /// `at_ms` as a local clock time ("15:40"), with the day when it isn't
 /// today ("Tue 15:40", or "3 Dec 15:40" a week or more away).
 pub fn clock_time(at_ms: i64, now_ms: i64, utc_offset_secs: i64) -> String {
@@ -672,6 +709,16 @@ mod tests {
         assert!(a.body.contains("Instance: not enrolled"), "{}", a.body);
         #[cfg(target_os = "macos")]
         assert_eq!(NOTICES_DIR, faro_platform_macos::pkg_layout::NOTICES_DIR);
+    }
+
+    #[test]
+    fn report_a_problem_explains_the_command() {
+        let r = report_problem();
+        assert_eq!(r.command, "sudo /Library/Faro/bin/faro-service diagnose");
+        assert!(r.body.contains(&r.command), "{}", r.body);
+        assert!(r.body.contains("Desktop"), "{}", r.body);
+        assert!(r.body.contains("faro-report-"), "{}", r.body);
+        assert_eq!(r.copy, "Copy Command");
     }
 
     #[test]

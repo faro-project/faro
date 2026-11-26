@@ -29,7 +29,9 @@
 //! `faro_agent::status_menu`). Clicking the line explains it and what to
 //! do. When something fixes it, an item below opens that (a System
 //! Settings pane, the web app's Computers page). Then "Open Faro" (the
-//! instance's web app), the monitoring notice, enrolling and "About Faro…"
+//! instance's web app), the monitoring notice, enrolling, "Report a
+//! problem…" (how to run `faro-service diagnose`, with a button that
+//! copies the command; it sends the service nothing) and "About Faro…"
 //! (versions, the instance, and the third-party notices in
 //! `/Library/Faro/notices`). Nothing on the menu stops monitoring, pauses
 //! it or hides anything.
@@ -70,8 +72,9 @@ use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSStatusBar, NSStatusItem,
-    NSTextField, NSVariableStatusItemLength, NSView, NSWorkspace,
+    NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSPasteboard,
+    NSPasteboardTypeString, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength,
+    NSView, NSWorkspace,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
@@ -107,6 +110,9 @@ pub const ABOUT: &str = "About Faro\u{2026}";
 /// The About window's button that shows the third-party notices.
 pub const SHOW_NOTICES: &str = "Show Third-Party Notices";
 
+/// The menu item that explains how to make a problem report.
+pub const REPORT_PROBLEM: &str = "Report a problem\u{2026}";
+
 /// The status line before the agent has told the UI anything.
 const STATUS_STARTING: &str = "Connecting to the Faro service\u{2026}";
 
@@ -115,6 +121,7 @@ struct StatusItems {
     status: Retained<NSMenuItem>,
     fix: Retained<NSMenuItem>,
     open: Retained<NSMenuItem>,
+    report: Retained<NSMenuItem>,
 }
 
 /// The agent's bundle identifier: only the real bundle registers itself
@@ -227,6 +234,12 @@ define_class!(
         }
 
         // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(reportProblem:))]
+        fn report_action(&self, _sender: Option<&AnyObject>) {
+            self.present_report();
+        }
+
+        // SAFETY: an action method: one object argument, no return value.
         #[unsafe(method(about:))]
         fn about_action(&self, _sender: Option<&AnyObject>) {
             self.present_about();
@@ -296,12 +309,19 @@ impl Delegate {
         if self.ivars().on_enroll.get().is_some() {
             menu.addItem(&targeted(ENROLL, sel!(enroll:)));
         }
+        let report = targeted(REPORT_PROBLEM, sel!(reportProblem:));
+        menu.addItem(&report);
         menu.addItem(&targeted(ABOUT, sel!(about:)));
         item.setMenu(Some(&menu));
 
         // Set once, from the one `applicationDidFinishLaunching:`.
         let _ = self.ivars().status_item.set(item);
-        let _ = self.ivars().items.set(StatusItems { status, fix, open });
+        let _ = self.ivars().items.set(StatusItems {
+            status,
+            fix,
+            open,
+            report,
+        });
         self.refresh_status();
     }
 
@@ -329,6 +349,29 @@ impl Delegate {
             None => items.fix.setHidden(true),
         }
         items.open.setHidden(s.web_app.is_none());
+        items.report.setHidden(s.report.is_none());
+    }
+
+    /// How to make a problem report, with a button that copies the
+    /// command. It explains only; nothing is sent to the service.
+    fn present_report(&self) {
+        let Some(r) = self.ivars().status.borrow().report.clone() else {
+            return;
+        };
+        let mtm = self.mtm();
+        let a = alert(mtm, &r.title, &r.body, false);
+        a.addButtonWithTitle(&NSString::from_str(&r.copy));
+        a.addButtonWithTitle(ns_string!("OK"));
+        if run_in_front(mtm, &a) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            // SAFETY: `NSPasteboardTypeString` is an immutable constant
+            // AppKit defines.
+            let kind = unsafe { NSPasteboardTypeString };
+            if !board.setString_forType(&NSString::from_str(&r.command), kind) {
+                eprintln!("faro-agent: could not copy the command");
+            }
+        }
     }
 
     /// The status line and what to do, with the fix's button if there is
@@ -523,6 +566,19 @@ pub struct StatusMenu {
     /// The About window.
     pub about_title: String,
     pub about_body: String,
+    /// "Report a problem…"; hidden without one.
+    pub report: Option<ReportProblem>,
+}
+
+/// The words of "Report a problem…": how to make a report, and the
+/// command its first button copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportProblem {
+    pub title: String,
+    pub body: String,
+    /// The button that copies `command` to the clipboard.
+    pub copy: String,
+    pub command: String,
 }
 
 impl StatusMenu {
@@ -535,6 +591,7 @@ impl StatusMenu {
             web_app: None,
             about_title: "About Faro".to_owned(),
             about_body: String::new(),
+            report: None,
         }
     }
 }

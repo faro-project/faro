@@ -90,6 +90,14 @@ fn main() {
                      (https://faro.example.org/)\n\nThird-party notices are in \
                      /Library/Faro/notices."
             .into(),
+        report: Some(faro_platform_macos::ui::ReportProblem {
+            title: "Report a problem".into(),
+            body: "Sample: open Terminal and run the command below.\n    \
+                   sudo /Library/Faro/bin/faro-service diagnose"
+                .into(),
+            copy: "Copy Command".into(),
+            command: "sudo /Library/Faro/bin/faro-service diagnose".into(),
+        }),
     });
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(1));
