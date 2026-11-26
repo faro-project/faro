@@ -4,6 +4,7 @@
 //! ```text
 //! domains-compile fetch --config crates/faro-detect/domains/sources.toml
 //! domains-compile build --config crates/faro-detect/domains/sources.toml --out target/domains/domains.bin
+//! domains-compile notice --manifest target/domains/domains.manifest.json --out domains.txt
 //! domains-compile hash  FILE...
 //! ```
 //!
@@ -17,7 +18,9 @@
 //! sources, licences, attribution, entry counts, BLAKE3 of the bundle).
 //! Clients load the two with [`faro_detect::load_domains`], which checks
 //! all of it again. The same config and inputs always give byte-identical
-//! outputs.
+//! outputs. `notice` loads a built bundle the same way and writes its
+//! attribution and licence texts as a plain-text notice (the macOS package
+//! installs it as `/Library/Faro/notices/domains.txt`).
 //!
 //! A source is in one of three states:
 //!
@@ -108,6 +111,17 @@ enum Cmd {
         #[arg(long)]
         allow_unapproved: bool,
     },
+    /// Load a built bundle as clients do (faro_detect::load_domains) and
+    /// write its plain-text notice: every source's attribution and the
+    /// licence texts.
+    Notice {
+        /// The bundle's manifest, for example target/domains/domains.manifest.json.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The notice to write.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Print the BLAKE3 of files, for pinning a new version of a source.
     Hash {
         #[arg(required = true)]
@@ -163,6 +177,18 @@ fn main() -> Result<()> {
             if m.unapproved_included {
                 eprintln!("warning: this bundle includes unapproved sources; never ship it");
             }
+            Ok(())
+        }
+        Cmd::Notice { manifest, out } => {
+            let m = notice(&manifest, &out)?;
+            eprintln!(
+                "{} loads (version {}, {} domains, blake3 {}); wrote {}",
+                manifest.display(),
+                m.version,
+                m.domains,
+                m.bundle.blake3,
+                out.display()
+            );
             Ok(())
         }
         Cmd::Hash { files } => {
@@ -637,6 +663,27 @@ fn write_outputs(compiled: &Compiled, out: &Path, manifest_path: &Path) -> Resul
     Ok(m)
 }
 
+/// `notice`: load the bundle with every client check, then write its
+/// notice. Only a bundle that would load is described.
+fn notice(manifest_path: &Path, out: &Path) -> Result<DomainsManifest> {
+    let m = faro_detect::load_domains(manifest_path)
+        .with_context(|| format!("loading {}", manifest_path.display()))?
+        .manifest;
+    let categories: BTreeSet<String> = m.sources.iter().map(|s| s.category.to_string()).collect();
+    let heading = format!(
+        "Domain list {} ({} domains: {}), distributed with Faro.",
+        m.version,
+        m.domains,
+        categories.into_iter().collect::<Vec<_>>().join(", ")
+    );
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(out, m.notice_text(&heading))
+        .with_context(|| format!("writing {}", out.display()))?;
+    Ok(m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,6 +980,36 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Converted"));
+    }
+
+    #[test]
+    fn notices_describe_bundles_that_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("domains.bin");
+        let manifest_path = out.with_extension("manifest.json");
+        let config = fixtures().join("sources.toml");
+        let none = fixtures().join("no-such-dir");
+        build(&config, &none, &out, &manifest_path, false).unwrap();
+        let path = dir.path().join("notices/domains.txt");
+        notice(&manifest_path, &path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(
+            "Domain list 1.0.0 (4 domains: adult, gambling), distributed with Faro.\n"
+        ));
+        assert!(text.contains(MANIFEST_NOTICE));
+        assert!(text.contains("Copyright (c) 2026 Fixture Author"));
+        assert!(text.contains("Author:  Fixture Collective"));
+        assert!(text.contains("--- MIT ---\nPermission is hereby granted"));
+
+        // Nothing is written for a bundle a client would refuse.
+        build(&config, &none, &out, &manifest_path, true).unwrap();
+        let refused = dir.path().join("refused.txt");
+        assert!(notice(&manifest_path, &refused).is_err());
+        assert!(!refused.exists());
+        build(&config, &none, &out, &manifest_path, false).unwrap();
+        fs::write(&out, b"changed").unwrap();
+        assert!(notice(&manifest_path, &refused).is_err());
+        assert!(!refused.exists());
     }
 
     #[test]

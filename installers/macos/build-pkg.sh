@@ -28,6 +28,14 @@
 # never taken from the repository. Both need network access the first
 # time, and CPython 3.9 (/usr/bin/python3 from the Command Line Tools).
 #
+# The domain category list (adult and gambling sites) is compiled by the
+# domains-compile example from the approved sources in
+# crates/faro-detect/domains/sources.toml. Each is downloaded at a fixed
+# commit into target/domains/sources and used only if its BLAKE3 matches
+# the pin there; refused and pending sources are never fetched. The same
+# pins always give the same bytes: the release checks that the package's
+# copy is the one it publishes on the update channel.
+#
 # The Rust crates' licences come from Cargo.lock through
 # release/notices/third-party.sh, which needs cargo-about at its pinned
 # version (the script prints the `cargo install` line if it is missing).
@@ -37,8 +45,10 @@
 #   /Library/Faro/bin/faro-uninstall            removes Faro, telling allies first
 #   /Library/Faro/Faro Agent.app                the session agent (org.faro.agent)
 #   /Library/Faro/models/opennsfw/              the image model and its manifest
+#   /Library/Faro/domains/                      the domain list and its manifest
 #   /Library/Faro/notices/                      licences and attribution of the model,
-#                                               of ONNX Runtime, and of the Rust crates
+#                                               of the domain list (domains.txt), of
+#                                               ONNX Runtime, and of the Rust crates
 #                                               (third-party.txt)
 #   /Library/Faro/service.toml.default          copied to the state dir if absent
 #   /Library/Faro/update-root.json              the project's update root of trust
@@ -143,6 +153,18 @@ echo "==> the image model"
 models="$work/models"
 "$repo/crates/faro-detect/models/opennsfw/build.sh" "$models"
 
+echo "==> the domain list"
+# For this Mac, not the package's targets: it only writes files.
+domains="$work/domains"
+domains_compile=(cargo run --manifest-path "$repo/Cargo.toml" --locked --quiet
+    -p faro-detect --example domains-compile --)
+domains_config="$repo/crates/faro-detect/domains/sources.toml"
+"${domains_compile[@]}" fetch --config "$domains_config" --sources-dir "$repo/target/domains/sources"
+"${domains_compile[@]}" build --config "$domains_config" --sources-dir "$repo/target/domains/sources" \
+    --out "$domains/domains.bin"
+# Loads it as clients do (faro_detect::load_domains) before describing it.
+"${domains_compile[@]}" notice --manifest "$domains/domains.manifest.json" --out "$domains/NOTICE.txt"
+
 # ONNX Runtime, checked here and linked statically. ort-sys's own download,
 # a system copy found by pkg-config and dynamic linking are all ruled out,
 # and its pins must be the ones ort-sys was written for.
@@ -188,6 +210,11 @@ install -m 644 "$models/manifest.json" "$models/opennsfw-int8.onnx" "$root/Libra
 install -m 644 "$models/NOTICE.txt" "$root/Library/Faro/notices/opennsfw.txt"
 install -m 644 "$ort/notices/onnxruntime-LICENSE.txt" "$ort/notices/onnxruntime-ThirdPartyNotices.txt" \
     "$root/Library/Faro/notices/"
+# The domain list, where pkg_layout::DOMAINS_MANIFEST says, and its
+# sources' attribution and licence texts. The manifest carries them too.
+install -d -m 755 "$root/Library/Faro/domains"
+install -m 644 "$domains/domains.manifest.json" "$domains/domains.bin" "$root/Library/Faro/domains/"
+install -m 644 "$domains/NOTICE.txt" "$root/Library/Faro/notices/domains.txt"
 # The Rust crates faro-service and faro-agent are built from.
 install -m 644 "$work/notices/third-party.txt" "$root/Library/Faro/notices/third-party.txt"
 if [[ -n "${FARO_UPDATE_ROOT:-}" ]]; then
@@ -197,12 +224,14 @@ fi
 
 # The service loads the staged model as it will once installed: its
 # licence, attribution and digest checks, then ONNX Runtime on a few
-# synthetic frames. Only this Mac's architecture can run here; check-pkg.sh
+# synthetic frames. The domain list goes through the same checks. Only this Mac's architecture can run here; check-pkg.sh
 # on an Intel Mac runs the other.
 host_arch="$(uname -m)"
 if lipo -archs "$bin/faro-service" | tr ' ' '\n' | grep -qx "$host_arch"; then
     echo "==> checking the model with the $host_arch faro-service"
     "$bin/faro-service" model-check --manifest "$root/Library/Faro/models/opennsfw/manifest.json" --runs 3
+    echo "==> checking the domain list with the $host_arch faro-service"
+    "$bin/faro-service" domains-check --manifest "$root/Library/Faro/domains/domains.manifest.json"
 fi
 
 app="$root/Library/Faro/Faro Agent.app"

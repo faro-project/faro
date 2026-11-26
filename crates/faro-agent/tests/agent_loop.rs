@@ -489,6 +489,23 @@ async fn browser_tab_follows_the_foreground() {
     .await;
 }
 
+/// A window hidden from capture goes to the service and the person at the
+/// screen is told which app it is.
+#[tokio::test]
+async fn hidden_window_is_forwarded_and_shown() {
+    let (h, server) = Harness::start(Script::new()).await;
+    let (mut conn, _) = accept(&server).await;
+    let signal = TamperSignal::WindowHiddenFromCapture {
+        app: "Viewer".into(),
+    };
+    h.script.with(|s| s.tamper.push(signal.clone()));
+    recv_until(&mut conn, |m| *m == AgentMsg::Tamper(signal.clone())).await;
+    let notices = h.notices.lock().unwrap().clone();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0], faro_agent::window_hidden_notice("Viewer"));
+    assert!(notices[0].1.contains("\u{201c}Viewer\u{201d}"));
+}
+
 #[tokio::test]
 async fn show_notice_reaches_the_sink() {
     let (h, server) = Harness::start(Script::new()).await;

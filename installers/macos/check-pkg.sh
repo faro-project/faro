@@ -19,6 +19,13 @@
 # its log file, and neither launchd job may send output to a file. A
 # release package's service must ignore [dev_thresholds] in service.toml.
 #
+# The domain list must be there with its manifest, at the bundle_version
+# of crates/faro-detect/domains/sources.toml and with no refused source,
+# and notices/domains.txt with every source's attribution and the licence
+# texts. The slice for this Mac's architecture must load it as the service
+# does (faro-service domains-check: faro_detect::load_domains), with adult
+# and gambling sources, each of them named in the notice.
+#
 #   installers/macos/check-pkg.sh target/pkg/Faro-<version>[-dev].pkg
 #   installers/macos/check-pkg.sh --arch arm64 target/pkg/Faro-<version>-dev.pkg
 set -euo pipefail
@@ -43,6 +50,12 @@ min_os=13.0
 # packaged int8 model must agree within its parity tolerance.
 model_reference=("solid-black 0.066799" "solid-white 0.014106" "solid-grey 0.197584")
 MODEL_TOLERANCE=0.05
+# What the domain list was compiled from: its version and the sources the
+# maintainer turned down (`refused = ...`), which must never ship.
+domains_config="$(cd "$(dirname "$0")/../.." && pwd)/crates/faro-detect/domains/sources.toml"
+domains_version="$(sed -n 's/^bundle_version = "\(.*\)"$/\1/p' "$domains_config")"
+[[ -n "$domains_version" ]] || { echo "check-pkg: cannot read bundle_version from $domains_config" >&2; exit 1; }
+refused_sources="$(awk -F'"' '/^\[\[source\]\]/ { name = "" } /^name = / { name = $2 } /^refused = / && name != "" { print name }' "$domains_config")"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -128,6 +141,10 @@ expect "Library/Faro/notices/opennsfw.txt" 100644
 expect "Library/Faro/notices/onnxruntime-LICENSE.txt" 100644
 expect "Library/Faro/notices/onnxruntime-ThirdPartyNotices.txt" 100644
 expect "Library/Faro/notices/third-party.txt" 100644
+domains_dir="Library/Faro/domains"
+expect "$domains_dir/domains.manifest.json" 100644
+expect "$domains_dir/domains.bin" 100644
+expect "Library/Faro/notices/domains.txt" 100644
 # What the licences ask to travel with the binaries.
 notices="$work/payload/Library/Faro/notices"
 has() { grep -qF -- "$2" "$notices/$1" || fail "notices/$1 lacks \"$2\""; }
@@ -147,6 +164,25 @@ has third-party.txt "  ort "
 has third-party.txt "  ed25519-dalek "
 has third-party.txt "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
 has third-party.txt "Permission is hereby granted, free of charge"
+# The domain list's sources (MIT and CC BY 4.0): their attribution, MIT's
+# text and the CC BY 4.0 link. Refused sources are in neither file.
+domains_manifest="$work/payload/$domains_dir/domains.manifest.json"
+got="$(plutil -extract version raw "$domains_manifest")" || fail "cannot read the domain list's manifest"
+[[ "$got" == "$domains_version" ]] || fail "the domain list is version $got (sources.toml says $domains_version)"
+[[ "$(plutil -extract unapproved_included raw "$domains_manifest")" == false ]] \
+    || fail "the domain list includes unapproved sources"
+has domains.txt "Domain list $domains_version ("
+has domains.txt "Author:  "
+has domains.txt "--- MIT ---"
+has domains.txt "Permission is hereby granted, free of charge"
+has domains.txt "https://creativecommons.org/licenses/by/4.0/"
+for name in $refused_sources; do
+    for f in "$domains_manifest" "$notices/domains.txt"; do
+        if grep -qF -- "$name" "$f"; then
+            fail "$(basename "$f") names the refused source $name"
+        fi
+    done
+done
 # The update root of trust: required in a release package (without it the
 # service never updates), optional in a development one.
 update_root="$work/payload/Library/Faro/update-root.json"
@@ -233,6 +269,19 @@ if [[ ",$want_archs," == *",$host_arch,"* ]]; then
         awk -v a="$got" -v b="$want" -v t="$MODEL_TOLERANCE" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }' \
             || fail "$frame: the packaged model gives p(nsfw) $got, the original $want (tolerance $MODEL_TOLERANCE)"
     done
+    # The domain list, as the service loads it (faro_detect::load_domains).
+    check="$("$service" domains-check --manifest "$domains_manifest")" \
+        || fail "faro-service ($host_arch) cannot load the packaged domain list"
+    echo "$check"
+    got="$(echo "$check" | awk '$1 == "domains" { print $2 }')"
+    [[ "$got" == "$domains_version" ]] || fail "domains-check loaded version \"$got\" (want $domains_version)"
+    for category in adult gambling; do
+        echo "$check" | awk -v c="$category" '$1 == "source" && $3 == c { found = 1 } END { exit !found }' \
+            || fail "the packaged domain list has no $category source"
+    done
+    for name in $(echo "$check" | awk '$1 == "source" { print $2 }'); do
+        grep -q "^$name (" "$notices/domains.txt" || fail "notices/domains.txt does not attribute $name"
+    done
     # Only a development build may lower the detection thresholds
     # (crates/faro-service/src/thresholds.rs): a release package's service
     # must ignore [dev_thresholds], a --dev one must apply it.
@@ -245,7 +294,7 @@ if [[ ",$want_archs," == *",$host_arch,"* ]]; then
         [[ "$thresholds" == *ignored* ]] || fail "the release service does not ignore [dev_thresholds]: $thresholds"
     fi
 else
-    echo "check-pkg: no $host_arch slice to run; the model check is skipped"
+    echo "check-pkg: no $host_arch slice to run; the model, domain list and threshold checks are skipped"
 fi
 
 info="$work/payload/Library/Faro/Faro Agent.app/Contents/Info.plist"

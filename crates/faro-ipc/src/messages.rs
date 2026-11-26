@@ -513,6 +513,9 @@ mod compat {
         UnmonitoredUserSession {
             user: String,
         },
+        WindowHiddenFromCapture {
+            app: String,
+        },
     }
 
     impl From<&TamperSignal> for WireTamperSignal {
@@ -543,6 +546,7 @@ mod compat {
                 T::VirtualMachine => W::VirtualMachine,
                 T::RemoteDesktop => W::RemoteDesktop,
                 T::UnmonitoredUserSession { user } => W::UnmonitoredUserSession { user },
+                T::WindowHiddenFromCapture { app } => W::WindowHiddenFromCapture { app },
             }
         }
     }
@@ -578,6 +582,7 @@ mod compat {
                 W::VirtualMachine => T::VirtualMachine,
                 W::RemoteDesktop => T::RemoteDesktop,
                 W::UnmonitoredUserSession { user } => T::UnmonitoredUserSession { user },
+                W::WindowHiddenFromCapture { app } => T::WindowHiddenFromCapture { app },
             }
         }
     }

@@ -289,6 +289,10 @@ const RETENTION_NAME: Record<string, string> = {
 export const SCREEN_RECORDING_FIX =
 	'To fix it, the member opens System Settings → Privacy & Security → Screen & System Audio Recording on that computer and turns on Faro Agent. If it is already on (after Faro was reinstalled, for example), they remove it with the − button and add it again.';
 
+/** Why an app might hide a window, so allies can judge a hidden-window alert. */
+export const HIDDEN_WINDOW_CONTEXT =
+	'Screenshots and screen recordings show whatever is behind such a window. Some apps do this on purpose, such as password managers, video players with copy protection and screen-sharing tools, but any app can, so it is also a way to get around Faro. The member was told on the computer too.';
+
 function screenRecordingOff(s: TamperSignal): boolean {
 	return s.signal === 'permission_revoked' && s.permission === 'screen_recording';
 }
@@ -300,6 +304,8 @@ function screenRecordingOff(s: TamperSignal): boolean {
 export function bodyTitle(b: EventBody, device: string): string | undefined {
 	if (b.type === 'tamper' && screenRecordingOff(b.signal))
 		return `Screen Recording is off on ${device}`;
+	if (b.type === 'tamper' && b.signal.signal === 'window_hidden_from_capture')
+		return `A window was hidden from Faro on ${device}`;
 	return undefined;
 }
 
@@ -323,6 +329,8 @@ export function describeTamper(s: TamperSignal): string {
 			return `Faro couldn't see the screen ${s.consecutive_failures} times in a row.`;
 		case 'unmonitored_user_session':
 			return `Someone used the account “${s.user}” while Faro wasn't running in it.`;
+		case 'window_hidden_from_capture':
+			return `“${s.app}” kept a window out of Faro's screen captures, so Faro couldn't see what it showed.`;
 		case 'browser_without_extension':
 			return `${s.browser} was used without the Faro extension.`;
 		case 'vpn_active':
@@ -366,7 +374,8 @@ export function describeBody(b: EventBody): string[] {
 			return [
 				describeTamper(b.signal),
 				...(b.account ? [`In the account “${b.account}”.`] : []),
-				...(screenRecordingOff(b.signal) ? [SCREEN_RECORDING_FIX] : [])
+				...(screenRecordingOff(b.signal) ? [SCREEN_RECORDING_FIX] : []),
+				...(b.signal.signal === 'window_hidden_from_capture' ? [HIDDEN_WINDOW_CONTEXT] : [])
 			];
 		case 'settings_change':
 			return b.changes.map(

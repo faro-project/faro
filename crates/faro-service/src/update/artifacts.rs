@@ -1,7 +1,7 @@
 //! Models and blocklists from the signed update channel (ARCHITECTURE.md
 //! §3.8, PROTOCOL.md §8.2).
 //!
-//! The package ships an image model (and may ship a domain bundle). The
+//! The package ships an image model and a domain bundle. The
 //! update channel can bring newer ones without a client release. They use
 //! the same mirror and the same trust state as client updates
 //! ([`ClientUpdater::check_artifacts`]), and each one is a data bundle
@@ -78,6 +78,9 @@ pub const MODEL_UPDATE_CHANGED: &str = "image model update (changed)";
 pub const BLOCKLIST_UPDATE_CHANGED: &str = "domain list update (changed)";
 /// A packaged domain bundle that is there but doesn't load.
 pub const BLOCKLIST_CHANGED: &str = "domain list (changed)";
+/// The packaged service's domain bundle is not there: the package ships
+/// one, so it was removed.
+pub const BLOCKLIST_MISSING: &str = "domain list (missing)";
 
 const MODEL_MANIFEST_FILE: &str = "manifest.json";
 const DOMAINS_MANIFEST_FILE: &str = "domains.manifest.json";
@@ -186,16 +189,28 @@ pub struct ArtifactConfig {
     pub runtime: Option<Arc<dyn ModelRuntime>>,
 }
 
+/// Whether this process is the packaged service, run from its installed
+/// location.
+pub fn is_packaged_service() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+            .is_some_and(|p| p == Path::new(faro_platform_macos::pkg_layout::SERVICE_PROGRAM))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// The packaged service writes notices next to the packaged ones; any other
 /// build into `notices/` in its state directory.
 pub fn default_notices_dir(state_dir: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        let packaged = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.canonicalize().ok())
-            .is_some_and(|p| p == Path::new(faro_platform_macos::pkg_layout::SERVICE_PROGRAM));
-        if packaged {
+        if is_packaged_service() {
             return PathBuf::from(faro_platform_macos::pkg_layout::NOTICES_DIR);
         }
     }
@@ -226,8 +241,12 @@ pub struct PackagedDomains {
 }
 
 /// Load the packaged domain bundle at `path`, if there is one. One that is
-/// there but doesn't load is reported as tamper.
-pub fn load_packaged_domains(path: &Path) -> (Option<PackagedDomains>, Option<TamperSignal>) {
+/// there but doesn't load is reported as tamper, and so is a missing one
+/// when it is `required` (the packaged service: the package ships one).
+pub fn load_packaged_domains(
+    path: &Path,
+    required: bool,
+) -> (Option<PackagedDomains>, Option<TamperSignal>) {
     match load_domains(path) {
         Ok(l) => {
             tracing::info!(version = %l.manifest.version, domains = l.categorizer.len(), "domain list loaded");
@@ -241,13 +260,42 @@ pub fn load_packaged_domains(path: &Path) -> (Option<PackagedDomains>, Option<Ta
             )
         }
         Err(DetectError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            (None, None)
+            if required {
+                tracing::error!(path = %path.display(), "the packaged domain list is missing");
+                (None, Some(integrity(BLOCKLIST_MISSING)))
+            } else {
+                (None, None)
+            }
         }
         Err(e) => {
             tracing::error!(error = %e, path = %path.display(), "the packaged domain list does not load");
             (None, Some(integrity(BLOCKLIST_CHANGED)))
         }
     }
+}
+
+/// `faro-service domains-check`: load a domain bundle exactly as `run`
+/// loads the packaged one ([`load_domains`]: the manifest, the licences and
+/// attribution, the bundle's length, BLAKE3 and domain count). Prints the
+/// bundle, then one line per source.
+pub fn check_domains(manifest: &Path, out: &mut dyn Write) -> Result<(), DetectError> {
+    let l = load_domains(manifest)?;
+    let m = &l.manifest;
+    let _ = writeln!(
+        out,
+        "domains      {} {} domains, blake3 {} verified",
+        m.version,
+        l.categorizer.len(),
+        m.bundle.blake3
+    );
+    for s in &m.sources {
+        let _ = writeln!(
+            out,
+            "source       {} {} {} {} domains",
+            s.name, s.category, s.license, s.domains
+        );
+    }
+    Ok(())
 }
 
 fn integrity(component: &str) -> TamperSignal {
@@ -698,53 +746,32 @@ fn remove_other_dirs(store: &Path, keep: Option<&str>) {
 /// changed, and the licence texts. Only manifest text, as the packaged
 /// notices are.
 pub fn notice_text(kind: TargetKind, manifest: &[u8]) -> Option<String> {
-    fn attribution(out: &mut String, a: &faro_detect::Attribution) {
-        out.push_str(&format!("Author:  {}\n", a.author));
-        for c in &a.copyright {
-            out.push_str(&format!("         {c}\n"));
-        }
-        out.push_str(&format!(
-            "Source:  {}\nLicence: {}\nChanges: {}\n",
-            a.source_url, a.license_url, a.changes
-        ));
-    }
-    let mut out = String::new();
     match kind {
         TargetKind::Model => {
             let m: ModelInfo = serde_json::from_slice(manifest).ok()?;
-            out.push_str(&format!(
+            let mut out = format!(
                 "Image model {} {}, installed through Faro's update channel.\n\
                  Used under the {} licence.\n\n",
                 m.name, m.version, m.license
-            ));
+            );
             if let Some(a) = &m.attribution {
-                attribution(&mut out, a);
+                out.push_str(&a.notice_lines());
             }
             if let Some(t) = &m.license_text {
                 out.push('\n');
                 out.push_str(t.trim_end());
                 out.push('\n');
             }
+            Some(out)
         }
         _ => {
             let m: DomainsManifest = serde_json::from_slice(manifest).ok()?;
-            out.push_str(&format!(
-                "Domain list {}, installed through Faro's update channel.\n{}\n",
-                m.version, m.notice
-            ));
-            for s in &m.sources {
-                out.push_str(&format!("\n{} ({}, {})\n", s.name, s.category, s.license));
-                out.push_str(&format!("From:    {}\n", s.origin));
-                if let Some(a) = &s.attribution {
-                    attribution(&mut out, a);
-                }
-            }
-            for (id, text) in &m.license_texts {
-                out.push_str(&format!("\n--- {id} ---\n{}\n", text.trim_end()));
-            }
+            Some(m.notice_text(&format!(
+                "Domain list {}, installed through Faro's update channel.",
+                m.version
+            )))
         }
     }
-    Some(out)
 }
 
 fn write_notice_from(notices: &Path, kind: TargetKind, dir: &Path) -> std::io::Result<()> {
@@ -935,6 +962,104 @@ impl ClientUpdater {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faro_detect::{
+        Attribution, Category, DomainCategorizerBuilder, DomainSource, DomainsBundleInfo,
+        DOMAINS_MANIFEST_FORMAT,
+    };
+
+    /// A domain bundle and its manifest in `dir`; returns the manifest.
+    fn domains(dir: &Path) -> PathBuf {
+        let mut b = DomainCategorizerBuilder::new();
+        b.add_domain("bet.example", Category::Gambling).unwrap();
+        let bytes = b.build().unwrap().to_bytes();
+        std::fs::write(dir.join("domains.bin"), &bytes).unwrap();
+        let m = DomainsManifest {
+            format: DOMAINS_MANIFEST_FORMAT.into(),
+            notice: "Test.".into(),
+            version: "1.2.3".into(),
+            bundle: DomainsBundleInfo {
+                file: "domains.bin".into(),
+                bytes: bytes.len() as u64,
+                blake3: blake3::hash(&bytes).to_hex().to_string(),
+            },
+            domains: 1,
+            unapproved_included: false,
+            sources: vec![DomainSource {
+                name: "bets".into(),
+                category: Category::Gambling,
+                format: "domains".into(),
+                license: "CC-BY-4.0".into(),
+                approved: true,
+                origin: "bets.txt".into(),
+                homepage: None,
+                blake3: "0".repeat(64),
+                attribution: Some(Attribution {
+                    author: "B".into(),
+                    copyright: vec![],
+                    source_url: "https://example.org/b".into(),
+                    license_url: "https://creativecommons.org/licenses/by/4.0/".into(),
+                    changes: "Compiled.".into(),
+                }),
+                lines: 1,
+                domains: 1,
+                skipped: 0,
+            }],
+            license_texts: BTreeMap::new(),
+        };
+        let p = dir.join(DOMAINS_MANIFEST_FILE);
+        std::fs::write(&p, serde_json::to_vec(&m).unwrap()).unwrap();
+        p
+    }
+
+    fn component(t: Option<TamperSignal>) -> Option<String> {
+        t.map(|t| match t {
+            TamperSignal::IntegrityFailure { component } => component,
+            other => panic!("{other:?}"),
+        })
+    }
+
+    #[test]
+    fn the_packaged_domain_list_loads_or_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = domains(dir.path());
+        for required in [false, true] {
+            let (d, t) = load_packaged_domains(&p, required);
+            let d = d.expect("loads");
+            assert_eq!(d.version, Some(Version::new(1, 2, 3)));
+            assert_eq!(d.categorizer.len(), 1);
+            assert!(t.is_none());
+        }
+        // Missing: tamper only for the packaged service, which ships one.
+        let gone = dir.path().join("gone/domains.manifest.json");
+        let (d, t) = load_packaged_domains(&gone, false);
+        assert!(d.is_none() && t.is_none());
+        let (d, t) = load_packaged_domains(&gone, true);
+        assert!(d.is_none());
+        assert_eq!(component(t).as_deref(), Some(BLOCKLIST_MISSING));
+        // There but altered: always tamper.
+        std::fs::write(dir.path().join("domains.bin"), b"changed").unwrap();
+        for required in [false, true] {
+            let (d, t) = load_packaged_domains(&p, required);
+            assert!(d.is_none());
+            assert_eq!(component(t).as_deref(), Some(BLOCKLIST_CHANGED));
+        }
+    }
+
+    #[test]
+    fn domains_check_prints_what_it_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = domains(dir.path());
+        let mut out = Vec::new();
+        check_domains(&p, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(lines[0].starts_with("domains      1.2.3 1 domains, blake3 "));
+        assert!(lines[0].ends_with(" verified"));
+        assert_eq!(lines[1], "source       bets gambling CC-BY-4.0 1 domains");
+        std::fs::write(dir.path().join("domains.bin"), b"changed").unwrap();
+        assert!(check_domains(&p, &mut Vec::new()).is_err());
+    }
 
     #[test]
     fn payload_names_must_be_plain() {

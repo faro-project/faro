@@ -31,7 +31,7 @@ use faro_ipc::{
     hello, AgentConnection, AgentHello, AgentMsg, IpcClient, IpcError, PeerVerifier, ServiceMsg,
     ShutdownReason, WirePermissionState,
 };
-use faro_platform::{AgentPlatform, AppInfo, BrowserContext, PermissionState};
+use faro_platform::{AgentPlatform, AppInfo, BrowserContext, PermissionState, TamperSignal};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -365,6 +365,11 @@ impl Runtime {
         }
         for t in obs.tamper.drain(..) {
             tracing::info!(signal = ?t, "tamper signal observed");
+            if let TamperSignal::WindowHiddenFromCapture { app } = &t {
+                // The person at the screen hears it too (§3.7, §12).
+                let (title, body) = crate::notice::window_hidden_notice(app);
+                self.notices.show(&title, &body);
+            }
             self.pending.push(Signal::Tamper(t));
         }
     }

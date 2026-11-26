@@ -595,6 +595,7 @@ export type TamperSignal =
 	| { signal: 'wayland_token_lost' }
 	| { signal: 'capture_failing'; consecutive_failures: number }
 	| { signal: 'unmonitored_user_session'; user: string }
+	| { signal: 'window_hidden_from_capture'; app: string }
 	| { signal: 'browser_without_extension'; browser: string }
 	| { signal: 'vpn_active' }
 	| { signal: 'virtual_machine' }

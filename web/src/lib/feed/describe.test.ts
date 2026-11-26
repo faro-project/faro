@@ -2,7 +2,12 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { bodyTitle, describeBody, SCREEN_RECORDING_FIX } from './describe.ts';
+import {
+	bodyTitle,
+	describeBody,
+	HIDDEN_WINDOW_CONTEXT,
+	SCREEN_RECORDING_FIX
+} from './describe.ts';
 import type { EventBody } from '../types.ts';
 
 const tamper = (signal: Extract<EventBody, { type: 'tamper' }>['signal']): EventBody => ({
@@ -39,4 +44,13 @@ test('other tamper signals keep the generic title', () => {
 	const ax = tamper({ signal: 'permission_revoked', permission: 'accessibility' });
 	assert.equal(bodyTitle(ax, 'Laptop'), undefined);
 	assert.deepEqual(describeBody(ax), ['A permission Faro needs was turned off (accessibility).']);
+});
+
+test('a window hidden from capture names the app', () => {
+	const b = tamper({ signal: 'window_hidden_from_capture', app: 'Viewer' });
+	assert.equal(bodyTitle(b, 'Laptop'), 'A window was hidden from Faro on Laptop');
+	assert.deepEqual(describeBody(b), [
+		"“Viewer” kept a window out of Faro's screen captures, so Faro couldn't see what it showed.",
+		HIDDEN_WINDOW_CONTEXT
+	]);
 });

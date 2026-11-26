@@ -44,6 +44,18 @@ pub(crate) fn get_i64(dict: &CFDictionary<CFString, CFType>, key: &str) -> Optio
     value(dict, key)?.downcast_ref::<CFNumber>()?.as_i64()
 }
 
+pub(crate) fn get_f64(dict: &CFDictionary<CFString, CFType>, key: &str) -> Option<f64> {
+    value(dict, key)?.downcast_ref::<CFNumber>()?.as_f64()
+}
+
+/// Read a nested dictionary value.
+pub(crate) fn get_dict(
+    dict: &CFDictionary<CFString, CFType>,
+    key: &str,
+) -> Option<objc2_core_foundation::CFRetained<CFDictionary>> {
+    value(dict, key)?.downcast::<CFDictionary>().ok()
+}
+
 pub(crate) fn get_string(dict: &CFDictionary<CFString, CFType>, key: &str) -> Option<String> {
     Some(value(dict, key)?.downcast_ref::<CFString>()?.to_string())
 }
@@ -91,6 +103,7 @@ mod tests {
         assert_eq!(get_bool(&d, "flag"), Some(true));
         assert_eq!(get_bool(&d, "numflag"), Some(false));
         assert_eq!(get_i64(&d, "uid"), Some(501));
+        assert_eq!(get_f64(&d, "uid"), Some(501.0));
         assert_eq!(get_string(&d, "name").as_deref(), Some("isaiah"));
     }
 
@@ -102,6 +115,8 @@ mod tests {
         assert_eq!(get_bool(&d, "name"), None);
         assert_eq!(get_bool(&d, "missing"), None);
         assert!(get_dict_array(&d, "uid").is_none());
+        assert_eq!(get_f64(&d, "name"), None);
+        assert!(get_dict(&d, "uid").is_none());
     }
 
     #[test]
