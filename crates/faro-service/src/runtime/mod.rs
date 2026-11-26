@@ -328,7 +328,7 @@ impl ServiceBuilder {
                 None,
             ),
             None => match artifacts::packaged_domains_manifest() {
-                Some(p) => artifacts::load_packaged_domains(&p),
+                Some(p) => artifacts::load_packaged_domains(&p, artifacts::is_packaged_service()),
                 None => (None, None),
             },
         };

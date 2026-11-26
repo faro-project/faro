@@ -6,6 +6,7 @@
 //! faro-service [--config FILE] [--state-dir DIR] status
 //! faro-service [--config FILE] [--state-dir DIR] goodbye [--reason uninstalled|account-deleted | --moved-to HOST] [--within SECS]
 //! faro-service model-check [--manifest PATH] [--runs N]
+//! faro-service domains-check [--manifest PATH]
 //! ```
 //!
 //! `goodbye` exits 0 once allies have been told (or there was nobody to
@@ -135,6 +136,13 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         runs: usize,
     },
+    /// Load the domain category list as `run` does (licence, attribution
+    /// and digest checks) and print its version and sources. Reads no state.
+    DomainsCheck {
+        /// Domain list manifest (default: the packaged one).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -174,6 +182,11 @@ enum CliError {
     Model {
         path: PathBuf,
         source: crate::model::OpenError,
+    },
+    #[error("domain list {}: {source}", path.display())]
+    Domains {
+        path: PathBuf,
+        source: faro_detect::DetectError,
     },
 }
 
@@ -233,6 +246,9 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
     // Needs no configuration or state.
     if let Command::ModelCheck { manifest, runs } = &cli.command {
         return cmd_model_check(manifest.clone(), *runs);
+    }
+    if let Command::DomainsCheck { manifest } = &cli.command {
+        return cmd_domains_check(manifest.clone());
     }
     let config = load_config(&cli)?;
     match cli.command {
@@ -312,8 +328,25 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
             opts.deliver_within = Duration::from_secs(within);
             cmd_goodbye(&config, opts).await
         }
-        Command::ModelCheck { .. } => unreachable!("handled above"),
+        Command::ModelCheck { .. } | Command::DomainsCheck { .. } => {
+            unreachable!("handled above")
+        }
     }
+}
+
+fn cmd_domains_check(manifest: Option<PathBuf>) -> Result<(), CliError> {
+    use crate::update::artifacts;
+    let manifest = manifest
+        .or_else(artifacts::packaged_domains_manifest)
+        .ok_or_else(|| {
+            CliError::Usage("no packaged domain list on this platform; give --manifest".into())
+        })?;
+    artifacts::check_domains(&manifest, &mut std::io::stdout().lock()).map_err(|source| {
+        CliError::Domains {
+            path: manifest,
+            source,
+        }
+    })
 }
 
 fn cmd_model_check(manifest: Option<PathBuf>, runs: usize) -> Result<(), CliError> {
