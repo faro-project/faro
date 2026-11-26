@@ -305,13 +305,14 @@ pub mod pkg_layout {
     /// The image model's manifest (`faro_detect::ModelInfo`); the model
     /// file sits next to it. Built by `crates/faro-detect/models/opennsfw`.
     pub const MODEL_MANIFEST: &str = "/Library/Faro/models/opennsfw/manifest.json";
-    /// Where a packaged domain bundle's manifest goes
-    /// (`faro_detect::DomainsManifest`), the bundle next to it. The package
-    /// doesn't ship one yet: the service loads it if it is there, and
-    /// otherwise uses the one from the update channel, if any.
+    /// The domain category list's manifest (`faro_detect::DomainsManifest`);
+    /// the bundle (`domains.bin`) sits next to it. Compiled by
+    /// `domains-compile` from `crates/faro-detect/domains/sources.toml`. A
+    /// newer list from the update channel takes over; this one stays as the
+    /// fallback.
     pub const DOMAINS_MANIFEST: &str = "/Library/Faro/domains/domains.manifest.json";
     /// Licences and attribution for the third-party parts of the package
-    /// (the image model, ONNX Runtime).
+    /// (the image model, the domain list, ONNX Runtime, the Rust crates).
     pub const NOTICES_DIR: &str = "/Library/Faro/notices";
 
     // ---- logs ---------------------------------------------------------
