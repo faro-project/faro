@@ -68,17 +68,17 @@ use std::cell::{Cell, OnceCell, RefCell};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSPasteboard,
-    NSPasteboardTypeString, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength,
-    NSView, NSWorkspace,
+    NSBitmapImageRep, NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSModalResponse,
+    NSPasteboard, NSPasteboardTypeString, NSStatusBar, NSStatusItem, NSTextField,
+    NSVariableStatusItemLength, NSView, NSWorkspace,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSURL,
+    ns_string, NSArray, NSBundle, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString, NSURL,
 };
 
 pub use objc2::MainThreadMarker;
@@ -92,8 +92,21 @@ pub const DEFAULT_NOTICE_BODY: &str = "Every account on this computer is monitor
      Screenshots are blurred on this computer and shared, encrypted, only with the member \
      and their allies. Switching to or creating another account does not turn monitoring off.";
 
-/// The SF Symbol in the menu bar.
-const ICON_SYMBOL: &str = "eye";
+/// The Faro mark in the menu bar, 18 pt square, at 1x and 2x: black on
+/// transparent, drawn as a template image. Built from the brand SVG by
+/// assets/brand/make-tray-icons.swift.
+const MENU_BAR_ICON: [(&[u8], f64); 2] = [
+    (
+        include_bytes!("../../../assets/brand/tray/faro-menubar.png"),
+        18.0,
+    ),
+    (
+        include_bytes!("../../../assets/brand/tray/faro-menubar@2x.png"),
+        36.0,
+    ),
+];
+/// The menu-bar icon's size in points.
+const MENU_BAR_ICON_POINTS: f64 = 18.0;
 
 /// What the menu shows for "Show the monitoring notice…".
 const SHOW_NOTICE: &str = "Show the monitoring notice\u{2026}";
@@ -269,15 +282,8 @@ impl Delegate {
         let monitored = NSString::from_str(MONITORED);
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
         if let Some(button) = item.button(mtm) {
-            let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                &NSString::from_str(ICON_SYMBOL),
-                Some(&monitored),
-            );
-            match icon {
-                Some(icon) => {
-                    icon.setTemplate(true);
-                    button.setImage(Some(&icon));
-                }
+            match menu_bar_icon(&monitored) {
+                Some(icon) => button.setImage(Some(&icon)),
                 None => button.setTitle(ns_string!("Faro")),
             }
             button.setToolTip(Some(&monitored));
@@ -461,6 +467,25 @@ fn open_url(url: &str) {
     if !opened {
         eprintln!("faro-agent: could not open {url}");
     }
+}
+
+/// The menu-bar icon: the embedded PNGs as one template image, so macOS
+/// draws it in the menu bar's colour and picks the 1x or 2x pixels. `None`
+/// if a PNG doesn't decode (the caller then shows "Faro" as text).
+fn menu_bar_icon(description: &NSString) -> Option<Retained<NSImage>> {
+    let size = NSSize::new(MENU_BAR_ICON_POINTS, MENU_BAR_ICON_POINTS);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    for (png, pixels) in MENU_BAR_ICON {
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png))?;
+        if rep.pixelsWide() as f64 != pixels {
+            return None;
+        }
+        rep.setSize(size);
+        image.addRepresentation(&rep);
+    }
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(description));
+    Some(image)
 }
 
 fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>) -> Retained<NSMenuItem> {
@@ -787,5 +812,19 @@ impl UiHandle {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The embedded PNGs decode at 18 and 36 pixels, so the menu bar shows
+    /// the Faro mark rather than the "Faro" text fallback.
+    #[test]
+    fn the_menu_bar_icon_decodes() {
+        let icon = menu_bar_icon(ns_string!("Faro")).expect("menu-bar icon");
+        assert!(icon.isTemplate());
+        assert_eq!(icon.representations().count(), 2);
     }
 }

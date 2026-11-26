@@ -32,11 +32,11 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 ### What works
 
 - **The instance** (`faro-server`), with its web app: setup, sign-in by emailed link, the admin console, and the member and ally pages. SQLite only: Postgres is experimental and not supported in the beta ([SELF-HOSTING.md](SELF-HOSTING.md)).
-- **The Mac app**, one package with two parts: the Faro service, which checks the screen, and **Faro Agent**, the eye icon in the menu bar. Members enroll from the web app's **Open in Faro** button or the menu's **Enroll this computer…**, with an administrator of the Mac approving in macOS's own password dialog.
+- **The Mac app**, one package with two parts: the Faro service, which checks the screen, and **Faro Agent**, the Faro icon in the menu bar. Members enroll from the web app's **Open in Faro** button or the menu's **Enroll this computer…**, with an administrator of the Mac approving in macOS's own password dialog.
 - **Image checks on the Mac**, with Yahoo's OpenNSFW model, which the package includes.
 - **Website categories (adult and gambling sites).** The package includes the list, so this works from the moment Faro is installed, even before the Mac has reached the update channel. The update channel can replace the list with a newer one without a new version of the app. The list's sources and their credits are in `/Library/Faro/notices/domains.txt`. Faro can only tell which website is open with the Accessibility permission, in Safari, Chrome, Edge, Brave or Arc ([3.5](#35-screen-recording-and-accessibility)).
 - **Tamper alerts**, including "Screen Recording is off", a window hidden from Faro, and Faro not seeing the screen ([section 4](#4-known-limitations-and-false-alarms)).
-- **The status menu** in the eye icon: what Faro is doing and what to do about it, **Report a problem…** and **About Faro…** ([the member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working)).
+- **The status menu** in the Faro icon: what Faro is doing and what to do about it, **Report a problem…** and **About Faro…** ([the member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working)).
 - **`sudo /Library/Faro/bin/faro-service status`** (and `--json`), which shows whether monitoring is working, and **`faro-service diagnose`**, which makes a problem report ([section 5](#5-reporting-problems)).
 - **Logs** in `/Library/Logs/Faro/faro-service.log` (any administrator of the Mac can read it) and `~/Library/Logs/Faro/faro-agent.log` for each account ([Faro's logs](MEMBER-GUIDE.md#faros-logs)).
 - **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-macs)).
@@ -140,7 +140,7 @@ It must say the package is signed with a **Developer ID Installer** certificate 
 
 Double-click the package and follow the installer. Faro installs for the whole Mac, so macOS asks for an administrator name and password. The installer's first page says what Faro does: read it, especially the part about every account being monitored. If the guest account is on, turn it off first (System Settings → Users & Groups).
 
-After installing, the eye icon is in the menu bar and its menu says **Status: Not enrolled**. Faro monitors nothing until you enroll the Mac.
+After installing, the Faro icon is in the menu bar and its menu says **Status: Not enrolled**. Faro monitors nothing until you enroll the Mac.
 
 ### 3.3 Your account, your keys and your allies
 
@@ -151,7 +151,7 @@ After installing, the eye icon is in the menu bar and its menu says **Status: No
 
 ### 3.4 Enroll the Mac
 
-Follow [Adding your Mac to Faro](MEMBER-GUIDE.md): create an enrollment code on the **Computers** page, open the link with **Open in Faro** (or **Enroll this computer…** in the eye icon's menu), check the instance and the list of accounts, let an administrator approve in macOS's password dialog, then compare the code and approve the computer in the web app. Monitoring starts once you approve it.
+Follow [Adding your Mac to Faro](MEMBER-GUIDE.md): create an enrollment code on the **Computers** page, open the link with **Open in Faro** (or **Enroll this computer…** in the Faro icon's menu), check the instance and the list of accounts, let an administrator approve in macOS's password dialog, then compare the code and approve the computer in the web app. Monitoring starts once you approve it.
 
 ### 3.5 Screen Recording and Accessibility
 
@@ -165,7 +165,7 @@ If you missed the question, or the menu says **Status: Screen Recording is off**
 
 ### 3.6 Check that it works
 
-Click the eye icon. **Status: Monitoring** means Faro is working. The [member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working) says what every other status means and what to do. For more detail, someone with an administrator password can run:
+Click the Faro icon. **Status: Monitoring** means Faro is working. The [member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working) says what every other status means and what to do. For more detail, someone with an administrator password can run:
 
 ```sh
 sudo /Library/Faro/bin/faro-service status
@@ -261,7 +261,7 @@ When something doesn't work, make a **problem report** on the Mac. Someone with 
 sudo /Library/Faro/bin/faro-service diagnose
 ```
 
-It lists what it will put in the report and writes nothing until you agree: **s** shows everything, **y** writes it, anything else stops. The report is a zip on the Desktop, `faro-report-`*date*`-`*time*`Z.zip`, that only your account can open. Web addresses, email addresses, other computers' and websites' names, window titles and app names are taken out. It never contains keys, passwords, screenshots, or what Faro reported. **Report a problem…** in the eye icon's menu shows the same steps and copies the command. The details are in [Reporting a problem](MEMBER-GUIDE.md#reporting-a-problem) and, for the technically minded, [Problem reports](DEVELOPMENT.md#problem-reports).
+It lists what it will put in the report and writes nothing until you agree: **s** shows everything, **y** writes it, anything else stops. The report is a zip on the Desktop, `faro-report-`*date*`-`*time*`Z.zip`, that only your account can open. Web addresses, email addresses, other computers' and websites' names, window titles and app names are taken out. It never contains keys, passwords, screenshots, or what Faro reported. **Report a problem…** in the Faro icon's menu shows the same steps and copies the command. The details are in [Reporting a problem](MEMBER-GUIDE.md#reporting-a-problem) and, for the technically minded, [Problem reports](DEVELOPMENT.md#problem-reports).
 
 - If macOS asks whether Terminal may access the Desktop, allow it, or save the report elsewhere: `sudo /Library/Faro/bin/faro-service diagnose --output ~/Documents`.
 - Read it before you send it, if you like: it is a folder of plain-text files.
