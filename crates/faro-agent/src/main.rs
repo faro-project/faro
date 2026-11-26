@@ -156,7 +156,10 @@ fn run_with_ui(args: RunArgs) -> ExitCode {
             quit.notify_one();
         })
     };
-    let notices = MacNotices(ui.handle());
+    let mut notices = MacNotices(ui.handle());
+    // The menu's About and "Report a problem…" are filled from the start;
+    // the agent reports changes from here on.
+    faro_agent::NoticeSink::status(&mut notices, &faro_agent::status_menu::Seen::Starting);
     offer_enrollment(&ui, &args);
     let agent = std::thread::Builder::new()
         .name("faro-agent".to_owned())
@@ -195,6 +198,37 @@ impl faro_agent::NoticeSink for MacNotices {
                 later: n.later.to_owned(),
                 url: n.url.to_owned(),
             });
+    }
+
+    fn status(&mut self, seen: &faro_agent::status_menu::Seen) {
+        use faro_agent::status_menu::{about, local_utc_offset_secs, report_problem, status_menu};
+        use faro_platform_macos::ui::{ReportProblem, StatusFix, StatusMenu};
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let menu = status_menu(seen, now_ms, local_utc_offset_secs(now_ms));
+        let about = about(faro_agent::AGENT_VERSION, seen);
+        let report = report_problem();
+        // The status line is a state, never content: fine at `info`.
+        tracing::info!(status = %menu.line, "status menu");
+        self.0.set_status(StatusMenu {
+            detail: menu.detail().to_owned(),
+            line: menu.line,
+            problem: menu.problem,
+            fix: menu.fix.map(|f| StatusFix {
+                label: f.label,
+                url: f.url,
+            }),
+            web_app: menu.web_app,
+            about_title: about.title,
+            about_body: about.body,
+            report: Some(ReportProblem {
+                title: report.title,
+                body: report.body,
+                copy: report.copy,
+                command: report.command,
+            }),
+        });
     }
 }
 

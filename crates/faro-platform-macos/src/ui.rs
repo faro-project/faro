@@ -21,6 +21,21 @@
 //! another alert ([`UiHandle::show_settings_notice`]) whose first button
 //! opens the System Settings pane that fixes it.
 //!
+//! # The status menu
+//!
+//! Under the first line, the menu says what Faro is doing (issue #89):
+//! "Status: Monitoring", "Status: Screen Recording is off", "Status: Not
+//! enrolled"… ([`UiHandle::set_status`]; the words come from
+//! `faro_agent::status_menu`). Clicking the line explains it and what to
+//! do. When something fixes it, an item below opens that (a System
+//! Settings pane, the web app's Computers page). Then "Open Faro" (the
+//! instance's web app), the monitoring notice, enrolling, "Report a
+//! problem…" (how to run `faro-service diagnose`, with a button that
+//! copies the command; it sends the service nothing) and "About Faro…"
+//! (versions, the instance, and the third-party notices in
+//! `/Library/Faro/notices`). Nothing on the menu stops monitoring, pauses
+//! it or hides anything.
+//!
 //! # Enrolling
 //!
 //! The agent can also enroll the computer (issue #62). The bundle registers
@@ -55,10 +70,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSApplicationTerminateReply, NSFloatingWindowLevel, NSImage, NSMenu,
-    NSMenuItem, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
-    NSWorkspace,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSFloatingWindowLevel, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSPasteboard,
+    NSPasteboardTypeString, NSStatusBar, NSStatusItem, NSTextField, NSVariableStatusItemLength,
+    NSView, NSWorkspace,
 };
 use objc2_foundation::{
     ns_string, NSArray, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
@@ -85,6 +101,29 @@ const SHOW_NOTICE: &str = "Show the monitoring notice\u{2026}";
 /// What the menu shows for enrolling.
 const ENROLL: &str = "Enroll this computer\u{2026}";
 
+/// The menu item that opens the instance's web app.
+pub const OPEN_FARO: &str = "Open Faro";
+
+/// The menu item that shows the About window.
+pub const ABOUT: &str = "About Faro\u{2026}";
+
+/// The About window's button that shows the third-party notices.
+pub const SHOW_NOTICES: &str = "Show Third-Party Notices";
+
+/// The menu item that explains how to make a problem report.
+pub const REPORT_PROBLEM: &str = "Report a problem\u{2026}";
+
+/// The status line before the agent has told the UI anything.
+const STATUS_STARTING: &str = "Connecting to the Faro service\u{2026}";
+
+/// The status menu's items, once the menu exists.
+struct StatusItems {
+    status: Retained<NSMenuItem>,
+    fix: Retained<NSMenuItem>,
+    open: Retained<NSMenuItem>,
+    report: Retained<NSMenuItem>,
+}
+
 /// The agent's bundle identifier: only the real bundle registers itself
 /// with LaunchServices for `faro://` links.
 const BUNDLE_ID: &str = "org.faro.agent";
@@ -104,6 +143,10 @@ struct Ivars {
     on_quit: Box<dyn Fn()>,
     on_enroll: OnceCell<EnrollHandler>,
     status_item: OnceCell<Retained<NSStatusItem>>,
+    /// The latest status ([`UiHandle::set_status`]).
+    status: RefCell<StatusMenu>,
+    /// The items that show it.
+    items: OnceCell<StatusItems>,
 }
 
 define_class!(
@@ -165,6 +208,42 @@ define_class!(
                 f(None);
             }
         }
+
+        // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(showStatus:))]
+        fn show_status_action(&self, _sender: Option<&AnyObject>) {
+            self.present_status();
+        }
+
+        // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(fixProblem:))]
+        fn fix_action(&self, _sender: Option<&AnyObject>) {
+            let url = self.ivars().status.borrow().fix.as_ref().map(|f| f.url.clone());
+            if let Some(url) = url {
+                open_url(&url);
+            }
+        }
+
+        // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(openFaro:))]
+        fn open_faro_action(&self, _sender: Option<&AnyObject>) {
+            let url = self.ivars().status.borrow().web_app.clone();
+            if let Some(url) = url {
+                open_url(&url);
+            }
+        }
+
+        // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(reportProblem:))]
+        fn report_action(&self, _sender: Option<&AnyObject>) {
+            self.present_report();
+        }
+
+        // SAFETY: an action method: one object argument, no return value.
+        #[unsafe(method(about:))]
+        fn about_action(&self, _sender: Option<&AnyObject>) {
+            self.present_about();
+        }
     }
 );
 
@@ -178,6 +257,8 @@ impl Delegate {
             on_quit,
             on_enroll: OnceCell::new(),
             status_item: OnceCell::new(),
+            status: RefCell::new(StatusMenu::starting()),
+            items: OnceCell::new(),
         });
         // SAFETY: NSObject's `init` has this signature.
         unsafe { msg_send![super(this), init] }
@@ -208,23 +289,118 @@ impl Delegate {
         header.setEnabled(false);
         menu.addItem(&header);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let show = menu_item(mtm, SHOW_NOTICE, Some(sel!(showNotice:)));
-        // SAFETY: `self` implements `showNotice:`, and the status item that
-        // holds the menu is kept in `self`, so the target outlives the menu
-        // item's use of it.
-        unsafe { show.setTarget(Some(self.as_ref())) };
-        menu.addItem(&show);
+        // Every item's target is `self`, which implements its action. The
+        // status item that holds the menu is kept in `self`, so the target
+        // outlives the menu items' use of it.
+        let targeted = |title: &str, action: Sel| {
+            let i = menu_item(mtm, title, Some(action));
+            // SAFETY: see above.
+            unsafe { i.setTarget(Some(self.as_ref())) };
+            i
+        };
+        let status = targeted(STATUS_STARTING, sel!(showStatus:));
+        menu.addItem(&status);
+        let fix = targeted("", sel!(fixProblem:));
+        menu.addItem(&fix);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let open = targeted(OPEN_FARO, sel!(openFaro:));
+        menu.addItem(&open);
+        menu.addItem(&targeted(SHOW_NOTICE, sel!(showNotice:)));
         if self.ivars().on_enroll.get().is_some() {
-            let enroll = menu_item(mtm, ENROLL, Some(sel!(enroll:)));
-            // SAFETY: as for `show`: `self` implements `enroll:` and
-            // outlives the menu.
-            unsafe { enroll.setTarget(Some(self.as_ref())) };
-            menu.addItem(&enroll);
+            menu.addItem(&targeted(ENROLL, sel!(enroll:)));
         }
+        let report = targeted(REPORT_PROBLEM, sel!(reportProblem:));
+        menu.addItem(&report);
+        menu.addItem(&targeted(ABOUT, sel!(about:)));
         item.setMenu(Some(&menu));
 
         // Set once, from the one `applicationDidFinishLaunching:`.
         let _ = self.ivars().status_item.set(item);
+        let _ = self.ivars().items.set(StatusItems {
+            status,
+            fix,
+            open,
+            report,
+        });
+        self.refresh_status();
+    }
+
+    /// Store `s` and show it in the menu.
+    fn set_status(&self, s: StatusMenu) {
+        *self.ivars().status.borrow_mut() = s;
+        self.refresh_status();
+    }
+
+    /// Make the menu items show the stored status.
+    fn refresh_status(&self) {
+        let iv = self.ivars();
+        let Some(items) = iv.items.get() else {
+            return;
+        };
+        let s = iv.status.borrow();
+        items
+            .status
+            .setTitle(&NSString::from_str(&format!("Status: {}", s.line)));
+        match &s.fix {
+            Some(f) => {
+                items.fix.setTitle(&NSString::from_str(&f.label));
+                items.fix.setHidden(false);
+            }
+            None => items.fix.setHidden(true),
+        }
+        items.open.setHidden(s.web_app.is_none());
+        items.report.setHidden(s.report.is_none());
+    }
+
+    /// How to make a problem report, with a button that copies the
+    /// command. It explains only; nothing is sent to the service.
+    fn present_report(&self) {
+        let Some(r) = self.ivars().status.borrow().report.clone() else {
+            return;
+        };
+        let mtm = self.mtm();
+        let a = alert(mtm, &r.title, &r.body, false);
+        a.addButtonWithTitle(&NSString::from_str(&r.copy));
+        a.addButtonWithTitle(ns_string!("OK"));
+        if run_in_front(mtm, &a) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            // SAFETY: `NSPasteboardTypeString` is an immutable constant
+            // AppKit defines.
+            let kind = unsafe { NSPasteboardTypeString };
+            if !board.setString_forType(&NSString::from_str(&r.command), kind) {
+                eprintln!("faro-agent: could not copy the command");
+            }
+        }
+    }
+
+    /// The status line and what to do, with the fix's button if there is
+    /// one.
+    fn present_status(&self) {
+        let s = self.ivars().status.borrow().clone();
+        let mtm = self.mtm();
+        let a = alert(mtm, &s.line, &s.detail, s.problem);
+        if let Some(f) = &s.fix {
+            a.addButtonWithTitle(&NSString::from_str(f.label.trim_end_matches('\u{2026}')));
+        }
+        a.addButtonWithTitle(ns_string!("OK"));
+        if run_in_front(mtm, &a) {
+            if let Some(f) = &s.fix {
+                open_url(&f.url);
+            }
+        }
+    }
+
+    /// Versions, the instance, and the third-party notices.
+    fn present_about(&self) {
+        let s = self.ivars().status.borrow().clone();
+        let mtm = self.mtm();
+        let a = alert(mtm, &s.about_title, &s.about_body, false);
+        a.addButtonWithTitle(ns_string!("OK"));
+        a.addButtonWithTitle(&NSString::from_str(SHOW_NOTICES));
+        if run_modal_in_front(mtm, &a) == NSAlertSecondButtonReturn {
+            open_url(&format!("file://{}/", crate::pkg_layout::NOTICES_DIR));
+        }
     }
 
     fn set_notice(&self, title: String, body: String) {
@@ -340,11 +516,16 @@ fn alert(mtm: MainThreadMarker, title: &str, body: &str, warning: bool) -> Retai
 /// Run `alert` in front of every window; `true` if its first button was
 /// pressed.
 fn run_in_front(mtm: MainThreadMarker, alert: &NSAlert) -> bool {
+    run_modal_in_front(mtm, alert) == NSAlertFirstButtonReturn
+}
+
+/// Run `alert` in front of every window and return which button closed it.
+fn run_modal_in_front(mtm: MainThreadMarker, alert: &NSAlert) -> NSModalResponse {
     alert.window().setLevel(NSFloatingWindowLevel);
     // `activate` is macOS 14+; this one works on 13 as well.
     #[allow(deprecated)]
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-    alert.runModal() == NSAlertFirstButtonReturn
+    alert.runModal()
 }
 
 /// The words of a notice that offers to open a System Settings pane (see
@@ -358,6 +539,61 @@ pub struct SettingsNotice {
     /// The second button: only closes the notice.
     pub later: String,
     pub url: String,
+}
+
+/// A menu item that fixes a problem: its title and the URL it opens (a
+/// System Settings pane, the web app's Computers page).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusFix {
+    pub label: String,
+    pub url: String,
+}
+
+/// What the status menu shows (see [`UiHandle::set_status`]). The words
+/// come from `faro_agent::status_menu`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusMenu {
+    /// The status line ("Monitoring").
+    pub line: String,
+    /// What it means and what to do, shown when the line is clicked.
+    pub detail: String,
+    /// Shown as a warning.
+    pub problem: bool,
+    /// The item that fixes it, if any.
+    pub fix: Option<StatusFix>,
+    /// "Open Faro" opens this; hidden without one.
+    pub web_app: Option<String>,
+    /// The About window.
+    pub about_title: String,
+    pub about_body: String,
+    /// "Report a problem…"; hidden without one.
+    pub report: Option<ReportProblem>,
+}
+
+/// The words of "Report a problem…": how to make a report, and the
+/// command its first button copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportProblem {
+    pub title: String,
+    pub body: String,
+    /// The button that copies `command` to the clipboard.
+    pub copy: String,
+    pub command: String,
+}
+
+impl StatusMenu {
+    fn starting() -> Self {
+        StatusMenu {
+            line: STATUS_STARTING.to_owned(),
+            detail: String::new(),
+            problem: false,
+            fix: None,
+            web_app: None,
+            about_title: "About Faro".to_owned(),
+            about_body: String::new(),
+            report: None,
+        }
+    }
 }
 
 /// The words of a two-field window (see [`UiHandle::ask_enroll_target`]).
@@ -522,6 +758,19 @@ impl UiHandle {
             UI.with(|ui| {
                 if let Some(ui) = ui.get() {
                     ui.present_settings(&notice);
+                }
+            });
+        });
+    }
+
+    /// Show `status` in the menu: the status line, the item that fixes a
+    /// problem, "Open Faro" and the About window. Doesn't block, and never
+    /// opens a window by itself.
+    pub fn set_status(&self, status: StatusMenu) {
+        DispatchQueue::main().exec_async(move || {
+            UI.with(|ui| {
+                if let Some(ui) = ui.get() {
+                    ui.set_status(status);
                 }
             });
         });

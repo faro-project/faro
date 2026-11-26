@@ -671,3 +671,121 @@ async fn refuses_a_non_root_service_in_production_mode() {
         );
     }
 }
+
+type Statuses = Arc<Mutex<Vec<faro_agent::status_menu::Seen>>>;
+
+/// Records what the status menu would show.
+struct StatusSink(Statuses);
+
+impl faro_agent::NoticeSink for StatusSink {
+    fn show(&mut self, _title: &str, _body: &str) {}
+
+    fn status(&mut self, seen: &faro_agent::status_menu::Seen) {
+        self.0.lock().unwrap().push(seen.clone());
+    }
+}
+
+/// Wait until the latest status matches.
+async fn status_until(statuses: &Statuses, want: impl Fn(&faro_agent::status_menu::Seen) -> bool) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if statuses.lock().unwrap().last().is_some_and(&want) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "statuses: {:?}",
+            statuses.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A stand-in for the service's enroll socket that answers every `Status`
+/// with "enrolled, waiting for approval".
+fn fake_enroll_socket(agent_socket: &Path) -> JoinHandle<()> {
+    use faro_ipc::{EnrollRequest, EnrollResponse, EnrollStatus};
+    let path = faro_ipc::enroll_socket_path(agent_socket, None);
+    let server = IpcServer::bind(&path, AllowSameUid).expect("bind enroll");
+    tokio::spawn(async move {
+        loop {
+            let Ok(mut conn) = server.accept_typed::<EnrollResponse, EnrollRequest>().await else {
+                continue;
+            };
+            if let Ok(EnrollRequest::Status) = conn.recv().await {
+                let _ = conn
+                    .send(&EnrollResponse::Status(EnrollStatus {
+                        enrolled: true,
+                        instance_name: Some("Sam's Faro".into()),
+                        instance_url: Some("https://faro.example.org/".into()),
+                        endorsed: false,
+                    }))
+                    .await;
+            }
+        }
+    })
+}
+
+/// The status menu hears the enroll socket while the service's agent
+/// socket isn't there, then the service's own `Status` once connected, and
+/// each change only once. Nothing the agent sends back depends on it.
+#[tokio::test]
+async fn the_status_menu_follows_the_service() {
+    use faro_agent::status_menu::{Enrollment, Seen};
+    use faro_ipc::status::CaptureState;
+    let dir = private_dir();
+    let path = dir.path().join("agent.sock");
+    let enroll = fake_enroll_socket(&path);
+    let statuses: Statuses = Arc::default();
+    let script = Script::new();
+    let agent =
+        Agent::new(config(&path), script.platform()).with_notice_sink(StatusSink(statuses.clone()));
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let agent = tokio::spawn(agent.run(async move {
+        let _ = stop_rx.await;
+    }));
+
+    // No agent socket yet: the computer waits for its member's approval.
+    status_until(&statuses, |s| {
+        matches!(s, Seen::NotConnected(Enrollment::AwaitingApproval { name, .. }) if name == "Sam's Faro")
+    })
+    .await;
+    // Asked again on every retry, but told only once.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(statuses.lock().unwrap().len(), 1, "{statuses:?}");
+
+    // The service starts and sends its view.
+    let server = IpcServer::bind(&path, AllowSameUid).expect("bind");
+    let (mut conn, _) = accept(&server).await;
+    let status = faro_ipc::MemberStatus {
+        instance_name: "Sam's Faro".into(),
+        capture: Some(CaptureState::Active),
+        ..faro_ipc::MemberStatus::default()
+    };
+    for _ in 0..2 {
+        conn.send(&ServiceMsg::Status(status.clone()))
+            .await
+            .unwrap();
+    }
+    conn.send(&ServiceMsg::Ping { nonce: 9 }).await.unwrap();
+    let (before, _) = recv_until(&mut conn, |m| *m == AgentMsg::Pong { nonce: 9 }).await;
+    // The agent answers nothing to a status.
+    assert!(
+        before
+            .iter()
+            .all(|m| !matches!(m, AgentMsg::Pong { .. } | AgentMsg::Goodbye)),
+        "{before:?}"
+    );
+    status_until(&statuses, |s| *s == Seen::Connected(status.clone())).await;
+    assert_eq!(statuses.lock().unwrap().len(), 2, "{statuses:?}");
+
+    // The service goes away: back to what the enroll socket says.
+    drop(conn);
+    drop(server);
+    status_until(&statuses, |s| matches!(s, Seen::NotConnected(_))).await;
+
+    let _ = stop_tx.send(());
+    let exit = tokio::time::timeout(WAIT, agent).await.unwrap().unwrap();
+    assert!(matches!(exit, Ok(ExitReason::Stopped)), "{exit:?}");
+    enroll.abort();
+}

@@ -64,7 +64,24 @@ Open them in the Console app (under **Log Reports**), or follow them in Terminal
 
 ## Checking that Faro is working
 
-Someone who knows an administrator password can check in Terminal:
+Click the eye icon in the menu bar. The line under **This computer is monitored by Faro** says what Faro is doing. Click it to see what it means and what to do; when something can fix it, an item just below opens it.
+
+| The menu says | What to do |
+|---|---|
+| **Status: Monitoring** | Nothing: Faro is working. |
+| **Status: Paused until** *time* | Nothing. Your allies were told about the pause, and monitoring starts again by itself. |
+| **Status: Not enrolled** | Faro monitors nothing yet. Follow the steps at the top of this guide. |
+| **Status: Waiting for approval in the web app** | Choose **Open the Computers Page…**, check the code, and approve the computer ([step 5](#5-compare-the-code-and-approve-in-the-web-app)). |
+| **Status: Connecting to the Faro service…** | Wait a minute. If it stays, log out and in again, or restart the Mac. |
+| **Status: Screen Recording is off** | Choose **Open Screen Recording Settings…** and switch on **Faro Agent**. If it is on already (after reinstalling Faro, for example), select it, remove it with **−** and add it again. Your allies are told while it is off. |
+| **Status: Can't reach** *your instance* | Check that the Mac is online. Faro keeps what it records and sends it once your instance answers. |
+| **Status: Faro can't take screenshots** | Restart the Mac. If it still says so, tell whoever runs your instance. |
+| **Status: Faro stopped sending to** *your instance* | Your instance no longer has the identity this Mac was enrolled with. Tell whoever runs your instance. |
+| **Status: The Faro service isn't running** | Restart the Mac. If it still says so, tell whoever runs your instance. |
+
+The menu also has **Open Faro** (your Faro web app), **Report a problem…** ([Reporting a problem](#reporting-a-problem)) and **About Faro…** (the versions, your instance, and the licences of the software Faro includes). Nothing on the menu turns Faro off, pauses it or hides anything.
+
+For more detail, someone who knows an administrator password can check in Terminal:
 
 ```sh
 sudo /Library/Faro/bin/faro-service status
@@ -88,6 +105,8 @@ If Faro isn't working and you'd like help, make a **problem report**: one file w
 ```sh
 sudo /Library/Faro/bin/faro-service diagnose
 ```
+
+**Report a problem…** in the eye icon's menu shows these steps too, and its **Copy Command** button puts that line on the clipboard, ready to paste into Terminal.
 
 1. Faro gathers the report and lists the files in it, with what each one is. Nothing is written yet.
 2. Type **s** to read everything in it first, **y** to write it, or **n** to stop.

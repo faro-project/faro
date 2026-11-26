@@ -393,6 +393,8 @@ impl ServiceBuilder {
             s.blocklist = start.blocklist_label;
             s.detection = detection;
             s.updates = updates;
+            s.instance_name = Some(enrollment.instance_name.clone());
+            s.instance_url = Some(enrollment.instance_url.clone());
         });
         let (control_tx, control_rx) = mpsc::channel(64);
         Ok(Service {
@@ -683,9 +685,18 @@ impl Service {
         let (src_cmd_tx, src_cmd_rx) = mpsc::channel::<SourceCommand>(8);
         let (src_ev_tx, src_ev_rx) = mpsc::channel::<SourceEvent>(64);
         tracing::info!(source = source.name(), "starting capture driver");
+        let (feed_tx, feed_rx) = watch::channel(None);
+        tasks.spawn(status::feed_loop(
+            status_rx.clone(),
+            feed_tx,
+            clock.clone(),
+            started_ms,
+            stop_rx.clone(),
+        ));
         let mut source_task = tokio::spawn(source.run(SourceIo {
             commands: src_cmd_rx,
             events: src_ev_tx,
+            status: feed_rx,
         }));
         if let Some(spec) = spawn_agent {
             tasks.spawn(spawn::supervise(spec, stop_rx.clone()));
