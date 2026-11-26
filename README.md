@@ -23,6 +23,8 @@ There is no central Faro service. A church, a college, a small group or one pers
 - [Architecture](docs/ARCHITECTURE.md): the full design, threat model and roadmap.
 - [Wire protocol](docs/PROTOCOL.md): byte-level signing, hashing and encryption formats.
 - [Development](docs/DEVELOPMENT.md): building, testing, crate map and the invariants every change must keep.
+- [Closed beta](docs/BETA.md): for the pilot instances and the people they enroll: what the beta is, setting up, the alerts to expect, reporting problems and leaving.
+- [Self-hosting](docs/SELF-HOSTING.md): running a Faro instance, for operators.
 - [Ally guide](docs/ALLY-GUIDE.md): a plain-language guide for allies, from accepting an invitation to having the conversation.
 - [Adding your Mac](docs/MEMBER-GUIDE.md): a plain-language guide for members, from the enrollment link to approving the computer.
 - [Key ceremony](docs/KEY-CEREMONY.md): the maintainer's runbook for creating and rotating the update signing keys.
@@ -43,7 +45,7 @@ assets/   brand assets (logo, colours)
 
 Faro is built on open-source software by others. The licences and copyright notices of everything it ships with are generated at build time and travel with it ([how](docs/DEVELOPMENT.md#third-party-notices)):
 
-- **On a Mac:** `/Library/Faro/notices/`, `third-party.txt` for the Rust crates, next to the image model's and ONNX Runtime's notices.
+- **On a Mac:** `/Library/Faro/notices/`, `third-party.txt` for the Rust crates, next to the image model's, the domain list's (`domains.txt`) and ONNX Runtime's notices.
 - **The server image:** `/usr/share/faro/notices/`, `third-party.txt` for the Rust crates in `faro-server` and `third-party-web.txt` for the web app's npm packages.
 - **The server binaries:** `faro-server-<version>-linux-<arch>-third-party.txt`, next to each binary in the release.
 - **The web app:** the **Licences** page (`/licenses`, linked from every page's footer) of any instance.

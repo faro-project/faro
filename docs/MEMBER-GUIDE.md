@@ -4,6 +4,7 @@
 
 ## Before you start
 
+- **In the closed beta,** read [BETA.md](BETA.md) first: where to download Faro, the permissions to grant, and the alerts your allies may see while you set up.
 - **Faro is installed** on the Mac, from the official installer. After installing, an eye icon is in the menu bar. Faro monitors nothing until you finish the steps below.
 - **Your member key is set up** in the web app (the **Keys** page).
 
