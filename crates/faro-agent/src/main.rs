@@ -465,8 +465,9 @@ impl faro_agent::enroll::Authorizer for EnrollAuthorizer {
 }
 
 /// Who the agent accepts as the service: root, unless a `dev` build was
-/// told to trust its own uid.
-#[cfg(any(unix, windows))]
+/// told to trust its own uid. Only the enrollment flow (macOS and Windows)
+/// asks.
+#[cfg(any(target_os = "macos", windows))]
 #[allow(unused_variables)] // `args` is only read in `dev` builds
 fn service_trust(args: &RunArgs) -> faro_agent::ServiceTrust {
     #[cfg(feature = "dev")]

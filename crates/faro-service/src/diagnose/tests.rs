@@ -246,14 +246,12 @@ fn a_report_holds_what_helps_and_nothing_private() {
     let status = report.file("status.txt").unwrap().contents();
     assert!(status.starts_with("Not enrolled."), "{status}");
     let files = report.file("files.txt").unwrap().contents();
-    // Unix modes are in the listing on Unix only.
-    let mut listed = vec!["device.key", "outbox.sqlite3", "agent.501.sock"];
-    if cfg!(unix) {
-        listed.push("drwx------");
-    }
-    for want in listed {
+    for want in ["device.key", "outbox.sqlite3", "agent.501.sock"] {
         assert!(files.contains(want), "missing {want:?} in\n{files}");
     }
+    // Permission bits are listed only where there are any.
+    #[cfg(unix)]
+    assert!(files.contains("drwx------"), "missing modes in\n{files}");
     let agent = report.file("logs/faro-agent.log").unwrap();
     assert_eq!(agent.about, "the last 50 lines of alex's agent log");
     assert!(agent.contents().contains("app=[redacted]"));

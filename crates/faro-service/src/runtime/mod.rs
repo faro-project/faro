@@ -159,6 +159,7 @@ pub struct ServiceBuilder {
     classifier: Option<Box<dyn Classifier>>,
     model_manifest: Option<PathBuf>,
     domains: Option<DomainCategorizer>,
+    domains_manifest: Option<PathBuf>,
     base_url: Option<Url>,
     seed: Option<u64>,
     tick: Duration,
@@ -175,6 +176,7 @@ impl ServiceBuilder {
             classifier: None,
             model_manifest: None,
             domains: None,
+            domains_manifest: None,
             base_url: None,
             seed: None,
             tick: Duration::from_secs(1),
@@ -222,6 +224,16 @@ impl ServiceBuilder {
 
     pub fn domains(mut self, domains: DomainCategorizer) -> Self {
         self.domains = Some(domains);
+        self
+    }
+
+    /// Without [`Self::domains`], load the domain bundle from this manifest
+    /// instead of the packaged one
+    /// ([`artifacts::packaged_domains_manifest`]). Tests point it at a path
+    /// that doesn't exist, so a Faro package installed on the machine running
+    /// them isn't picked up.
+    pub fn domains_manifest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.domains_manifest = Some(path.into());
         self
     }
 
@@ -331,7 +343,10 @@ impl ServiceBuilder {
                 }),
                 None,
             ),
-            None => match artifacts::packaged_domains_manifest() {
+            None => match self
+                .domains_manifest
+                .or_else(artifacts::packaged_domains_manifest)
+            {
                 Some(p) => artifacts::load_packaged_domains(&p, artifacts::is_packaged_service()),
                 None => (None, None),
             },

@@ -435,9 +435,14 @@ async fn every_account_has_an_agent_and_capture_follows_the_screen() {
         .await;
     assert_eq!(st.sessions, 2);
     // The status lists both sessions, with alex's as the capture target.
+    // The list is published in steps, so wait for the settled state rather
+    // than asserting on the first list with both agents in it.
     let list = dev
-        .wait("both sessions in the status", |s| {
+        .wait("both sessions in the status, alex's the target", |s| {
             s.session_list.iter().filter(|x| x.agent_connected).count() == 2
+                && s.session_list
+                    .iter()
+                    .any(|x| x.account == "alex" && x.capture_target)
         })
         .await
         .session_list;

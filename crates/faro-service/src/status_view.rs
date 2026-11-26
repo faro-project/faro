@@ -659,6 +659,8 @@ mod tests {
     #[test]
     fn this_process_is_alive() {
         assert!(process_alive(std::process::id()));
+        // Only Unix can tell; elsewhere every pid counts as alive.
+        #[cfg(unix)]
         assert!(!process_alive(0));
     }
 }
