@@ -111,6 +111,7 @@ mod tests {
                 width: 8,
                 height: 8,
             },
+            resize: Default::default(),
             labels: vec!["a".into(), "b".into(), "c".into()],
             mean: [0.0; 3],
             std: [0.1; 3],

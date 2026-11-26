@@ -23,6 +23,7 @@ pub(crate) fn colour_info(blake3: String) -> ModelInfo {
             width: 8,
             height: 8,
         },
+        resize: Default::default(),
         labels: LABELS.map(String::from).to_vec(),
         mean: [0.0; 3],
         std: [0.1; 3],

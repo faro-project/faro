@@ -286,6 +286,7 @@ mod tests {
                 width: 8,
                 height: 8,
             },
+            resize: Default::default(),
             labels: vec!["nsfw".into()],
             mean: [0.0; 3],
             std: [1.0; 3],
