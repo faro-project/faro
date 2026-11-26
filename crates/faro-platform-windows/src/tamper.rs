@@ -95,6 +95,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowDisplayAffinity, GetWindowRect, IsIconic, IsWindowVisible,
 };
 
+use crate::capture::DisplayHealth;
 use crate::foreground::{display_name, file_description, process_image_path, window_pid};
 
 /// Hidden windows thinner than this (pixels) never count.
@@ -741,12 +742,21 @@ pub fn read_now() -> Vec<HiddenApp> {
 pub struct WinTamper {
     last: TamperObservation,
     hidden: HiddenWindowTracker,
+    /// Written by the capture side; see [`DisplayHealth`].
+    displays: DisplayHealth,
 }
 
 impl WinTamper {
     /// Context signals start from "not active" (see module docs).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Also report displays that keep failing to capture, as recorded by
+    /// the [`crate::capture::WinScreenCapture`] sharing `displays`.
+    pub fn with_display_health(mut self, displays: DisplayHealth) -> Self {
+        self.displays = displays;
+        self
     }
 
     /// Feed an observation and return the signals it triggers.
@@ -760,7 +770,19 @@ impl WinTamper {
 impl TamperSignals for WinTamper {
     fn poll(&mut self) -> Vec<TamperSignal> {
         let mut out = self.observe(observe());
-        out.extend(self.hidden.observe(&read_now()));
+        // Windows are per desktop: read the one that has the input.
+        let apps = match crate::session::attach_input_desktop() {
+            Ok(_guard) => read_now(),
+            Err(_) => Vec::new(),
+        };
+        out.extend(self.hidden.observe(&apps));
+        // A display that never captures while the others do (one monitor
+        // failing both DXGI and GDI) would otherwise go unnoticed.
+        out.extend(self.displays.take_edges().into_iter().map(|(_, n)| {
+            TamperSignal::CaptureFailing {
+                consecutive_failures: n,
+            }
+        }));
         out
     }
 }

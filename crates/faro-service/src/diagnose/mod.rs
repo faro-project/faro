@@ -294,6 +294,22 @@ pub fn collect(config: &Config, sources: &Sources, now_ms: i64) -> Report {
         .and_then(|e| url::Url::parse(&e.instance_url).ok())
         .and_then(|u| u.host_str().map(str::to_owned));
     let r = Redactor::new(instance_host.as_deref());
+    // This computer's own names are private too (a Windows report names the
+    // computer, its domain and the account in paths and `DOMAIN\user`).
+    #[cfg(windows)]
+    let r = {
+        let env = |k: &str| std::env::var(k).unwrap_or_default();
+        let logon = env("LOGONSERVER");
+        r.with_local_names(
+            &[
+                &env("COMPUTERNAME"),
+                &env("USERDOMAIN"),
+                &env("USERDNSDOMAIN"),
+                &logon,
+            ],
+            &[&env("USERNAME")],
+        )
+    };
     let name = format!("faro-report-{}", compact_utc(now_ms));
     let mut files = Vec::new();
 
@@ -741,6 +757,12 @@ fn listings(dirs: &[PathBuf], config_file: &Path) -> String {
     let mut o = String::new();
     for d in dirs {
         let _ = writeln!(o, "{}:", d.display());
+        #[cfg(windows)]
+        if let Err(e) = windows::check_dir_no_links(d) {
+            let _ = writeln!(o, "  not listed: {e}");
+            o.push('\n');
+            continue;
+        }
         match std::fs::symlink_metadata(d) {
             Ok(m) => {
                 let _ = writeln!(o, "  {}  .", entry(&m));
@@ -952,6 +974,9 @@ fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     if f.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(io::Error::other("it is a symbolic link"));
     }
+    // The flag above covers only the last component; this covers the folders
+    // above it (a junction a user planted in their profile).
+    windows::verify_no_links(&f, path)?;
     Ok(f)
 }
 

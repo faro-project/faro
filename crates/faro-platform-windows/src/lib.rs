@@ -91,11 +91,14 @@ impl WinPlatform {
     /// (the agent's dedicated platform thread). It registers the
     /// display-state callback and samples the session baseline.
     pub fn agent_platform() -> faro_platform::AgentPlatform {
+        // Capture and tamper are separate objects; this is how a display
+        // that keeps failing to capture reaches the tamper signals.
+        let health = capture::DisplayHealth::default();
         faro_platform::AgentPlatform {
-            capture: Box::new(WinScreenCapture::new()),
+            capture: Box::new(WinScreenCapture::new().with_health(health.clone())),
             foreground: Box::new(WinForeground::new()),
             session: Box::new(WinSession::new()),
-            tamper: Box::new(WinTamper::new()),
+            tamper: Box::new(WinTamper::new().with_display_health(health)),
         }
     }
 }

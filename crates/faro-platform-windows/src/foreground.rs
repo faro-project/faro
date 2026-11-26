@@ -260,8 +260,22 @@ impl WinForeground {
     }
 }
 
+/// Attach this thread to the input desktop for a read (a desktop a user
+/// created has its own foreground window). `None` when it can't, so the
+/// read yields nothing rather than the wrong desktop's window; the capture
+/// path reports that case as a failure. The guard's `Option` is flattened:
+/// `Some(None)` means already on it.
+fn follow_input_desktop() -> Option<Option<crate::session::DesktopGuard>> {
+    if crate::session::input_desktop().is_benign_pause() {
+        // Secure desktop: reads there are the same as before (nothing useful).
+        return Some(None);
+    }
+    crate::session::attach_input_desktop().ok()
+}
+
 impl ForegroundInfo for WinForeground {
     fn active_app(&self) -> Option<AppInfo> {
+        let _desktop = follow_input_desktop()?;
         let (_, path) = window_process(foreground_window()?)?;
         let id = exe_id(&path)?;
         let name = self.app_name(&path);
@@ -269,11 +283,13 @@ impl ForegroundInfo for WinForeground {
     }
 
     fn window_title(&self) -> Option<String> {
+        let _desktop = follow_input_desktop()?;
         window_text(foreground_window()?)
     }
 
     /// See [`crate::browser`].
     fn browser(&self) -> Option<BrowserContext> {
+        let _desktop = follow_input_desktop()?;
         let hwnd = foreground_window()?;
         let (_, path) = window_process(hwnd)?;
         let b = Browser::from_exe_name(&exe_id(&path)?)?;

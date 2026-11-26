@@ -15,6 +15,11 @@
 //!   --interval SECS    seconds between repeats (default 2; fractions allowed)
 //!   --gdi              use only the GDI fallback
 //!   --quiet            print only the per-round summary line
+//!   --other-desktop    create a desktop, switch to it for about a second,
+//!                      capture from it and the foreground read, then switch
+//!                      back (a watchdog thread switches back after 4 s no
+//!                      matter what). Expect: not "unavailable", frames
+//!                      captured, input desktop reported as Other(..).
 //! ```
 //!
 //! To check the lock screen, UAC and fast user switching, run it with a
@@ -55,6 +60,7 @@ mod probe {
         interval: Duration,
         gdi: bool,
         quiet: bool,
+        other_desktop: bool,
     }
 
     fn parse_args() -> Result<Args, String> {
@@ -63,6 +69,7 @@ mod probe {
             interval: Duration::from_secs(2),
             gdi: false,
             quiet: false,
+            other_desktop: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -75,6 +82,7 @@ mod probe {
                 }
                 "--gdi" => a.gdi = true,
                 "--quiet" => a.quiet = true,
+                "--other-desktop" => a.other_desktop = true,
                 other => return Err(format!("unknown argument {other:?}")),
             }
         }
@@ -177,8 +185,102 @@ mod probe {
         }
     }
 
+    /// A user-created desktop that has the input while this exists. The
+    /// watchdog restores `Default` after `limit` even if the caller hangs.
+    fn other_desktop_round(gdi: bool) -> Result<(), String> {
+        use windows::core::w;
+        use windows::Win32::System::StationsAndDesktops::DESKTOP_ACCESS_FLAGS;
+        use windows::Win32::System::StationsAndDesktops::{
+            CloseDesktop, CreateDesktopW, OpenDesktopW, SwitchDesktop, DESKTOP_CONTROL_FLAGS,
+            DESKTOP_SWITCHDESKTOP,
+        };
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        // SAFETY: plain handle calls; every handle is closed below.
+        let default = unsafe {
+            OpenDesktopW(
+                w!("Default"),
+                DESKTOP_CONTROL_FLAGS(0),
+                false,
+                DESKTOP_SWITCHDESKTOP.0,
+            )
+        }
+        .map_err(|e| format!("OpenDesktop(Default): {e}"))?;
+        // SAFETY: as above.
+        let other = unsafe {
+            CreateDesktopW(
+                w!("FaroProbeDesktop"),
+                None,
+                None,
+                DESKTOP_CONTROL_FLAGS(0),
+                GENERIC_ALL,
+                None,
+            )
+        }
+        .map_err(|e| format!("CreateDesktop: {e}"))?;
+        let default_raw = default.0 as isize;
+        // Always come back, whatever the capture does.
+        let watchdog = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(4));
+            // SAFETY: the handle outlives this thread (joined below).
+            let _ = unsafe {
+                SwitchDesktop(windows::Win32::System::StationsAndDesktops::HDESK(
+                    default_raw as *mut _,
+                ))
+            };
+        });
+        // SAFETY: valid desktop handle.
+        unsafe { SwitchDesktop(other) }.map_err(|e| format!("SwitchDesktop: {e}"))?;
+        std::thread::sleep(Duration::from_millis(400));
+        let desk = input_desktop();
+        let unavailable = screen_unavailable();
+        let mut cap = if gdi {
+            WinScreenCapture::gdi_only()
+        } else {
+            WinScreenCapture::new()
+        };
+        let result = cap.capture_each();
+        let fg = WinForeground::new().active_app().is_some();
+        // SAFETY: valid handles.
+        let _ = unsafe { SwitchDesktop(default) };
+        let _ = watchdog.join();
+        // SAFETY: closed once.
+        unsafe {
+            let _ = CloseDesktop(other);
+            let _ = CloseDesktop(default);
+        }
+        let _ = DESKTOP_ACCESS_FLAGS(0);
+        println!("input desktop while switched: {desk:?}");
+        println!("screen unavailable          : {unavailable:?}");
+        println!("foreground read found an app: {fg} (a bare desktop has none)");
+        match result {
+            Ok(r) => {
+                for d in &r {
+                    println!(
+                        "display {:>3} {:?}: {}",
+                        d.display_id,
+                        d.backend,
+                        match &d.result {
+                            Ok(f) => format!("{}x{} captured", f.width(), f.height()),
+                            Err(e) => format!("error: {e}"),
+                        }
+                    );
+                }
+                if r.iter().any(|d| d.result.is_ok()) && unavailable.is_none() {
+                    println!("OK: the user-created desktop was captured");
+                    Ok(())
+                } else {
+                    Err("no display captured from the other desktop".into())
+                }
+            }
+            Err(e) => Err(format!("capture on the other desktop failed: {e}")),
+        }
+    }
+
     pub fn run() -> Result<(), String> {
         let args = parse_args()?;
+        if args.other_desktop {
+            return other_desktop_round(args.gdi);
+        }
         if !args.quiet {
             report_environment();
         }
