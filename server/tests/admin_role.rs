@@ -346,6 +346,7 @@ async fn the_command_line_grants_the_role_when_nobody_can() {
     assert!(e.to_string().contains("not an email address"), "{e}");
 
     // Disabled, or being deleted.
+    t.clock.advance_ms(1000);
     let r = t
         .post(
             &format!("/admin/api/users/{sam}/disable"),
