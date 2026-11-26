@@ -1,26 +1,28 @@
 <script lang="ts">
 	// The Manage tab, for facilitators (GROUPS.md §6): details, who can
-	// invite, the participant limit, invitations, facilitators, removing
-	// people, and archiving. The meeting and the listing are added by #122.
+	// invite, the participant limit, the meeting, the directory listing and
+	// join requests, invitations, facilitators, removing people, and
+	// archiving.
 	import { api, seg } from '#lib/api.ts';
 	import { date } from '#lib/format.ts';
-	import { GROUP_LIMITS, type Links } from '#lib/groups.ts';
+	import { GROUP_LIMITS } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import type { GroupPatch, GroupView, RosterEntry, WhoCanInvite } from '#lib/types.ts';
 	import InvitePeople from './InvitePeople.svelte';
+	import JoinRequests from './JoinRequests.svelte';
+	import ListingSettings from './ListingSettings.svelte';
+	import MeetingSettings from './MeetingSettings.svelte';
 	import Roster from './Roster.svelte';
 
 	let {
 		group,
 		myId,
-		links,
 		people,
 		onchanged,
 		onarchived
 	}: {
 		group: GroupView;
 		myId: string;
-		links: Links;
 		people: { id: string; name: string }[];
 		/** The group changed: the page reloads its copy and its history. */
 		onchanged: (g?: GroupView) => void;
@@ -32,8 +34,10 @@
 	let name = $state(group.name);
 	// svelte-ignore state_referenced_locally
 	let description = $state(group.description);
+	// The group's own choice, not what is in effect after the instance's limit.
 	// svelte-ignore state_referenced_locally
-	let whoCanInvite = $state<WhoCanInvite>(group.who_can_invite);
+	let whoCanInvite = $state<WhoCanInvite>(group.group_who_can_invite ?? group.who_can_invite);
+	let instanceAllowsParticipants = $derived(group.instance_who_can_invite === 'participants');
 	// svelte-ignore state_referenced_locally
 	let limit = $state(group.max_participants === null ? '' : String(group.max_participants));
 	let detailsBusy = $state(false);
@@ -52,7 +56,9 @@
 		const patch: GroupPatch = {};
 		if (n !== group.name) patch.name = n;
 		if (description.trim() !== group.description) patch.description = description.trim();
-		if (whoCanInvite !== group.who_can_invite) patch.who_can_invite = whoCanInvite;
+		if (whoCanInvite !== (group.group_who_can_invite ?? group.who_can_invite)) {
+			patch.who_can_invite = whoCanInvite;
+		}
 		const raw = limit.trim();
 		const max = raw === '' ? null : Number(raw);
 		if (max !== null && (!Number.isInteger(max) || max < 1)) {
@@ -163,9 +169,13 @@
 		<label for="group-who-invites">Who can invite people</label>
 		<select id="group-who-invites" bind:value={whoCanInvite}>
 			<option value="facilitators">Only facilitators</option>
-			<option value="participants">Any participant</option>
+			<option value="participants" disabled={!instanceAllowsParticipants}>Any participant</option>
 		</select>
-		<span class="hint">This instance's settings may only allow facilitators.</span>
+		{#if !instanceAllowsParticipants}
+			<span class="hint">
+				This instance only lets facilitators invite, so "Any participant" isn't available.
+			</span>
+		{/if}
 	</div>
 	<div class="field">
 		<label for="group-limit">
@@ -186,7 +196,11 @@
 	</div>
 </form>
 
-<!-- MEETING and LISTING settings (#122) go here, as further cards. -->
+<MeetingSettings {group} {onchanged} />
+
+<ListingSettings {group} {onchanged} />
+
+{#if group.listed}<JoinRequests {group} {onchanged} />{/if}
 
 <InvitePeople {group} {people} />
 
@@ -197,7 +211,7 @@
 		people, remove people and close the group. They can't see anyone's reports or alerts.
 	</p>
 	{#if personError}<div class="notice error" role="alert"><p>{personError}</p></div>{/if}
-	<Roster groupId={group.id} {myId} {links} version={rosterVersion}>
+	<Roster groupId={group.id} {myId} version={rosterVersion}>
 		{#snippet actions(p)}
 			{#if p.role === 'facilitator'}
 				<button

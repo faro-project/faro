@@ -448,6 +448,8 @@ export interface AllyLink {
 	member_sign_pubkey: string | null;
 	/** When the ally's account will be deleted, if they asked for that. */
 	deletion_purge_after_ms: number | null;
+	/** The group this alliance was proposed in, if it came from a proposal. */
+	origin_group_id: string | null;
 }
 
 export interface ManifestStatus {
@@ -483,6 +485,8 @@ export interface SupportedMember {
 	ally_enc_pubkey: string | null;
 	/** When the member's account will be deleted, if they asked for that. */
 	deletion_purge_after_ms: number | null;
+	/** The group this alliance was proposed in, if it came from a proposal. */
+	origin_group_id: string | null;
 }
 
 /** `POST /v1/invites/{token}/accept` */
@@ -731,8 +735,7 @@ export interface GroupSummary {
 	description: string;
 	my_role: GroupRole;
 	participant_count: number;
-	/** The meeting card's data; its shape belongs to the meetings work (#122). */
-	meeting: unknown;
+	meeting: Meeting | null;
 	archived_at_ms: number | null;
 	delete_after_ms: number | null;
 	/** The last facilitator's account was deleted and this person is offered the role. */
@@ -750,17 +753,52 @@ export interface GroupView {
 	facilitators: GroupPerson[];
 	/** What is in effect: the instance's setting, narrowed by the group's. */
 	who_can_invite: WhoCanInvite;
+	/** What the facilitators chose; null until they choose. */
+	group_who_can_invite: WhoCanInvite | null;
+	/** The instance's limit: `facilitators` rules out "any participant". */
+	instance_who_can_invite: WhoCanInvite;
 	can_invite: boolean;
 	max_participants: number | null;
-	meeting: unknown;
+	meeting: Meeting | null;
+	/** The start of the next meeting (Unix ms), if there is a schedule. */
+	next_meeting_at_ms: number | null;
+	my_meeting_reminders: MeetingReminders;
 	listed: boolean;
-	listing: unknown;
+	listing: Listing | null;
 	archived_at_ms: number | null;
 	delete_after_ms: number | null;
 	no_facilitator: boolean;
 	facilitator_offer_until_ms: number | null;
 	groups_disabled: boolean;
 }
+
+/** A meeting schedule (GROUPS.md §8.4); the weekday counts from Monday as 0. */
+export interface Meeting {
+	cadence: 'weekly' | 'fortnightly';
+	weekday: number;
+	minute_of_day: number;
+	/** Minutes east of UTC. */
+	tz_offset_min: number;
+	place?: string;
+	anchor_ms?: number;
+}
+
+/** What a listing shows beyond the name, description and facilitators. */
+export interface Listing {
+	show_meeting_time: boolean;
+	show_place: boolean;
+}
+
+/** The caller's reminder choices for one group. */
+export interface MeetingReminders {
+	reminders: boolean;
+	email: boolean;
+	/** What `email` is until the person chooses (off in large groups). */
+	email_default: boolean;
+}
+
+/** How the viewer and another person are linked, from the viewer's side. */
+export type RosterRelationship = 'partners' | 'your_ally' | 'their_ally' | 'waiting';
 
 /** `GET /v1/groups/{id}/participants`. Never an email address. */
 export interface RosterEntry {
@@ -770,6 +808,15 @@ export interface RosterEntry {
 	joined_at_ms: number;
 	/** The account is disabled or being deleted: listed but unavailable. */
 	unavailable: boolean;
+	/** People you are linked with come first, whatever page they are on. */
+	relationship: RosterRelationship | null;
+}
+
+/** `GET /v1/groups/{id}/me/allies`: the people here you are linked with. */
+export interface GroupAlly {
+	user_id: string;
+	display_name: string;
+	relationship: RosterRelationship;
 }
 
 export interface Page<T> {
@@ -803,6 +850,19 @@ export interface GroupPatch {
 	description?: string;
 	who_can_invite?: WhoCanInvite;
 	max_participants?: number | null;
+	listed?: boolean;
+	listing?: Partial<Listing>;
+	/** `null` removes the meeting. */
+	meeting?: MeetingInput | null;
+}
+
+/** A facilitator's meeting schedule, as sent. */
+export interface MeetingInput {
+	cadence: 'weekly' | 'fortnightly';
+	weekday: number;
+	minute_of_day: number;
+	tz_offset_min: number;
+	place?: string | null;
 }
 
 /** `POST /v1/groups/{id}/invites` body */
@@ -837,8 +897,99 @@ export interface GroupInviteInfo {
 	group_description: string;
 	group_archived: boolean;
 	inviter_display_name: string;
+	/** The facilitators' display names. */
+	facilitators: string[];
+	meeting: Meeting | null;
 	instance_name: string;
 	expires_at_ms: number;
+}
+
+// ---- Alliance proposals (GROUPS.md §7; server/src/api/proposals.rs) ---------
+
+export type ProposalKind = 'request' | 'offer' | 'partnership';
+
+export interface ProposalPerson {
+	user_id: string;
+	display_name: string;
+}
+
+/** A proposal you sent, as you see it: a decline reads like an expiry. */
+export interface OutgoingProposal {
+	id: string;
+	group_id: string;
+	group_name: string | null;
+	to: ProposalPerson;
+	kind: ProposalKind;
+	state: 'open' | 'accepted' | 'not_accepted' | 'withdrawn';
+	created_at_ms: number;
+	expires_at_ms: number;
+	accepted_at_ms: number | null;
+	withdrawn_at_ms: number | null;
+	/** "You can ask again on" this date. */
+	ask_again_at_ms: number | null;
+}
+
+/** A proposal sent to you. */
+export interface IncomingProposal {
+	id: string;
+	group_id: string;
+	group_name: string | null;
+	from: ProposalPerson;
+	kind: ProposalKind;
+	state: 'open' | 'accepted' | 'declined' | 'expired' | 'withdrawn' | 'void';
+	created_at_ms: number;
+	expires_at_ms: number;
+	decided_at_ms: number | null;
+}
+
+/** `GET /v1/me/proposals` */
+export interface MyProposals {
+	incoming: IncomingProposal[];
+	outgoing: OutgoingProposal[];
+}
+
+/** `POST /v1/proposals/{id}/accept`: the links it started, all pending. */
+export interface ProposalAccepted {
+	proposal: IncomingProposal;
+	links: { member_id: string; ally_id: string; state: 'pending'; ally_key_id: string }[];
+}
+
+/** `GET /v1/me/proposal-blocks` */
+export interface ProposalBlock {
+	user_id: string;
+	display_name: string;
+	created_at_ms: number;
+}
+
+/** What `POST …/proposals` and `…/accept` take for a first ally key. */
+export interface AllyKeyUpload {
+	enc_pubkey: string;
+	wrapped_privkey: unknown;
+}
+
+// ---- The directory and join requests (GROUPS.md §8.8) ----------------------
+
+/** `GET /v1/group-directory`: never who is in a group, or how many. */
+export interface DirectoryEntry {
+	id: string;
+	name: string;
+	description: string;
+	facilitators: string[];
+	meeting: Omit<Meeting, 'place' | 'anchor_ms'> | null;
+	place: string | null;
+	full: boolean;
+	requested: boolean;
+	joined: boolean;
+}
+
+/** `GET /v1/me/join-requests`: an ended one reads "not_accepted", always. */
+export interface MyJoinRequest {
+	id: string;
+	group_id: string;
+	state: 'open' | 'not_accepted';
+	group_name?: string;
+	created_at_ms?: number;
+	expires_at_ms?: number;
 }
 
 /** `GET /admin/api/groups`: metadata only. */
@@ -852,4 +1003,12 @@ export interface AdminGroupRow {
 	created_at_ms: number;
 	archived_at_ms: number | null;
 	delete_after_ms: number | null;
+}
+
+/** `GET /v1/groups/{id}/join-requests` (facilitators): a name and a time. */
+export interface JoinRequestEntry {
+	id: string;
+	display_name: string;
+	created_at_ms: number;
+	expires_at_ms: number;
 }

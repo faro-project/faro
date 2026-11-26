@@ -180,6 +180,12 @@ pub struct GroupView {
     pub facilitators: Vec<Person>,
     /// Who may invite, after the instance's setting.
     pub who_can_invite: WhoCanInvite,
+    /// What the group's facilitators chose, before the instance's limit;
+    /// `null` until they choose (then the instance's setting applies).
+    pub group_who_can_invite: Option<WhoCanInvite>,
+    /// The instance's setting: `facilitators` means "any participant" can't
+    /// be chosen for this group.
+    pub instance_who_can_invite: WhoCanInvite,
     /// Whether the caller may invite right now.
     pub can_invite: bool,
     pub max_participants: Option<i64>,
@@ -227,6 +233,8 @@ pub(crate) async fn view(
         no_facilitator: facilitators.is_empty() && !group.is_archived(),
         facilitators,
         who_can_invite: effective_who_can_invite(&settings, group),
+        group_who_can_invite: group.who_can_invite,
+        instance_who_can_invite: settings.who_can_invite,
         can_invite: !group.is_archived() && settings.enabled && can_invite(&settings, group, me),
         max_participants: group.max_participants,
         meeting: parse_json_field(&group.meeting_json),
@@ -380,8 +388,10 @@ pub(crate) fn cursor_of(raw: &Option<String>) -> AppResult<Option<(i64, String)>
         .transpose()
 }
 
-/// `GET /v1/groups/{id}/participants?q=&cursor=`: 100 per page, oldest
-/// participant first. Names only, never email addresses.
+/// `GET /v1/groups/{id}/participants?q=&cursor=`: 100 per page. People the
+/// caller has an alliance with come first (each entry says which kind), then
+/// everyone else, oldest participant first. Names only, never email
+/// addresses.
 pub async fn roster(
     State(state): State<AppState>,
     s: SessionUser,
@@ -391,7 +401,7 @@ pub async fn roster(
     load(&state, &s, &id).await?;
     let cursor = cursor_of(&q.cursor)?;
     Ok(Json(
-        groups::roster(state.db().pool(), &id, q.q.as_deref(), cursor).await?,
+        groups::roster(state.db().pool(), &id, &s.user.id, q.q.as_deref(), cursor).await?,
     ))
 }
 
@@ -412,6 +422,51 @@ pub async fn history(
     load(&state, &s, &id).await?;
     let cursor = cursor_of(&q.cursor)?;
     Ok(Json(groups::history(state.db().pool(), &id, cursor).await?))
+}
+
+/// `GET /v1/groups/{id}/me/allies`: the people in this group the caller is
+/// allied with (either way, waiting links too), for the leave
+/// confirmation. A short list, not the roster.
+pub async fn my_allies_here(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<groups::GroupAlly>>> {
+    load(&state, &s, &id).await?;
+    Ok(Json(
+        groups::allies_in_group(state.db().pool(), &id, &s.user.id).await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserSearchQuery {
+    pub q: Option<String>,
+}
+
+/// Shortest search text: one letter would list half the instance.
+const USER_SEARCH_MIN_CHARS: usize = 2;
+
+/// `GET /v1/groups/{id}/user-search?q=`: a facilitator looks for people on
+/// the instance to invite, by display name. Returns only an id and a name
+/// (at most 20), never an email address, and doesn't match addresses at
+/// all, so it can't be used to learn whether an address has an account.
+/// People already in the group and accounts that can't join are left out.
+pub async fn user_search(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Path(id): Path<String>,
+    Query(q): Query<UserSearchQuery>,
+) -> AppResult<Json<Vec<Person>>> {
+    let (group, me) = load(&state, &s, &id).await?;
+    require_facilitator(&me)?;
+    require_writable(&state, &group)?;
+    let text = q.q.unwrap_or_default();
+    if text.trim().chars().count() < USER_SEARCH_MIN_CHARS {
+        return Ok(Json(Vec::new()));
+    }
+    Ok(Json(
+        groups::search_users(state.db().pool(), &id, &text).await?,
+    ))
 }
 
 // ---- Edit and archive --------------------------------------------------------
@@ -1105,21 +1160,39 @@ pub struct InviteInfo {
     pub group_description: String,
     pub group_archived: bool,
     pub inviter_display_name: String,
+    /// The facilitators' display names (§8.7). Never anyone else.
+    pub facilitators: Vec<String>,
+    /// `{cadence, weekday, minute_of_day, tz_offset_min, place?, anchor_ms}`
+    /// when the group has a schedule.
+    pub meeting: Option<serde_json::Value>,
     pub instance_name: String,
     pub expires_at_ms: i64,
 }
 
-fn invite_info(state: &AppState, i: InviteForMe, description: String) -> InviteInfo {
-    InviteInfo {
+async fn invite_info(
+    state: &AppState,
+    i: InviteForMe,
+    group: Option<Group>,
+) -> AppResult<InviteInfo> {
+    let facilitators = groups::facilitators(state.db().pool(), &i.invite.group_id)
+        .await?
+        .into_iter()
+        .map(|p| p.display_name)
+        .collect();
+    Ok(InviteInfo {
+        facilitators,
+        meeting: group
+            .as_ref()
+            .and_then(|g| parse_json_field(&g.meeting_json)),
         invite_ref: i.invite.token_hash,
         group_id: i.invite.group_id,
         group_name: i.group_name,
-        group_description: description,
+        group_description: group.map(|g| g.description).unwrap_or_default(),
         group_archived: i.group_archived,
         inviter_display_name: i.inviter_name,
         instance_name: state.config().instance.name.clone(),
         expires_at_ms: i.invite.expires_at_ms,
-    }
+    })
 }
 
 /// `GET /v1/me/group-invites`: invitations waiting for the caller (the
@@ -1134,11 +1207,8 @@ pub async fn my_invites(
         if i.group_archived {
             continue;
         }
-        let description = groups::by_id(state.db().pool(), &i.invite.group_id)
-            .await?
-            .map(|g| g.description)
-            .unwrap_or_default();
-        out.push(invite_info(&state, i, description));
+        let group = groups::by_id(state.db().pool(), &i.invite.group_id).await?;
+        out.push(invite_info(&state, i, group).await?);
     }
     Ok(Json(out))
 }
@@ -1160,11 +1230,8 @@ pub async fn get_invite(
         .find(|i| i.invite.token_hash == inv.token_hash)
         .filter(|i| !i.group_archived)
         .ok_or(AppError::NotFound)?;
-    let description = groups::by_id(&mut *conn, &inv.group_id)
-        .await?
-        .map(|g| g.description)
-        .unwrap_or_default();
-    Ok(Json(invite_info(&state, mine, description)))
+    let group = groups::by_id(&mut *conn, &inv.group_id).await?;
+    Ok(Json(invite_info(&state, mine, group).await?))
 }
 
 /// `POST /v1/group-invites/{token}/accept`: join. Only the invited address

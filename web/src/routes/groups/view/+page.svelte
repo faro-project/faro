@@ -6,10 +6,9 @@
 	// group gets a 404 from the API and sees "not found", as if it didn't
 	// exist.
 	//
-	// Spots other work fills in, each a component marked with its issue:
-	//   * WaitingForYou, MeetingCard  (#122): above the roster
-	//   * RosterPersonActions         (#122): in each roster row
-	//   * SharingSettings             (#124): "What this group can see about me"
+	// Alliance proposals, meetings and the roster's person actions are
+	// #122 (WaitingForYou, MeetingCard, RosterPersonActions); "What this group
+	// can see about me" is #124 (SharingSettings).
 	//
 	// GroupKeys (#125) is the group's signed member list and epoch keys: it
 	// warns when the list doesn't check out, and facilitators' browsers sign
@@ -20,10 +19,11 @@
 	import { resolve } from '$app/paths';
 	import { api, ApiError, seg } from '#lib/api.ts';
 	import { date } from '#lib/format.ts';
-	import { leaveConfirmation, relationshipOf, type Links } from '#lib/groups.ts';
-	import { groupError, loadLinks } from '#lib/groups-api.ts';
+	import { leaveConfirmation } from '#lib/groups.ts';
+	import { groupError } from '#lib/groups-api.ts';
+	import { proposals } from '#lib/proposals.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { GroupView, Page, RosterEntry } from '#lib/types.ts';
+	import type { GroupAlly, GroupView } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
 	import GroupHistory from '#lib/ui/groups/GroupHistory.svelte';
 	import GroupKeys from '#lib/ui/groups/GroupKeys.svelte';
@@ -40,7 +40,6 @@
 	let view = $state<'loading' | 'ok' | 'missing' | 'error'>('loading');
 	let error = $state('');
 	let tab = $state<'group' | 'manage'>('group');
-	let links = $state<Links>({ myAllies: [], supporting: [] });
 	let historyVersion = $state(0);
 	let loadedFor = '';
 
@@ -69,7 +68,7 @@
 		if (u && groupId && k !== loadedFor) {
 			loadedFor = k;
 			void load();
-			void loadLinks(u.roles).then((l) => (links = l));
+			void proposals.refresh(u.roles);
 		}
 	});
 
@@ -95,7 +94,7 @@
 		!!group?.facilitator_offer_until_ms && group.facilitator_offer_until_ms > Date.now()
 	);
 	let myAlliesInvitable = $derived(
-		links.myAllies.filter((a) => a.state === 'active').map((a) => a.id)
+		proposals.links.myAllies.filter((a) => a.state === 'active').map((a) => a.id)
 	);
 	let people = $state<{ id: string; name: string }[]>([]);
 
@@ -141,8 +140,8 @@
 	}
 
 	// Leaving: always possible, one step, and alliances stay (§9). The
-	// confirmation names the allies who are in this group, found by reading
-	// the whole roster (a group can be large, so it is read only now).
+	// confirmation names the allies who are in this group, from a short list
+	// the server keeps for exactly this (not the whole roster).
 	let leaveDialog = $state<HTMLDialogElement | null>(null);
 	let leaveBusy = $state(false);
 	let leaveError = $state('');
@@ -155,22 +154,8 @@
 		leaveText = '';
 		leaveDialog?.showModal();
 		try {
-			const names: string[] = [];
-			let cursor: string | null = null;
-			for (let pages = 0; pages < 50; pages++) {
-				const qs: string = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
-				const page: Page<RosterEntry> = await api.get(
-					`/v1/groups/${seg(groupId)}/participants${qs}`
-				);
-				for (const p of page.items) {
-					if (p.user_id !== session.user?.id && relationshipOf(p.user_id, links)) {
-						names.push(p.display_name);
-					}
-				}
-				cursor = page.next_cursor;
-				if (!cursor) break;
-			}
-			leaveText = leaveConfirmation(names);
+			const allies = await api.get<GroupAlly[]>(`/v1/groups/${seg(groupId)}/me/allies`);
+			leaveText = leaveConfirmation(allies.map((p) => p.display_name));
 		} catch {
 			leaveText = leaveConfirmation([]);
 		}
@@ -300,20 +285,19 @@
 				<ManageGroup
 					{group}
 					myId={user.id}
-					{links}
 					{people}
 					onchanged={changed}
 					onarchived={() => goto(resolve('/groups'))}
 				/>
 			{:else}
-				<WaitingForYou groupId={group.id} />
+				<WaitingForYou groupId={group.id} {readOnly} />
 				<MeetingCard {group} />
 
 				<section class="section" aria-labelledby="roster-h">
 					<h2 id="roster-h">People</h2>
-					<Roster groupId={group.id} myId={user.id} {links}>
+					<Roster groupId={group.id} myId={user.id}>
 						{#snippet actions(person)}
-							<RosterPersonActions {groupId} {person} />
+							<RosterPersonActions {groupId} {person} {readOnly} />
 						{/snippet}
 					</Roster>
 				</section>

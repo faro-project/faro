@@ -665,7 +665,56 @@ pub struct RosterEntry {
     pub joined_at_ms: i64,
     /// The account is disabled or being deleted: listed but unavailable.
     pub unavailable: bool,
+    /// How this person and the viewer are linked as allies, if they are.
+    /// The viewer's own line, and people they have no link with, say `null`.
+    pub relationship: Option<Relationship>,
 }
+
+/// The alliance between the viewer and another person in the group, from
+/// the viewer's side. Pending links count only as `waiting` (for safety
+/// codes). Declared in the order the roster sorts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relationship {
+    /// Each is the other's active ally.
+    Partners,
+    /// They are the viewer's ally.
+    YourAlly,
+    /// The viewer is their ally.
+    TheirAlly,
+    /// A link exists but is waiting for approval.
+    Waiting,
+}
+
+impl Relationship {
+    fn from_rank(rank: i64) -> Option<Self> {
+        match rank {
+            0 => Some(Self::Partners),
+            1 => Some(Self::YourAlly),
+            2 => Some(Self::TheirAlly),
+            3 => Some(Self::Waiting),
+            _ => None,
+        }
+    }
+}
+
+/// SQL for the rank of the link between the viewer and `u.id`: 0 to 3 as
+/// [`Relationship`], 4 for none. `l1` is the viewer's link to them as
+/// member, `l2` theirs to the viewer.
+macro_rules! rank_sql {
+    () => {
+        "(CASE
+            WHEN l1.state = 'active' AND l2.state = 'active' THEN 0
+            WHEN l1.state = 'active' THEN 1
+            WHEN l2.state = 'active' THEN 2
+            WHEN l1.state IS NOT NULL OR l2.state IS NOT NULL THEN 3
+            ELSE 4 END)"
+    };
+}
+
+/// Cursor numbers are `rank * RANK_SCALE + joined_at`: ms since 1970 stays
+/// below the scale until the year 5138.
+const RANK_SCALE: i64 = 100_000_000_000_000;
 
 /// A page of results and the cursor for the next one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -697,30 +746,45 @@ fn like_pattern(q: &str) -> String {
     out
 }
 
-/// The roster, oldest participant first, [`PAGE_SIZE`] at a time. `q`
-/// filters on display name.
+/// The roster, [`PAGE_SIZE`] at a time: people the `viewer` has an alliance
+/// with first (partners, then their allies, then people they are allies of,
+/// then links waiting for safety codes), everyone else after, each group
+/// oldest participant first. The order is the server's, so it holds across
+/// pages. `q` filters on display name.
 pub async fn roster<'e>(
     e: impl Executor<'e, Database = Any>,
     group: &str,
+    viewer: &UserId,
     q: Option<&str>,
     cursor: Option<(i64, String)>,
 ) -> Result<Page<RosterEntry>, sqlx::Error> {
-    let (after_at, after_id) = cursor.unwrap_or((i64::MIN, String::new()));
+    let (after, after_id) = cursor.unwrap_or((i64::MIN, String::new()));
     let pattern = like_pattern(q.unwrap_or(""));
-    let rows = sqlx::query(
-        "SELECT p.id AS pid, p.user_id, p.role, p.joined_at, u.display_name, u.disabled,
-                u.deletion_requested_at
-         FROM group_participants p JOIN users u ON u.id = p.user_id
-         WHERE p.group_id = $1 AND p.state = 'active'
-           AND LOWER(u.display_name) LIKE $2 ESCAPE '\\'
-           AND (p.joined_at > $3 OR (p.joined_at = $3 AND p.id > $4))
-         ORDER BY p.joined_at, p.id
-         LIMIT $5",
-    )
+    let rows = sqlx::query(concat!(
+        "SELECT * FROM (
+            SELECT p.id AS pid, p.user_id, p.role, p.joined_at, u.display_name, u.disabled,
+                   u.deletion_requested_at,
+                   CAST(",
+        rank_sql!(),
+        " AS BIGINT) AS rank
+            FROM group_participants p JOIN users u ON u.id = p.user_id
+            LEFT JOIN ally_links l1 ON l1.member_id = $2 AND l1.ally_id = u.id
+                 AND l1.state <> 'removed' AND u.id <> $2
+            LEFT JOIN ally_links l2 ON l2.ally_id = $2 AND l2.member_id = u.id
+                 AND l2.state <> 'removed' AND u.id <> $2
+            WHERE p.group_id = $1 AND p.state = 'active'
+              AND LOWER(u.display_name) LIKE $3 ESCAPE '\\'
+         ) r
+         WHERE (rank * $6 + joined_at > $4 OR (rank * $6 + joined_at = $4 AND pid > $5))
+         ORDER BY rank, joined_at, pid
+         LIMIT $7"
+    ))
     .bind(group)
+    .bind(viewer.as_str())
     .bind(pattern)
-    .bind(after_at)
+    .bind(after)
     .bind(after_id)
+    .bind(RANK_SCALE)
     .bind(PAGE_SIZE + 1)
     .fetch_all(e)
     .await?;
@@ -729,7 +793,8 @@ pub async fn roster<'e>(
     for r in rows.iter().take(PAGE_SIZE as usize) {
         let joined_at_ms: i64 = r.try_get("joined_at")?;
         let pid: String = r.try_get("pid")?;
-        last = Some(format!("{joined_at_ms}:{pid}"));
+        let rank: i64 = r.try_get("rank")?;
+        last = Some(format!("{}:{pid}", rank * RANK_SCALE + joined_at_ms));
         items.push(RosterEntry {
             user_id: UserId::new(r.try_get::<String, _>("user_id")?),
             display_name: r.try_get("display_name")?,
@@ -738,6 +803,7 @@ pub async fn roster<'e>(
             unavailable: r.try_get::<i64, _>("disabled")? != 0
                 || r.try_get::<Option<i64>, _>("deletion_requested_at")?
                     .is_some(),
+            relationship: Relationship::from_rank(rank),
         });
     }
     let next_cursor = if rows.len() as i64 > PAGE_SIZE {
@@ -746,6 +812,100 @@ pub async fn roster<'e>(
         None
     };
     Ok(Page { items, next_cursor })
+}
+
+/// A person in the group the viewer has an alliance with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupAlly {
+    pub user_id: UserId,
+    pub display_name: String,
+    pub relationship: Relationship,
+}
+
+/// Most people [`allies_in_group`] returns: more than the 32 allies one
+/// person can have, plus the members they support.
+const ALLIES_IN_GROUP_MAX: i64 = 200;
+
+/// The people in `group` the `viewer` is linked with (the leave
+/// confirmation: "You'll stay allies with ..."). Only the viewer's own
+/// alliances, so it shows nothing a roster row doesn't.
+pub async fn allies_in_group<'e>(
+    e: impl Executor<'e, Database = Any>,
+    group: &str,
+    viewer: &UserId,
+) -> Result<Vec<GroupAlly>, sqlx::Error> {
+    let rows = sqlx::query(concat!(
+        "SELECT * FROM (
+            SELECT p.user_id, u.display_name, p.joined_at, p.id AS pid,
+                   CAST(",
+        rank_sql!(),
+        " AS BIGINT) AS rank
+            FROM group_participants p JOIN users u ON u.id = p.user_id
+            LEFT JOIN ally_links l1 ON l1.member_id = $2 AND l1.ally_id = u.id
+                 AND l1.state <> 'removed'
+            LEFT JOIN ally_links l2 ON l2.ally_id = $2 AND l2.member_id = u.id
+                 AND l2.state <> 'removed'
+            WHERE p.group_id = $1 AND p.state = 'active' AND u.id <> $2
+         ) r
+         WHERE rank < 4
+         ORDER BY rank, joined_at, pid
+         LIMIT $3"
+    ))
+    .bind(group)
+    .bind(viewer.as_str())
+    .bind(ALLIES_IN_GROUP_MAX)
+    .fetch_all(e)
+    .await?;
+    rows.iter()
+        .filter_map(|r| {
+            let rank: i64 = r.try_get("rank").ok()?;
+            Some((r, Relationship::from_rank(rank)?))
+        })
+        .map(|(r, relationship)| {
+            Ok(GroupAlly {
+                user_id: UserId::new(r.try_get::<String, _>("user_id")?),
+                display_name: r.try_get("display_name")?,
+                relationship,
+            })
+        })
+        .collect()
+}
+
+/// Most people [`search_users`] returns.
+pub const USER_SEARCH_MAX: i64 = 20;
+
+/// Instance users whose display name contains `q`, for a facilitator picking
+/// people to invite: only an id and a name, and never someone already in
+/// the group or whose account is disabled or being deleted. **Display names
+/// only**: matching email addresses would tell the searcher whether an
+/// address has an account.
+pub async fn search_users<'e>(
+    e: impl Executor<'e, Database = Any>,
+    group: &str,
+    q: &str,
+) -> Result<Vec<Person>, sqlx::Error> {
+    sqlx::query(
+        "SELECT u.id, u.display_name FROM users u
+         WHERE LOWER(u.display_name) LIKE $2 ESCAPE '\\'
+           AND u.disabled = 0 AND u.deletion_requested_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM group_participants p
+                           WHERE p.group_id = $1 AND p.user_id = u.id AND p.state = 'active')
+         ORDER BY LOWER(u.display_name), u.id
+         LIMIT $3",
+    )
+    .bind(group)
+    .bind(like_pattern(q))
+    .bind(USER_SEARCH_MAX)
+    .fetch_all(e)
+    .await?
+    .iter()
+    .map(|r| {
+        Ok(Person {
+            user_id: UserId::new(r.try_get::<String, _>("id")?),
+            display_name: r.try_get("display_name")?,
+        })
+    })
+    .collect()
 }
 
 // ---- History ----------------------------------------------------------------

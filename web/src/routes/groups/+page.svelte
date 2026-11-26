@@ -9,6 +9,8 @@
 	import { date } from '#lib/format.ts';
 	import { GROUP_LIMITS } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
+	import { nextMeetingText, nextStart } from '#lib/meetings.ts';
+	import { proposals } from '#lib/proposals.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { GroupInviteInfo, GroupSummary, GroupView } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
@@ -43,6 +45,7 @@
 		if (u && u.id !== loadedFor) {
 			loadedFor = u.id;
 			void load();
+			void proposals.refresh(u.roles);
 		}
 	});
 
@@ -51,6 +54,13 @@
 
 	// While the account is being deleted, nothing new joins it.
 	let deleting = $derived(!!session.deletion);
+
+	/** Proposals people sent you in this group that you haven't answered. */
+	function waitingIn(groupId: string): number {
+		return proposals.incoming.filter(
+			(p) => p.group_id === groupId && p.state === 'open' && p.expires_at_ms > Date.now()
+		).length;
+	}
 
 	function href(id: string) {
 		return `${resolve('/groups/view')}?id=${encodeURIComponent(id)}`;
@@ -149,7 +159,18 @@
 											{g.participant_count}
 											{g.participant_count === 1 ? 'person' : 'people'}
 										</div>
-										<!-- The next meeting and "Waiting for you" go here (#122). -->
+										{#if g.meeting}
+											{@const at = nextStart(g.meeting)}
+											{#if at}<div class="row-meta">Next meeting: {nextMeetingText(at)}</div>{/if}
+										{/if}
+										{#if waitingIn(g.id) > 0}
+											<div class="row-meta">
+												<span class="chip pending">
+													{waitingIn(g.id)}
+													{waitingIn(g.id) === 1 ? 'proposal' : 'proposals'} waiting for you
+												</span>
+											</div>
+										{/if}
 									</div>
 								</div>
 							</li>

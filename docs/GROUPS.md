@@ -579,6 +579,17 @@ PUT    /admin/api/groups/{id}/listed               {listed: false}   (admin log 
 DELETE /admin/api/groups/{id}                      archive (admin log + notices)
 ```
 
+Added for the web app (§17):
+
+```
+GET /v1/groups/{id}/participants        each entry has `relationship` (partners | your_ally | their_ally | waiting | null);
+                                        people the caller is linked with come first, on every page
+GET /v1/groups/{id}/me/allies           the people in this group the caller is linked with (the leave dialog)
+GET /v1/groups/{id}/user-search?q=      facilitators: instance users by display name (id and name only; never matches email)
+GET /v1/group-invites/{token}           also `facilitators` (names) and `meeting`
+GET /v1/groups/{id}                     also `group_who_can_invite` (null until chosen) and `instance_who_can_invite`
+```
+
 Authorization is checked on every route against `group_participants` (state `active`) and role. Someone who isn't in a group gets `404`, not `403`, so group ids can't be probed. The only exceptions are a listed group's directory entry and its join-request route, which any signed-in user can reach while the group is listed.
 
 ---

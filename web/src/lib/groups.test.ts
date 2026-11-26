@@ -13,10 +13,9 @@ import {
 	leaveConfirmation,
 	parseEmails,
 	relationshipOf,
-	roster,
 	tokenFromHash
 } from './groups.ts';
-import type { HistoryEntry, HistoryKind, RosterEntry } from './types.ts';
+import type { HistoryEntry, HistoryKind } from './types.ts';
 
 const DAY = 24 * 3600 * 1000;
 const person = (n: string) => ({ user_id: `usr_${n}`, display_name: n });
@@ -26,13 +25,6 @@ const entry = (kind: HistoryKind, atDays: number, who = 'Sam'): HistoryEntry => 
 	kind,
 	subject: person(who),
 	actor: null
-});
-const member = (n: string): RosterEntry => ({
-	user_id: `usr_${n}`,
-	display_name: n,
-	role: 'participant',
-	joined_at_ms: 0,
-	unavailable: false
 });
 
 test('the leave confirmation says alliances stay, with the section 9 wording', () => {
@@ -74,18 +66,6 @@ test('relationships are named from both directions', () => {
 	assert.equal(relationshipOf('usr_Both', links), 'partners');
 	assert.equal(relationshipOf('usr_Pat', links), 'waiting');
 	assert.equal(relationshipOf('usr_Nobody', links), null);
-});
-
-test('people you have a relationship with are listed first, the rest keep their order', () => {
-	const links = {
-		myAllies: [{ id: 'usr_C', state: 'active' }],
-		supporting: [{ id: 'usr_D', state: 'active' }]
-	};
-	const sorted = roster([member('A'), member('B'), member('C'), member('D')], links);
-	assert.deepEqual(
-		sorted.map((e) => e.display_name),
-		['C', 'D', 'A', 'B']
-	);
 });
 
 test('runs of joins in a week collapse, and short runs do not', () => {
