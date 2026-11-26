@@ -26,7 +26,7 @@ mod goodbye;
 pub mod journal;
 mod net;
 pub mod spawn;
-mod status;
+pub mod status;
 pub mod supervisor;
 mod updates;
 
@@ -349,6 +349,7 @@ impl ServiceBuilder {
             packaged_model,
             packaged_domains,
         );
+        let detection = start_detection(&start, domains_tamper.as_ref());
         let mut model_tamper = start.tamper;
         model_tamper.extend(domains_tamper);
         let detector = Detector::new(&DetectorConfig::default(), start.classifier, start.domains)?;
@@ -373,9 +374,18 @@ impl ServiceBuilder {
             clock.clone(),
         );
         let (status, status_rx) = StatusTx::new();
+        let updates = faro_ipc::status::UpdatesReport {
+            enabled: updater.is_some(),
+            disabled_reason: updater
+                .is_none()
+                .then(|| "this build has no root of trust for updates".to_owned()),
+            ..Default::default()
+        };
         status.update(|s| {
             s.model = Some(start.model_label);
             s.blocklist = start.blocklist_label;
+            s.detection = detection;
+            s.updates = updates;
         });
         let (control_tx, control_rx) = mpsc::channel(64);
         Ok(Service {
@@ -404,6 +414,55 @@ impl ServiceBuilder {
             artifacts,
             lock,
         })
+    }
+}
+
+/// The model and domain list the service starts with, for the status; when
+/// there is none, why (the integrity failure reported for it, if any).
+fn start_detection(
+    start: &artifacts::Start,
+    domains_tamper: Option<&TamperSignal>,
+) -> faro_ipc::status::DetectionReport {
+    let reason = |prefix: &str| {
+        start
+            .tamper
+            .iter()
+            .chain(domains_tamper)
+            .find_map(|t| match t {
+                TamperSignal::IntegrityFailure { component } if component.starts_with(prefix) => {
+                    Some(component.clone())
+                }
+                _ => None,
+            })
+    };
+    let (model, model_missing) = if start.classifier.info().name == "null" {
+        let why = reason("image model").unwrap_or_else(|| {
+            if crate::model::default_runtime().is_none() {
+                "this build has no ONNX Runtime; rating from context signals only".to_owned()
+            } else {
+                "no image model installed; rating from context signals only".to_owned()
+            }
+        });
+        (None, Some(why))
+    } else {
+        let a = status::artifact(&start.model_label, start.model_from_channel);
+        (Some(a), None)
+    };
+    let (domains, domains_missing) = match &start.blocklist_label {
+        Some(l) => (
+            Some(status::artifact(l, start.blocklist_from_channel)),
+            None,
+        ),
+        None => (
+            None,
+            Some(reason("domain list").unwrap_or_else(|| "no domain list installed".to_owned())),
+        ),
+    };
+    faro_ipc::status::DetectionReport {
+        model,
+        model_missing,
+        domains,
+        domains_missing,
     }
 }
 
@@ -499,7 +558,7 @@ impl Service {
             tick,
             spawn_agent,
             status,
-            status_rx: _,
+            status_rx,
             control_tx,
             mut control_rx,
             pokes,
@@ -539,6 +598,21 @@ impl Service {
             gate: gate.clone(),
         });
         let mut tasks = JoinSet::new();
+        let started_ms = clock.wall_ms();
+        tasks.spawn(status::write_loop(
+            dir.clone(),
+            status_rx.clone(),
+            clock.clone(),
+            started_ms,
+            stop_rx.clone(),
+        ));
+        let final_status = |status: &StatusTx| {
+            status.update(|s| s.phase = Phase::Stopped);
+            let last = status_rx.borrow().clone();
+            if let Err(e) = status::write_status_file(&dir, &last, started_ms, clock.wall_ms()) {
+                tracing::warn!(error = %e, "cannot write the status file");
+            }
+        };
 
         // The pin is checked before anything is sent; a transient failure
         // here is fine (the refresh loop re-checks).
@@ -554,6 +628,8 @@ impl Service {
                 update_first_check.unwrap_or_else(updates::default_first_check),
                 config.updates.check_interval(),
                 control_tx.clone(),
+                status.clone(),
+                clock.clone(),
                 stop_rx.clone(),
             ));
         }
@@ -589,7 +665,7 @@ impl Service {
                     )
                     .await;
                     finish(tasks).await;
-                    status.update(|s| s.phase = Phase::Stopped);
+                    final_status(&status);
                     return Ok(());
                 }
             }
@@ -740,7 +816,7 @@ impl Service {
             tracing::warn!(error = ?e, "could not send the shutting-down heartbeat");
         }
         finish(tasks).await;
-        status.update(|s| s.phase = Phase::Stopped);
+        final_status(&status);
         Ok(())
     }
 

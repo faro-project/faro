@@ -50,6 +50,7 @@ use faro_core::{
     OutboxError, RecipientSet, Scheduler, SessionSnapshot, SignalRoute, Transition, Trigger,
 };
 use faro_detect::{ContextSignals, DetectionOutcome, Detector, DetectorConfig, NullClassifier};
+use faro_ipc::status::{CaptureFailure, CaptureState, PermissionsReport, SessionReport};
 use faro_ipc::CaptureReason;
 use faro_platform::{Frame, PermissionState, SessionChange};
 use faro_proto::api::DeviceState;
@@ -232,6 +233,8 @@ pub struct Core {
     target: Option<CaptureTarget>,
     /// Connected agents: session id → account.
     agents: BTreeMap<String, String>,
+    /// Connected agents: session id → version (for the status).
+    agent_versions: BTreeMap<String, String>,
     /// The sessions the source listed (`None`: it does not list them).
     sessions: Option<Vec<SessionStatus>>,
     /// Sessions currently without an agent.
@@ -326,6 +329,7 @@ impl Core {
             context: ContextSignals::default(),
             target: None,
             agents: BTreeMap::new(),
+            agent_versions: BTreeMap::new(),
             sessions: None,
             absence: BTreeMap::new(),
             noticed: BTreeSet::new(),
@@ -744,8 +748,13 @@ impl Core {
         let account = self.target_account();
         self.status.update(|s| {
             s.agent_connected = connected;
-            s.capture_account = account;
+            s.capture_account = account.clone();
+            s.permissions = PermissionsReport {
+                account,
+                ..PermissionsReport::default()
+            };
         });
+        self.update_session_status();
         match &self.target {
             // Same state, another account: a new span on the timeline.
             Some(_) => self.set_activity(self.activity),
@@ -789,12 +798,61 @@ impl Core {
             .collect();
         let sessions = self.sessions.as_ref().map_or(1, Vec::len);
         let agents = self.agents.len();
+        let list = self.session_list();
         self.status.update(|s| {
             s.agent_missing = !missing.is_empty();
             s.unmonitored_accounts = missing;
             s.sessions = sessions;
             s.agents = agents;
+            s.session_list = list;
         });
+    }
+
+    /// Every session the source listed, and any connected agent it did not
+    /// list (a source that does not list sessions), for the status.
+    fn session_list(&self) -> Vec<SessionReport> {
+        let target = self.target.as_ref().map(|t| t.session.as_str());
+        let entry = |id: &str, account: &str, at_screen: bool| SessionReport {
+            session: id.to_owned(),
+            account: account.to_owned(),
+            at_screen,
+            agent_connected: self.agents.contains_key(id),
+            agent_version: self.agent_versions.get(id).cloned(),
+            capture_target: target == Some(id),
+            unmonitored: self.absence.get(id).is_some_and(|a| a.reported),
+        };
+        let listed = self.sessions.as_deref().unwrap_or_default();
+        let mut out: Vec<SessionReport> = listed
+            .iter()
+            .map(|s| entry(&s.id, &s.account, s.active))
+            .collect();
+        for (id, account) in &self.agents {
+            if !listed.iter().any(|s| &s.id == id) {
+                out.push(entry(id, account, target == Some(id.as_str())));
+            }
+        }
+        out
+    }
+
+    /// Whether captures run, and why not, for the status.
+    fn capture_state(&self) -> CaptureState {
+        if self.member_pause.is_some() {
+            CaptureState::Paused
+        } else if self.sleeping {
+            CaptureState::Asleep
+        } else if !self.capturing() {
+            if self.someone_active() {
+                CaptureState::NoAgent
+            } else {
+                CaptureState::LoginWindow
+            }
+        } else if self.session.locked {
+            CaptureState::Locked
+        } else if self.session.display_asleep || self.session.idle_secs >= IDLE_SECS {
+            CaptureState::Idle
+        } else {
+            CaptureState::Active
+        }
     }
 
     fn account_of(&self, session: &str) -> String {
@@ -837,6 +895,14 @@ impl Core {
     }
 
     fn publish_state(&self) {
+        let state = self.capture_state();
+        let account = self.target_account();
+        self.status.update_if(|s| {
+            let changed = s.capture.state != state || s.capture.target_account != account;
+            s.capture.state = state;
+            s.capture.target_account = account;
+            changed
+        });
         let s = self.device_state();
         self.hb_state.send_if_modified(|cur| {
             if *cur == s || *cur == DeviceState::ShuttingDown {
@@ -916,6 +982,8 @@ impl Core {
             if self.capture_in_flight.is_some() {
                 return;
             }
+            self.status
+                .update(|s| s.capture.last_attempt_ms = Some(wall));
             match self
                 .source_tx
                 .try_send(SourceCommand::CaptureNow(capture_reason(info.cause)))
@@ -990,7 +1058,16 @@ impl Core {
         tracing::warn!(%reason, "capture failed");
         self.failures_in_row = self.failures_in_row.saturating_add(1);
         self.journal.capture_failure();
-        self.status.update(|s| s.capture_failures += 1);
+        let failure = CaptureFailure {
+            at_ms: self.clock.wall_ms(),
+            reason: faro_ipc::status::short_reason(reason),
+        };
+        let in_row = self.failures_in_row;
+        self.status.update(|s| {
+            s.capture_failures += 1;
+            s.capture.consecutive_failures = in_row;
+            s.capture.last_failure = Some(failure);
+        });
         if self.failures_in_row >= self.capture_failure_threshold && !self.capture_failing_reported
         {
             self.capture_failing_reported = true;
@@ -1021,12 +1098,22 @@ impl Core {
         if let Some(m) = model {
             tracing::info!(model = %m.label, "image model switched");
             det.set_classifier(m.value);
-            self.status.update(|s| s.model = Some(m.label));
+            let report = super::status::artifact(&m.label, true);
+            self.status.update(|s| {
+                s.model = Some(m.label);
+                s.detection.model = Some(report);
+                s.detection.model_missing = None;
+            });
         }
         if let Some(d) = domains {
             tracing::info!(list = %d.label, "domain list switched");
             det.set_domains(Some(d.value));
-            self.status.update(|s| s.blocklist = Some(d.label));
+            let report = super::status::artifact(&d.label, true);
+            self.status.update(|s| {
+                s.blocklist = Some(d.label);
+                s.detection.domains = Some(report);
+                s.detection.domains_missing = None;
+            });
         }
     }
 
@@ -1110,7 +1197,11 @@ impl Core {
             if let Some(host) = self.context.browser.as_ref().and_then(url_host) {
                 self.journal.domain(&host);
             }
-            self.status.update(|s| s.captures += 1);
+            self.status.update(|s| {
+                s.captures += 1;
+                s.capture.last_success_ms = Some(wall);
+                s.capture.consecutive_failures = 0;
+            });
         }
         if best.rating >= Rating::Medium {
             let flag = FlagBody {
@@ -1142,6 +1233,7 @@ impl Core {
             } => {
                 tracing::info!(%agent_version, %account, "agent connected");
                 self.agents.insert(session.clone(), account);
+                self.agent_versions.insert(session.clone(), agent_version);
                 self.absence.remove(&session);
                 self.update_session_status();
                 if let Some(r) = self.supervisor.on_connect(mono, &session) {
@@ -1165,6 +1257,7 @@ impl Core {
             } => {
                 tracing::info!(%reason, %account, expected, "agent disconnected");
                 self.agents.remove(&session);
+                self.agent_versions.remove(&session);
                 if self.target.as_ref().is_some_and(|t| t.session == session) {
                     self.set_target(None);
                     self.set_activity(if expected || !self.someone_active() {
@@ -1293,6 +1386,12 @@ impl Core {
                         tracing::error!(error = %e, "cannot persist the permission state");
                     }
                 }
+                let reported = PermissionsReport {
+                    account: account.clone(),
+                    screen_recording: Some(screen.into()),
+                    accessibility,
+                };
+                self.status.update(|s| s.permissions = reported);
                 if let Some(now) = accessibility {
                     let was = self.accessibility.replace(now);
                     if was == Some(true) && !now {
