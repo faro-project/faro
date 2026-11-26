@@ -61,3 +61,22 @@ If something doesn't work and you want to see why, or someone helping you asks f
 - **The menu-bar agent, for each account:** `~/Library/Logs/Faro/faro-agent.log`, readable only by that account.
 
 Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.
+
+## Checking that Faro is working
+
+Someone who knows an administrator password can check in Terminal:
+
+```sh
+sudo /Library/Faro/bin/faro-service status
+```
+
+It shows what Faro is doing, never what was on the screen. The lines to look at:
+
+| It says | What it means |
+|---|---|
+| **Service:** not running | Faro's service has stopped. Restart the Mac. If it still says so, tell whoever runs your instance; the **Log** line names the file that says why ([Faro's logs](#faros-logs)). |
+| **Capture:** active | Faro is working. `paused` because the screen is locked, the Mac is asleep or nobody is using it is normal too. |
+| **Capture:** none: the agent of *account* is not connected | Faro Agent isn't running in that account. Log out of it and in again. Your allies are told if this lasts. |
+| **Permissions:** Screen Recording denied, or **Failures:** permission denied: screen_recording | Open System Settings > Privacy & Security > Screen Recording (Screen & System Audio Recording on newer macOS) in that account and turn on **Faro Agent**. |
+| **Image model:** none | Faro can't check images on this Mac and rates the screen from the apps and websites in use only. Reinstall Faro, and tell whoever runs your instance if it stays. |
+| **Updates:** last check … failed | Faro couldn't check for updates. It tries again later; if it keeps failing, tell whoever runs your instance. |

@@ -419,6 +419,23 @@ async fn every_account_has_an_agent_and_capture_follows_the_screen() {
         })
         .await;
     assert_eq!(st.sessions, 2);
+    // The status lists both sessions, with alex's as the capture target.
+    let list = dev
+        .wait("both sessions in the status", |s| {
+            s.session_list.iter().filter(|x| x.agent_connected).count() == 2
+        })
+        .await
+        .session_list;
+    let by = |a: &str| list.iter().find(|x| x.account == a).unwrap().clone();
+    let (a, g) = (by("alex"), by("guest"));
+    assert!(
+        a.at_screen && a.capture_target && a.agent_version.is_some(),
+        "{a:?}"
+    );
+    assert!(
+        !g.at_screen && !g.capture_target && g.agent_connected,
+        "{g:?}"
+    );
 
     dev.drive_until("a flag from alex", |s| s.flags >= 1).await;
     assert_eq!(flag_accounts(&w, &dev).await, [Some("alex".to_owned())]);
@@ -513,6 +530,18 @@ async fn a_session_whose_agent_never_connects_is_tamper() {
     // `active`.
     logins.switch_to("newbie");
     dev.wait("no capture target", |s| !s.agent_connected).await;
+    let st = dev
+        .wait("the status says why", |s| {
+            s.capture.state == faro_ipc::status::CaptureState::NoAgent
+        })
+        .await;
+    assert_eq!(st.capture.target_account, None);
+    let newbie = st
+        .session_list
+        .iter()
+        .find(|x| x.account == "newbie")
+        .unwrap();
+    assert!(newbie.at_screen && !newbie.agent_connected && newbie.unmonitored);
     dev.handle().heartbeat_now();
     dev.wait("heartbeat no longer active", |s| {
         s.last_heartbeat_state == Some(DeviceState::Idle)

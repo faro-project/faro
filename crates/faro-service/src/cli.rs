@@ -3,7 +3,7 @@
 //! ```text
 //! faro-service [--config FILE] [--state-dir DIR] [-v] enroll (--link faro://enroll?... | --instance URL --code XXXX-XXXX [--member-key ID]) [--name NAME] [--yes] [--no-wait]
 //! faro-service [--config FILE] [--state-dir DIR] [-v] run [--socket PATH] [--spawn-agent BIN] [--capture ipc|in-process]
-//! faro-service [--config FILE] [--state-dir DIR] status
+//! faro-service [--config FILE] [--state-dir DIR] status [--json]
 //! faro-service [--config FILE] [--state-dir DIR] goodbye [--reason uninstalled|account-deleted | --moved-to HOST] [--within SECS]
 //! faro-service model-check [--manifest PATH] [--runs N]
 //! faro-service domains-check [--manifest PATH]
@@ -105,8 +105,14 @@ pub enum Command {
         #[arg(long, value_enum, default_value = "ipc")]
         capture: CaptureMode,
     },
-    /// Show enrollment and outbox state (no network access).
-    Status,
+    /// Show enrollment, the outbox, and what the running service is doing:
+    /// agents, captures, permissions, the model and updates (no network
+    /// access).
+    Status {
+        /// Print JSON (`status_view::StatusView`) instead.
+        #[arg(long)]
+        json: bool,
+    },
     /// Tell allies that monitoring ends on purpose (the uninstaller runs
     /// this after stopping the service). Writes an urgent `goodbye` event
     /// and uploads it.
@@ -170,6 +176,8 @@ enum CliError {
     Service(#[from] ServiceError),
     #[error(transparent)]
     Outbox(#[from] faro_core::OutboxError),
+    #[error(transparent)]
+    Status(#[from] crate::status_view::GatherError),
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
@@ -290,7 +298,7 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
             }
             cmd_run(config, spawn_agent, capture).await
         }
-        Command::Status => cmd_status(&config),
+        Command::Status { json } => cmd_status(&config, json),
         Command::Goodbye {
             reason,
             moved_to,
@@ -632,65 +640,21 @@ async fn shutdown_signal() {
     }
 }
 
-fn cmd_status(config: &Config) -> Result<(), CliError> {
-    let dir = StateDir::open(&config.state_dir)?;
-    let e = match dir.enrollment() {
-        Ok(e) => e,
-        Err(crate::state::StateError::NotEnrolled) => {
-            println!("Not enrolled. State directory: {}", dir.path().display());
-            print_thresholds(config);
-            return Ok(());
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let key = state::load_device_key(&dir)?;
-    println!("Instance:     {} ({})", e.instance_name, e.instance_url);
-    println!("Instance id:  {}", e.instance_id);
-    println!("Device:       {} \"{}\"", e.device_id, e.device_name);
-    println!(
-        "Fingerprint:  {}",
-        enroll::device_fingerprint(&key.public())
-    );
-    println!("Member:       {}", e.member_id);
-    println!(
-        "Member key:   {}  (compare with the member key your web app shows)",
-        enroll::member_fingerprint(&e.member_sign_pubkey)
-    );
-    println!(
-        "Endorsed:     {}",
-        if dir.endorsement()?.is_some() {
-            "yes"
-        } else {
-            "no (waiting for approval)"
-        }
-    );
-    let outbox = faro_core::Outbox::open(dir.path(), &e.instance_id, &e.device_id)?;
-    match outbox.current_recipients(&e.member_sign_pubkey, &e.member_id)? {
-        Some(set) => println!(
-            "Recipients:   manifest v{} (member + {} allies)",
-            set.manifest_ref().version,
-            set.allies().len()
-        ),
-        None => println!("Recipients:   none yet (not bootstrapped)"),
+fn cmd_status(config: &Config, json: bool) -> Result<(), CliError> {
+    let now = SystemClock::new().wall_ms();
+    let view = crate::status_view::gather(config, now)?;
+    if json {
+        let text = serde_json::to_string_pretty(&view)
+            .map_err(|e| CliError::Usage(format!("cannot print the status: {e}")))?;
+        println!("{text}");
+    } else {
+        print!("{}", view.text(now));
     }
-    let stats = outbox.stats()?;
-    let head = outbox.head()?;
-    println!(
-        "Outbox:       {} events ({} bytes), {} reports queued; next seq {}",
-        stats.events, stats.event_bytes, stats.reports, head.next_seq
-    );
-    print_thresholds(config);
     Ok(())
 }
 
 /// A note when `[dev_thresholds]` is set: lowered (a development build) or
 /// ignored. `installers/macos/check-pkg.sh` reads it.
-fn print_thresholds(config: &Config) {
-    if let Some(line) = crate::thresholds::build_use(config.dev_thresholds.as_ref()).status_line() {
-        println!("{line}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -712,6 +676,14 @@ mod tests {
     #[test]
     fn cli_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_status() {
+        let c = Cli::try_parse_from(["faro-service", "status"]).unwrap();
+        assert!(matches!(c.command, Command::Status { json: false }));
+        let c = Cli::try_parse_from(["faro-service", "status", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Status { json: true }));
     }
 
     #[test]

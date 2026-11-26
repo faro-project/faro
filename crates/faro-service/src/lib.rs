@@ -20,6 +20,7 @@
 //! | [`model`] | the image classifier: the packaged model, its checks, `model-check` |
 //! | [`thresholds`] | `[dev_thresholds]`: lower detection thresholds, in `dev` builds only |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
+//! | [`status_view`] | `status`: the state directory and the running service's [`runtime::status`] report, as text or JSON |
 //! | [`update`] | client self-update: verify against the project root, download, install; models and blocklists from the same channel ([`update::artifacts`]) |
 //! | [`logging`] | where the log goes (the packaged service's log file) and how much |
 //! | [`cli`] | the command line |
@@ -65,6 +66,7 @@ pub mod model;
 pub mod runtime;
 pub mod source;
 pub mod state;
+pub mod status_view;
 pub mod thresholds;
 pub mod update;
 

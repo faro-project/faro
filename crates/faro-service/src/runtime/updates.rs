@@ -2,8 +2,10 @@
 //! [`ClientUpdater::check_artifacts`], on a jittered timer.
 
 use super::core::Control;
+use super::status::StatusTx;
 use crate::update::artifacts::{ArtifactOutcome, Artifacts};
-use crate::update::{ClientUpdater, Outcome, Settled};
+use crate::update::{CheckError, ClientUpdater, Outcome, Settled};
+use faro_ipc::status::short_reason;
 use faro_proto::body::TamperSignal;
 use rand::Rng;
 use std::time::Duration;
@@ -33,6 +35,31 @@ pub fn rejected_package_signal(version: &faro_update::Version, reason: &str) -> 
     }
 }
 
+/// What a check found, for the status (`last_result`), and whether it
+/// failed.
+fn describe(outcome: &Result<Outcome, CheckError>) -> (String, bool) {
+    let text = match outcome {
+        Ok(Outcome::Unavailable) => "the instance has no release to offer".to_owned(),
+        Ok(Outcome::UpToDate) => "up to date".to_owned(),
+        Ok(Outcome::NotInstallable { version }) => {
+            format!("{version} is available; this build does not install updates")
+        }
+        Ok(Outcome::GaveUp { version }) => format!("{version} failed to install; not retrying"),
+        Ok(Outcome::InstallPending { version }) => format!("installing {version}"),
+        Ok(Outcome::Installing { version }) => format!("installing {version}"),
+        Ok(Outcome::Rejected { version, reason })
+        | Ok(Outcome::PreviouslyRejected { version, reason }) => {
+            format!("refused {version}: {reason}")
+        }
+        Err(e) => return (short_reason(&format!("failed: {e}")), true),
+    };
+    let failed = matches!(
+        outcome,
+        Ok(Outcome::GaveUp { .. } | Outcome::Rejected { .. } | Outcome::PreviouslyRejected { .. })
+    );
+    (short_reason(&text), failed)
+}
+
 /// Check after `first`, then about every `every`, until `stop` flips. A
 /// rejected package is reported to the core through `control` as tamper,
 /// once per run of the service: a report lost to a restart before
@@ -48,6 +75,7 @@ pub async fn update_loop(
     first: Duration,
     every: Duration,
     control: mpsc::Sender<Control>,
+    status: StatusTx,
     mut stop: watch::Receiver<bool>,
 ) {
     match updater.settle_pending() {
@@ -71,6 +99,15 @@ pub async fn update_loop(
             return;
         }
         let outcome = updater.check().await;
+        let (result, failed) = describe(&outcome);
+        let channel = updater.last_channel();
+        let now = updater.clock().wall_ms();
+        status.update(|s| {
+            s.updates.channel = channel;
+            s.updates.last_check_ms = Some(now);
+            s.updates.last_result = Some(result);
+            s.updates.last_check_failed = failed;
+        });
         if !matches!(outcome, Ok(Outcome::Installing { .. })) {
             check_artifacts(&updater, &artifacts).await;
         }

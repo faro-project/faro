@@ -68,6 +68,21 @@ pub fn init(cli: &Cli) {
         .try_init();
 }
 
+/// The log file this process writes, if it logs to one (for the status).
+pub fn log_file() -> Option<&'static str> {
+    if !TO_FILE.load(Ordering::Relaxed) {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(faro_platform_macos::pkg_layout::SERVICE_LOG)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Report why the command failed: on stderr, and in the log file when the
 /// log goes there (launchd discards the service's stderr).
 pub fn fail(e: &dyn Display) {

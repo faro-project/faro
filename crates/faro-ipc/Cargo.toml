@@ -24,5 +24,6 @@ libc = "0.2.177"
 
 [dev-dependencies]
 proptest.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

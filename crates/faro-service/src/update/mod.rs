@@ -233,6 +233,8 @@ pub struct ClientUpdater {
     clock: Arc<dyn Clock>,
     spec: ClientSpec,
     installer: Option<Arc<dyn Installer>>,
+    /// The channel the instance named at the last check (for the status).
+    last_channel: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for ClientUpdater {
@@ -265,11 +267,23 @@ impl ClientUpdater {
             clock,
             spec,
             installer,
+            last_channel: std::sync::Mutex::new(None),
         })
     }
 
     pub fn spec(&self) -> &ClientSpec {
         &self.spec
+    }
+
+    /// The clock checks are timed with.
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// The channel the instance named at the last check that reached its
+    /// update information.
+    pub fn last_channel(&self) -> Option<String> {
+        self.last_channel.lock().ok()?.clone()
     }
 
     /// The recorded attempts.
@@ -361,6 +375,9 @@ impl ClientUpdater {
             tracing::warn!(error = %e, "the instance names an invalid channel; using stable");
             Channel::stable()
         });
+        if let Ok(mut c) = self.last_channel.lock() {
+            *c = Some(channel.to_string());
+        }
 
         let mut u = self.load_trust()?;
         let verified = {

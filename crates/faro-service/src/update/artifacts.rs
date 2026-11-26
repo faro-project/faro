@@ -311,6 +311,10 @@ pub struct Start {
     /// For the service status.
     pub model_label: String,
     pub blocklist_label: Option<String>,
+    /// The model and domain list in use came from the update channel, not
+    /// the package (for the service status).
+    pub model_from_channel: bool,
+    pub blocklist_from_channel: bool,
     /// Integrity failures to report once the service runs.
     pub tamper: Vec<TamperSignal>,
     pub artifacts: Artifacts,
@@ -406,12 +410,17 @@ impl Artifacts {
             Some(v) => format!("domains {v}"),
             None => "domains".to_owned(),
         });
+        let (mut model_from_channel, mut blocklist_from_channel) = (false, false);
         for kind in [TargetKind::Model, TargetKind::Blocklist] {
             match a.start_one(&mut record, kind, &mut tamper) {
-                Some(Ready::Model(c, _)) => classifier = c,
+                Some(Ready::Model(c, _)) => {
+                    classifier = c;
+                    model_from_channel = true;
+                }
                 Some(Ready::Blocklist(d, label)) => {
                     domains = Some(d);
                     blocklist_label = Some(label);
+                    blocklist_from_channel = true;
                 }
                 None => {}
             }
@@ -428,6 +437,8 @@ impl Artifacts {
             domains,
             model_label,
             blocklist_label,
+            model_from_channel,
+            blocklist_from_channel,
             tamper,
             artifacts: a,
         }

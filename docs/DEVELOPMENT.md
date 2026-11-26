@@ -379,10 +379,30 @@ Most licences of the software Faro is built from (MIT, Apache-2.0, BSD, ISC, Zli
 - **What is installed.** The newest target of each kind in the instance's channel that this client may install (`min_client`), if its version is above the packaged copy's, above the one installed before, and not below the highest ever installed. Models only if the build has ONNX Runtime (`--features onnx`, `model::default_runtime`).
 - **Where.** `artifacts/model/<blake3>/` and `artifacts/blocklist/<blake3>/` in the state directory (`/Library/Application Support/Faro` on macOS, root only), next to the packaged copy in `/Library/Faro`, which is never changed. `update-artifacts.json` there records what is in use, the highest version ever installed, and rejected bundles. Downloads go to `artifacts/downloads/` and are removed after the install.
 - **Checks.** The same as for the packaged copy (`load_model`, `load_domains`), plus: the manifest's version is the target's, and a model has a label the default policy reads as explicit. A bundle that fails them is recorded and never downloaded again; nothing else changes.
-- **The switch.** The update task puts the new classifier or domain list in `Swaps`; the core takes it on its next tick or capture and calls `Detector::set_classifier` / `set_domains`. `ServiceStatus::model` and `blocklist` say what is in use. No frame is written or kept: the model is built from its files.
+- **The switch.** The update task puts the new classifier or domain list in `Swaps`; the core takes it on its next tick or capture and calls `Detector::set_classifier` / `set_domains`. `ServiceStatus::model` and `blocklist` say what is in use, and the status report's `detection` says where it came from ([The service status](#the-service-status)). No frame is written or kept: the model is built from its files.
 - **At start.** The installed copy is used if it is newer than the packaged one and its manifest still has the recorded BLAKE3 and passes the checks. One that no longer matches is reported as an urgent `integrity_failure` (`image model update (changed)`, `domain list update (changed)`) and removed; the next check installs it again.
 - **Notices.** Each installed artifact's attribution and licence texts go to `update-model.txt` and `update-blocklist.txt` next to the packaged notices (`/Library/Faro/notices` for the packaged service; `notices/` in the state directory for any other build). They are removed when the artifact is no longer in use.
 - **Publishing.** `release/build-layout.sh --data model=MANIFEST --data blocklist=MANIFEST` checks the file against its manifest (and that a domain list has no unapproved source), joins the two with `faro-release pack-data`, and lists the bundle under the manifest's version as `<kind>/any/<name>-<version>-<channel>.data`. `--data model:1.2.0=...` sets `min_client`. `release.yml` does this for the packaged model and the domain list in every release; a version already listed with the same bytes is simply listed again.
+
+## The service status
+
+`sudo /Library/Faro/bin/faro-service status` shows the enrollment and the outbox (read from the state directory) and what the running service is doing. `--json` prints the same data (`faro_service::status_view::StatusView`). It needs no network access, and on macOS no `launchctl debug`.
+
+- **Where it comes from.** The service keeps a `ServiceStatus` (`crates/faro-service/src/runtime/status.rs`) up to date and writes it as a `faro_ipc::status::StatusReport` to `status.json` in the state directory: about a second after a change, and at least every 30 s (`STATUS_REFRESH_SECS`). The file is 0600, like every state file. `status` reads it with `runtime::status::read_status_file`, and calls the service not running when the report is older than three refresh periods, its process is gone, or it says `stopped` (the last report an orderly stop writes).
+- **The report** (`crates/faro-ipc/src/status.rs`, where every field is documented). It lives in `faro-ipc` so that the agent can show it without depending on the service; no IPC message carries it yet. It serializes with JSON and postcard, its fields are append-only, and readers accept missing and unknown fields.
+
+| Section | What it says |
+|---|---|
+| top level | `schema`, the service's version and pid, when it started, when the report was made, the `phase`, and `log_file`, the log it writes (`pkg_layout::SERVICE_LOG` for the packaged service, `null` when it logs to stderr) |
+| `sessions` | each interactive session: account, at the screen, agent connected and its version, capture target, unmonitored (an `unmonitored_user_session` was raised) |
+| `capture` | `state` (`active`, `idle`, `locked`, `asleep`, `paused`, `login_window`, `no_agent`, `not_started`, `stopped`), the target's account, the last attempt and success, failures in a row and the last failure's reason (`permission denied: screen_recording`) |
+| `permissions` | Screen Recording and Accessibility, as the capture target's agent last reported them, and for which account |
+| `detection` | the image model and the domain list in use, each `packaged` or `update_channel`, or why there is none (`image model (missing)`, `no domain list installed`), and `thresholds`: `default`, `lowered` (with the values) or `ignored`, what the service did with `[dev_thresholds]` at start. `status` prints its `Thresholds:` line from the config file as it is now, and `--json` has that as the top-level `thresholds` |
+| `updates` | whether updates are on (or why not), the channel the instance named, the last check's time and result |
+| `health` | the last heartbeat state, counters since start, the newest event written and acknowledged, recipient and identity warnings, the last error |
+
+- **No content.** A report never holds a URL, a window title, an app name or anything from a frame: only states, times, counters, account short names, versions and short diagnostics (at most 200 characters).
+- **Times** are the service clock's wall milliseconds. `status` shows them relative to now (`4 min ago`).
 
 ## Releasing
 

@@ -22,6 +22,7 @@
 //! a release package's service ignores the section.
 
 use faro_detect::{DetectorConfig, PolicyConfig};
+use faro_ipc::status::{ThresholdsReport, ThresholdsState};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -155,17 +156,37 @@ impl DevThresholdsUse {
 
     /// The line `faro-service status` prints, if any.
     pub fn status_line(&self) -> Option<String> {
+        status_line(&self.report())
+    }
+
+    /// For the status report.
+    pub fn report(&self) -> ThresholdsReport {
         match self {
-            DevThresholdsUse::Default => None,
-            DevThresholdsUse::Lowered(t) => Some(format!(
-                "Thresholds:   LOWERED FOR TESTING ({t}); flags are made with these \
-                 [dev_thresholds], not the defaults"
-            )),
-            DevThresholdsUse::Ignored(_) => Some(
-                "Thresholds:   default ([dev_thresholds] ignored: not a development build)"
-                    .to_owned(),
-            ),
+            DevThresholdsUse::Default => ThresholdsReport::default(),
+            DevThresholdsUse::Lowered(t) => ThresholdsReport {
+                state: ThresholdsState::Lowered,
+                values: Some(t.to_string()),
+            },
+            DevThresholdsUse::Ignored(_) => ThresholdsReport {
+                state: ThresholdsState::Ignored,
+                values: None,
+            },
         }
+    }
+}
+
+/// The `Thresholds:` line `faro-service status` prints for `r`, if any.
+pub fn status_line(r: &ThresholdsReport) -> Option<String> {
+    match r.state {
+        ThresholdsState::Default => None,
+        ThresholdsState::Lowered => Some(format!(
+            "Thresholds:   LOWERED FOR TESTING ({}); flags are made with these \
+             [dev_thresholds], not the defaults",
+            r.values.as_deref().unwrap_or("?")
+        )),
+        ThresholdsState::Ignored => Some(
+            "Thresholds:   default ([dev_thresholds] ignored: not a development build)".to_owned(),
+        ),
     }
 }
 
