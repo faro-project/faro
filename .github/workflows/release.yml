@@ -150,6 +150,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       # No build cache: a release builds from clean sources.
+      # For the package's third-party notices (release/notices/third-party.sh).
+      - name: cargo-about
+        run: cargo install --locked cargo-about --features cli --version "$(release/notices/third-party.sh --cargo-about-version)"
       - name: Signing configuration
         id: sign
         env:
@@ -335,6 +338,9 @@ jobs:
           mkdir -p dist
           cid="$(docker create --platform "$PLATFORM" "$REF")"
           docker cp "$cid:/usr/local/bin/faro-server" "dist/faro-server-$VERSION-linux-$ARCH"
+          # Its crates' licences travel with the binary download. (The web
+          # app's are in the binary, at /licenses.)
+          docker cp "$cid:/usr/share/faro/notices/third-party.txt" "dist/faro-server-$VERSION-linux-$ARCH-third-party.txt"
           docker rm "$cid"
       - name: Export digest
         if: env.DRY_RUN == 'false'
@@ -632,7 +638,7 @@ jobs:
             fi
             echo
             echo "- **macOS** (13 or later, Apple Silicon and Intel): \`$(cd "$dist" && ls Faro-*.pkg)\`. Computers enrolled in an instance update themselves through it."
-            echo "- **Instances:** the container image \`$IMAGE:$VERSION\`, or the \`faro-server\` binaries for Linux (glibc 2.41 or newer, as in Debian 13). See SELF-HOSTING.md."
+            echo "- **Instances:** the container image \`$IMAGE:$VERSION\`, or the \`faro-server\` binaries for Linux (glibc 2.41 or newer, as in Debian 13), each with its third-party licences (\`-third-party.txt\`). See SELF-HOSTING.md."
             echo
             echo "Every file is also listed, with its length and BLAKE3, in the signed update metadata at ${FARO_UPDATES_URL}targets.json. SHA-256 checksums:"
             echo
