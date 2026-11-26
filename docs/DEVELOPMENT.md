@@ -179,6 +179,8 @@ On macOS the agent binary shows a menu-bar icon and the service's notices, which
 
 Browser tab URLs (`faro_platform_macos::browser`) need Accessibility and a real browser, so their live path has no automated test either. `cargo run -p faro-platform-macos --example browser_probe` prints what the agent would send every 2 seconds: the frontmost app and the reduced URL (`scheme://host/`). Run it from a terminal that has Accessibility and switch between browsers. `--pid PID --as safari|chrome|…` reads one process instead, which works for any app with a web view.
 
+Windows hidden from screen capture (`faro_platform_macos::hidden_windows`) have unit tests for the decision, but reading other apps' capture state needs Screen Recording. `cargo run -p faro-platform-macos --example hidden_window_probe` lists every on-screen window's sharing state, layer, size and owner (never its title), marks the macOS processes that are allowed, and prints the reading and the signal the agent would send. `--hide` first opens a window of its own with `sharingType = .none` and reads the probe's own windows without skipping them, which works without the permission (a process always reads its own windows' real state). To check other apps, run it from a terminal that has Screen Recording.
+
 ## The image model
 
 The beta's image classifier is **OpenNSFW** (Yahoo, BSD-2-Clause; ARCHITECTURE.md §3.5, [research/model-licenses.md](research/model-licenses.md)). The project converts it from Yahoo's own Caffe files. Nothing in the repository holds weights: `crates/faro-detect/models/opennsfw/build.sh` makes the model every time a package is built.

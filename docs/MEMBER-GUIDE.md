@@ -50,6 +50,7 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | Not approved | Nothing changed. Try again when an administrator can type their password. |
 | Enrollment stopped to keep you safe | The instance answered with a key that doesn't match your link. Don't continue. Remove the new computer in the web app if it appears there, and tell whoever runs your instance. |
 | This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. |
+| Faro can't see one of your windows | An app (it names it) keeps a window out of screenshots and screen recordings, so Faro can't check it, and your allies are told which app. Close the window if you don't need it, or turn off the app's setting that hides its windows from screen sharing, if it has one. |
 | Nothing happens when you click the link | Restart the Mac, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the eye icon and paste the link. |
 
 ### Faro's logs
