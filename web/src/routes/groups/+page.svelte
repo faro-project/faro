@@ -1,0 +1,232 @@
+<script lang="ts">
+	// Your groups (docs/GROUPS.md §17): the invitations waiting for you, the
+	// groups you are in, and starting a new one. Joining or being in a group
+	// shares nothing about your computer.
+
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { api } from '#lib/api.ts';
+	import { date } from '#lib/format.ts';
+	import { GROUP_LIMITS } from '#lib/groups.ts';
+	import { groupError } from '#lib/groups-api.ts';
+	import { session } from '#lib/session.svelte.ts';
+	import type { GroupInviteInfo, GroupSummary, GroupView } from '#lib/types.ts';
+	import Gate from '#lib/ui/Gate.svelte';
+	import FindAGroup from '#lib/ui/groups/FindAGroup.svelte';
+
+	let groups = $state<GroupSummary[] | null>(null);
+	let invites = $state<GroupInviteInfo[]>([]);
+	let loadError = $state('');
+	let loadedFor = '';
+
+	let name = $state('');
+	let description = $state('');
+	let creating = $state(false);
+	let createError = $state('');
+
+	async function load() {
+		loadError = '';
+		try {
+			const [g, i] = await Promise.all([
+				api.get<GroupSummary[]>('/v1/groups'),
+				api.get<GroupInviteInfo[]>('/v1/me/group-invites')
+			]);
+			groups = g;
+			invites = i;
+		} catch (e) {
+			loadError = groupError(e);
+		}
+	}
+
+	$effect(() => {
+		const u = session.user;
+		if (u && u.id !== loadedFor) {
+			loadedFor = u.id;
+			void load();
+		}
+	});
+
+	let live = $derived(groups?.filter((g) => !g.archived_at_ms) ?? []);
+	let closed = $derived(groups?.filter((g) => g.archived_at_ms) ?? []);
+
+	// While the account is being deleted, nothing new joins it.
+	let deleting = $derived(!!session.deletion);
+
+	function href(id: string) {
+		return `${resolve('/groups/view')}?id=${encodeURIComponent(id)}`;
+	}
+
+	async function create(e: SubmitEvent) {
+		e.preventDefault();
+		createError = '';
+		const n = name.trim();
+		if (!n || n.length > GROUP_LIMITS.name) {
+			createError = `Give the group a name of 1 to ${GROUP_LIMITS.name} characters.`;
+			return;
+		}
+		creating = true;
+		try {
+			const g = await api.post<GroupView>('/v1/groups', {
+				name: n,
+				description: description.trim()
+			});
+			await goto(href(g.id));
+		} catch (err) {
+			createError = groupError(err);
+			creating = false;
+		}
+	}
+</script>
+
+<svelte:head>
+	<title>Groups · Faro</title>
+</svelte:head>
+
+<Gate>
+	{#snippet children()}
+		<div class="page-head">
+			<h1>Groups</h1>
+			<p>
+				A group is a place to meet the people you're doing this with. Being in a group shares
+				nothing about your computer or your reports. Anyone can leave at any time.
+			</p>
+		</div>
+
+		{#if loadError}
+			<div class="notice error" role="alert"><p>{loadError}</p></div>
+			<button class="secondary" type="button" onclick={load}>Try again</button>
+		{:else if !groups}
+			<p class="muted" role="status">Loading…</p>
+		{:else}
+			{#if invites.length}
+				<section class="card attention" aria-labelledby="invited">
+					<h2 id="invited">Invitations</h2>
+					<ul class="rows">
+						{#each invites as i (i.invite_ref)}
+							<li>
+								<div class="row-main">
+									<div>
+										<div class="row-title"><strong>{i.group_name}</strong></div>
+										<div class="row-meta">
+											{i.inviter_display_name} invited you · until {date(i.expires_at_ms)}
+										</div>
+									</div>
+									<a
+										class="button primary small"
+										href="{resolve('/group-invite')}#token={encodeURIComponent(i.invite_ref)}"
+									>
+										Look at it
+									</a>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				</section>
+			{/if}
+
+			<section class="section" aria-labelledby="mine">
+				<h2 id="mine">Your groups</h2>
+				{#if live.length === 0}
+					<div class="empty">
+						<p>You're not in a group yet. Start one below, or accept an invitation.</p>
+					</div>
+				{:else}
+					<ul class="rows">
+						{#each live as g (g.id)}
+							<li>
+								<div class="row-main">
+									<div>
+										<div class="row-title">
+											<a href={href(g.id)}><strong>{g.name}</strong></a>
+											{#if g.my_role === 'facilitator'}<span class="chip good">
+													Facilitator
+												</span>{/if}
+											{#if g.facilitator_offer}
+												<span class="chip pending">Needs a facilitator</span>
+											{/if}
+										</div>
+										<div class="row-meta">
+											{g.participant_count}
+											{g.participant_count === 1 ? 'person' : 'people'}
+										</div>
+										<!-- The next meeting and "Waiting for you" go here (#122). -->
+									</div>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</section>
+
+			{#if closed.length}
+				<section class="section" aria-labelledby="closed">
+					<h2 id="closed">Closed groups</h2>
+					<p class="muted">These were closed. You can still read them until they are deleted.</p>
+					<ul class="rows">
+						{#each closed as g (g.id)}
+							<li>
+								<div class="row-main">
+									<div>
+										<div class="row-title">
+											<a href={href(g.id)}><strong>{g.name}</strong></a>
+											<span class="chip off">Closed</span>
+										</div>
+										{#if g.delete_after_ms}
+											<div class="row-meta">Deleted on {date(g.delete_after_ms)}</div>
+										{/if}
+									</div>
+								</div>
+							</li>
+						{/each}
+					</ul>
+				</section>
+			{/if}
+
+			<FindAGroup />
+
+			{#if !deleting}
+				<form class="card section" onsubmit={create} novalidate>
+					<h2>Start a group</h2>
+					<p class="muted">
+						You become its first facilitator. Nobody is added without saying yes: you invite people,
+						and they accept.
+					</p>
+					<div class="field">
+						<label for="new-name">Name</label>
+						<input
+							id="new-name"
+							type="text"
+							bind:value={name}
+							maxlength={GROUP_LIMITS.name}
+							placeholder="Tuesday group"
+						/>
+					</div>
+					<div class="field">
+						<label for="new-description">
+							Description
+							<span class="hint">Optional. People you invite read this before they accept.</span>
+						</label>
+						<textarea
+							id="new-description"
+							rows="3"
+							bind:value={description}
+							maxlength={GROUP_LIMITS.description}></textarea>
+					</div>
+					{#if createError}<div class="notice error" role="alert"><p>{createError}</p></div>{/if}
+					<div class="actions">
+						<button class="primary" type="submit" disabled={creating}>
+							{creating ? 'Creating…' : 'Create group'}
+						</button>
+					</div>
+				</form>
+			{/if}
+		{/if}
+	{/snippet}
+</Gate>
+
+<style>
+	.attention {
+		border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+		margin-bottom: 2rem;
+	}
+</style>

@@ -4,6 +4,7 @@
 	import { api } from '#lib/api.ts';
 	import { ago } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
+	import { pendingGroupInvite } from '#lib/groups.ts';
 	import { pendingInvite } from '#lib/keys/pending-invite.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { DeviceSummary, MyAllies, SetupStatus, SupportedMember } from '#lib/types.ts';
@@ -14,10 +15,12 @@
 	let allies = $state<MyAllies | null>(null);
 	let supporting = $state<SupportedMember[] | null>(null);
 	let hasInvite = $state(false);
+	let hasGroupInvite = $state(false);
 	let loadedFor = '';
 
 	onMount(async () => {
 		hasInvite = !!pendingInvite();
+		hasGroupInvite = !!pendingGroupInvite();
 		try {
 			needsSetup = (await api.get<SetupStatus>('/v1/setup')).needs_setup;
 		} catch {
@@ -113,6 +116,14 @@
 	{#if hasInvite}
 		<div class="notice info">
 			<p>You were accepting an invitation. <a href={resolve('/invite')}>Continue</a></p>
+		</div>
+	{/if}
+
+	{#if hasGroupInvite}
+		<div class="notice info">
+			<p>
+				You were opening a group invitation. <a href={resolve('/group-invite')}>Continue</a>
+			</p>
 		</div>
 	{/if}
 

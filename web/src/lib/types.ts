@@ -120,6 +120,8 @@ export interface InstanceSettings {
 		/** `stable`, `beta`, … or the pin `stable-1`. */
 		channel: string;
 	};
+	/** Groups (docs/GROUPS.md §13). */
+	groups: GroupSettings;
 }
 
 /** `GET /v1/updates`: what the instance's update mirror offers. */
@@ -140,6 +142,7 @@ export interface SettingsPatch {
 	};
 	liveness_grace_secs?: number;
 	update_channel?: string;
+	groups?: Partial<GroupSettings>;
 }
 
 /** `GET /admin/api/overview`: configuration and aggregate counts only. */
@@ -699,4 +702,154 @@ export interface RetentionView {
 	chosen: { event_header_days: number | null; blob_days: number | null; alert_days: number | null };
 	effective: RetentionWindows;
 	min_days: number;
+}
+
+// ---- Groups (docs/GROUPS.md; server/src/api/groups.rs) -----------------------
+
+export type GroupRole = 'facilitator' | 'participant';
+export type WhoCanInvite = 'facilitators' | 'participants';
+
+/** The `groups` object of `GET|PATCH /admin/api/settings` (GROUPS.md §13). */
+export interface GroupSettings {
+	enabled: boolean;
+	who_can_create: 'anyone' | 'admins';
+	who_can_list: 'facilitators' | 'admins' | 'nobody';
+	who_can_invite: WhoCanInvite;
+	invites_create_accounts: boolean;
+	max_groups_per_user: number;
+}
+
+export interface GroupPerson {
+	user_id: string;
+	display_name: string;
+}
+
+/** `GET /v1/groups` */
+export interface GroupSummary {
+	id: string;
+	name: string;
+	description: string;
+	my_role: GroupRole;
+	participant_count: number;
+	/** The meeting card's data; its shape belongs to the meetings work (#122). */
+	meeting: unknown;
+	archived_at_ms: number | null;
+	delete_after_ms: number | null;
+	/** The last facilitator's account was deleted and this person is offered the role. */
+	facilitator_offer: boolean;
+}
+
+/** `GET /v1/groups/{id}`, and the answer to creating, editing or joining */
+export interface GroupView {
+	id: string;
+	name: string;
+	description: string;
+	created_at_ms: number;
+	my_role: GroupRole;
+	participant_count: number;
+	facilitators: GroupPerson[];
+	/** What is in effect: the instance's setting, narrowed by the group's. */
+	who_can_invite: WhoCanInvite;
+	can_invite: boolean;
+	max_participants: number | null;
+	meeting: unknown;
+	listed: boolean;
+	listing: unknown;
+	archived_at_ms: number | null;
+	delete_after_ms: number | null;
+	no_facilitator: boolean;
+	facilitator_offer_until_ms: number | null;
+	groups_disabled: boolean;
+}
+
+/** `GET /v1/groups/{id}/participants`. Never an email address. */
+export interface RosterEntry {
+	user_id: string;
+	display_name: string;
+	role: GroupRole;
+	joined_at_ms: number;
+	/** The account is disabled or being deleted: listed but unavailable. */
+	unavailable: boolean;
+}
+
+export interface Page<T> {
+	items: T[];
+	next_cursor: string | null;
+}
+
+export type HistoryKind =
+	| 'joined'
+	| 'left'
+	| 'removed'
+	| 'facilitator_added'
+	| 'facilitator_removed'
+	| 'renamed'
+	| 'listed'
+	| 'unlisted'
+	| 'archived';
+
+/** `GET /v1/groups/{id}/history`, newest first. `null` people are "someone". */
+export interface HistoryEntry {
+	id: string;
+	at_ms: number;
+	kind: HistoryKind;
+	subject: GroupPerson | null;
+	actor: GroupPerson | null;
+}
+
+/** `PATCH /v1/groups/{id}` body. `max_participants: null` removes the limit. */
+export interface GroupPatch {
+	name?: string;
+	description?: string;
+	who_can_invite?: WhoCanInvite;
+	max_participants?: number | null;
+}
+
+/** `POST /v1/groups/{id}/invites` body */
+export interface GroupInvitesRequest {
+	emails: string[];
+	user_ids: string[];
+}
+
+export interface GroupInvitesCreated {
+	invites: { invited: string; expires_at_ms: number; invite_url: string }[];
+	/** Already in the group, already invited, or not a valid target. */
+	skipped: number;
+}
+
+/** `GET /v1/groups/{id}/invites` */
+export interface GroupInviteStatus {
+	invited: string;
+	invited_user_id: string | null;
+	inviter: GroupPerson | null;
+	created_at_ms: number;
+	expires_at_ms: number;
+	/** `not_accepted` covers declined and expired: the inviter is never told which. */
+	state: 'pending' | 'accepted' | 'not_accepted';
+}
+
+/** `GET /v1/me/group-invites`, `GET /v1/group-invites/{token}` */
+export interface GroupInviteInfo {
+	/** Works in place of the emailed token in the invite endpoints' paths. */
+	invite_ref: string;
+	group_id: string;
+	group_name: string;
+	group_description: string;
+	group_archived: boolean;
+	inviter_display_name: string;
+	instance_name: string;
+	expires_at_ms: number;
+}
+
+/** `GET /admin/api/groups`: metadata only. */
+export interface AdminGroupRow {
+	id: string;
+	name: string;
+	participant_count: number;
+	facilitators: GroupPerson[];
+	no_facilitator: boolean;
+	listed: boolean;
+	created_at_ms: number;
+	archived_at_ms: number | null;
+	delete_after_ms: number | null;
 }
