@@ -144,7 +144,9 @@ impl Approver for SystemApprover {
     }
 }
 
-#[cfg(unix)]
+/// Only the macOS approver asks: whether it may rewrite the authorization
+/// rule.
+#[cfg(target_os = "macos")]
 fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
