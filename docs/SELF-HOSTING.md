@@ -774,4 +774,10 @@ The unit runs Faro as the unprivileged `faro` user in a tight sandbox: it can on
 | `admin grant` says `there is no account with the address …` | That person has never signed in. Grant the role to someone who has, or ask them to sign in once at `/signin` if your registration setting lets them create an account. |
 | Backup fails with `Permission denied` on `/backups` | Run `sudo chown 10001:10001 backups` in the `deploy` folder. |
 
+### Reporting a problem
+
+**With a member's Mac** (Faro doesn't capture, the agent keeps restarting, the computer stops checking in): ask the member to make a problem report, as the member guide's [Reporting a problem](MEMBER-GUIDE.md#reporting-a-problem) explains. Someone with an administrator password runs `sudo /Library/Faro/bin/faro-service diagnose` in Terminal from the member's account; it shows what is in the report and, once they agree, writes `faro-report-<date>-<time>Z.zip` to their Desktop. It holds the service's status, versions, the launchd jobs' state, the package receipt and the last 2000 lines of the service's and the member's agent's logs, with web addresses, email addresses, other host names and window titles taken out. It never holds keys, events, reports or screenshots. Your instance's address stays in it, so whoever reads it can tell which instance it is about.
+
+Problem reports for the Faro project go to **[where to send problem reports: to be added]**. Send them there yourself if you can't tell what is wrong, or let members send theirs directly.
+
 Still stuck? Open an issue at <https://github.com/faro-project/faro/issues> with the output of `faro-server doctor` (it contains no secrets) and the relevant log lines. **Never post** `faro.env`, `identity.key`, backup files, setup tokens or sign-in links.

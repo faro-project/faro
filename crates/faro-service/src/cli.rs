@@ -4,6 +4,7 @@
 //! faro-service [--config FILE] [--state-dir DIR] [-v] enroll (--link faro://enroll?... | --instance URL --code XXXX-XXXX [--member-key ID]) [--name NAME] [--yes] [--no-wait]
 //! faro-service [--config FILE] [--state-dir DIR] [-v] run [--socket PATH] [--spawn-agent BIN] [--capture ipc|in-process]
 //! faro-service [--config FILE] [--state-dir DIR] status [--json]
+//! faro-service [--config FILE] [--state-dir DIR] diagnose [--lines N] [--output DIR] [--yes | --print]
 //! faro-service [--config FILE] [--state-dir DIR] goodbye [--reason uninstalled|account-deleted | --moved-to HOST] [--within SECS]
 //! faro-service model-check [--manifest PATH] [--runs N]
 //! faro-service domains-check [--manifest PATH]
@@ -113,6 +114,25 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Make a problem report to send to whoever helps you with Faro: a zip
+    /// on your Desktop with the status, versions, launchd jobs and the
+    /// last lines of the logs, with web addresses, email addresses, host
+    /// names and window titles taken out. Shows what is in it, and writes
+    /// it only when you say so. Needs sudo.
+    Diagnose {
+        /// Lines from the end of each log.
+        #[arg(long, default_value_t = crate::diagnose::DEFAULT_LINES, value_name = "N")]
+        lines: usize,
+        /// Folder to write the zip to (default: your Desktop).
+        #[arg(long, value_name = "DIR")]
+        output: Option<PathBuf>,
+        /// Write it without asking (it still lists what is in it).
+        #[arg(long)]
+        yes: bool,
+        /// Print everything the report would hold, and write nothing.
+        #[arg(long, conflicts_with_all = ["yes", "output"])]
+        print: bool,
+    },
     /// Tell allies that monitoring ends on purpose (the uninstaller runs
     /// this after stopping the service). Writes an urgent `goodbye` event
     /// and uploads it.
@@ -178,6 +198,8 @@ enum CliError {
     Outbox(#[from] faro_core::OutboxError),
     #[error(transparent)]
     Status(#[from] crate::status_view::GatherError),
+    #[error(transparent)]
+    Report(#[from] crate::diagnose::WriteError),
     #[error("{0}")]
     Usage(String),
     #[error(transparent)]
@@ -299,6 +321,25 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
             cmd_run(config, spawn_agent, capture).await
         }
         Command::Status { json } => cmd_status(&config, json),
+        Command::Diagnose {
+            lines,
+            output,
+            yes,
+            print,
+        } => {
+            let config_file = cli
+                .config
+                .clone()
+                .unwrap_or_else(crate::config::default_config_path);
+            let opts = DiagnoseOptions {
+                lines,
+                output,
+                yes,
+                print,
+                development: cli.state_dir.is_some(),
+            };
+            cmd_diagnose(&config, config_file, opts)
+        }
         Command::Goodbye {
             reason,
             moved_to,
@@ -653,6 +694,99 @@ fn cmd_status(config: &Config, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+struct DiagnoseOptions {
+    lines: usize,
+    output: Option<PathBuf>,
+    yes: bool,
+    print: bool,
+    /// `--state-dir` was given: a development run, which needn't be root.
+    development: bool,
+}
+
+/// `diagnose`: collect the report, show what is in it, and write it once
+/// the member says so (`crate::diagnose`).
+fn cmd_diagnose(config: &Config, config_file: PathBuf, o: DiagnoseOptions) -> Result<(), CliError> {
+    use crate::diagnose;
+    use std::io::IsTerminal;
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions.
+        let root = unsafe { libc::geteuid() } == 0;
+        if !root && !o.development {
+            return Err(CliError::Usage(
+                "diagnose reads the service's state and logs, so it needs an administrator: \
+                 sudo /Library/Faro/bin/faro-service diagnose"
+                    .into(),
+            ));
+        }
+    }
+    let member = diagnose::member();
+    let sources = diagnose::Sources::installed(config, config_file, member.as_ref(), o.lines);
+    let now = SystemClock::new().wall_ms();
+    let report = diagnose::collect(config, &sources, now);
+    if o.print {
+        print!("{}", report.full_text());
+        return Ok(());
+    }
+    let owner = member.as_ref().map(|m| (m.uid, m.gid));
+    let dir = match o.output {
+        Some(d) => {
+            std::path::absolute(&d).map_err(|e| CliError::Usage(format!("bad --output: {e}")))?
+        }
+        None => {
+            let m = member.as_ref().ok_or_else(|| {
+                CliError::Usage(
+                    "can't tell whose Desktop the report goes on; choose a folder with --output"
+                        .into(),
+                )
+            })?;
+            diagnose::desktop(m)?
+        }
+    };
+    println!("Faro problem report");
+    println!();
+    println!(
+        "It goes to {} and holds:",
+        dir.join(format!("{}.zip", report.name)).display()
+    );
+    println!();
+    print!("{}", report.summary());
+    println!();
+    if !o.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::Usage(
+                "nothing written: run it in Terminal to see what is in the report first, \
+                 or add --yes"
+                    .into(),
+            ));
+        }
+        loop {
+            print!("Write it? Type y to write it, s to show everything in it first, n to stop: ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+            match line.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" if read > 0 => break,
+                "s" | "show" if read > 0 => {
+                    println!();
+                    print!("{}", report.full_text());
+                }
+                _ => {
+                    println!("Nothing written.");
+                    return Ok(());
+                }
+            }
+        }
+    }
+    let path = diagnose::write_zip(&report, &dir, owner)?;
+    println!("Wrote {}.", path.display());
+    println!(
+        "Send it to whoever helps you with Faro (the member guide's \"Reporting a problem\" \
+         says where). The files in it are plain text: open it to check them first."
+    );
+    Ok(())
+}
+
 /// A note when `[dev_thresholds]` is set: lowered (a development build) or
 /// ignored. `installers/macos/check-pkg.sh` reads it.
 #[cfg(test)]
@@ -684,6 +818,31 @@ mod tests {
         assert!(matches!(c.command, Command::Status { json: false }));
         let c = Cli::try_parse_from(["faro-service", "status", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Status { json: true }));
+    }
+
+    #[test]
+    fn parses_diagnose() {
+        let c = Cli::try_parse_from(["faro-service", "diagnose"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Diagnose {
+                lines: crate::diagnose::DEFAULT_LINES,
+                output: None,
+                yes: false,
+                print: false
+            }
+        ));
+        let c =
+            Cli::try_parse_from(["faro-service", "diagnose", "--lines", "50", "--yes"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Diagnose {
+                lines: 50,
+                yes: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["faro-service", "diagnose", "--print", "--yes"]).is_err());
     }
 
     #[test]

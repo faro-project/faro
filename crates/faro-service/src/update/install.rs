@@ -97,7 +97,7 @@ impl LaunchdInstaller {
     pub fn new(state_dir: &Path) -> Self {
         LaunchdInstaller {
             plist: state_dir.join("update-job.plist"),
-            log: state_dir.join("update-install.log"),
+            log: state_dir.join(super::INSTALL_LOG),
         }
     }
 

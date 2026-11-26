@@ -76,6 +76,9 @@ pub const TRUST_FILE: &str = "update-trust.json";
 pub const ATTEMPTS_FILE: &str = "update-attempts.json";
 /// Downloaded packages, in the state directory.
 pub const DOWNLOAD_DIR: &str = "updates";
+/// The `org.faro.update` job's output (`installer`), in the state
+/// directory.
+pub const INSTALL_LOG: &str = "update-install.log";
 /// Largest package accepted.
 pub const MAX_PACKAGE_BYTES: u64 = 1 << 30;
 /// Failed installs of one package before it is skipped.
