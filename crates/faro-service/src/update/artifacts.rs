@@ -56,7 +56,7 @@ use faro_detect::{
 use faro_proto::body::TamperSignal;
 use faro_proto::Hash32;
 use faro_update::bundle::{read_bundle_manifest, BundleError};
-use faro_update::{Channel, Selection, TargetInfo, TargetKind, Version, VerifiedTargets};
+use faro_update::{Channel, Selection, TargetInfo, TargetKind, VerifiedTargets, Version};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -404,7 +404,10 @@ impl Artifacts {
         let mut ready = None;
         if let Some(cur) = slot.current.clone() {
             let version = Version::parse(&cur.version).ok();
-            if version.is_none() || packaged.as_ref().is_some_and(|p| version.as_ref() <= Some(p))
+            if version.is_none()
+                || packaged
+                    .as_ref()
+                    .is_some_and(|p| version.as_ref() <= Some(p))
             {
                 tracing::info!(kind = ?kind, version = %cur.version, "the packaged copy is as new; removing the one from the update channel");
                 slot.current = None;
@@ -488,7 +491,6 @@ impl Artifacts {
     pub fn record(&self) -> Record {
         read_record(&self.cfg.dir)
     }
-
 }
 
 /// Check an unpacked artifact and build what the detector needs, the same

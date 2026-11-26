@@ -574,7 +574,10 @@ async fn models_and_blocklists_are_prefetched_for_the_channel() {
     assert!(kinds.contains(&TargetKind::Model) && kinds.contains(&TargetKind::Blocklist));
     // The older list, for clients below its min_client, on demand.
     let old = t
-        .get("/v1/updates/targets/blocklist/any/domains-1.0.0-stable.data", None)
+        .get(
+            "/v1/updates/targets/blocklist/any/domains-1.0.0-stable.data",
+            None,
+        )
         .await;
     assert_eq!(old.status, StatusCode::OK);
     assert_eq!(old.raw, b"blocklist/any/domains-1.0.0-stable.data");

@@ -81,7 +81,10 @@ fn model_bundle(info: &ModelInfo, weights: &[u8]) -> Vec<u8> {
 /// A model target: `version` in the listing and the manifest.
 fn model(version: &str) -> Artifact {
     let weights = format!("weights {version}").into_bytes();
-    model_artifact(version, &model_bundle(&model_info(version, "MIT", &weights), &weights))
+    model_artifact(
+        version,
+        &model_bundle(&model_info(version, "MIT", &weights), &weights),
+    )
 }
 
 fn model_artifact(version: &str, content: &[u8]) -> Artifact {
@@ -121,15 +124,21 @@ fn domains_manifest(version: &str, bytes: &[u8], domains: usize) -> DomainsManif
             domains,
             skipped: 0,
         }],
-        license_texts: [("MIT".to_owned(), "Permission is hereby granted (test).".to_owned())]
-            .into(),
+        license_texts: [(
+            "MIT".to_owned(),
+            "Permission is hereby granted (test).".to_owned(),
+        )]
+        .into(),
     }
 }
 
 fn blocklist_with(version: &str, edit: impl FnOnce(&mut DomainsManifest)) -> Artifact {
     let mut b = DomainCategorizerBuilder::new();
-    b.add_domain(&format!("adult-{}.test", version.replace('.', "-")), Category::Adult)
-        .unwrap();
+    b.add_domain(
+        &format!("adult-{}.test", version.replace('.', "-")),
+        Category::Adult,
+    )
+    .unwrap();
     let bytes = b.build().unwrap().to_bytes();
     let mut m = domains_manifest(version, &bytes, 1);
     edit(&mut m);
@@ -429,7 +438,10 @@ async fn a_newer_model_and_blocklist_install_and_are_swapped_in() {
     let before = inst.downloads();
     let r = check(&u, &a).await;
     assert_eq!(outcome(&r, TargetKind::Model), &ArtifactOutcome::UpToDate);
-    assert_eq!(outcome(&r, TargetKind::Blocklist), &ArtifactOutcome::UpToDate);
+    assert_eq!(
+        outcome(&r, TargetKind::Blocklist),
+        &ArtifactOutcome::UpToDate
+    );
     assert_eq!(inst.downloads(), before);
 }
 
@@ -600,7 +612,10 @@ async fn older_artifacts_are_never_installed() {
     let before = inst.downloads();
     let r = check(&u, &a).await;
     assert_eq!(outcome(&r, TargetKind::Model), &ArtifactOutcome::UpToDate);
-    assert_eq!(outcome(&r, TargetKind::Blocklist), &ArtifactOutcome::UpToDate);
+    assert_eq!(
+        outcome(&r, TargetKind::Blocklist),
+        &ArtifactOutcome::UpToDate
+    );
     assert_eq!(inst.downloads(), before);
     assert_eq!(record_json(&dev), rec, "nothing changed");
     // Not even after the installed copy was lost: the floor is the highest
@@ -610,7 +625,10 @@ async fn older_artifacts_are_never_installed() {
     assert_eq!(s.model_label, "test 1.0.0");
     let r = check(&u, &s.artifacts).await;
     assert_eq!(outcome(&r, TargetKind::Model), &ArtifactOutcome::UpToDate);
-    assert_eq!(outcome(&r, TargetKind::Blocklist), &ArtifactOutcome::UpToDate);
+    assert_eq!(
+        outcome(&r, TargetKind::Blocklist),
+        &ArtifactOutcome::UpToDate
+    );
 }
 
 /// A signed bundle that fails the checks the packaged copy passes (a
@@ -642,12 +660,18 @@ async fn signed_but_unusable_artifacts_are_refused_once() {
         ),
         (bad_model("1.3.0", |i| i.attribution = None), "attribution"),
         (bad_model("1.4.0", |i| i.version = "1.4.1".into()), "1.4.1"),
-        (bad_model("1.5.0", |i| i.blake3 = "0".repeat(64)), "integrity"),
+        (
+            bad_model("1.5.0", |i| i.blake3 = "0".repeat(64)),
+            "integrity",
+        ),
         (
             bad_model("1.6.0", |i| i.labels = vec!["cat".into(), "dog".into()]),
             "explicit",
         ),
-        (bad_model("1.7.0", |i| i.file = "../escape".into()), "plain file name"),
+        (
+            bad_model("1.7.0", |i| i.file = "../escape".into()),
+            "plain file name",
+        ),
         (
             model_artifact("1.8.0", b"not a bundle at all"),
             "not a Faro data bundle",
@@ -778,8 +802,142 @@ async fn a_packaged_domain_list_is_replaced_only_by_a_newer_one() {
     let s = start_with(&dev, None, None, Some(packaged("1.0.0")));
     assert_eq!(s.blocklist_label.as_deref(), Some("domains 1.0.0"));
     let r = check(&u, &s.artifacts).await;
-    assert_eq!(outcome(&r, TargetKind::Blocklist), &ArtifactOutcome::UpToDate);
+    assert_eq!(
+        outcome(&r, TargetKind::Blocklist),
+        &ArtifactOutcome::UpToDate
+    );
     let s = start_with(&dev, None, None, Some(packaged("0.9.0")));
     let r = check(&u, &s.artifacts).await;
     assert_eq!(outcome(&r, TargetKind::Blocklist), &installed("1.0.0"));
+}
+
+/// With ONNX Runtime (`--features onnx`): a tiny, weightless graph from the
+/// channel loads and classifies, and bytes that aren't a model are refused.
+/// The graph is encoded here, as in `faro-detect`'s `classifier/test_onnx.rs`.
+#[cfg(feature = "onnx")]
+mod onnx {
+    use super::*;
+
+    fn varint(mut v: u64, out: &mut Vec<u8>) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    fn int(field: u64, v: u64, out: &mut Vec<u8>) {
+        varint(field << 3, out);
+        varint(v, out);
+    }
+
+    fn bytes(field: u64, b: &[u8], out: &mut Vec<u8>) {
+        varint((field << 3) | 2, out);
+        varint(b.len() as u64, out);
+        out.extend_from_slice(b);
+    }
+
+    fn value_info(name: &str, dims: &[u64]) -> Vec<u8> {
+        let mut shape = Vec::new();
+        for &d in dims {
+            let mut dim = Vec::new();
+            int(1, d, &mut dim);
+            bytes(1, &dim, &mut shape);
+        }
+        let mut tensor = Vec::new();
+        int(1, 1, &mut tensor);
+        bytes(2, &shape, &mut tensor);
+        let mut ty = Vec::new();
+        bytes(1, &tensor, &mut ty);
+        let mut vi = Vec::new();
+        bytes(1, name.as_bytes(), &mut vi);
+        bytes(2, &ty, &mut vi);
+        vi
+    }
+
+    /// `y = GlobalAveragePool(x)`, x `[1,3,8,8]`: three outputs, the mean
+    /// of each input channel.
+    fn mean_pool() -> Vec<u8> {
+        let mut node = Vec::new();
+        bytes(1, b"x", &mut node);
+        bytes(2, b"y", &mut node);
+        bytes(4, b"GlobalAveragePool", &mut node);
+        let mut graph = Vec::new();
+        bytes(1, &node, &mut graph);
+        bytes(2, b"mean_pool", &mut graph);
+        bytes(11, &value_info("x", &[1, 3, 8, 8]), &mut graph);
+        bytes(12, &value_info("y", &[1, 3, 1, 1]), &mut graph);
+        let mut opset = Vec::new();
+        bytes(1, b"", &mut opset);
+        int(2, 13, &mut opset);
+        let mut model = Vec::new();
+        int(1, 8, &mut model);
+        bytes(8, &opset, &mut model);
+        bytes(7, &graph, &mut model);
+        model
+    }
+
+    fn graph_model(version: &str, weights: &[u8]) -> Artifact {
+        let mut info = model_info(version, "MIT", weights);
+        info.labels = vec!["nsfw".into(), "sfw".into(), "other".into()];
+        info.output = OutputActivation::Softmax;
+        model_artifact(version, &model_bundle(&info, weights))
+    }
+
+    #[tokio::test]
+    async fn a_model_from_the_channel_runs_on_onnx_runtime() {
+        let mut inst = FakeInstance::start().await;
+        inst.publish(&[graph_model("1.1.0", &mean_pool())]);
+        let dev = device();
+        let u = updater(&inst, &dev, "1.0.0");
+        let a = Artifacts::start(
+            ArtifactConfig {
+                dir: dev.dir.clone(),
+                notices: dev.notices.clone(),
+                runtime: faro_service::model::default_runtime(),
+            },
+            ModelLoad {
+                classifier: Box::new(Fixed(model_info("1.0.0", "MIT", b"packaged"))),
+                tamper: None,
+            },
+            None,
+        )
+        .artifacts;
+        let r = check(&u, &a).await;
+        assert_eq!(outcome(&r, TargetKind::Model), &installed("1.1.0"));
+        let mut m = a.swaps().take_model().unwrap().value;
+        let red = Frame::new(
+            8,
+            8,
+            faro_platform::PixelFormat::Bgra8,
+            0,
+            [0, 0, 255, 255].repeat(64),
+        )
+        .unwrap();
+        let scores = m.classify(&red).unwrap();
+        assert!(scores.get("nsfw").unwrap() > scores.get("other").unwrap());
+
+        // Verified bytes that ONNX Runtime can't load.
+        inst.publish(&[graph_model("1.2.0", b"not a graph")]);
+        let r = check(&u, &a).await;
+        assert!(matches!(
+            outcome(&r, TargetKind::Model),
+            ArtifactOutcome::Rejected { reason, .. } if reason.contains("doesn't load")
+        ));
+        // At the next start the channel's model loads on ONNX Runtime again.
+        let s = Artifacts::start(
+            ArtifactConfig {
+                dir: dev.dir.clone(),
+                notices: dev.notices.clone(),
+                runtime: faro_service::model::default_runtime(),
+            },
+            ModelLoad {
+                classifier: Box::new(Fixed(model_info("1.0.0", "MIT", b"packaged"))),
+                tamper: None,
+            },
+            None,
+        );
+        assert_eq!(s.model_label, "test 1.1.0");
+        assert!(s.tamper.is_empty());
+    }
 }

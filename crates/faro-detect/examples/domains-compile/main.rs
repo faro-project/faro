@@ -618,11 +618,7 @@ fn build(
     Ok((compiled.excluded, m))
 }
 
-fn write_outputs(
-    compiled: &Compiled,
-    out: &Path,
-    manifest_path: &Path,
-) -> Result<DomainsManifest> {
+fn write_outputs(compiled: &Compiled, out: &Path, manifest_path: &Path) -> Result<DomainsManifest> {
     let file = out
         .file_name()
         .and_then(|f| f.to_str())
@@ -774,7 +770,16 @@ mod tests {
         for ok in ["1.0.0", "0.10.2", "2.0.0-rc.1"] {
             assert!(is_release_version(ok), "{ok}");
         }
-        for bad in ["", "1", "1.0", "1.0.0+b", "01.0.0", "1.0.0-", "1.0.0-a..b", "v1.0.0"] {
+        for bad in [
+            "",
+            "1",
+            "1.0",
+            "1.0.0+b",
+            "01.0.0",
+            "1.0.0-",
+            "1.0.0-a..b",
+            "v1.0.0",
+        ] {
             assert!(!is_release_version(bad), "{bad}");
         }
         let ok = "path = \"x\"\nlicense = \"CC0-1.0\"\napproved = true";

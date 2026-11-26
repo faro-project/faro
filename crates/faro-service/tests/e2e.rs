@@ -1124,10 +1124,9 @@ async fn the_service_switches_to_a_model_and_domain_list_from_its_instance() {
             && s.blocklist.as_deref() == Some("domains 1.0.0")
     })
     .await;
-    let notice = std::fs::read_to_string(
-        notices.join(faro_service::update::artifacts::MODEL_NOTICE),
-    )
-    .unwrap();
+    let notice =
+        std::fs::read_to_string(notices.join(faro_service::update::artifacts::MODEL_NOTICE))
+            .unwrap();
     assert!(notice.contains("Image model channel 2.0.0"), "{notice}");
     assert!(notices
         .join(faro_service::update::artifacts::BLOCKLIST_NOTICE)

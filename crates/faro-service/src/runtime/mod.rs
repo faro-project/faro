@@ -40,12 +40,12 @@ use crate::backoff::Backoff;
 use crate::client::{ClientError, ClientOptions, InstanceClient};
 use crate::config::Config;
 use crate::enroll::{self, EndorsementPoll, EnrollError};
+use crate::model::ModelRuntime;
 use crate::source::{FrameSource, SourceCommand, SourceEvent, SourceIo};
 use crate::state::{self, Enrollment, StateDir, StateError, ENDORSEMENT_FILE};
+use crate::update::artifacts::{self, ArtifactConfig, Artifacts, Swaps};
 use crate::update::fetch::{FetchError, UpdateFetcher};
 use crate::update::install::{platform_installer, Installer};
-use crate::model::ModelRuntime;
-use crate::update::artifacts::{self, ArtifactConfig, Artifacts, Swaps};
 use crate::update::{CheckError, ClientSpec, ClientUpdater};
 use faro_core::clock::{Clock, SystemClock};
 use faro_core::{
