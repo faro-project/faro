@@ -14,7 +14,7 @@
 //! test's own uid and is told apart by its id, as two accounts' sessions
 //! would be.
 
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 // Shared with tests/e2e.rs; not every helper is used here.
 #[allow(dead_code)]
@@ -37,9 +37,14 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-fn euid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
+/// The account the test runs as: the uid, or the user's SID on Windows.
+fn own_account() -> faro_ipc::AccountId {
+    faro_ipc::current_account().unwrap()
+}
+
+/// Root (LocalSystem on Windows): a real, not a development, service.
+fn privileged() -> bool {
+    faro_service::source::sessions::is_privileged()
 }
 
 /// The sessions the IPC source sees.
@@ -56,7 +61,7 @@ impl Logins {
     fn log_in(&self, account: &str, active: bool) {
         self.0.lock().unwrap().push(SessionEntry {
             id: session_of(account),
-            uid: euid(),
+            uid: own_account(),
             account: account.into(),
             active,
         });
@@ -174,11 +179,21 @@ async fn setup_with(logins: Logins, classifier: Box<dyn faro_detect::Classifier>
     // Private, whatever the umask: the socket checks refuse a group-writable
     // directory, and tempfile leaves the mode to the umask (002 on many Linux
     // accounts).
+    #[cfg(unix)]
     let sock_dir = tempfile::Builder::new()
         .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
         .tempdir()
         .expect("socket dir");
+    #[cfg(windows)]
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    #[cfg(unix)]
     let socket = sock_dir.path().join("agent.sock");
+    // A pipe name, unique per test.
+    #[cfg(windows)]
+    let socket = PathBuf::from(format!(
+        r"\\.\pipe\faro-test-{}\agent",
+        sock_dir.path().file_name().unwrap().to_string_lossy()
+    ));
     dev.start_with(classifier, Box::new(ipc_source(&socket, &logins)));
     dev.wait("awaiting endorsement", |s| {
         s.phase == Phase::AwaitingEndorsement
@@ -574,9 +589,14 @@ fn spawn_agent_arguments_parse_with_the_agent_cli() {
     let spec = AgentSpawn::new("/usr/local/bin/faro-agent", "/tmp/faro-test/agent.sock");
     let argv = std::iter::once("faro-agent".to_owned()).chain(spec.resolved_args());
     let cli = faro_agent::cli::Cli::try_parse_from(argv).expect("faro-agent accepts them");
-    let faro_agent::cli::Command::Run(args) = cli.command;
+    // Windows also has `open-url`; elsewhere `Run` is the only command.
+    #[allow(irrefutable_let_patterns)]
+    let faro_agent::cli::Command::Run(args) = cli.command
+    else {
+        panic!("parsed as another command");
+    };
     assert_eq!(args.socket, PathBuf::from("/tmp/faro-test/agent.sock"));
-    if euid() != 0 {
+    if !privileged() {
         assert!(
             args.trust_same_uid_service,
             "a user-run dev service must be trusted"

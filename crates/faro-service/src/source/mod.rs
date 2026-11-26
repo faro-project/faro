@@ -1,7 +1,8 @@
 //! Where frames and session context come from (ARCHITECTURE.md §3.1).
 //!
 //! In production the capture side is the per-session **agent**, connected
-//! over `faro-ipc` ([`ipc::IpcFrameSource`], Unix only for now). Tests, the
+//! over `faro-ipc` ([`ipc::IpcFrameSource`]: Unix sockets, or named pipes
+//! on Windows, where [`win_agents`] also launches the agents). Tests, the
 //! headless E2E client and development builds can instead drive an
 //! [`AgentPlatform`](faro_platform::AgentPlatform) in-process
 //! ([`InProcessFrameSource`], e.g. over `faro_platform::synthetic::Script`).
@@ -26,13 +27,15 @@
 //! zeroized when dropped (including if a channel is closed with frames still
 //! queued). `SourceEvent`'s `Debug` never prints pixels.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod codesign;
 mod in_process;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod ipc;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod sessions;
+#[cfg(windows)]
+pub mod win_agents;
 
 pub use in_process::InProcessFrameSource;
 
@@ -66,7 +69,8 @@ pub enum SourceCommand {
 /// One interactive session, as a source sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatus {
-    /// The session id agents send in `Hello` (`uid:<uid>`).
+    /// The session id agents send in `Hello` (`uid:<uid>`, `wts:<id>` on
+    /// Windows).
     pub id: String,
     /// The account's short name (the label in events, §3.6).
     pub account: String,

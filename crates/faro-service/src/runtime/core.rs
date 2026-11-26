@@ -228,6 +228,10 @@ pub enum Control {
     /// A tamper signal from a task outside the core (an update package
     /// that failed its signature check).
     Tamper(TamperSignal),
+    /// The OS says the system clock was set (Windows
+    /// `SERVICE_CONTROL_TIMECHANGE`): compare wall and monotonic time now
+    /// instead of at the next tick.
+    ClockChanged,
 }
 
 struct MemberPause {
@@ -1656,6 +1660,11 @@ impl Core {
                 }
             }
             Control::Tamper(sig) => self.signal(sig).await,
+            Control::ClockChanged => {
+                if let Some(sig) = self.guard.observe_clock(&*self.clock) {
+                    self.signal(sig).await;
+                }
+            }
         }
     }
 }

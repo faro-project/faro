@@ -70,6 +70,16 @@ faro-platform-windows.workspace = true
 # Reading the version inside a Windows update package (src/update/msi.rs):
 # the MSI's Property table, without running anything.
 msi = "0.11"
+# Pipe-client tokens (the enroll approval), the session of a process, and
+# finding a running agent (src/win.rs, src/source/win_agents.rs).
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 faro-platform-macos.workspace = true

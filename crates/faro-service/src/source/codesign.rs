@@ -16,9 +16,16 @@
 //! through the kernel's **audit token** rather than the pid (a pid can be
 //! recycled between the credential read and the check).
 //!
-//! macOS only: Authenticode (Windows) and IMA / package-manager checks
-//! (Linux) are not implemented, so on those systems a configured
-//! requirement rejects every peer rather than being silently ignored.
+//! **Windows** checks the Authenticode signature of the process image behind
+//! the pipe client's pid (`faro_platform_windows::authenticode::
+//! verify_process`) against a `subject="..."[; sha256=...]` requirement
+//! ([`faro_platform_windows::SignerRequirement`]). The account check is
+//! done first and comes from the connection itself; the pid is only as good
+//! as pid reuse allows (see `faro_ipc::peer`).
+//!
+//! macOS and Windows only: IMA / package-manager checks (Linux) are not
+//! implemented, so on Linux a configured requirement rejects every peer
+//! rather than being silently ignored.
 
 use faro_ipc::PeerInfo;
 
@@ -39,6 +46,15 @@ pub enum CodeSignError {
     Alloc,
     #[error("code-signature verification is not implemented on this operating system")]
     Unsupported,
+    /// Windows: the requirement text does not parse.
+    #[error("{0}")]
+    BadWindowsRequirement(String),
+    /// Windows: the OS did not report the client's pid.
+    #[error("the OS did not report the peer's process id")]
+    NoPid,
+    /// Windows: the process image is not signed as required.
+    #[error("{0}")]
+    NotSigned(String),
 }
 
 /// Check that `requirement` parses as a designated requirement, so a typo
@@ -207,7 +223,29 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod imp {
+    use super::CodeSignError;
+    use faro_ipc::PeerInfo;
+    use faro_platform_windows::authenticode::{verify_process, SignerRequirement};
+
+    pub(super) fn check_requirement(text: &str) -> Result<(), CodeSignError> {
+        SignerRequirement::parse(text)
+            .map(|_| ())
+            .map_err(|e| CodeSignError::BadWindowsRequirement(e.to_string()))
+    }
+
+    pub(super) fn verify_peer(peer: &PeerInfo, text: &str) -> Result<(), CodeSignError> {
+        let req = SignerRequirement::parse(text)
+            .map_err(|e| CodeSignError::BadWindowsRequirement(e.to_string()))?;
+        let pid = peer.pid.ok_or(CodeSignError::NoPid)?;
+        verify_process(pid, &req)
+            .map(|_| ())
+            .map_err(|e| CodeSignError::NotSigned(e.to_string()))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod imp {
     use super::CodeSignError;
     use faro_ipc::PeerInfo;

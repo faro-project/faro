@@ -248,6 +248,18 @@ impl EnrollService {
 
     /// Answer one request.
     pub async fn handle(&self, req: EnrollRequest) -> EnrollResponse {
+        self.handle_with(req, self.approver.clone()).await
+    }
+
+    /// [`handle`](Self::handle) with `approver` asking for the
+    /// administrator's approval instead of the service's own. The Windows
+    /// listener passes an approver that says yes, after it consumed an
+    /// approval an elevated helper recorded (`crate::enroll_approval`).
+    pub async fn handle_with(
+        &self,
+        req: EnrollRequest,
+        approver: Arc<dyn Approver>,
+    ) -> EnrollResponse {
         // The status menu asks for `Status` about every 30 s while the
         // agent has no session connection: keep that out of the log.
         let status_only = matches!(req, EnrollRequest::Status);
@@ -270,9 +282,15 @@ impl EnrollService {
                     &confirmed_instance,
                     &confirmed_identity,
                     &authorization,
+                    approver,
                 )
                 .await
             }
+            // Only the Windows listener takes these, before `handle`.
+            EnrollRequest::ApproveEnroll { .. } => Err(fail(
+                FailureKind::Unavailable,
+                "approving an enrollment is not possible here",
+            )),
         };
         let resp = answer.unwrap_or_else(|r| *r.0);
         match &resp {
@@ -382,6 +400,7 @@ impl EnrollService {
         confirmed_instance: &str,
         confirmed_identity: &[u8; 32],
         authorization: &[u8; AUTHORIZATION_LEN],
+        approver: Arc<dyn Approver>,
     ) -> Result<EnrollResponse, Refused> {
         let Ok(guard) = self.enrolling.clone().try_lock_owned() else {
             return Err(fail(FailureKind::Busy, "another enrollment is in progress"));
@@ -406,7 +425,6 @@ impl EnrollService {
         // lock goes with it, so a dialog left open after the timeout still
         // keeps a second enrollment out until it closes.
         let prompt = approval_prompt(&info.name, &info.url);
-        let approver = self.approver.clone();
         let auth = *authorization;
         let asked = tokio::task::spawn_blocking(move || {
             let r = approver.approve(&auth, &prompt);
@@ -482,24 +500,22 @@ pub fn failure_kind(e: &EnrollError) -> FailureKind {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use listener::EnrollServer;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod listener {
     use super::EnrollService;
     use crate::config::Config;
-    use crate::source::ipc::{check_policy, ensure_socket_dir, peer_policy, PeerPolicy};
+    use crate::source::ipc::{bind_options, ensure_socket_dir, peer_policy, PeerPolicy};
     use crate::source::sessions::{self, SessionLister};
     use faro_ipc::{
-        BindOptions, EnrollResponse, EnrollServerConnection, FailureKind, IpcError, IpcServer,
-        PeerInfo,
+        AccountId, EnrollResponse, EnrollServerConnection, IpcServer, PeerInfo, ServerStream,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::net::UnixStream;
     use tokio::sync::Semaphore;
     use tokio::task::JoinHandle;
 
@@ -518,6 +534,8 @@ mod listener {
         per_account: bool,
         sessions: SessionLister,
         recheck: Duration,
+        #[cfg(windows)]
+        approvals: Arc<crate::enroll_approval::ApprovalTable>,
     }
 
     impl std::fmt::Debug for EnrollServer {
@@ -545,9 +563,11 @@ mod listener {
                 service: Arc::new(service),
                 agent_socket: config.ipc.socket_path.clone(),
                 code_requirement: config.ipc.agent_requirement.clone(),
-                per_account: super::euid() == 0,
+                per_account: sessions::is_privileged(),
                 sessions: sessions::default_lister(),
                 recheck: RECHECK,
+                #[cfg(windows)]
+                approvals: Arc::default(),
             }
         }
 
@@ -559,7 +579,7 @@ mod listener {
         }
 
         /// The socket path for `uid` (`None`: the development socket).
-        pub fn socket_path(&self, uid: Option<u32>) -> PathBuf {
+        pub fn socket_path(&self, uid: Option<AccountId>) -> PathBuf {
             faro_ipc::enroll_socket_path(&self.agent_socket, uid)
         }
 
@@ -571,13 +591,18 @@ mod listener {
                 return std::future::pending().await;
             }
             let slots = Arc::new(Semaphore::new(MAX_CONCURRENT));
-            let mut listeners: BTreeMap<Option<u32>, Listener> = BTreeMap::new();
-            let mut wanted: BTreeSet<Option<u32>> = [None].into();
+            let mut listeners: BTreeMap<Option<AccountId>, Listener> = BTreeMap::new();
+            let mut wanted: BTreeSet<Option<AccountId>> = [None].into();
             loop {
                 if self.per_account {
                     if let Some(list) = (self.sessions)() {
                         wanted = list.iter().map(|s| Some(s.uid)).collect();
                     }
+                    // The helper of an administrator's approval may be any
+                    // administrator, not the session's user, so it has its
+                    // own pipe, open to elevated administrators only.
+                    #[cfg(windows)]
+                    wanted.insert(Some(crate::enroll_approval::ADMIN_PIPE_ACCOUNT));
                 }
                 listeners.retain(|k, _| wanted.contains(k));
                 for key in &wanted {
@@ -591,6 +616,7 @@ mod listener {
                                 server,
                                 self.service.clone(),
                                 slots.clone(),
+                                self.context(*key, policy.clone()),
                             ));
                             listeners.insert(*key, Listener(task));
                         }
@@ -603,36 +629,79 @@ mod listener {
             }
         }
 
+        #[cfg(unix)]
+        fn context(&self, _owner: Option<AccountId>, _policy: Result<PeerPolicy, String>) -> Ctx {
+            Ctx {}
+        }
+
+        #[cfg(windows)]
+        fn context(&self, owner: Option<AccountId>, policy: Result<PeerPolicy, String>) -> Ctx {
+            Ctx {
+                account: owner.unwrap_or_else(crate::win::own_account),
+                admin_pipe: owner == Some(crate::enroll_approval::ADMIN_PIPE_ACCOUNT),
+                policy,
+                approvals: self.approvals.clone(),
+            }
+        }
+
         fn bind(
             &self,
-            owner: Option<u32>,
+            owner: Option<AccountId>,
             policy: Result<PeerPolicy, String>,
         ) -> faro_ipc::Result<IpcServer> {
             let path = self.socket_path(owner);
             ensure_socket_dir(&path)?;
-            let admit = owner.unwrap_or_else(super::euid);
-            let verify = move |peer: &PeerInfo| {
-                if peer.uid != admit {
-                    return Err(IpcError::peer_rejected(format!(
-                        "uid {} may not use this enroll socket",
-                        peer.uid
-                    )));
+            // Unix: only the socket's account, checked before a byte is
+            // read. Windows: the pipe's DACL names the account (and
+            // elevated administrators); who may send what is decided per
+            // request in `crate::enroll_approval`, since an approval comes
+            // from a different account than the agent.
+            #[cfg(unix)]
+            let verify = {
+                use crate::source::ipc::{check_policy, peer_account};
+                let admit = owner.unwrap_or_else(|| {
+                    // SAFETY: geteuid has no preconditions and cannot fail.
+                    unsafe { libc::geteuid() }
+                });
+                move |peer: &PeerInfo| {
+                    if peer_account(peer) != Some(admit) {
+                        return Err(faro_ipc::IpcError::peer_rejected(format!(
+                            "uid {} may not use this enroll socket",
+                            peer.uid
+                        )));
+                    }
+                    check_policy(peer, &policy)
                 }
-                check_policy(peer, &policy)
             };
-            IpcServer::bind_with(
-                &path,
-                BindOptions {
-                    mode: 0o600,
-                    group: None,
-                    owner,
-                },
-                verify,
-            )
+            #[cfg(windows)]
+            let verify = {
+                let _ = &policy;
+                move |_peer: &PeerInfo| Ok(())
+            };
+            IpcServer::bind_with(&path, bind_options(owner), verify)
         }
     }
 
-    async fn accept_loop(server: IpcServer, service: Arc<EnrollService>, slots: Arc<Semaphore>) {
+    /// What `serve` needs to know about the pipe it serves (Windows).
+    #[cfg(windows)]
+    #[derive(Clone)]
+    struct Ctx {
+        account: AccountId,
+        admin_pipe: bool,
+        policy: Result<PeerPolicy, String>,
+        approvals: Arc<crate::enroll_approval::ApprovalTable>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone)]
+    struct Ctx {}
+
+    async fn accept_loop(
+        server: IpcServer,
+        service: Arc<EnrollService>,
+        slots: Arc<Semaphore>,
+        ctx: Ctx,
+    ) {
         loop {
             match server
                 .accept_typed::<EnrollResponse, faro_ipc::EnrollRequest>()
@@ -641,8 +710,9 @@ mod listener {
                 Ok(conn) => {
                     let service = service.clone();
                     let slot = slots.clone().try_acquire_owned();
+                    let ctx = ctx.clone();
                     tokio::spawn(async move {
-                        serve(conn, &service, slot.is_ok()).await;
+                        serve(conn, &service, slot.is_ok(), &ctx).await;
                     });
                 }
                 Err(e) => {
@@ -654,9 +724,10 @@ mod listener {
     }
 
     async fn serve(
-        mut conn: EnrollServerConnection<UnixStream>,
+        mut conn: EnrollServerConnection<ServerStream>,
         service: &EnrollService,
         have_slot: bool,
+        ctx: &Ctx,
     ) {
         let req = match conn
             .recv_timeout(REQUEST_TIMEOUT, "an enroll request")
@@ -668,11 +739,28 @@ mod listener {
                 return;
             }
         };
+        #[cfg(unix)]
+        let _ = ctx;
+        #[cfg(unix)]
         let resp = if have_slot {
             service.handle(req).await
         } else {
-            EnrollResponse::failed(FailureKind::Busy, "too many requests at once")
+            EnrollResponse::failed(faro_ipc::FailureKind::Busy, "too many requests at once")
         };
+        #[cfg(windows)]
+        let (mut conn, resp) = crate::enroll_approval::answer(
+            &ctx.approvals,
+            crate::enroll_approval::PipeRules {
+                account: ctx.account,
+                admin_pipe: ctx.admin_pipe,
+                policy: ctx.policy.clone(),
+            },
+            conn,
+            req,
+            service,
+            have_slot,
+        )
+        .await;
         if let Err(e) = conn.send(&resp).await {
             tracing::warn!(error = %e, "could not answer the enroll request");
         }

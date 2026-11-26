@@ -8,7 +8,16 @@
 //! faro-service [--config FILE] [--state-dir DIR] goodbye [--reason uninstalled|account-deleted | --moved-to HOST] [--within SECS]
 //! faro-service model-check [--manifest PATH] [--runs N]
 //! faro-service domains-check [--manifest PATH]
+//! faro-service run-service                          (Windows: the SCM entry point)
+//! faro-service install-service | uninstall-service  (Windows: development conveniences)
+//! faro-service approve-enroll --request <64 hex>    (Windows: the elevated approval helper)
 //! ```
+//!
+//! On Windows the MSI registers the service itself with `run-service` as
+//! its argument. `run-service` talks to the Service Control Manager; started
+//! from a console instead it runs like `run`. Without `--state-dir` and
+//! `--config` the Windows defaults are `C:\ProgramData\Faro`
+//! (`faro_platform_windows::layout::DATA_DIR`) and its `service.toml`.
 //!
 //! `goodbye` exits 0 once allies have been told (or there was nobody to
 //! tell, or they were told already because the instance retired this
@@ -152,6 +161,29 @@ pub enum Command {
         #[arg(long, default_value_t = 60, value_name = "SECS")]
         within: u64,
     },
+    /// Windows: run as the Windows service (what the Service Control
+    /// Manager starts). From a console it runs in the foreground like `run`.
+    #[cfg(windows)]
+    #[command(name = "run-service")]
+    RunService,
+    /// Windows, development: register this computer's `C:\Program
+    /// Files\Faro\faro-service.exe run-service` with the Service Control
+    /// Manager (the MSI does this itself). Needs an elevated administrator.
+    #[cfg(windows)]
+    InstallService,
+    /// Windows, development: stop and remove the service registration.
+    #[cfg(windows)]
+    UninstallService,
+    /// Windows: the elevated helper of an administrator's approval of
+    /// enrolling from the agent (the agent starts it through UAC). Records
+    /// the approval with the service and exits 0 (approved), 10 (refused),
+    /// 11 (no service) or 12 (bad arguments).
+    #[cfg(windows)]
+    ApproveEnroll {
+        /// The request id, 64 hex digits.
+        #[arg(long)]
+        request: String,
+    },
     /// Load the image model as `run` does (licence, attribution and
     /// digest checks), classify a few synthetic frames and time it. Reads
     /// no state and no screen.
@@ -225,6 +257,16 @@ enum CliError {
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     crate::logging::init(&cli);
+    // Windows: the commands that don't start a runtime the usual way.
+    #[cfg(windows)]
+    let cli = match windows::early(cli) {
+        Ok(code) => return code,
+        Err(cli) => cli,
+    };
+    run_cli(cli)
+}
+
+fn run_cli(cli: Cli) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -364,6 +406,11 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
             opts.deliver_within = Duration::from_secs(within);
             cmd_goodbye(&config, opts).await
         }
+        #[cfg(windows)]
+        Command::RunService
+        | Command::InstallService
+        | Command::UninstallService
+        | Command::ApproveEnroll { .. } => unreachable!("handled in main"),
         Command::ModelCheck { .. } | Command::DomainsCheck { .. } => {
             unreachable!("handled above")
         }
@@ -549,7 +596,15 @@ fn installed_service_running() -> bool {
     {
         std::path::Path::new(faro_platform_macos::pkg_layout::DAEMON_PLIST).exists()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use faro_platform_windows::scm::{service_state, ServiceState};
+        matches!(
+            service_state(faro_platform_windows::layout::SERVICE_NAME),
+            Ok(Some(ServiceState::Running | ServiceState::StartPending))
+        )
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         false
     }
@@ -591,12 +646,30 @@ async fn cmd_run(
     spawn_agent: Option<PathBuf>,
     capture: CaptureMode,
 ) -> Result<(), CliError> {
+    cmd_run_until(config, spawn_agent, capture, shutdown_signal(), None).await
+}
+
+/// `run` until `shutdown` completes. `signals`, if given, receives the
+/// running service's [`crate::ServiceSignals`] once it is built (after
+/// enrollment).
+async fn cmd_run_until(
+    config: Config,
+    spawn_agent: Option<PathBuf>,
+    capture: CaptureMode,
+    shutdown: impl Future<Output = ()> + Send,
+    signals: Option<tokio::sync::oneshot::Sender<crate::ServiceSignals>>,
+) -> Result<(), CliError> {
     let dir = StateDir::open(&config.state_dir)?;
+    // Windows: the agents come up before enrollment too (the agent is what
+    // enrolls the computer), started and kept by the service itself.
+    #[cfg(windows)]
+    let _launcher = start_agent_launcher(spawn_agent.is_none() && capture == CaptureMode::Ipc);
     // Up before the wait, for the life of the process: the agent can enroll
     // the computer through it (an administrator approves), and ask whether
     // it is enrolled.
     let _enroll_server = start_enroll_server(&config);
-    if !wait_for_enrollment(&dir, ENROLLMENT_POLL, shutdown_signal()).await? {
+    tokio::pin!(shutdown);
+    if !wait_for_enrollment(&dir, ENROLLMENT_POLL, &mut shutdown).await? {
         return Ok(());
     }
     let socket = config.ipc.socket_path.clone();
@@ -610,8 +683,24 @@ async fn cmd_run(
     }
     let service = b.build()?;
     tracing::info!(device = %service.enrollment().device_id, instance = %service.enrollment().instance_url, "starting");
-    service.run(shutdown_signal()).await?;
+    if let Some(tx) = signals {
+        let _ = tx.send(service.signals());
+    }
+    service.run(shutdown).await?;
     Ok(())
+}
+
+/// Windows: start the launcher of the per-session agents, if this is the
+/// LocalSystem service (only it may start a process in another session).
+#[cfg(windows)]
+fn start_agent_launcher(wanted: bool) -> AbortOnDrop {
+    if wanted && crate::win::is_system() {
+        AbortOnDrop(Some(tokio::spawn(
+            crate::source::win_agents::AgentLauncher::production().run(),
+        )))
+    } else {
+        AbortOnDrop(None)
+    }
 }
 
 /// Aborts the enroll server's task when dropped.
@@ -629,13 +718,13 @@ impl Drop for AbortOnDrop {
 /// through [`SystemApprover`](crate::enroll_server::SystemApprover): there
 /// is deliberately no option to use another.
 fn start_enroll_server(config: &Config) -> AbortOnDrop {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use crate::enroll_server::{EnrollServer, EnrollService, SystemApprover};
         let service = EnrollService::from_config(config, Arc::new(SystemApprover));
         AbortOnDrop(Some(tokio::spawn(EnrollServer::new(service, config).run())))
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = config;
         AbortOnDrop(None)
@@ -678,6 +767,335 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Windows: the commands that need the process before a runtime exists
+/// (`run-service`'s dispatcher must be called from the main thread) or no
+/// runtime at all. `Err(cli)` hands the rest to the usual path.
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use faro_platform_windows::layout;
+    use faro_platform_windows::scm::{self, ServiceContext, ServiceControl};
+    use faro_platform_windows::ui::approval::{exit, ApprovalRequest};
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use tokio::sync::mpsc;
+
+    /// How often Faro's program files are checked for write access by
+    /// other accounts.
+    const INTEGRITY_EVERY: Duration = Duration::from_secs(60);
+
+    #[allow(clippy::result_large_err)]
+    pub(super) fn early(cli: Cli) -> Result<ExitCode, Cli> {
+        match &cli.command {
+            Command::InstallService => Ok(registration(true)),
+            Command::UninstallService => Ok(registration(false)),
+            Command::ApproveEnroll { request } => {
+                let args = ["approve-enroll", "--request", request.as_str()];
+                let code = match ApprovalRequest::parse_helper_arguments(&args) {
+                    Some(r) => approve_enroll(&cli, &r),
+                    None => exit::BAD_ARGUMENTS,
+                };
+                Ok(ExitCode::from(code as u8))
+            }
+            Command::RunService => Ok(run_service(cli)),
+            _ => Err(cli),
+        }
+    }
+
+    fn registration(install: bool) -> ExitCode {
+        let r = if install {
+            // The same argv the MSI registers.
+            scm::install_service(
+                std::path::Path::new(layout::SERVICE_PROGRAM),
+                &["run-service".to_owned()],
+            )
+        } else {
+            scm::uninstall_service()
+        };
+        match r {
+            Ok(()) => {
+                println!(
+                    "{}",
+                    if install {
+                        "Service registered."
+                    } else {
+                        "Service removed."
+                    }
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                crate::logging::fail(&format!(
+                    "{} needs an elevated administrator: {e}",
+                    if install {
+                        "install-service"
+                    } else {
+                        "uninstall-service"
+                    }
+                ));
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    /// The approval helper: tell the service an elevated administrator
+    /// approved `request`. Returns the exit code.
+    fn approve_enroll(cli: &Cli, request: &ApprovalRequest) -> u32 {
+        use faro_ipc::{
+            AllowSameUser, AllowSystemService, EnrollRequest, EnrollResponse, IpcClient, Sid,
+        };
+        let base = load_config(cli)
+            .map(|c| c.ipc.socket_path)
+            .unwrap_or_else(|_| crate::config::default_socket_path());
+        // The admin pipe of a real service, else a development service's.
+        let path = faro_ipc::resolve_enroll_socket(&base, Sid::BUILTIN_ADMINISTRATORS);
+        let production =
+            path == faro_ipc::enroll_socket_path(&base, Some(Sid::BUILTIN_ADMINISTRATORS));
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return exit::NO_SERVICE;
+        };
+        rt.block_on(async {
+            let conn = if production {
+                IpcClient::connect_verified_typed::<EnrollRequest, EnrollResponse>(
+                    &path,
+                    &AllowSystemService,
+                )
+                .await
+            } else {
+                IpcClient::connect_verified_typed::<EnrollRequest, EnrollResponse>(
+                    &path,
+                    &AllowSameUser,
+                )
+                .await
+            };
+            let Ok(mut conn) = conn else {
+                return exit::NO_SERVICE;
+            };
+            let sent = conn
+                .send(&EnrollRequest::ApproveEnroll {
+                    request: *request.bytes(),
+                })
+                .await;
+            if sent.is_err() {
+                return exit::NO_SERVICE;
+            }
+            match conn
+                .recv_timeout(Duration::from_secs(15), "the approval answer")
+                .await
+            {
+                Ok(EnrollResponse::Approved) => exit::APPROVED,
+                Ok(_) => exit::REFUSED,
+                Err(_) => exit::NO_SERVICE,
+            }
+        })
+    }
+
+    /// `run-service`: the SCM's dispatcher, or the foreground when started
+    /// from a console.
+    fn run_service(cli: Cli) -> ExitCode {
+        let slot = Arc::new(Mutex::new(Some(cli)));
+        let for_service = slot.clone();
+        let r = scm::run_service_dispatcher(move |ctx| {
+            let cli = for_service.lock().ok().and_then(|mut s| s.take());
+            match cli {
+                Some(cli) => service_main(cli, ctx),
+                None => 1,
+            }
+        });
+        match r {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) if scm::is_not_a_service(&e) => {
+                let Some(mut cli) = slot.lock().ok().and_then(|mut s| s.take()) else {
+                    return ExitCode::FAILURE;
+                };
+                cli.command = Command::Run {
+                    socket: None,
+                    spawn_agent: None,
+                    capture: CaptureMode::Ipc,
+                };
+                run_cli(cli)
+            }
+            Err(e) => {
+                crate::logging::fail(&format!("cannot connect to the service manager: {e}"));
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    /// On the SCM's service thread: the whole service.
+    fn service_main(cli: Cli, ctx: ServiceContext) -> u32 {
+        if let Err(e) = crate::win::prepare_dirs() {
+            tracing::error!(error = %e, "cannot protect the state and log directories");
+        }
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                crate::logging::fail(&CliError::Runtime(e));
+                return 1;
+            }
+        };
+        let ServiceContext {
+            controls, status, ..
+        } = ctx;
+        let code = rt.block_on(async move {
+            let config = match load_config(&cli) {
+                Ok(c) => c,
+                Err(e) => {
+                    crate::logging::fail(&e);
+                    return 1;
+                }
+            };
+            // The SCM's channel into tokio.
+            let (tx, mut controls_rx) = mpsc::unbounded_channel();
+            std::thread::spawn(move || {
+                while let Ok(c) = controls.recv() {
+                    if tx.send(c).is_err() {
+                        break;
+                    }
+                }
+            });
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+            let mut stop_tx = Some(stop_tx);
+            let (sig_tx, sig_rx) = tokio::sync::oneshot::channel();
+            let mut sig_rx = Some(sig_rx);
+            let mut signals: Option<crate::ServiceSignals> = None;
+            let run = cmd_run_until(
+                config,
+                None,
+                CaptureMode::Ipc,
+                async move {
+                    let _ = stop_rx.await;
+                },
+                Some(sig_tx),
+            );
+            tokio::pin!(run);
+            status.running();
+            let mut integrity = tokio::time::interval(INTEGRITY_EVERY);
+            integrity.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut reported: BTreeSet<String> = BTreeSet::new();
+            let result = loop {
+                tokio::select! {
+                    r = &mut run => break r,
+                    Some(c) = controls_rx.recv() => match c {
+                        ServiceControl::Stop
+                        | ServiceControl::Shutdown
+                        | ServiceControl::Preshutdown => {
+                            tracing::info!("the service manager asked the service to stop");
+                            if let Some(tx) = stop_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                        ServiceControl::SessionChange(ev) => {
+                            tracing::info!(kind = ?ev.kind, session = ev.session, "session change");
+                            crate::win::notify_session_change();
+                        }
+                        ServiceControl::TimeChange => {
+                            tracing::info!("the system clock was set");
+                            if let Some(s) = &signals {
+                                s.clock_changed();
+                            }
+                        }
+                        ServiceControl::Power(_) => {}
+                    },
+                    Some(Ok(s)) = async {
+                        match sig_rx.as_mut() {
+                            Some(rx) => Some(rx.await),
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        signals = Some(s);
+                        sig_rx = None;
+                    },
+                    _ = integrity.tick() => {
+                        if let Some(s) = &signals {
+                            check_program_files(s, &mut reported).await;
+                        }
+                    }
+                }
+            };
+            match result {
+                Ok(()) => 0,
+                Err(e) => {
+                    crate::logging::fail(&e);
+                    1
+                }
+            }
+        });
+        // Let tasks that block (the control bridge thread) not hold the
+        // process up.
+        rt.shutdown_timeout(Duration::from_secs(2));
+        code
+    }
+
+    /// Tamper (§3.7): Faro's program files must not be writable by anyone
+    /// but SYSTEM, Administrators and TrustedInstaller. Each offending
+    /// path is reported once per process as an `IntegrityFailure`.
+    async fn check_program_files(signals: &crate::ServiceSignals, reported: &mut BTreeSet<String>) {
+        let found = tokio::task::spawn_blocking(writable_program_files)
+            .await
+            .unwrap_or_default();
+        for rel in found {
+            if reported.insert(rel.clone()) {
+                tracing::error!(path = %rel, "a Faro program file can be changed by other accounts");
+                signals.tamper(faro_proto::body::TamperSignal::IntegrityFailure {
+                    component: format!("program files: {rel} can be changed by other accounts"),
+                });
+            }
+        }
+    }
+
+    /// Paths under `layout::PROGRAM_DIR` (relative) that other accounts
+    /// may write. Only the installed service has such a directory.
+    fn writable_program_files() -> Vec<String> {
+        use faro_platform_windows::acl::writable_by_others;
+        let root = std::path::Path::new(layout::PROGRAM_DIR);
+        if !crate::win::is_system() || !root.is_dir() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut todo = vec![(root.to_path_buf(), 0usize)];
+        let mut seen = 0usize;
+        while let Some((dir, depth)) = todo.pop() {
+            if let Ok(true) = writable_by_others(&dir) {
+                out.push(rel(root, &dir));
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                seen += 1;
+                if seen > 500 {
+                    return out;
+                }
+                let p = e.path();
+                let Ok(t) = e.file_type() else { continue };
+                if t.is_dir() {
+                    if depth < 3 {
+                        todo.push((p, depth + 1));
+                    }
+                } else if let Ok(true) = writable_by_others(&p) {
+                    out.push(rel(root, &p));
+                }
+            }
+        }
+        out
+    }
+
+    fn rel(root: &std::path::Path, p: &std::path::Path) -> String {
+        p.strip_prefix(root)
+            .map(|r| r.display().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ".".to_owned())
     }
 }
 

@@ -218,6 +218,8 @@ fn fixture() -> Fixture {
     }
 }
 
+// Expects Unix modes and sockets in the listing.
+#[cfg(unix)]
 #[test]
 fn a_report_holds_what_helps_and_nothing_private() {
     let f = fixture();
