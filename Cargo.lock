@@ -1156,6 +1156,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
  "url",
  "windows",
  "zeroize",
