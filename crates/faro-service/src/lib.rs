@@ -20,6 +20,7 @@
 //! | [`model`] | the image classifier: the packaged model, its checks, `model-check` |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
 //! | [`update`] | client self-update: verify against the project root, download, install; models and blocklists from the same channel ([`update::artifacts`]) |
+//! | [`logging`] | where the log goes (the packaged service's log file) and how much |
 //! | [`cli`] | the command line |
 //!
 //! ## Invariants kept here (docs/DEVELOPMENT.md)
@@ -55,6 +56,7 @@ pub mod config;
 pub mod enroll;
 pub mod enroll_server;
 pub mod link;
+pub mod logging;
 pub mod model;
 pub mod runtime;
 pub mod source;
