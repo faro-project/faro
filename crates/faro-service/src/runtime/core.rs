@@ -7,6 +7,7 @@
 //! | tick | clock check, report rollover, scheduler → `CaptureNow` |
 //! | `Frames` | detector (frames consumed and zeroized) → report; `medium`+ → `flag` event |
 //! | tamper signal | [`route_signal`]: `tamper` event (urgent), or report context |
+//! | captures failing past the threshold | one `capture_failing`, or `permission_revoked` (`never_granted` if it never was) when Screen Recording is off |
 //! | agent drop / reconnect (any session) | `agent_restarted`, `agent_killed_repeatedly` past the threshold |
 //! | a session (any account) without an agent | `unmonitored_user_session` tamper after [`AGENT_ABSENT_MS`] |
 //! | an agent connects | the login notice in its session (§12) |
@@ -97,6 +98,16 @@ const SLEEP_CLAIM_MAX_AWAKE_MS: u64 = 600_000;
 const REPORT_RETRY_MS: u64 = 60_000;
 /// Unsealed reports kept for retry; older ones are given up (with an error).
 const MAX_UNSEALED_REPORTS: usize = 8;
+
+/// The permission name in `permission_revoked` for Screen Recording.
+const SCREEN_RECORDING: &str = "screen_recording";
+/// How a capture refused for want of Screen Recording reads in
+/// `CaptureFailed` (the agent's `PlatformError::PermissionDenied`).
+const SCREEN_RECORDING_DENIED: &str = "permission denied: screen_recording";
+
+fn is_screen_recording_off(sig: &TamperSignal) -> bool {
+    matches!(sig, TamperSignal::PermissionRevoked { permission, .. } if permission == SCREEN_RECORDING)
+}
 
 /// Persisted in [`PERMISSIONS_FILE`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +263,10 @@ pub struct Core {
     capture_failing_reported: bool,
     capture_failure_threshold: u32,
     screen_permission: Option<PermissionState>,
+    /// A Screen Recording `permission_revoked` was sent for the capture
+    /// target since its permission was last seen granted. The failures it
+    /// causes are then not reported a second time (§3.7).
+    screen_off_reported: bool,
     accessibility: Option<bool>,
     seen_permissions: SeenPermissions,
     recent_signals: HashMap<String, u64>,
@@ -341,6 +356,7 @@ impl Core {
             capture_failing_reported: false,
             capture_failure_threshold: p.capture_failure_threshold,
             screen_permission: None,
+            screen_off_reported: false,
             accessibility: None,
             seen_permissions,
             recent_signals: HashMap::new(),
@@ -446,6 +462,9 @@ impl Core {
 
     /// Route a signal from `account`'s session.
     async fn signal_for(&mut self, sig: TamperSignal, account: Option<String>) {
+        if is_screen_recording_off(&sig) && account == self.target_account() {
+            self.screen_off_reported = true;
+        }
         let wall = self.clock.wall_ms();
         match route_signal(&sig) {
             SignalRoute::ReportContext => self.journal.signal(None, wall, sig, account),
@@ -739,6 +758,7 @@ impl Core {
         self.session = Session::default();
         self.context = ContextSignals::default();
         self.screen_permission = None;
+        self.screen_off_reported = false;
         self.accessibility = None;
         let connected = self.capturing();
         let account = self.target_account();
@@ -995,13 +1015,25 @@ impl Core {
         {
             self.capture_failing_reported = true;
             let account = self.target_account();
-            self.signal_for(
-                TamperSignal::CaptureFailing {
+            let denied = reason.contains(SCREEN_RECORDING_DENIED)
+                || self.screen_permission == Some(PermissionState::Denied);
+            let sig = match (denied, self.screen_off_reported) {
+                // Allies were already told Screen Recording is off.
+                (true, true) => return,
+                // Off without a revocation the service saw: never granted
+                // here (a new install, or a reinstall that dropped the
+                // grant), or turned off in a way it missed.
+                (true, false) => TamperSignal::PermissionRevoked {
+                    permission: SCREEN_RECORDING.into(),
+                    never_granted: !self
+                        .seen_permissions
+                        .granted_before(account.as_deref().unwrap_or_default()),
+                },
+                (false, _) => TamperSignal::CaptureFailing {
                     consecutive_failures: self.failures_in_row,
                 },
-                account,
-            )
-            .await;
+            };
+            self.signal_for(sig, account).await;
         }
     }
 
@@ -1279,11 +1311,16 @@ impl Core {
                 if revoked {
                     self.signal_for(
                         TamperSignal::PermissionRevoked {
-                            permission: "screen_recording".into(),
+                            permission: SCREEN_RECORDING.into(),
+                            never_granted: false,
                         },
                         account.clone(),
                     )
                     .await;
+                }
+                if granted {
+                    // Turning it off again is a new signal.
+                    self.screen_off_reported = false;
                 }
                 if granted && self.seen_permissions.screen_granted_accounts.insert(key) {
                     if let Err(e) = self
@@ -1299,6 +1336,7 @@ impl Core {
                         self.signal_for(
                             TamperSignal::PermissionRevoked {
                                 permission: "accessibility".into(),
+                                never_granted: false,
                             },
                             account,
                         )

@@ -483,6 +483,9 @@ mod compat {
     /// of the wire format: append only.
     #[derive(Serialize, Deserialize)]
     enum WireTamperSignal {
+        /// Without `never_granted`: only the service knows whether it saw
+        /// the permission granted on this enrollment, so it decides that
+        /// itself, and an agent's signal always arrives as `false`.
         PermissionRevoked {
             permission: String,
         },
@@ -517,7 +520,7 @@ mod compat {
             use TamperSignal as T;
             use WireTamperSignal as W;
             match t.clone() {
-                T::PermissionRevoked { permission } => W::PermissionRevoked { permission },
+                T::PermissionRevoked { permission, .. } => W::PermissionRevoked { permission },
                 T::AgentKilledRepeatedly { count, window_secs } => {
                     W::AgentKilledRepeatedly { count, window_secs }
                 }
@@ -549,7 +552,10 @@ mod compat {
             use TamperSignal as T;
             use WireTamperSignal as W;
             match w {
-                W::PermissionRevoked { permission } => T::PermissionRevoked { permission },
+                W::PermissionRevoked { permission } => T::PermissionRevoked {
+                    permission,
+                    never_granted: false,
+                },
                 W::AgentKilledRepeatedly { count, window_secs } => {
                     T::AgentKilledRepeatedly { count, window_secs }
                 }
@@ -659,6 +665,24 @@ mod tests {
         ] {
             assert_eq!(SessionChange::from(WireSessionChange::from(c)), c);
         }
+    }
+
+    /// An agent can't claim a permission was never granted: the service
+    /// decides that from its own record, and the field isn't on the wire
+    /// (so the wire format is unchanged).
+    #[test]
+    fn never_granted_is_not_carried() {
+        let sent = AgentMsg::Tamper(TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: true,
+        });
+        let old = AgentMsg::Tamper(TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: false,
+        });
+        let bytes = postcard::to_allocvec(&sent).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&old).unwrap());
+        assert_eq!(postcard::from_bytes::<AgentMsg>(&bytes).unwrap(), old);
     }
 
     /// Documents why the compat mirrors exist: the proto types' JSON-oriented

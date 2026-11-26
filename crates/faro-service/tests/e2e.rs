@@ -253,7 +253,8 @@ async fn revoked_permission_is_an_urgent_tamper_alert_for_the_ally() {
         body,
         EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
-                permission: "screen_recording".into()
+                permission: "screen_recording".into(),
+                never_granted: false,
             },
             account: None,
         }
@@ -277,6 +278,104 @@ async fn revoked_permission_is_an_urgent_tamper_alert_for_the_ally() {
         assert_content_free(m, &[]);
     }
 
+    // The captures it makes fail are not reported again as
+    // `capture_failing`: one signal, naming the cause.
+    drive_failures(&dev, failure_threshold() + 1).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: false,
+        }]
+    );
+
+    dev.shutdown().await;
+}
+
+/// Consecutive failed captures before the service reports them.
+fn failure_threshold() -> u64 {
+    u64::from(faro_service::config::CaptureConfig::default().capture_failure_threshold)
+}
+
+/// Drive the device until `n` captures have failed in all, one at a time
+/// (after a success the schedule spaces them out more than one
+/// `drive_until` allows for all of them).
+async fn drive_failures(dev: &Device, n: u64) {
+    loop {
+        let failed = dev.status().capture_failures;
+        if failed >= n {
+            return;
+        }
+        dev.drive_until("another failed capture", |s| s.capture_failures > failed)
+            .await;
+    }
+}
+
+/// Every tamper signal of `dev`, as the ally decrypts them, in `seq` order.
+async fn tamper_signals(w: &World, dev: &Device) -> Vec<TamperSignal> {
+    dev.upload_all().await;
+    let mut out = Vec::new();
+    let mut events = w.feed_events(&w.ally.session).await;
+    events.sort_by_key(|e| e.seq);
+    for e in events {
+        if e.device_id != dev.enrollment.device_id || e.kind != EventKind::Tamper {
+            continue;
+        }
+        let item = w.event_item(&w.ally.session, dev, e.seq).await;
+        let body: EventBody = serde_json::from_slice(
+            &open_event(&item, dev, e.seq, &w.ally.id, &w.ally.keys.enc).expect("ally opens it"),
+        )
+        .expect("EventBody");
+        match body {
+            EventBody::Tamper { signal, .. } => out.push(signal),
+            other => panic!("not a tamper body: {other:?}"),
+        }
+    }
+    out
+}
+
+/// 3a. A computer where Faro never had Screen Recording (a new install, or
+///     a reinstall that dropped the grant) is reported as exactly that once
+///     the captures keep failing, not as `capture_failing`, and only once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn screen_recording_never_granted_is_named_once() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    dev.script.with(|s| s.permission = PermissionState::Denied);
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+
+    drive_failures(&dev, failure_threshold() + 3).await;
+    assert_eq!(dev.status().captures, 0);
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: true,
+        }]
+    );
+    dev.shutdown().await;
+}
+
+/// 3a'. Captures failing for any other reason are still `capture_failing`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn other_capture_failures_are_capture_failing() {
+    let w = World::new().await;
+    let mut dev = w.active_device(quiet_classifier()).await;
+    dev.drive_until("a capture", |s| s.captures >= 1).await;
+    dev.script.with(|s| s.fail_capture = true);
+    drive_failures(&dev, failure_threshold() + 1).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::CaptureFailing {
+            consecutive_failures: u32::try_from(failure_threshold()).unwrap(),
+        }]
+    );
     dev.shutdown().await;
 }
 
@@ -602,7 +701,8 @@ async fn permission_revoked_while_stopped_is_tamper_at_next_start() {
         body,
         EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
-                permission: "screen_recording".into()
+                permission: "screen_recording".into(),
+                never_granted: false,
             },
             account: None,
         }

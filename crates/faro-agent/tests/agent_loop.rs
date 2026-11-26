@@ -538,6 +538,7 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
         s.changes.push(SessionChange::DisplaySleep);
         s.tamper.push(TamperSignal::PermissionRevoked {
             permission: "screen_recording".into(),
+            never_granted: false,
         });
     });
     // Let a few failed reconnects (and polls) go by.
@@ -554,6 +555,7 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
     recv_until(&mut conn, |m| {
         *m == AgentMsg::Tamper(TamperSignal::PermissionRevoked {
             permission: "screen_recording".into(),
+            never_granted: false,
         })
     })
     .await;
