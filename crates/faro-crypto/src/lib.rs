@@ -17,12 +17,14 @@
 //! crate by the shared vectors in `tests/data/web-vectors.json`.
 
 pub mod chain;
+mod group;
 mod keycheck;
 mod passphrase;
 mod seal;
 mod sign;
 
 pub use chain::{verify_chain, verify_next, ChainError, ChainHead, Link};
+pub use group::{open_group_message, seal_group_message, verify_group_message};
 pub use keycheck::{is_weak_x25519, validate_enc_pubkey, validate_sign_pubkey};
 pub use passphrase::{
     generate_recovery_code, unwrap_secret, wrap_secret, KdfParams, WrappedSecret,
@@ -50,6 +52,8 @@ pub enum CryptoError {
     Unsupported(String),
     #[error("key derivation failed")]
     Kdf,
+    #[error("invalid structure: {0}")]
+    Invalid(String),
 }
 
 /// Fill a fixed-size array from the OS CSPRNG.

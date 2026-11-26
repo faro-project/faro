@@ -152,19 +152,22 @@ pub async fn insert<'e>(
     e: impl Executor<'e, Database = Any>,
     group: &str,
     user: &UserId,
+    note_id: Option<&str>,
     now_ms: i64,
 ) -> Result<JoinRequest, sqlx::Error> {
     let id = new_hex_id();
     let expires = now_ms.saturating_add(REQUEST_TTL_MS);
     sqlx::query(
-        "INSERT INTO group_join_requests (id, group_id, user_id, state, created_at, expires_at)
-         VALUES ($1, $2, $3, 'open', $4, $5)",
+        "INSERT INTO group_join_requests (id, group_id, user_id, state, created_at, expires_at,
+                                          note_blob_ref)
+         VALUES ($1, $2, $3, 'open', $4, $5, $6)",
     )
     .bind(&id)
     .bind(group)
     .bind(user.as_str())
     .bind(now_ms)
     .bind(expires)
+    .bind(note_id)
     .execute(e)
     .await?;
     Ok(JoinRequest {
@@ -262,6 +265,10 @@ pub struct FacilitatorEntry {
     pub display_name: String,
     pub created_at_ms: i64,
     pub expires_at_ms: i64,
+    /// The signed, encrypted note to the facilitators
+    /// (`GET /v1/group-messages/{id}`), if the person wrote one.
+    #[serde(default)]
+    pub note_id: Option<String>,
 }
 
 /// Open requests to `group`, oldest first.
@@ -273,7 +280,7 @@ pub async fn list_for_group<'e>(
 ) -> Result<Page<FacilitatorEntry>, sqlx::Error> {
     let (after_at, after_id) = cursor.unwrap_or((i64::MIN, String::new()));
     let rows = sqlx::query(
-        "SELECT r.id, r.created_at, r.expires_at, u.display_name
+        "SELECT r.id, r.created_at, r.expires_at, r.note_blob_ref, u.display_name
          FROM group_join_requests r JOIN users u ON u.id = r.user_id
          WHERE r.group_id = $1 AND r.state = 'open' AND r.expires_at > $2
            AND (r.created_at > $3 OR (r.created_at = $3 AND r.id > $4))
@@ -297,6 +304,7 @@ pub async fn list_for_group<'e>(
             display_name: r.try_get("display_name")?,
             created_at_ms: created,
             expires_at_ms: r.try_get("expires_at")?,
+            note_id: r.try_get("note_blob_ref")?,
         });
     }
     let next_cursor = if rows.len() as i64 > PAGE_SIZE {

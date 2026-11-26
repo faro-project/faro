@@ -51,20 +51,20 @@
     "device_id": "dev_laptop01",
     "item": {
       "alg": "xchacha20poly1305",
-      "ciphertext": "Qcp4GYhkkguOzQ2-PA6hUDPuLJJwIYJJsXAuLeghtVHw8-oxz-qbVjbWHtC70jEtze0OWVPGkB9ij_oRZA1oH3myx5tZkSQdFE0i8bY0t-wtIBK7dpbyWYCbS26_rjLmCVkBUIGSyMIpxn5BiLzp_l_ewZYygytKlgNZ_nT6lzGF4EECPApmPs5RFplhAAupIt0Nt0shVc7e8BOuRpDOdabnb05QL_sL-XHGWraScraqLWMS7453UGzDLL4",
+      "ciphertext": "UyiKHn7EKSEeWSQvTYTYPIDxMdl1DiaSEYrR72cKIYq_UId-fJjMwWLwjrkFvT6ELqza5VTVxM_o6p97OFNuXRIGRAcYac-csvBAYlWrQJsZPq0Xmnw-tfueBES097dqNRoGCEtvmsNu_KQITUQ9c_fnesBw7WquV4C8_g8n_SH1kuALTM7Rt3nKFr5e1ZkxYL2fRrgSukutofR_ZhVF-ZGb9gHEr5l3It113Cd2bEBz8wAz3soXP2YhSUc",
       "envelopes": [
         {
           "key_id": "364d6d61390d995f",
           "recipient": "usr_member01",
-          "wrapped_key": "-06bQalQmdXau_hZrcc-RmtN_NPWi-lRGdLfL92sUTXCxN3inclN_H3PmfjH7bsIh6R8iaxzk1RbHxCuEPgZray8jYaDZPoFogdWJHu-BRk"
+          "wrapped_key": "Ad3lwdXZa_lNO7CrbGaqls1REh9V9TkYpIGKfoSqX2gAXG2f1Hmh7G6R8FE_FGIZISPMDVesUG3Cus-HT5rw9nEs1ep-WtdsBDtqpBLn2rs"
         },
         {
           "key_id": "205a3aea09061b9e",
           "recipient": "usr_ally_a",
-          "wrapped_key": "3rpGQu-euhj4iP2IJQOkfgAXglI_bwKwwZzd9qDz6Fpx08oojrfaiCHTF79KA33NBtXJ2JbKf8Ct834X7rwMP5v0VSExrktNtRDOBghZ0PA"
+          "wrapped_key": "JbXmJeYdbXw2gtsMPBNO7kZNw-dDqXmXQdINgkIDfmyW8ARwnQ0NY6yO9NlNw0MhgOqQ_JeD1cSdNI2YTjEyGc5LZzEPbnZB093HZGTMuEk"
         }
       ],
-      "nonce": "Wdr6BcqxhRJ43nm_q4BlWg7ZXt4vunpJ"
+      "nonce": "65Mw9PT5Nxc3_KuYGYjCsxjepVkGjFES"
     },
     "plaintext": "{\"type\":\"flag\",\"rating\":\"high\",\"reasons\":[{\"source\":\"image\",\"label\":\"explicit\",\"score\":0.93}],\"app\":{\"id\":\"com.apple.Safari\",\"name\":\"Safari\"},\"burst\":false,\"account\":\"sam\"}",
     "seq": 17
@@ -86,9 +86,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "LLiBTY32EEbSE0iqUXvjgg",
-          "nonce": "MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG",
-          "ciphertext": "fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx",
+          "salt": "QnQ0x-3y6Eajy820tUyQKQ",
+          "nonce": "yhgGnFCgwyBK2IeuC5A6UPw1EoAenbUv",
+          "ciphertext": "CKq6vMISB5JTz3KZlwGqHRWfEaOYu6FPhvHtBglthb9k_j1BT4E5Utswtq8u2gER",
           "recovery": {
             "v": 1,
             "kdf": "argon2id13",
@@ -97,9 +97,9 @@
               "t_cost": 2,
               "p_cost": 1
             },
-            "salt": "4QSdWUYOsycfvMos7Ad_ug",
-            "nonce": "8kksamF4AX3g6mWek99bd2Jn55PBfWAF",
-            "ciphertext": "wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi"
+            "salt": "yef_aKtVHkQ7QqxTsLNBbA",
+            "nonce": "2JP_b2lXWwKVY7OgisRpYdQnKnxY0aTg",
+            "ciphertext": "gu44ETzEOlBup06gYD3k8TvuHCFGy5OBXKxZmZKVH77_mlm2HMZMiEEY6BHHYhVZ"
           }
         }
       },
@@ -114,9 +114,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "4QSdWUYOsycfvMos7Ad_ug",
-          "nonce": "8kksamF4AX3g6mWek99bd2Jn55PBfWAF",
-          "ciphertext": "wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi"
+          "salt": "yef_aKtVHkQ7QqxTsLNBbA",
+          "nonce": "2JP_b2lXWwKVY7OgisRpYdQnKnxY0aTg",
+          "ciphertext": "gu44ETzEOlBup06gYD3k8TvuHCFGy5OBXKxZmZKVH77_mlm2HMZMiEEY6BHHYhVZ"
         }
       },
       {
@@ -130,9 +130,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "_mgQvv7QP2piWDqj72gLGQ",
-          "nonce": "9iv0Akrd8YdoCau6wa8s8PugUXqLDpqI",
-          "ciphertext": "9huGlm-j-_bOGgjBhVVDxlSeiiN-Wu3WvWZ0x4VQtQPIF4-jiyTNLI55XbV-CAlZ"
+          "salt": "fw9LHXkt6F7fGKdLYgRAxQ",
+          "nonce": "R7Jg_QYZBS7gktXibnX_yV4oNf-Mxv0j",
+          "ciphertext": "aZyAhdvIAHYNIsnI0A7ekI9oTi3yxCMnqBWjhlkT4xY8j_41Wn1qu-n0-A0Fp699"
         }
       },
       {
@@ -146,9 +146,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "_mgQvv7QP2piWDqj72gLGQ",
-          "nonce": "Ov7eWzrCLYa22eVTNN5tD94eHNX6G5Ue",
-          "ciphertext": "qgOpMFY8Y0t1C2sEcZuNTM1_zFxs6vy-eDJmfoGyZv9cT5X-pPDCleThXVSAespX"
+          "salt": "fw9LHXkt6F7fGKdLYgRAxQ",
+          "nonce": "g6zrEMYKobCLSgW8gAT9vpxHR8zYZoet",
+          "ciphertext": "1ZtNsuBiy-YHDpE-HA8xzGmycdDzle_9Q8gSihqfsyTXB_exJUuyDZPYy1witX03"
         }
       }
     ],
@@ -198,10 +198,10 @@
       "member_id": "usr_member01",
       "sign_pubkey": "NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y",
       "issued_at_ms": 1790000300000,
-      "wrapped_sign_key": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"LLiBTY32EEbSE0iqUXvjgg\",\"nonce\":\"MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG\",\"ciphertext\":\"fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"4QSdWUYOsycfvMos7Ad_ug\",\"nonce\":\"8kksamF4AX3g6mWek99bd2Jn55PBfWAF\",\"ciphertext\":\"wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi\"}}",
+      "wrapped_sign_key": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"QnQ0x-3y6Eajy820tUyQKQ\",\"nonce\":\"yhgGnFCgwyBK2IeuC5A6UPw1EoAenbUv\",\"ciphertext\":\"CKq6vMISB5JTz3KZlwGqHRWfEaOYu6FPhvHtBglthb9k_j1BT4E5Utswtq8u2gER\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"yef_aKtVHkQ7QqxTsLNBbA\",\"nonce\":\"2JP_b2lXWwKVY7OgisRpYdQnKnxY0aTg\",\"ciphertext\":\"gu44ETzEOlBup06gYD3k8TvuHCFGy5OBXKxZmZKVH77_mlm2HMZMiEEY6BHHYhVZ\"}}",
       "wrapped_enc_key": "{\"v\":1}",
       "recovery_wrapped": "{\"sign\":{},\"enc\":{}}",
-      "sig": "7WiKcXvHgpUjAYMgjyVxGoaWAelUM1U0SOUbOJAhMsobWOU3sSDf28qI48cWyktnYWbG_XGwrkUK9ADpGps9Bg"
+      "sig": "UXTeoMPILGdxrDDcGNJsmeW61jmoC_UIEI0w2IpQwRbkAt0_AiQB23PgDzhQtu_MySB1izuKx1yg4dEfZpUUDg"
     },
     "ally_key_rewrap": {
       "challenge_hex": "4444444444444444444444444444444444444444444444444444444444444444",
@@ -210,8 +210,128 @@
         "ally_id": "usr_ally_a",
         "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
         "issued_at_ms": 1790000400000,
-        "wrapped_privkey": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"LLiBTY32EEbSE0iqUXvjgg\",\"nonce\":\"MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG\",\"ciphertext\":\"fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"4QSdWUYOsycfvMos7Ad_ug\",\"nonce\":\"8kksamF4AX3g6mWek99bd2Jn55PBfWAF\",\"ciphertext\":\"wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi\"}}",
-        "proof": "b3:6ef2c6b79e2d38ea3996da66f46d48e405fa08e14cb152aecf2de4415be21429"
+        "wrapped_privkey": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"QnQ0x-3y6Eajy820tUyQKQ\",\"nonce\":\"yhgGnFCgwyBK2IeuC5A6UPw1EoAenbUv\",\"ciphertext\":\"CKq6vMISB5JTz3KZlwGqHRWfEaOYu6FPhvHtBglthb9k_j1BT4E5Utswtq8u2gER\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"yef_aKtVHkQ7QqxTsLNBbA\",\"nonce\":\"2JP_b2lXWwKVY7OgisRpYdQnKnxY0aTg\",\"ciphertext\":\"gu44ETzEOlBup06gYD3k8TvuHCFGy5OBXKxZmZKVH77_mlm2HMZMiEEY6BHHYhVZ\"}}",
+        "proof": "b3:fccd2b7861b94090f6dd765b78c84d4a0389f540a55d0d973dcaa670ad1f6b30"
+      }
+    },
+    "group_message": {
+      "sealed": {
+        "message": {
+          "instance_id": "inst_0123456789abcdef",
+          "group_id": "fedcba9876543210fedcba9876543210",
+          "item_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": "reach_out",
+          "author_id": "usr_member01",
+          "issued_at_ms": 1790000600000,
+          "recipients": [
+            {
+              "user_id": "usr_ally_a",
+              "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ"
+            },
+            {
+              "user_id": "usr_ally_b",
+              "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms"
+            }
+          ],
+          "body_hash": "b3:08c2d67572f3a0d008738474a75532ae32924b2ea73b277123da7bb6446e927a",
+          "sig": "CdrCQKM0OOQPQGLMFm9a9bRNazyojGrll1jdgVztpv4pTNp4uB-yOgpSwh60wkIkVpG0UpN5Z5JDd2CgQ2OxDg"
+        },
+        "body": {
+          "alg": "xchacha20poly1305",
+          "nonce": "cUXdniSHnff4UCVYdLTzkaCCA-ojlD7t",
+          "ciphertext": "dMBVHCKCkKhnChKpWuwPaQJiytRF4_PYJsMt22yhKud0_xJU8Y9ITFmQRXfEU4xAabUhXyDIPZJdT8Gu-ura4EWDaN34qUM-ANE",
+          "envelopes": [
+            {
+              "recipient": "usr_ally_a",
+              "key_id": "205a3aea09061b9e",
+              "wrapped_key": "EBA47UaYcSM0SV-Vwzx1Q8DaDdBUoRtdoGEH6pdAaBhWvgf0xupa5Qioj4_lEBVV43TfBo1ZFC_N3-AZOimxhAL-6YIlmsqUAVGPLkM_7Uk"
+            },
+            {
+              "recipient": "usr_ally_b",
+              "key_id": "b9bf75f1ddf7324b",
+              "wrapped_key": "qcXDbCfdS5eYZsxZ0nM87GOz69GSH89Luk4pRGpggmFtLuCNqpPyytSEGUBDEjE0ca5U5fOlMZ3TujFDHOHwmS1aKXHQkYnzY1ni6TOfYX4"
+            },
+            {
+              "recipient": "usr_member01",
+              "key_id": "364d6d61390d995f",
+              "wrapped_key": "8hrBsjRMmpJuw9ZhJUZk0SkRs4vXY37pcKcIMrWIQSDYFlMuM2mhdGmzwPQzucF3Yffm0b1y21_F5MFCLBagTaVnUJ689dXIUrs4gtHoSQA"
+            }
+          ]
+        }
+      },
+      "plaintext": "{\"text\":\"Sealed in the browser: can someone call me? ✓\"}"
+    }
+  },
+  "group_message": {
+    "body_aad_hex": "6661726f2f67726f75702d6d6573736167652d626f64792f76310000000015696e73745f30313233343536373839616263646566000000203031323334353637383961626364656630313233343536373839616263646566",
+    "content_free": {
+      "signed": {
+        "author_id": "usr_member01",
+        "body_hash": "b3:0000000000000000000000000000000000000000000000000000000000000000",
+        "group_id": "fedcba9876543210fedcba9876543210",
+        "instance_id": "inst_0123456789abcdef",
+        "issued_at_ms": 1790000500000,
+        "item_id": "0123456789abcdef0123456789abcdef",
+        "kind": "reach_out",
+        "recipients": [
+          {
+            "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+            "user_id": "usr_ally_a"
+          },
+          {
+            "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms",
+            "user_id": "usr_ally_b"
+          }
+        ],
+        "sig": "sxxdc6J6yuXNivwtYB5XpYt-5c71qItyzwZEJ9lA8bxNyvdzS3_xA3H1mQyfuFY8oRgNUTQF96ecqV-oSL-NDw"
+      },
+      "signing_bytes_hex": "6661726f2f67726f75702d6d6573736167652f76310000000015696e73745f303132333435363738396162636465660000002066656463626139383736353433323130666564636261393837363534333231300000002030313233343536373839616263646566303132333435363738396162636465660000000972656163685f6f75740000000c7573725f6d656d6265723031000001a0c4580d2000000000000000020000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b140000000a7573725f616c6c795f62ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "group_message_sealed": {
+    "plaintext": "{\"text\":\"Rough night. Can someone call me? ✓\"}",
+    "sealed": {
+      "body": {
+        "alg": "xchacha20poly1305",
+        "ciphertext": "XvBpljLiSvCb-YrjPFqlP-taHUysNXC9uTQeUKK-SkJZZ9_wJTKC-5u83_GohkPO1zKq0ehFG9io46fhAMVbjw",
+        "envelopes": [
+          {
+            "key_id": "205a3aea09061b9e",
+            "recipient": "usr_ally_a",
+            "wrapped_key": "8-U2i-LTM5kxsAn_z8gs1bDzwocnuB2SDPhkxVXpZ0ML0OlxmtSBbL9b9RzwWm1o8E0ISc-pVCPRR8Z_QKvA7Oe4CjWgZvA0xYKl9-U03B0"
+          },
+          {
+            "key_id": "b9bf75f1ddf7324b",
+            "recipient": "usr_ally_b",
+            "wrapped_key": "nLSmyTStYlmMwW7FNRtaCB4-x0MuV58G38m256VcEBUEE3_G3Aek70cuDiJeMrXxDQ9sUc9mNQ_7RpEa9Y8HoE9zuHQDrgi9aG2EYwxCM48"
+          },
+          {
+            "key_id": "364d6d61390d995f",
+            "recipient": "usr_member01",
+            "wrapped_key": "cMSq2alXBpimgdsLmU8Obc-7Zyuf2sGpxFqoG2vfU2V2gVfiibH_makLU90hYg32EoZGapqdkh42yKazUQ51lNARddA9P9N39Rs5gaRn66k"
+          }
+        ],
+        "nonce": "MzpvviJTKJHXb3vjrl-Vv-UtAxGd0K5V"
+      },
+      "message": {
+        "author_id": "usr_member01",
+        "body_hash": "b3:d808be6addd3e51c261c3fa33f265ebe3144203a3cd8ede6357fc8ab943248cd",
+        "group_id": "fedcba9876543210fedcba9876543210",
+        "instance_id": "inst_0123456789abcdef",
+        "issued_at_ms": 1790000500000,
+        "item_id": "0123456789abcdef0123456789abcdef",
+        "kind": "reach_out",
+        "recipients": [
+          {
+            "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+            "user_id": "usr_ally_a"
+          },
+          {
+            "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms",
+            "user_id": "usr_ally_b"
+          }
+        ],
+        "sig": "gEW9slaTx48jPT_g7GMiql8Xrzx5wTk0HGC99sjBn7ru209JYnFiiiD8C3rJ7agjuOCbaoMahLPLVpHlrha6AQ"
       }
     }
   },
@@ -292,25 +412,25 @@
     "device_id": "dev_laptop01",
     "item": {
       "alg": "xchacha20poly1305",
-      "ciphertext": "4F5ph5KKbGXw9j1htAZCmyXivHz4qKxLghZcltjCALe96oUcUR_JkIVZVubqk4H0dhGZwZs0O5Un94jr-Tmk06hz5LhriWjQMxlsFMFw2zO0Fcfj5I8xMwndA7lWmi4lXWPIw5SByIofF38ZLHQSCc46pY3EYnlnSNA1TE7zTkcqHxMIQcbhUWbfZ3xey5NDu-8jXc11jxyXdTRoU5m3GLda2qbEfEJntCEIAcuoj5iLv_utbsKAfv50RCSEwps4yghmRH89oPg5VKH1-cCqO81IHxrx2UX0thu8l1YrLCVLauw36zPgBnJMoImx7zVmIuhys9mR7nJdibHMPfAV12EYeKCgnJnSPnNBrg8K82vPnaO9dQXvkzgpUeaICbbJXXcXIqCwchWNScNFeU-xb-oaa86jC1_0c7QJgAwcxn7o8KcNQtgDyPhQkIii7rnwJkHJPft6XE3Vrn1XZFsq8q3ZEvaz3gIUzTHIuHoNEmk-SM1w6ya6gsn0Hy6a4Q8cgPLlqHpT0tzqU-BEIm0j4lu6BehgqWZkmpV7",
+      "ciphertext": "J66Fap36kOe8g0_dj7ujCQzXQ6Z6hvf2KlXctOpqP4fEiCkfkPTbK1eIe8ZJgycWdpJ4ISUgsm52IGqtqPGCUiH2aa5H5glIDTOm0Yl0BF4rQbF9HXLtPNOlTuhIqLpXxCVtKD_9KlnSj8_Q-Rd9TgW9DZVqVSmAUaOFbgp_RPWCLMNTPbBoSsogN3P-CYiC5UndnimKodFvquC2PLf8jAPz1QKPqlH9tzmt6cIcx9i96SXSeCvZtcFf3kKYvFs8KwU0yHtaKy2qgoWDeOoBFvJ-vyaENelOuAej1p5ErZJdEXawi7gJtQ6L2wyMdBIIdNdq3gU-I8ltmIyudLSyptg96aJINm1Cyu6-6h60CagZotGez-VORFzJVWiCGbp8ocs8a1FZgEX7Kkqbwc9AXgpR80ZDFweU3_XGoPbX7Du3lCwtMEHNSggW3IET68C-31lx-RGNnBzA_O-7rqlfK6iNzX4cg_T9INAhLLk1Dpn9qRuqyXgeDeQhwIPl00Ef2cmqLoE0rqNwHjS3njPyuGScisaO5RF1CQXK",
       "envelopes": [
         {
           "key_id": "364d6d61390d995f",
           "recipient": "usr_member01",
-          "wrapped_key": "w6fC38tJ-ShK2UkydRzFJIILg4i8AbuSuF67ySslEENygACheLC-ZkxaKvzwCD_61N0e-sHJ05ZdpwPKOLS6yHrdslnT8bss4FHi4oWhyxk"
+          "wrapped_key": "Wa_Ihxmf3VbAvqgGmmIwhaQQW9XSjVPA9qwWOukuzBH1fBDOMuNff24ULBCxIAbC5DqPUPnzbVPA204T6hDRx_f769ORKzbz4fmm183SSjE"
         },
         {
           "key_id": "205a3aea09061b9e",
           "recipient": "usr_ally_a",
-          "wrapped_key": "9WEe8CgvqHpfnF8w4DQb86V-Jl9CeRCJB-JGMpBRn3vjZi4lnDJHHyFCNXdkfcaXef5kxIpurbAzN9yJuGjBgj8AmAMfInjlFRkuKpgzUGU"
+          "wrapped_key": "HiorCnZ3l5DZH1e3I9zk2lunzrOgV_uwRd9cWzsguzjgRu4_kTR3kqIv_FF1e-a71X8hd01vt6ziZUjHuHtnR5wmphD5O_UhytAClJrvOno"
         },
         {
           "key_id": "b9bf75f1ddf7324b",
           "recipient": "usr_ally_b",
-          "wrapped_key": "89MmNZyLiVAiCnTMmUBfrg4IbnVbqsbfmET8K2xlADquByphPgOCfqL2_EG_RWx4zbb0S3y5cRcdPxImxtcxyOFXGNPv2-MoREt8wrp645k"
+          "wrapped_key": "L0Y9PPduJpCMhgGYKtoZOp7MxFRoFH5JEUsQel-HM0ppraLlKMCUXiADOaRsPRygVQ81ZhzHvXPADRXxGllSNK7GSZ59QjjL90NudGjli14"
         }
       ],
-      "nonce": "jRUITObibSBuIL8kwsz6Ji5LLc0kMHDq"
+      "nonce": "GEu4Yxd0FeOruifGmIDJf7zOinITPGf-"
     },
     "period_end_ms": 1790086400000,
     "period_start_ms": 1790000000000,
@@ -324,22 +444,22 @@
   "sealed_box": {
     "plaintext_hex": "7777777777777777777777777777777777777777777777777777777777777777",
     "recipient_secret": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
-    "sealed": "GdjKOzpzqdf7N_6EcXGQRHQfncXGdmXEbbHhC89d7k9hviZKkyc6t89PzlyY74ZATwKqOlB6wAj3iHnTRv9q4T8cX3Z1dRIO_mStbVyBTbY"
+    "sealed": "uCV0vVo10oU3bjqSMZWF55gSe7E1oaZK9GyP3dWAWCNNudpUL7gA4O8Do7OHFRn5WDWUqOyvvNjVbbb2F-ln9hH3LexINYMvZnXOA3WJs0k"
   },
   "wrapped": [
     {
       "passphrase": "correct horse battery",
       "plaintext_hex": "7777777777777777777777777777777777777777777777777777777777777777",
       "wrapped": {
-        "ciphertext": "7aDgqk3jo-NuDXFRZcHRkel0T5ZwFthXtnQHDbbzXPUkzUhJJuO9kKEK7NjJD3HV",
+        "ciphertext": "bALcRfs2EcIGVyYxQbsUVAf9zZk1bF0WUegXdJj0fZXyNVWeukbMDyipv2wBfW4q",
         "kdf": "argon2id13",
-        "nonce": "XCA6eVvzjtw5YmXSbb-df4bgOrxsS5w7",
+        "nonce": "WAUamB6IqHLK791G6jX8DX-pU3FR59io",
         "params": {
           "m_cost_kib": 256,
           "p_cost": 1,
           "t_cost": 2
         },
-        "salt": "nGpDzBwpysJLu13ZCO0snw",
+        "salt": "pl57yf8Oai8nfyevtobzHw",
         "v": 1
       }
     },
@@ -347,15 +467,15 @@
       "passphrase": "pässwörd ✓",
       "plaintext_hex": "9999999999999999999999999999999999999999999999999999999999999999",
       "wrapped": {
-        "ciphertext": "6vUGZAOsNpCcS6zHpqorzE8ELzBy5CWugINtpIJp_RUrdYQQaAkcEfXURAVuyOgK",
+        "ciphertext": "awGExwumwbnmCc8nNgJZNQvJQcltRKsN0DXslM5kO-YrMDPguY1l-19NxOZaEY4K",
         "kdf": "argon2id13",
-        "nonce": "XggPHzEtpteF70pkLvaBdwL8UnqvLsW2",
+        "nonce": "l2h2sbJFZSU3qnLycoa2PkVrZDdDMm2h",
         "params": {
           "m_cost_kib": 256,
           "p_cost": 1,
           "t_cost": 2
         },
-        "salt": "2MfkBR1qWPNBRR-Pgi19Zg",
+        "salt": "e1YyR8seJQWx0wcfoL427A",
         "v": 1
       }
     }

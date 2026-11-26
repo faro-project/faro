@@ -927,6 +927,8 @@ export interface OutgoingProposal {
 	withdrawn_at_ms: number | null;
 	/** "You can ask again on" this date. */
 	ask_again_at_ms: number | null;
+	/** Your signed note (`GET /v1/group-messages/{id}`), if you wrote one. */
+	note_id?: string | null;
 }
 
 /** A proposal sent to you. */
@@ -940,6 +942,8 @@ export interface IncomingProposal {
 	created_at_ms: number;
 	expires_at_ms: number;
 	decided_at_ms: number | null;
+	/** The sender's signed note (`GET /v1/group-messages/{id}`), if any. */
+	note_id?: string | null;
 }
 
 /** `GET /v1/me/proposals` */
@@ -1011,4 +1015,6 @@ export interface JoinRequestEntry {
 	display_name: string;
 	created_at_ms: number;
 	expires_at_ms: number;
+	/** Their signed note to the facilitators, if they wrote one. */
+	note_id?: string | null;
 }

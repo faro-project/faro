@@ -155,6 +155,8 @@ pub struct Proposal {
     pub cooldown_until_ms: i64,
     pub withdrawn_at_ms: Option<i64>,
     pub hidden: bool,
+    /// The signed, encrypted note (`group_messages.id`), if it has one.
+    pub note_id: Option<String>,
 }
 
 impl Proposal {
@@ -217,13 +219,15 @@ fn proposal_from_row(r: &AnyRow) -> Result<Proposal, sqlx::Error> {
         cooldown_until_ms: r.try_get("cooldown_until")?,
         withdrawn_at_ms: r.try_get("withdrawn_at")?,
         hidden: r.try_get::<i64, _>("hidden")? != 0,
+        note_id: r.try_get("note_blob_ref")?,
     })
 }
 
 macro_rules! columns {
     () => {
         "a.id, a.group_id, a.from_id, a.to_id, a.kind, a.offer_ally_key_id, a.state,
-         a.created_at, a.expires_at, a.decided_at, a.cooldown_until, a.withdrawn_at, a.hidden"
+         a.created_at, a.expires_at, a.decided_at, a.cooldown_until, a.withdrawn_at, a.hidden,
+         a.note_blob_ref"
     };
 }
 
@@ -236,6 +240,8 @@ pub struct NewProposal<'a> {
     pub offer_ally_key_id: Option<&'a str>,
     /// Never shown to the recipient (see the `hidden` column).
     pub hidden: bool,
+    /// The note, already stored in `group_messages`.
+    pub note_id: Option<&'a str>,
     pub now_ms: i64,
 }
 
@@ -265,12 +271,13 @@ pub async fn insert<'e>(
         cooldown_until_ms: expires_at_ms.saturating_add(COOLDOWN_MS),
         withdrawn_at_ms: None,
         hidden: p.hidden,
+        note_id: p.note_id.map(str::to_owned),
     };
     sqlx::query(
         "INSERT INTO alliance_proposals
             (id, group_id, from_id, to_id, kind, offer_ally_key_id, state, created_at,
-             expires_at, cooldown_until, hidden)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             expires_at, cooldown_until, hidden, note_blob_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&row.id)
     .bind(&row.group_id)
@@ -283,6 +290,7 @@ pub async fn insert<'e>(
     .bind(row.expires_at_ms)
     .bind(row.cooldown_until_ms)
     .bind(i64::from(row.hidden))
+    .bind(row.note_id.clone())
     .execute(e)
     .await?;
     Ok(row)
@@ -732,6 +740,7 @@ mod tests {
             cooldown_until_ms: PROPOSAL_TTL_MS + COOLDOWN_MS,
             withdrawn_at_ms: withdrawn,
             hidden,
+            note_id: None,
         }
     }
 

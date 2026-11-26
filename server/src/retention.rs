@@ -577,6 +577,11 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
         // after they expired.
         let p = crate::db::repo::proposals::sweep(&mut conn, now).await?;
         s.other += p.pruned;
+        // Reach outs follow alert retention; messages go with whatever
+        // used them (a proposal, a join request or a reach out), GROUPS.md §18.
+        use crate::db::repo::group_messages;
+        s.other += group_messages::prune(&mut *conn, alert_cut).await?;
+        s.other += group_messages::sweep_unused(&mut *conn, now - 3600 * 1000).await?;
     }
 
     s.orphan_files = sweep_orphans(state, now).await?;

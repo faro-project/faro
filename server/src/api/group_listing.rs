@@ -15,7 +15,10 @@
 //!   unlisting ([`group_listing::MyRequest`]), and the refusal to ask again
 //!   is the same `409` whatever ended the request.
 //!
-//! Join requests carry no note yet (a later task adds encrypted notes).
+//! A join request may carry a note to the facilitators: signed by the
+//! requester's member key and sealed to each facilitator's key
+//! ([`crate::messages`], GROUPS.md §10.2). Facilitators see that there is
+//! one (`note_id`) and read it in their browser; the instance can't.
 
 use super::groups::{
     cursor_of, ensure_room, group_settings, load, load_in_tx, require_enabled, require_facilitator,
@@ -29,11 +32,13 @@ use crate::db::repo::groups::{self, HistoryKind, JoinedVia, Page, Role, LARGE_GR
 use crate::db::repo::{is_unique_violation, users};
 use crate::error::{AppError, AppResult};
 use crate::meetings::{self, Meeting};
+use crate::messages::{self, Expect};
 use crate::settings::{GroupSettings, WhoCanListGroups};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use faro_proto::group::{GroupMessageKind, SealedGroupMessage};
 use faro_proto::UserId;
 use serde::{Deserialize, Serialize};
 
@@ -198,7 +203,38 @@ pub async fn directory(
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateJoinRequest {}
+pub struct CreateJoinRequest {
+    /// A note to the facilitators, at most 500 characters, signed and
+    /// sealed in the browser (`for=join_request_note` recipients).
+    #[serde(default)]
+    pub note: Option<SealedGroupMessage>,
+}
+
+/// The facilitators of a listed group, to seal a join-request note to.
+/// `404` unless the directory is open and the group listed (as for the
+/// join-request route itself).
+pub(crate) async fn note_recipients(
+    state: &AppState,
+    conn: &mut sqlx::AnyConnection,
+    id: &str,
+) -> AppResult<Vec<UserId>> {
+    require_enabled(state)?;
+    if !directory_open(&group_settings(state)) {
+        return Err(AppError::NotFound);
+    }
+    groups::by_id(&mut *conn, id)
+        .await?
+        .filter(|g| g.listed && !g.is_archived())
+        .ok_or(AppError::NotFound)?;
+    let people: Vec<UserId> = groups::active_user_ids(&mut *conn, id, true).await?;
+    if people.is_empty() {
+        return Err(AppError::conflict(
+            "no_recipients",
+            "this group has no facilitator to send a note to",
+        ));
+    }
+    Ok(people)
+}
 
 /// `POST /v1/groups/{id}/join-requests`: ask to join a listed group. `404`
 /// unless the group is listed (and so for an unlisted one, as for an
@@ -207,7 +243,7 @@ pub async fn create_request(
     State(state): State<AppState>,
     s: SessionUser,
     Path(id): Path<String>,
-    ApiJson(_): ApiJson<CreateJoinRequest>,
+    ApiJson(body): ApiJson<CreateJoinRequest>,
 ) -> AppResult<(StatusCode, Json<MyRequest>)> {
     s.require_not_being_deleted()?;
     let settings = group_settings(&state);
@@ -263,7 +299,27 @@ pub async fn create_request(
     {
         return Err(too_many_groups(&settings));
     }
-    let req = match group_listing::insert(&mut *tx, &id, &s.user.id, now).await {
+    let note_id = match &body.note {
+        None => None,
+        Some(note) => {
+            let facilitators = note_recipients(&state, &mut tx, &id).await?;
+            messages::accept_message(
+                &mut tx,
+                &state,
+                &s.user.id,
+                note,
+                &Expect {
+                    kind: GroupMessageKind::JoinRequestNote,
+                    group_id: Some(&id),
+                    allowed: &facilitators,
+                },
+            )
+            .await?;
+            Some(note.message.body.item_id.clone())
+        }
+    };
+    let req = match group_listing::insert(&mut *tx, &id, &s.user.id, note_id.as_deref(), now).await
+    {
         Ok(r) => r,
         Err(e) if is_unique_violation(&e) => {
             return Err(AppError::conflict(

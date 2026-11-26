@@ -29,7 +29,8 @@
 
 use crate::api::{
     account, admin, allies, auth, branding, devices, events, feed, group_listing, groups,
-    heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup, well_known,
+    heartbeat, invites, keys, manifests, prefs, privacy, proposals, reach_outs, reports, setup,
+    well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -180,6 +181,23 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/v1/me/proposal-blocks/{user_id}",
             put(proposals::put_block).delete(proposals::delete_block),
+        )
+        // Reach out and signed, encrypted messages (GROUPS.md §8.3, §10.2).
+        .route("/v1/me/message-recipients", get(reach_outs::recipients))
+        .route(
+            "/v1/me/reach-outs",
+            get(reach_outs::list_mine).post(reach_outs::create),
+        )
+        .route("/v1/reach-outs/{id}/answer", post(reach_outs::answer))
+        .route("/v1/group-messages/{id}", get(reach_outs::get_message))
+        .route("/v1/me/reach-out-settings", get(reach_outs::settings))
+        .route(
+            "/v1/me/quiet-hours-bypass/{user_id}",
+            put(reach_outs::put_bypass).delete(reach_outs::delete_bypass),
+        )
+        .route(
+            "/v1/me/reach-out-prefs/{user_id}",
+            put(reach_outs::put_prefs),
         )
         .route("/v1/group-directory", get(group_listing::directory))
         .route(

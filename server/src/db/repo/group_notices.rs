@@ -11,7 +11,8 @@ use crate::tokens::new_hex_id;
 use faro_proto::{Urgency, UserId};
 
 /// What a notice says. None of these is tamper-class: they are ordinary
-/// "normal" notices a person can switch off (GROUPS.md §14).
+/// notices a person can switch off (GROUPS.md §14). All are "normal" but
+/// [`NoticeKind::ReachOut`], which is urgent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
     /// Someone accepted an invitation. To the group's facilitators.
@@ -41,10 +42,14 @@ pub enum NoticeKind {
     AlliancePartnership,
     /// The person's proposal was accepted: compare safety codes to finish.
     AllianceAccepted,
+    /// Someone is reaching out to the person (urgent, §8.3).
+    ReachOut,
+    /// Someone answered the person's reach out.
+    ReachOutAnswered,
 }
 
 impl NoticeKind {
-    pub const ALL: [NoticeKind; 13] = [
+    pub const ALL: [NoticeKind; 15] = [
         NoticeKind::GroupJoined,
         NoticeKind::GroupLeft,
         NoticeKind::GroupRemoved,
@@ -58,6 +63,8 @@ impl NoticeKind {
         NoticeKind::AllianceOffered,
         NoticeKind::AlliancePartnership,
         NoticeKind::AllianceAccepted,
+        NoticeKind::ReachOut,
+        NoticeKind::ReachOutAnswered,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -75,6 +82,16 @@ impl NoticeKind {
             NoticeKind::AllianceOffered => "alliance_offered",
             NoticeKind::AlliancePartnership => "alliance_partnership",
             NoticeKind::AllianceAccepted => "alliance_accepted",
+            NoticeKind::ReachOut => "reach_out",
+            NoticeKind::ReachOutAnswered => "reach_out_answered",
+        }
+    }
+
+    /// How urgent its notification is.
+    pub fn urgency(self) -> Urgency {
+        match self {
+            NoticeKind::ReachOut => Urgency::Urgent,
+            _ => Urgency::Normal,
         }
     }
 
@@ -130,7 +147,7 @@ pub async fn insert(
         &NewNotification {
             target: &Target::GroupNotice(id),
             recipient: n.recipient,
-            urgency: Urgency::Normal,
+            urgency: n.kind.urgency(),
             mode: n.mode,
             due_at_ms: n.due_at_ms,
             now_ms: n.now_ms,

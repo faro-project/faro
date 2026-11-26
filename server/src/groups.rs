@@ -24,6 +24,7 @@
 //! still never the group: "*Sam* invited you to join a group on *instance*."
 
 use crate::db::repo::group_listing;
+use crate::db::repo::group_messages;
 use crate::db::repo::group_notices::{self, NewNotice, NoticeKind};
 use crate::db::repo::groups::{self, HistoryKind, LARGE_GROUP};
 use crate::db::repo::notifications as notif;
@@ -250,6 +251,79 @@ pub async fn tell_meeting_reminder(
         },
     )
     .await
+}
+
+/// The `detail` of a reach-out notice whose recipient lets the sender's
+/// reach outs through quiet hours: the notifier doesn't hold it back.
+pub const QUIET_BYPASS_DETAIL: &str = "quiet_bypass";
+
+/// `reach_out` to `recipient` about `sender` (GROUPS.md §8.3, decision 4):
+/// **urgent**, immediate by default, and content-free ("*Sam* is reaching
+/// out"). The recipient may have moved `sender`'s reach outs to the digest
+/// or switched them off ([`group_messages::mode_for`]); otherwise their own
+/// choice for urgent notices applies. It waits for the end of their quiet
+/// hours unless they let `sender`'s reach outs through. Not tamper-class.
+pub async fn tell_reach_out(
+    conn: &mut sqlx::AnyConnection,
+    recipient: &UserId,
+    sender: &UserId,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    let prefs = notif::get_prefs(&mut *conn, recipient, recipient).await?;
+    let mode = match group_messages::mode_for(&mut *conn, recipient, sender).await? {
+        Some(m) => m,
+        None => policy::effective_mode(prefs.stored_mode(Urgency::Urgent), Urgency::Urgent, false),
+    };
+    let bypass = group_messages::has_bypass(&mut *conn, recipient, sender).await?;
+    let due_at_ms = if bypass {
+        now_ms
+    } else {
+        policy::quiet_until(now_ms, prefs.quiet.as_ref()).unwrap_or(now_ms)
+    };
+    group_notices::insert(
+        conn,
+        &NewNotice {
+            kind: NoticeKind::ReachOut,
+            recipient,
+            actor: Some(sender),
+            summary: false,
+            dedupe_key: None,
+            detail: bypass.then(|| QUIET_BYPASS_DETAIL.to_owned()),
+            mode: (mode != Mode::Off).then_some(mode),
+            due_at_ms,
+            now_ms,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// `reach_out_answered` to the sender, naming who answered: a normal
+/// notice, once per reach out and person (a changed answer says nothing).
+pub async fn tell_reach_out_answered(
+    conn: &mut sqlx::AnyConnection,
+    reach_out: &str,
+    sender: &UserId,
+    answerer: &UserId,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    let (mode, due_at_ms) = delivery(conn, sender, now_ms).await?;
+    group_notices::insert(
+        conn,
+        &NewNotice {
+            kind: NoticeKind::ReachOutAnswered,
+            recipient: sender,
+            actor: Some(answerer),
+            summary: false,
+            dedupe_key: Some(format!("reach_out_answered:{reach_out}:{answerer}")),
+            detail: None,
+            mode,
+            due_at_ms,
+            now_ms,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// Archive `group`: read-only for 30 days, then deleted by the retention

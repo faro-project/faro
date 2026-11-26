@@ -35,7 +35,17 @@ import {
 	type RecipientManifest,
 	type Signed
 } from './proto.ts';
-import { DecryptError, openItem, sealOpen, type EncryptedItem } from './seal.ts';
+import { DecryptError, openItem, sealItem, sealOpen, sealTo, type EncryptedItem } from './seal.ts';
+import {
+	groupMessageBodyAad,
+	groupMessageSigningBytes,
+	openGroupMessage,
+	sealGroupMessage,
+	validateGroupMessage,
+	verifyGroupMessage,
+	type GroupMessage,
+	type SealedGroupMessage
+} from './group.ts';
 
 export const VECTORS_PATH = join(
 	import.meta.dirname,
@@ -245,4 +255,118 @@ test('recovery codes', () => {
 	);
 	assert.equal(normalizeRecoveryCode('too short'), null);
 	assert.equal(normalizeRecoveryCode('UUUU-0000-0000-0000-0000-0000-0000-0000'), null);
+});
+
+test('sealing round trips, and Rust opens what the web app sealed', () => {
+	const ck = new Uint8Array(32).fill(9);
+	assert.deepEqual(sealOpen(sealTo(unb64(K.ally_a_pubkey), ck), unb64(K.ally_a_secret)), ck);
+	assert.throws(() => sealTo(new Uint8Array(32), ck), /cannot seal/);
+	const aad = new Uint8Array([1, 2]);
+	const item = sealItem(new Uint8Array([7, 7]), aad, [
+		{ user_id: V.ids.ally_a, pubkey: unb64(K.ally_a_pubkey) },
+		{ user_id: V.ids.member, pubkey: unb64(K.member_enc_pubkey) }
+	]);
+	assert.deepEqual(
+		openItem(item, aad, V.ids.ally_a, unb64(K.ally_a_secret)),
+		new Uint8Array([7, 7])
+	);
+	assert.deepEqual(
+		openItem(item, aad, V.ids.member, unb64(K.member_enc_secret)),
+		new Uint8Array([7, 7])
+	);
+});
+
+test('group messages match Rust', () => {
+	const pk = unb64(K.member_sign_pubkey);
+	const seed = unb64(K.member_sign_seed);
+	const cf = V.group_message.content_free.signed as Signed<GroupMessage>;
+	assert.equal(validateGroupMessage(cf), null);
+	assert.equal(hex(groupMessageSigningBytes(cf)), V.group_message.content_free.signing_bytes_hex);
+	assert.equal(hex(groupMessageBodyAad(V.ids.instance, cf.item_id)), V.group_message.body_aad_hex);
+	const { sig, ...body } = cf;
+	assert.equal(signWith(seed, body, groupMessageSigningBytes).sig, sig);
+	assert.equal(verifyGroupMessage(pk, { message: cf, body: null }), null);
+
+	// Rust sealed and signed this one: it verifies, and opens for the author
+	// and each recipient.
+	const s = V.group_message_sealed.sealed as SealedGroupMessage;
+	assert.equal(verifyGroupMessage(pk, s), null);
+	const text = JSON.parse(V.group_message_sealed.plaintext).text;
+	assert.equal(openGroupMessage(s, V.ids.ally_a, unb64(K.ally_a_secret)), text);
+	assert.equal(openGroupMessage(s, V.ids.ally_b, unb64(K.ally_b_secret)), text);
+	assert.equal(openGroupMessage(s, V.ids.member, unb64(K.member_enc_secret)), text);
+});
+
+test('forged and altered group messages are refused', () => {
+	const pk = unb64(K.member_sign_pubkey);
+	const s = V.group_message_sealed.sealed as SealedGroupMessage;
+	// Signed by someone else (an operator holding only public keys can't do
+	// better than this): the same message with another key's signature.
+	const mallory = new Uint8Array(32).fill(0x99);
+	const { sig: _sig, ...header } = s.message;
+	const forged = { ...s, message: signWith(mallory, header, groupMessageSigningBytes) };
+	assert.match(verifyGroupMessage(pk, forged) ?? '', /signature/);
+	// Any edit to the signed header.
+	for (const change of [
+		{ issued_at_ms: header.issued_at_ms + 1 },
+		{ group_id: null },
+		{ kind: 'proposal_note' as const },
+		{ author_id: 'usr_someone' },
+		{ recipients: header.recipients.slice(1) }
+	]) {
+		const m = { ...s, message: { ...s.message, ...change } };
+		assert.notEqual(verifyGroupMessage(pk, m), null, JSON.stringify(change));
+	}
+	// A swapped body, a dropped author copy, a garbage signature.
+	const other = sealGroupMessage(
+		unb64(K.member_sign_seed),
+		unb64(K.member_enc_pubkey),
+		{ ...header, item_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
+		'another message'
+	);
+	assert.match(verifyGroupMessage(pk, { ...s, body: other.body }) ?? '', /signed/);
+	assert.notEqual(
+		verifyGroupMessage(pk, {
+			...s,
+			body: { ...s.body!, envelopes: s.body!.envelopes.filter((e) => e.recipient !== V.ids.member) }
+		}),
+		null
+	);
+	assert.notEqual(verifyGroupMessage(pk, { ...s, message: { ...s.message, sig: 'AAAA' } }), null);
+	// A body moved to another item doesn't open there.
+	const moved = { ...other, message: { ...other.message, item_id: s.message.item_id } };
+	assert.throws(() => openGroupMessage(moved, V.ids.ally_a, unb64(K.ally_a_secret)));
+	// No envelope for a stranger.
+	assert.throws(
+		() => openGroupMessage(s, 'usr_stranger', unb64(K.ally_a_secret)),
+		(e: unknown) => e instanceof DecryptError && e.reason === 'no_envelope'
+	);
+});
+
+test('sealing a group message checks its limits', () => {
+	const seed = unb64(K.member_sign_seed);
+	const base = {
+		instance_id: V.ids.instance,
+		group_id: null,
+		item_id: 'cccccccccccccccccccccccccccccccc',
+		kind: 'reach_out' as const,
+		author_id: V.ids.member,
+		issued_at_ms: 1,
+		recipients: [{ user_id: V.ids.ally_a, enc_pubkey: K.ally_a_pubkey }]
+	};
+	const enc = unb64(K.member_enc_pubkey);
+	assert.equal(sealGroupMessage(seed, enc, base, null).body, null);
+	assert.throws(() => sealGroupMessage(seed, enc, base, ' '), /characters/);
+	assert.throws(() => sealGroupMessage(seed, enc, base, 'x'.repeat(501)), /characters/);
+	assert.ok(sealGroupMessage(seed, enc, base, 'é'.repeat(500)).body);
+	assert.throws(() => sealGroupMessage(seed, enc, { ...base, recipients: [] }, null), /recipients/);
+	const many = Array.from({ length: 33 }, (_, i) => ({
+		user_id: `usr_${String(i).padStart(3, '0')}`,
+		enc_pubkey: K.ally_a_pubkey
+	}));
+	assert.throws(() => sealGroupMessage(seed, enc, { ...base, recipients: many }, null), /many/);
+	assert.throws(
+		() => sealGroupMessage(seed, enc, { ...base, kind: 'join_request_note' }, 'hi'),
+		/group/
+	);
 });

@@ -23,6 +23,7 @@
 	import { resolve } from '$app/paths';
 	import AllyKeySetup from '../AllyKeySetup.svelte';
 	import Modal from '../Modal.svelte';
+	import SignedNote from '../SignedNote.svelte';
 	import CompareCodes from './CompareCodes.svelte';
 
 	let { groupId, readOnly = false }: { groupId: string; readOnly?: boolean } = $props();
@@ -166,6 +167,9 @@
 							<div>
 								<div class="row-title"><strong>{describeIncoming(p)}</strong></div>
 								<div class="row-meta">Sent {date(p.created_at_ms)}</div>
+								{#if p.note_id && session.user}
+									<SignedNote messageId={p.note_id} user={session.user} author={p.from.user_id} />
+								{/if}
 							</div>
 							{#if !readOnly}
 								<div class="row-actions">
@@ -250,6 +254,13 @@
 				</div>
 			{/if}
 		{:else}
+			{#if answering.note_id}
+				<SignedNote
+					messageId={answering.note_id}
+					user={session.user}
+					author={answering.from.user_id}
+				/>
+			{/if}
 			<p>{acceptNote(answering.kind)}</p>
 		{/if}
 		{#if needsAllyKey}

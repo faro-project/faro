@@ -6,15 +6,19 @@
 	// explanation (§7.1); the only thing said about a past "no" is the date
 	// you can ask again. Nothing here makes anyone an ally: a proposal is
 	// only a question, and the person it goes to answers it (principle 3).
-	import { api, seg } from '#lib/api.ts';
+	import { api, ApiError, seg } from '#lib/api.ts';
 	import { date } from '#lib/format.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import { actionLabel, proposeExplanation, rowActions, senderStatus } from '#lib/proposals.ts';
 	import { proposals } from '#lib/proposals.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { ProposalKind, RosterEntry } from '#lib/types.ts';
+	import { keyring } from '#lib/keys/keyring.svelte.ts';
+	import { loadRecipients } from '#lib/reach-out-api.ts';
+	import { composeMessage, MAX_NOTE_CHARS, noteLength, sealable } from '#lib/reach-out.ts';
 	import AllyKeySetup from '../AllyKeySetup.svelte';
 	import Modal from '../Modal.svelte';
+	import NoteField from '../NoteField.svelte';
 
 	let {
 		groupId,
@@ -54,6 +58,8 @@
 	let error = $state('');
 	let sent = $state(false);
 	let blocked = $state(false);
+	let note = $state('');
+	let noteTooLong = $derived(noteLength(note) > MAX_NOTE_CHARS);
 
 	// Making an ally key first (offers and partnerships).
 	let setup = $state<ReturnType<typeof AllyKeySetup> | null>(null);
@@ -66,6 +72,7 @@
 		sent = false;
 		blocked = false;
 		setupReady = false;
+		note = '';
 		if (menu) menu.open = false;
 	}
 
@@ -81,19 +88,38 @@
 		busy = true;
 		error = '';
 		try {
+			// The note first: signed with your member key and sealed to them.
+			let message = null;
+			if (note.trim()) {
+				const keys = keyring.memberFor(session.user.id);
+				if (!keys) {
+					error = 'Unlock your keys to sign the note, or remove it.';
+					return;
+				}
+				const r = await loadRecipients('proposal_note', {
+					groupId,
+					userIds: [person.user_id]
+				});
+				if (!sealable(r).length) {
+					error = `${person.display_name} can't receive a note yet. Send it without one.`;
+					return;
+				}
+				message = composeMessage(keys, r, 'proposal_note', groupId, note);
+			}
 			const allyKey = needsAllyKey ? await setup?.prepare() : null;
 			if (allyKey === false) return;
 			await api.post(`/v1/groups/${seg(groupId)}/proposals`, {
 				to: person.user_id,
 				kind,
-				...(allyKey ? { ally_key: allyKey } : {})
+				...(allyKey ? { ally_key: allyKey } : {}),
+				...(message ? { note: message } : {})
 			});
 			sent = true;
 			setup?.commit();
 			await session.refresh().catch(() => {});
 			if (session.user) await proposals.refresh(session.user.roles);
 		} catch (e) {
-			error = groupError(e);
+			error = e instanceof Error && !(e instanceof ApiError) ? e.message : groupError(e);
 			// "They already sent you one": show it under "Waiting for you".
 			if (session.user) void proposals.refresh(session.user.roles);
 		} finally {
@@ -184,6 +210,13 @@
 			<p class="muted small">
 				Nobody becomes anyone's ally until the safety codes are compared and the member approves.
 			</p>
+			<NoteField
+				user={session.user}
+				bind:text={note}
+				canSign={session.hasMemberKeys}
+				label="A note to {person.display_name} (optional)"
+				placeholder="We talked after the meeting last week…"
+			/>
 		{/if}
 		{#if needsAllyKey}
 			<!-- Stays mounted after sending, so the recovery code can be shown and saved. -->
@@ -205,7 +238,7 @@
 				<button
 					class="primary"
 					type="button"
-					disabled={busy || (needsAllyKey && !setupReady)}
+					disabled={busy || noteTooLong || (needsAllyKey && !setupReady)}
 					onclick={send}
 				>
 					{busy ? 'Sending…' : 'Send'}

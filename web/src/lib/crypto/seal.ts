@@ -1,8 +1,9 @@
 // Opening what devices encrypt (docs/PROTOCOL.md §4.1), a port of
-// `faro_crypto::seal::open_item`.
+// `faro_crypto::seal::{open_item, seal_item, seal_to}`.
 //
-// The web app only ever opens: devices seal, members and allies read. A
-// sealed box is libsodium's `crypto_box_seal`:
+// Devices seal reports and events, and members and allies read them. The
+// web app seals only group messages (reach outs and notes, §9). A sealed
+// box is libsodium's `crypto_box_seal`:
 //
 //   epk ‖ crypto_box(m, nonce = BLAKE2b-192(epk ‖ pk), pk, esk)
 //
@@ -12,8 +13,8 @@ import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hsalsa, xsalsa20poly1305 } from '@noble/ciphers/salsa.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake2b } from '@noble/hashes/blake2.js';
-import { concat, unb64, unb64Fixed, wipe, type Bytes } from './bytes.ts';
-import { encPublicKey, isWeakX25519, keyId } from './keys.ts';
+import { b64, concat, randomBytes, unb64, unb64Fixed, wipe, type Bytes } from './bytes.ts';
+import { encPublicKey, isWeakX25519, keyId, newEncryptionSecret } from './keys.ts';
 
 /** `faro_proto::EncryptedItem` as JSON. */
 export interface EncryptedItem {
@@ -120,4 +121,57 @@ export function openItem(
 		}
 	}
 	throw new DecryptError('decrypt');
+}
+
+/** libsodium `crypto_box_seal`: `msg` for the holder of the X25519 key `pub`. */
+export function sealTo(pub: Uint8Array, msg: Uint8Array): Bytes {
+	if (pub.length !== 32 || isWeakX25519(pub)) throw new Error('cannot seal to this key');
+	const esk = newEncryptionSecret();
+	const epk = encPublicKey(esk);
+	const nonce = blake2b(concat(epk, pub), { dkLen: 24 });
+	const shared = x25519.getSharedSecret(esk, pub);
+	const out = new Uint32Array(8);
+	hsalsa(SIGMA, le32(shared), new Uint32Array(4), out);
+	const key = fromLe32(out);
+	try {
+		return concat(epk, xsalsa20poly1305(key, nonce).encrypt(msg));
+	} finally {
+		wipe(esk, shared, key);
+	}
+}
+
+export interface SealRecipient {
+	user_id: string;
+	/** X25519 public key. */
+	pubkey: Uint8Array;
+}
+
+/**
+ * `faro_crypto::seal_item`: encrypt once under a random content key with
+ * XChaCha20-Poly1305 (`aad` binds it to its context), and seal the key to
+ * every recipient.
+ */
+export function sealItem(
+	plaintext: Uint8Array,
+	aad: Uint8Array,
+	recipients: SealRecipient[]
+): EncryptedItem {
+	if (recipients.length === 0) throw new Error('no recipients');
+	const ck = randomBytes(32);
+	const nonce = randomBytes(24);
+	try {
+		const ciphertext = xchacha20poly1305(ck, nonce, aad).encrypt(plaintext);
+		return {
+			alg: 'xchacha20poly1305',
+			nonce: b64(nonce),
+			ciphertext: b64(ciphertext),
+			envelopes: recipients.map((r) => ({
+				recipient: r.user_id,
+				key_id: keyId(r.pubkey),
+				wrapped_key: b64(sealTo(r.pubkey, ck))
+			}))
+		};
+	} finally {
+		wipe(ck);
+	}
 }
