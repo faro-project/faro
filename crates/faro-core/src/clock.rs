@@ -95,7 +95,7 @@ pub struct SystemClock {
     /// High-water mark so a transient `clock_gettime` failure (or a
     /// non-monotone fallback) can never make `mono_ms` go backwards.
     last_mono: AtomicU64,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     anchor: std::time::Instant,
 }
 
@@ -121,7 +121,7 @@ impl SystemClock {
         SystemClock {
             boot_id: os_boot_id().unwrap_or_else(random_boot_id),
             last_mono: AtomicU64::new(0),
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             anchor: std::time::Instant::now(),
         }
     }
@@ -154,7 +154,17 @@ impl SystemClock {
         secs.checked_mul(1000)?.checked_add(nanos / 1_000_000)
     }
 
-    #[cfg(not(unix))]
+    /// Windows: `GetTickCount64`, milliseconds since boot with sleep
+    /// included. The same clock the session agent stamps captures with
+    /// (`faro_agent::identity::mono_ms`), and unlike a per-process
+    /// `Instant` it does not restart from zero when the service restarts.
+    #[cfg(windows)]
+    fn raw_mono_ms(&self) -> Option<u64> {
+        // SAFETY: GetTickCount64 has no preconditions and cannot fail.
+        Some(unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn raw_mono_ms(&self) -> Option<u64> {
         u64::try_from(self.anchor.elapsed().as_millis()).ok()
     }

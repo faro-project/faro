@@ -12,8 +12,8 @@ pub fn default_session_id() -> String {
     format!("uid:{}", current_uid())
 }
 
-/// `session:<WTS session id>` on Windows, the form
-/// `faro_platform_windows`'s session listing uses (the service also sees
+/// `wts:<WTS session id>` on Windows, exactly the form
+/// `faro_platform_windows::service::session_id` gives the service's session listing (the service also sees
 /// the pipe client's session and SID itself).
 #[cfg(windows)]
 pub fn default_session_id() -> String {
@@ -22,7 +22,7 @@ pub fn default_session_id() -> String {
     let mut id = 0u32;
     // SAFETY: `id` is a valid out-pointer.
     match unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) } {
-        Ok(()) => format!("session:{id}"),
+        Ok(()) => faro_platform_windows::service::session_id(id).0,
         Err(_) => "unknown".to_owned(),
     }
 }
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn session_and_user_are_well_formed() {
-        assert!(default_session_id().starts_with(if cfg!(windows) { "session:" } else { "uid:" }));
+        assert!(default_session_id().starts_with(if cfg!(windows) { "wts:" } else { "uid:" }));
         let user = login_name();
         assert!(!user.is_empty());
         assert!(user.len() <= faro_ipc::handshake::MAX_HELLO_FIELD_LEN);
