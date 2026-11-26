@@ -7,7 +7,9 @@
 use super::synthetic::write_synthetic_set;
 use super::*;
 use crate::classifier::TensorLayout;
-use crate::classifier::{postprocess, preprocess, ChannelOrder, ModelInfo, OutputActivation};
+use crate::classifier::{
+    postprocess, preprocess, ChannelOrder, ModelInfo, OutputActivation, Resize,
+};
 use faro_platform::Frame;
 use std::path::Path;
 
@@ -350,6 +352,70 @@ fn gate_refuses_incomparable_reports() {
 }
 
 #[test]
+fn resize_modes_are_reported_and_compared() {
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_set(dir.path()).unwrap();
+    let set = open(dir.path());
+    let policy = PolicyEngine::default();
+    let opts = RunOptions { warmup: 0 };
+    let direct = run(&mut DominantColour::new(), &policy, &set, &opts).unwrap();
+    let crop_info = ModelInfo {
+        resize: Resize::ResizeCrop { side: 10 },
+        ..colour_info("00".repeat(32))
+    };
+    let crop = run(&mut DominantColour(crop_info), &policy, &set, &opts).unwrap();
+    assert_eq!(crop.model.resize, Resize::ResizeCrop { side: 10 });
+    assert_eq!(crop.set, direct.set);
+
+    // A direct report is written as before the setting, so older reports
+    // (and baselines) read as direct; another mode round-trips.
+    let json: serde_json::Value = serde_json::from_slice(&direct.to_json()).unwrap();
+    assert!(json["model"].get("resize").is_none(), "{json}");
+    assert_eq!(BenchReport::from_json(&direct.to_json()).unwrap(), direct);
+    assert_eq!(BenchReport::from_json(&crop.to_json()).unwrap(), crop);
+    assert!(direct.to_text().contains("resize direct"));
+    assert!(crop.to_text().contains("resize resize_crop:10"));
+
+    // Gating one against the other is allowed, with a note.
+    let out = gate(&direct, &crop, &GateConfig::default()).unwrap();
+    assert!(
+        out.notes.iter().any(|n| n.contains("preprocessing")),
+        "{:?}",
+        out.notes
+    );
+
+    let text = compare_text(&[("direct", &direct), ("resize_crop:10", &crop)]).unwrap();
+    assert!(
+        text.starts_with("comparison on the same set (15 images"),
+        "{text}"
+    );
+    for want in [
+        "resize_crop:10",
+        "precision",
+        "recall",
+        "clean/low/medium/high",
+        "p95 ms",
+    ] {
+        assert!(text.contains(want), "{want} in {text}");
+    }
+    // The direct column of explicit: precision 0.8, recall 4/6, ratings.
+    let line = |prefix: &str| {
+        text.lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix} in {text}"))
+            .to_owned()
+    };
+    assert!(line("explicit").contains("0.800"), "{text}");
+    assert!(text.contains("1/0/2/3"), "{text}");
+    assert!(line("latency").contains("p95"), "{text}");
+    // Only runs on the same set compare.
+    let mut other = crop.clone();
+    other.set.digest = "ab".repeat(32);
+    assert!(compare_text(&[("direct", &direct), ("other", &other)]).is_err());
+    assert!(compare_text(&[]).is_err());
+}
+
+#[test]
 fn report_format_is_checked() {
     let r = sample_report();
     let mut v: serde_json::Value = serde_json::from_slice(&r.to_json()).unwrap();
@@ -497,6 +563,85 @@ mod onnx {
         let (code, _, err) = cli(&["--manifest", &manifest, "--model", &s(&junk), "--set", &set]);
         assert_eq!(code, 2);
         assert!(err.contains("integrity"), "{err}");
+    }
+
+    #[test]
+    fn command_line_compares_resize_modes() {
+        let models = tempfile::tempdir().unwrap();
+        let set_dir = tempfile::tempdir().unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        write_synthetic_set(set_dir.path()).unwrap();
+        let s = |p: &Path| p.to_str().unwrap().to_owned();
+        let (manifest, set) = (s(&write_model(models.path())), s(set_dir.path()));
+        let results = s(&out_dir.path().join("r.json"));
+        let run = |extra: &[&str]| {
+            let mut args = vec!["--manifest", &manifest, "--set", &set, "--warmup", "0"];
+            args.extend_from_slice(extra);
+            cli(&args)
+        };
+
+        // Both on the same set: a report each, one JSON file each, and the
+        // comparison.
+        let (code, out, err) = run(&["--resize", "direct,resize_crop:16", "--json", &results]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.starts_with("== resize direct =="), "{out}");
+        assert!(out.contains("\n== resize resize_crop:16 =="), "{out}");
+        assert!(out.contains("comparison on the same set"), "{out}");
+        assert_eq!(
+            tree(out_dir.path()),
+            ["r.direct.json", "r.resize_crop-16.json"]
+        );
+        let read = |name: &str| {
+            BenchReport::from_json(&std::fs::read(out_dir.path().join(name)).unwrap()).unwrap()
+        };
+        let direct = read("r.direct.json");
+        assert_synthetic_metrics(&direct);
+        assert_eq!(direct.model.resize, Resize::Direct);
+        let crop = read("r.resize_crop-16.json");
+        assert_eq!(crop.model.resize, Resize::ResizeCrop { side: 16 });
+        assert_eq!(crop.set, direct.set);
+        // Either gates on its own.
+        let (code, _, err) = cli(&[
+            "--results",
+            &s(&out_dir.path().join("r.resize_crop-16.json")),
+            "--baseline",
+            &s(&out_dir.path().join("r.direct.json")),
+            "--max-p95-increase",
+            "1000",
+            "--max-recall-drop",
+            "1",
+        ]);
+        assert_eq!(code, 0, "{err}");
+
+        // One mode overrides the manifest's and writes the plain path.
+        std::fs::remove_dir_all(out_dir.path()).unwrap();
+        std::fs::create_dir(out_dir.path()).unwrap();
+        let (code, out, err) = run(&["--resize", "resize_crop:8", "--json", &results]);
+        assert_eq!(code, 0, "{err}");
+        assert!(!out.contains("comparison"), "{out}");
+        assert_eq!(tree(out_dir.path()), ["r.json"]);
+        assert_eq!(read("r.json").model.resize, Resize::ResizeCrop { side: 8 });
+
+        // Refused: a crop larger than the resized square, an unknown or
+        // repeated mode, a gate on several runs, --resize when only gating.
+        for bad in [
+            &["--resize", "resize_crop:4"][..],
+            &["--resize", "crop"],
+            &["--resize", "direct,direct"],
+            &["--resize", "direct,resize_crop:16", "--baseline", &results],
+        ] {
+            let (code, _, err) = run(bad);
+            assert_eq!(code, 2, "{bad:?}: {err}");
+        }
+        let (code, _, _) = cli(&[
+            "--results",
+            &results,
+            "--baseline",
+            &results,
+            "--resize",
+            "direct",
+        ]);
+        assert_eq!(code, 2);
     }
 
     #[test]

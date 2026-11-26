@@ -39,7 +39,7 @@
 //! single image can be identified or recovered. There are no per-image
 //! results anywhere, not even file names.
 
-use crate::classifier::{Classifier, ImageScores, InputSize};
+use crate::classifier::{Classifier, ImageScores, InputSize, Resize};
 use crate::error::DetectError;
 use crate::fusion::{PolicyConfig, PolicyEngine};
 use faro_platform::MAX_FRAME_SIDE;
@@ -51,10 +51,12 @@ use std::time::Instant;
 
 #[cfg(feature = "onnx")]
 pub mod cli;
+mod compare;
 mod gate;
 pub mod set;
 pub mod synthetic;
 
+pub use compare::compare_text;
 pub use gate::{gate, GateCheck, GateConfig, GateOutcome};
 pub use set::{EvalImage, EvalSet};
 
@@ -193,6 +195,7 @@ pub fn run(
             license: info.license.clone(),
             blake3: info.blake3.clone(),
             input_size: info.input_size,
+            resize: info.resize,
             labels: info.labels.clone(),
         },
         policy: PolicySummary {
@@ -252,6 +255,10 @@ pub struct ModelSummary {
     pub license: String,
     pub blake3: String,
     pub input_size: InputSize,
+    /// Absent (direct) in reports from before the setting, and still
+    /// written only when it isn't direct.
+    #[serde(default, skip_serializing_if = "Resize::is_direct")]
+    pub resize: Resize,
     pub labels: Vec<String>,
 }
 
@@ -431,13 +438,14 @@ impl BenchReport {
         let p = &self.policy;
         let _ = writeln!(
             s,
-            "model    {} {} ({}, blake3 {}), input {}x{}",
+            "model    {} {} ({}, blake3 {}), input {}x{}, resize {}",
             m.name,
             m.version,
             m.license,
             m.blake3.get(..16).unwrap_or(&m.blake3),
             m.input_size.width,
-            m.input_size.height
+            m.input_size.height,
+            m.resize
         );
         let ignored = self.ignored_labels();
         if !ignored.is_empty() {
