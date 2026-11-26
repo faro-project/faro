@@ -12,9 +12,23 @@ pub fn default_session_id() -> String {
     format!("uid:{}", current_uid())
 }
 
-#[cfg(not(unix))]
+/// `session:<WTS session id>` on Windows, the form
+/// `faro_platform_windows`'s session listing uses (the service also sees
+/// the pipe client's session and SID itself).
+#[cfg(windows)]
 pub fn default_session_id() -> String {
-    // TODO(windows): the WTS session id, once a Windows agent exists.
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let mut id = 0u32;
+    // SAFETY: `id` is a valid out-pointer.
+    match unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) } {
+        Ok(()) => format!("session:{id}"),
+        Err(_) => "unknown".to_owned(),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn default_session_id() -> String {
     "unknown".to_owned()
 }
 
@@ -119,20 +133,31 @@ pub fn mono_ms() -> Option<u64> {
     secs.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }
 
-#[cfg(not(unix))]
+/// Windows: `GetTickCount64`, milliseconds since boot, sleep included (the
+/// interrupt-time counter), so a stamp stays comparable across a suspend.
+///
+/// NOTE: `faro_core::clock::SystemClock` currently reads `Instant` since
+/// *process* start on Windows, which is not this clock. The service only
+/// compares the agent's stamps with each other today; if it ever needs to
+/// compare them with its own clock, `SystemClock` must read this one.
+#[cfg(windows)]
 pub fn mono_ms() -> Option<u64> {
-    // TODO(windows): QueryUnbiasedInterruptTime / the same source
-    // `SystemClock` uses there. Unreachable today: no Windows agent exists.
+    // SAFETY: no preconditions.
+    Some(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() })
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn mono_ms() -> Option<u64> {
     None
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
 
     #[test]
     fn session_and_user_are_well_formed() {
-        assert!(default_session_id().starts_with("uid:"));
+        assert!(default_session_id().starts_with(if cfg!(windows) { "session:" } else { "uid:" }));
         let user = login_name();
         assert!(!user.is_empty());
         assert!(user.len() <= faro_ipc::handshake::MAX_HELLO_FIELD_LEN);

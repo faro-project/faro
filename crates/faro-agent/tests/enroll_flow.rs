@@ -2,13 +2,13 @@
 //! fake service on a real enroll socket, with the screens and the
 //! authorization faked: which requests are sent, in what order, with what,
 //! and what the person is shown.
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use faro_agent::enroll::{run_flow, Authorizer, EnrollUi, PasteScreen, Screen};
 use faro_agent::ServiceTrust;
 use faro_ipc::{
-    AllowSameUid, EnrollDone, EnrollPreview, EnrollRequest, EnrollResponse, EnrollServerConnection,
-    EnrollStatus, EnrollTarget, FailureKind, IpcServer,
+    AllowSameUser, EnrollDone, EnrollPreview, EnrollRequest, EnrollResponse,
+    EnrollServerConnection, EnrollStatus, EnrollTarget, FailureKind, IpcServer,
 };
 use std::any::Any;
 use std::cell::RefCell;
@@ -60,7 +60,14 @@ struct FakeService {
 impl FakeService {
     fn start(answers: Vec<EnrollResponse>) -> FakeService {
         let dir = tempfile::tempdir().unwrap();
-        let socket = faro_ipc::enroll_socket_path(&dir.path().join("agent.sock"), None);
+        #[cfg(unix)]
+        let base = dir.path().join("agent.sock");
+        #[cfg(windows)]
+        let base = PathBuf::from(format!(
+            r"\\.\pipe\faro-enroll-test-{}\agent",
+            dir.path().file_name().unwrap().to_string_lossy()
+        ));
+        let socket = faro_ipc::enroll_socket_path(&base, None);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (path, log) = (socket.clone(), seen.clone());
@@ -70,7 +77,7 @@ impl FakeService {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let server = IpcServer::bind(&path, AllowSameUid).unwrap();
+                let server = IpcServer::bind(&path, AllowSameUser).unwrap();
                 ready_tx.send(()).unwrap();
                 let mut answers: VecDeque<_> = answers.into();
                 while let Some(answer) = answers.pop_front() {
@@ -299,6 +306,7 @@ fn no_service_is_explained() {
 fn only_root_counts_as_the_service_in_production() {
     // The fake service runs as the test's uid, so `Root` trust refuses it
     // (unless the tests run as root) before sending the link.
+    #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
         return;
     }

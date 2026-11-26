@@ -221,10 +221,7 @@ fn capture(p: &mut AgentPlatform) -> Result<Capture, CaptureError> {
     })
 }
 
-// Unix only: `identity::mono_ms` has no Windows source yet (it must be a
-// since-boot clock shared with the service, not a per-process `Instant`),
-// and there is no Windows agent for it to serve.
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use faro_platform::synthetic::Script;

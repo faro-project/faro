@@ -1,36 +1,51 @@
 //! Drives the agent's real loop against an in-test service: a `faro-ipc`
-//! server on a Unix socket in a private tempdir, with the synthetic platform
-//! standing in for the screen.
-#![cfg(unix)]
+//! server on a Unix socket in a private tempdir (a uniquely named pipe on
+//! Windows), with the synthetic platform standing in for the screen.
+#![cfg(any(unix, windows))]
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use faro_agent::{Agent, AgentConfig, AgentError, Backoff, ExitReason, ServiceTrust};
 use faro_ipc::{
-    accept_agent, AgentMsg, AllowSameUid, CaptureReason, IpcError, IpcServer, ServiceConnection,
+    accept_agent, AgentMsg, AllowSameUser, CaptureReason, IpcError, IpcServer, ServiceConnection,
     ServiceMsg, ShutdownReason, WirePermissionState, WirePixelFormat, WireSessionChange,
     HELLO_TIMEOUT,
 };
 use faro_platform::synthetic::{Scene, Script};
 use faro_platform::{AppInfo, BrowserContext, PermissionState, SessionChange, TamperSignal};
-use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(5);
 
-type Conn = ServiceConnection<UnixStream>;
+type Conn = ServiceConnection<faro_ipc::ServerStream>;
 
 /// A private (0700) tempdir with a short path: macOS caps socket paths at
 /// 104 bytes and `faro-ipc` refuses group/world-writable directories.
 fn private_dir() -> tempfile::TempDir {
     let d = tempfile::tempdir().expect("tempdir");
-    fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
     d
+}
+
+/// The agent endpoint for a test: `agent.sock` in the tempdir, or on
+/// Windows a pipe named after it (unique per test).
+fn agent_endpoint(dir: &tempfile::TempDir) -> PathBuf {
+    #[cfg(unix)]
+    {
+        dir.path().join("agent.sock")
+    }
+    #[cfg(windows)]
+    {
+        let unique = dir.path().file_name().unwrap().to_string_lossy();
+        PathBuf::from(format!(r"\\.\pipe\faro-agent-test-{unique}\agent"))
+    }
 }
 
 fn config(path: &Path) -> AgentConfig {
@@ -63,8 +78,8 @@ impl Harness {
     /// start the agent with `trust`.
     async fn start_with(script: Script, trust: ServiceTrust) -> (Harness, IpcServer) {
         let dir = private_dir();
-        let path = dir.path().join("agent.sock");
-        let server = IpcServer::bind(&path, AllowSameUid).expect("bind");
+        let path = agent_endpoint(&dir);
+        let server = IpcServer::bind(&path, AllowSameUser).expect("bind");
         let mut cfg = config(&path);
         cfg.service_trust = trust;
         let notices: Notices = Arc::default();
@@ -594,6 +609,7 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
     recv_until(&mut conn, |m| matches!(m, AgentMsg::Foreground { .. })).await;
 
     // The service goes away (socket removed, connection closed).
+    #[cfg(unix)]
     let path = server.path().to_path_buf();
     drop(conn);
     drop(server);
@@ -609,9 +625,10 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
     });
     // Let a few failed reconnects (and polls) go by.
     tokio::time::sleep(Duration::from_millis(300)).await;
+    #[cfg(unix)]
     assert!(!path.exists());
 
-    let server = IpcServer::bind(&h.path, AllowSameUid).expect("rebind");
+    let server = IpcServer::bind(&h.path, AllowSameUser).expect("rebind");
     let (mut conn, hello) = accept(&server).await;
     assert_eq!(hello.pid, std::process::id());
     recv_until(&mut conn, |m| {
@@ -638,12 +655,12 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
 #[tokio::test]
 async fn agent_started_before_service_connects_when_it_appears() {
     let dir = private_dir();
-    let path = dir.path().join("agent.sock");
+    let path = agent_endpoint(&dir);
     let script = Script::new();
     let agent = Agent::new(config(&path), script.platform());
     let task = tokio::spawn(agent.run(std::future::pending::<()>()));
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let server = IpcServer::bind(&path, AllowSameUid).unwrap();
+    let server = IpcServer::bind(&path, AllowSameUser).unwrap();
     let (mut conn, _) = accept(&server).await;
     faro_ipc::ping(&mut conn, WAIT, |_| {}).await.unwrap();
     task.abort();
@@ -653,7 +670,9 @@ async fn agent_started_before_service_connects_when_it_appears() {
 /// the socket path must not even receive `Hello`, let alone frames.
 #[tokio::test]
 async fn refuses_a_non_root_service_in_production_mode() {
+    // On Windows the test server is never LocalSystem.
     // SAFETY: no preconditions.
+    #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("skipped: running as root, so the test server *is* root");
         return;
@@ -706,7 +725,7 @@ async fn status_until(statuses: &Statuses, want: impl Fn(&faro_agent::status_men
 fn fake_enroll_socket(agent_socket: &Path) -> JoinHandle<()> {
     use faro_ipc::{EnrollRequest, EnrollResponse, EnrollStatus};
     let path = faro_ipc::enroll_socket_path(agent_socket, None);
-    let server = IpcServer::bind(&path, AllowSameUid).expect("bind enroll");
+    let server = IpcServer::bind(&path, AllowSameUser).expect("bind enroll");
     tokio::spawn(async move {
         loop {
             let Ok(mut conn) = server.accept_typed::<EnrollResponse, EnrollRequest>().await else {
@@ -734,7 +753,7 @@ async fn the_status_menu_follows_the_service() {
     use faro_agent::status_menu::{Enrollment, Seen};
     use faro_ipc::status::CaptureState;
     let dir = private_dir();
-    let path = dir.path().join("agent.sock");
+    let path = agent_endpoint(&dir);
     let enroll = fake_enroll_socket(&path);
     let statuses: Statuses = Arc::default();
     let script = Script::new();
@@ -755,7 +774,7 @@ async fn the_status_menu_follows_the_service() {
     assert_eq!(statuses.lock().unwrap().len(), 1, "{statuses:?}");
 
     // The service starts and sends its view.
-    let server = IpcServer::bind(&path, AllowSameUid).expect("bind");
+    let server = IpcServer::bind(&path, AllowSameUser).expect("bind");
     let (mut conn, _) = accept(&server).await;
     let status = faro_ipc::MemberStatus {
         instance_name: "Sam's Faro".into(),
