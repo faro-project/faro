@@ -10,7 +10,13 @@
 	import { keyring } from '../keys/keyring.svelte.ts';
 	import type { FeedEntry, User } from '../types.ts';
 	import UnlockKeys from '../ui/UnlockKeys.svelte';
-	import { describeBody, describeEntry, reportSummary, type NameOf } from './describe.ts';
+	import {
+		bodyTitle,
+		describeBody,
+		describeEntry,
+		reportSummary,
+		type NameOf
+	} from './describe.ts';
 	import {
 		entryKey,
 		FAILURE_TEXT,
@@ -253,12 +259,15 @@
 				{@const k = entryKey(e)}
 				{@const d = describeEntry(e, nameOf, device(e.device_id))}
 				{@const o = opened[k]}
+				{@const title =
+					(typeof o === 'object' && o.kind === 'event' && bodyTitle(o.body, device(e.device_id))) ||
+					d.title}
 				<li class="tone-{d.tone}">
 					<div class="entry">
 						<span class="dot" aria-hidden="true"></span>
 						<div class="body">
 							<div class="row-title">
-								<strong>{d.title}</strong>
+								<strong>{title}</strong>
 								{#if e.type !== 'report' && e.urgency === 'urgent'}<span class="chip urgent">
 										Urgent
 									</span>{/if}
