@@ -371,7 +371,9 @@ mod live {
         let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         // SAFETY: `buf` is a writable buffer of the size passed.
         let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-        let n = usize::try_from(n).ok().filter(|&n| n > 0 && n <= buf.len())?;
+        let n = usize::try_from(n)
+            .ok()
+            .filter(|&n| n > 0 && n <= buf.len())?;
         buf.truncate(n);
         String::from_utf8(buf).ok()
     }
@@ -422,7 +424,9 @@ mod tests {
     fn third_party(pid: i32) -> Process {
         Process {
             bundle_id: Some(format!("com.example.app{pid}")),
-            exe_path: Some(format!("/Applications/App{pid}.app/Contents/MacOS/App{pid}")),
+            exe_path: Some(format!(
+                "/Applications/App{pid}.app/Contents/MacOS/App{pid}"
+            )),
             name: Some(format!("App {pid}")),
         }
     }
@@ -535,7 +539,11 @@ mod tests {
         // nothing else on screen.
         let mut menu_bar = win(5, 1, 1710.0, 34.0);
         menu_bar.layer = 24;
-        let ws = [menu_bar, win(20, 0, 1710.0, 1000.0), win(20, 0, 400.0, 300.0)];
+        let ws = [
+            menu_bar,
+            win(20, 0, 1710.0, 1000.0),
+            win(20, 0, 400.0, 300.0),
+        ];
         assert_eq!(names(&read(&ws, ME, third_party)), ["App 20"]);
     }
 
@@ -620,7 +628,10 @@ mod tests {
         assert_eq!(hidden_app(9, &p, Some("")).name, "viewer");
         assert_eq!(hidden_app(9, &p, None).key, "/Users/a/bin/viewer");
         let a = hidden_app(9, &Process::default(), None);
-        assert_eq!((a.key.as_str(), a.name.as_str()), ("pid:9", "An unnamed app"));
+        assert_eq!(
+            (a.key.as_str(), a.name.as_str()),
+            ("pid:9", "An unnamed app")
+        );
         assert_eq!(app_label(&"x".repeat(200)).chars().count(), MAX_APP_LABEL);
     }
 
@@ -643,7 +654,10 @@ mod tests {
     #[test]
     fn reported_once_after_two_polls() {
         let mut t = HiddenWindowTracker::new();
-        assert!(t.observe(&hidden(&["V"])).is_empty(), "one poll is not enough");
+        assert!(
+            t.observe(&hidden(&["V"])).is_empty(),
+            "one poll is not enough"
+        );
         assert_eq!(t.observe(&hidden(&["V"])), [signal("V")]);
         for _ in 0..100 {
             assert!(t.observe(&hidden(&["V"])).is_empty(), "not every poll");
