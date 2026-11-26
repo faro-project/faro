@@ -666,7 +666,10 @@ impl Device {
         cfg.network.endorsement_poll_secs = 1;
         cfg.network.upload_interval_secs = 1;
         cfg.report.utc_offset_minutes = self.utc_offset_minutes;
-        let builder = Service::builder(cfg);
+        // Never the domain list of a Faro package installed on this machine
+        // (a CI runner may have one): as on platforms without a package.
+        let builder =
+            Service::builder(cfg).domains_manifest(self.state_dir.join("no-packaged-domains"));
         let builder = match &self.model_manifest {
             Some(m) => builder.model_manifest(m),
             None => builder.classifier(classifier),
