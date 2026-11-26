@@ -55,6 +55,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "info.url: the instance's address being enrolled with",
     ),
     (
+        "crates/faro-service/src/enroll_approval.rs",
+        "url",
+        "subject.url: the instance's address an enrollment was refused for (Windows UAC approval), not browsing",
+    ),
+    (
         "crates/faro-service/src/runtime/core.rs",
         "body",
         "body.kind(): only the event's kind, never its content",
