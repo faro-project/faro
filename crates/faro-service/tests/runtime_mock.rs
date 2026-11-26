@@ -16,9 +16,12 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use faro_core::clock::Clock;
 use faro_core::{open_event_body, open_report, ManualClock};
 use faro_crypto::{ChainHead, EncryptionKeypair, SigningKey};
 use faro_detect::{ImageScores, ScriptedClassifier};
+use faro_ipc::status::{ArtifactSource, CaptureState, ServicePhase};
+use faro_ipc::WirePermissionState;
 use faro_platform::synthetic::Script;
 use faro_proto::api::{
     auth_headers, request_signing_bytes, ApiError, DeviceState, EnrollRequest, EnrollResponse,
@@ -499,6 +502,44 @@ async fn full_lifecycle_against_mock_instance() {
         assert!(m.auth_failures.is_empty(), "{:?}", m.auth_failures);
     }
 
+    // ---- status ----------------------------------------------------------
+    let st = wait_for(&handle, "capture status", |s| {
+        s.capture.last_success_ms.is_some() && s.capture.state == CaptureState::Active
+    })
+    .await;
+    assert_eq!(st.capture.consecutive_failures, 0);
+    assert!(st.capture.last_attempt_ms.is_some());
+    assert_eq!(st.session_list.len(), 1, "{:?}", st.session_list);
+    let session = &st.session_list[0];
+    assert!(session.agent_connected && session.capture_target && session.at_screen);
+    assert!(session
+        .agent_version
+        .as_deref()
+        .is_some_and(|v| v.starts_with("in-process/")));
+    assert_eq!(
+        st.permissions.screen_recording,
+        Some(WirePermissionState::Granted)
+    );
+    let model = st.detection.model.as_ref().expect("a model in the status");
+    assert_eq!(model.source, ArtifactSource::Packaged);
+    assert!(!st.updates.enabled, "no root of trust in this test");
+    // The running service writes it to the state directory, where `status`
+    // reads it.
+    let view = wait_for_status_file(&state_dir, |v| {
+        v.service_running
+            && v.service
+                .as_ref()
+                .is_some_and(|r| r.capture.last_success_ms.is_some())
+    })
+    .await;
+    let report = view.service.as_ref().unwrap();
+    assert_eq!(report.phase, ServicePhase::Running);
+    assert_eq!(report.pid, std::process::id());
+    let text = view.text(clock.wall_ms());
+    assert!(text.contains("Service:      running since"), "{text}");
+    assert!(text.contains("Capture:      active"), "{text}");
+    assert!(text.contains("Screen Recording granted"), "{text}");
+
     // ---- tamper vs context ------------------------------------------------
     script.with(|s| {
         s.tamper.push(TamperSignal::PermissionRevoked {
@@ -586,4 +627,30 @@ async fn full_lifecycle_against_mock_instance() {
     );
     assert_eq!(m.reports.len(), 2, "partial report at shutdown");
     assert!(m.auth_failures.is_empty(), "{:?}", m.auth_failures);
+    // The last status says it stopped.
+    let view = faro_service::status_view::gather(&state_dir, clock.wall_ms()).unwrap();
+    assert!(!view.service_running);
+    let report = view.service.unwrap();
+    assert_eq!(report.phase, ServicePhase::Stopped);
+    assert_eq!(report.capture.state, CaptureState::Stopped);
+}
+
+async fn wait_for_status_file(
+    state_dir: &std::path::Path,
+    mut pred: impl FnMut(&faro_service::status_view::StatusView) -> bool,
+) -> faro_service::status_view::StatusView {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        // The service's clock runs ahead of real time here, so its reports
+        // always look fresh.
+        let view = faro_service::status_view::gather(state_dir, 0).unwrap();
+        if pred(&view) {
+            return view;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the status file: {view:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
