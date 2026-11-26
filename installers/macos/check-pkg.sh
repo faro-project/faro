@@ -16,7 +16,8 @@
 # and the slice for this Mac's architecture must load the model (licence,
 # attribution and digest checks) and score three solid colours within
 # MODEL_TOLERANCE of Yahoo's original Caffe model. Each program must name
-# its log file, and neither launchd job may send output to a file.
+# its log file, and neither launchd job may send output to a file. A
+# release package's service must ignore [dev_thresholds] in service.toml.
 #
 # The domain list must be there with its manifest, at the bundle_version
 # of crates/faro-detect/domains/sources.toml and with no refused source,
@@ -281,8 +282,19 @@ if [[ ",$want_archs," == *",$host_arch,"* ]]; then
     for name in $(echo "$check" | awk '$1 == "source" { print $2 }'); do
         grep -q "^$name (" "$notices/domains.txt" || fail "notices/domains.txt does not attribute $name"
     done
+    # Only a development build may lower the detection thresholds
+    # (crates/faro-service/src/thresholds.rs): a release package's service
+    # must ignore [dev_thresholds], a --dev one must apply it.
+    printf '[dev_thresholds]\nexplicit_high = 0.5\nexplicit_medium = 0.05\nany_low = 0.03\n' > "$work/dev-thresholds.toml"
+    thresholds="$("$service" --config "$work/dev-thresholds.toml" --state-dir "$work/state" status | grep '^Thresholds:')" \
+        || fail "faro-service status printed no Thresholds line for [dev_thresholds]"
+    if [[ "$(basename "$pkg")" == *-dev.pkg ]]; then
+        [[ "$thresholds" == *LOWERED* ]] || fail "the development service does not apply [dev_thresholds]: $thresholds"
+    else
+        [[ "$thresholds" == *ignored* ]] || fail "the release service does not ignore [dev_thresholds]: $thresholds"
+    fi
 else
-    echo "check-pkg: no $host_arch slice to run; the model and domain list checks are skipped"
+    echo "check-pkg: no $host_arch slice to run; the model, domain list and threshold checks are skipped"
 fi
 
 info="$work/payload/Library/Faro/Faro Agent.app/Contents/Info.plist"
