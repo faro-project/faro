@@ -48,3 +48,27 @@ pub mod session;
 pub mod tamper;
 #[cfg(windows)]
 pub mod ui;
+
+#[cfg(windows)]
+pub use authenticode::{AuthenticodeError, SignerInfo, SignerRequirement};
+#[cfg(windows)]
+pub use scm::{ServiceContext, ServiceControl};
+#[cfg(windows)]
+pub use service::{SessionEvent, SessionEventKind, WinServiceHost};
+
+// NOTE (merge): the agent-side work adds `WinPlatform` with
+// `agent_platform()` too. Keep one struct definition; the impl blocks are
+// separate so both can stay as they are.
+/// Constructors for the Windows platform bundle.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WinPlatform;
+
+#[cfg(windows)]
+impl WinPlatform {
+    /// The service-side host integration (sessions, launching agents,
+    /// installing the service).
+    pub fn service_host() -> WinServiceHost {
+        WinServiceHost::new()
+    }
+}
