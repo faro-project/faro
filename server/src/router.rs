@@ -28,8 +28,8 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, branding, devices, events, feed, groups, heartbeat, invites,
-    keys, manifests, prefs, privacy, proposals, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, group_listing, groups,
+    heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -179,6 +179,28 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             "/v1/me/proposal-blocks/{user_id}",
             put(proposals::put_block).delete(proposals::delete_block),
         )
+        .route("/v1/group-directory", get(group_listing::directory))
+        .route(
+            "/v1/groups/{id}/join-requests",
+            get(group_listing::list_requests).post(group_listing::create_request),
+        )
+        .route(
+            "/v1/groups/{id}/join-requests/me",
+            delete(group_listing::withdraw_request),
+        )
+        .route("/v1/me/join-requests", get(group_listing::my_requests))
+        .route(
+            "/v1/join-requests/{id}/accept",
+            post(group_listing::accept_request),
+        )
+        .route(
+            "/v1/join-requests/{id}/decline",
+            post(group_listing::decline_request),
+        )
+        .route(
+            "/v1/groups/{id}/me/meeting-reminders",
+            put(group_listing::set_reminders),
+        )
         .route("/v1/me/group-invites", get(groups::my_invites))
         .route(
             "/v1/group-invites/{token}",
@@ -237,6 +259,10 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/admin/api/log", get(admin::log))
         .route("/admin/api/groups", get(admin::list_groups))
         .route("/admin/api/groups/{id}", delete(admin::archive_group))
+        .route(
+            "/admin/api/groups/{id}/listed",
+            put(admin::set_group_listed),
+        )
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),

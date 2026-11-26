@@ -23,6 +23,7 @@
 //! Group invitations are the one email that names a person (the inviter) and
 //! still never the group: "*Sam* invited you to join a group on *instance*."
 
+use crate::db::repo::group_listing;
 use crate::db::repo::group_notices::{self, NewNotice, NoticeKind};
 use crate::db::repo::groups::{self, HistoryKind, LARGE_GROUP};
 use crate::db::repo::notifications as notif;
@@ -71,6 +72,7 @@ async fn tell(
             actor,
             summary: summary_group.is_some(),
             dedupe_key,
+            detail: None,
             mode,
             due_at_ms,
             now_ms,
@@ -149,6 +151,107 @@ pub async fn tell_alliance(
     tell(conn, kind, recipient, Some(actor), None, now_ms).await
 }
 
+/// `group_join_requested` to each of the group's facilitators.
+pub async fn tell_join_requested(
+    conn: &mut sqlx::AnyConnection,
+    group: &str,
+    requester: &UserId,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    for f in groups::active_user_ids(&mut *conn, group, true).await? {
+        tell(
+            conn,
+            NoticeKind::GroupJoinRequested,
+            &f,
+            Some(requester),
+            None,
+            now_ms,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// `group_join_accepted` to the person a facilitator let in.
+pub async fn tell_join_accepted(
+    conn: &mut sqlx::AnyConnection,
+    requester: &UserId,
+    by: &UserId,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    tell(
+        conn,
+        NoticeKind::GroupJoinAccepted,
+        requester,
+        Some(by),
+        None,
+        now_ms,
+    )
+    .await
+}
+
+/// `group_unlisted` to each facilitator after an admin removed the group
+/// from the directory.
+pub async fn tell_unlisted(
+    conn: &mut sqlx::AnyConnection,
+    group: &str,
+    admin: &UserId,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    for f in groups::active_user_ids(&mut *conn, group, true).await? {
+        if f != *admin {
+            tell(
+                conn,
+                NoticeKind::GroupUnlisted,
+                &f,
+                Some(admin),
+                None,
+                now_ms,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// A meeting reminder for `occurrence_ms` (the meeting's start) to
+/// `recipient`: always written (it is the in-app notice), and emailed only
+/// when `email` is true and the recipient's own notification choices and
+/// quiet hours allow it before the meeting starts. One per recipient, group
+/// and meeting. Returns whether a notice was written (false: already sent).
+///
+/// Delivery is "immediate" (a reminder an hour late is no reminder). Web
+/// Push does not exist yet, so the notice is the only non-email channel.
+pub async fn tell_meeting_reminder(
+    conn: &mut sqlx::AnyConnection,
+    group: &str,
+    recipient: &UserId,
+    occurrence_ms: i64,
+    detail: String,
+    email: bool,
+    now_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    let (mode, due_at_ms) = delivery(conn, recipient, now_ms).await?;
+    let mode = (email && mode.is_some() && due_at_ms < occurrence_ms).then_some(Mode::Immediate);
+    group_notices::insert(
+        conn,
+        &NewNotice {
+            kind: NoticeKind::MeetingReminder,
+            recipient,
+            actor: None,
+            summary: false,
+            dedupe_key: Some(format!(
+                "meeting_reminder:{group}:{recipient}:{occurrence_ms}"
+            )),
+            detail: Some(detail),
+            mode,
+            due_at_ms,
+            now_ms,
+        },
+    )
+    .await
+}
+
 /// Archive `group`: read-only for 30 days, then deleted by the retention
 /// worker. Unlists it, withdraws a facilitator offer, writes the history
 /// entry and tells everyone in it (`group_archived`) except `by`, who knows.
@@ -167,6 +270,7 @@ pub async fn archive(
         return Ok(false);
     }
     groups::add_history(&mut *conn, group, HistoryKind::Archived, None, by, now_ms).await?;
+    group_listing::void_open(&mut *conn, group, now_ms).await?;
     for p in groups::active_user_ids(&mut *conn, group, false).await? {
         if Some(&p) != by {
             tell(conn, NoticeKind::GroupArchived, &p, by, None, now_ms).await?;

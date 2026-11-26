@@ -35,6 +35,12 @@ pub enum Action {
     /// entry names the group by id only; participants have their own
     /// notice.
     GroupArchived,
+    /// An admin listed a group in the directory (the instance lets only
+    /// admins list). By id only.
+    GroupListed,
+    /// An admin removed a group from the directory. The facilitators have
+    /// their own notice.
+    GroupUnlisted,
 }
 
 impl Action {
@@ -48,6 +54,8 @@ impl Action {
             Action::AccountDisabled => "account_disabled",
             Action::AccountEnabled => "account_enabled",
             Action::GroupArchived => "group_archived",
+            Action::GroupListed => "group_listed",
+            Action::GroupUnlisted => "group_unlisted",
         }
     }
 
@@ -61,6 +69,8 @@ impl Action {
             "account_disabled" => Some(Action::AccountDisabled),
             "account_enabled" => Some(Action::AccountEnabled),
             "group_archived" => Some(Action::GroupArchived),
+            "group_listed" => Some(Action::GroupListed),
+            "group_unlisted" => Some(Action::GroupUnlisted),
             _ => None,
         }
     }
