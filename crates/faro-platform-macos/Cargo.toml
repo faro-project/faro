@@ -113,3 +113,16 @@ objc2-service-management = { version = "0.3.2", default-features = false, featur
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# The `hidden_window_probe` example opens a window of its own.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSWindow",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFDate",
+    "CFRunLoop",
+] }
