@@ -358,9 +358,46 @@ fn secure_dir(path: &Path) -> Result<(), StateError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Windows: the state directory gets a protected SYSTEM + Administrators
+/// DACL (§3.3 Windows) whenever a privileged process opens it, the
+/// service or an administrator's `enroll`, `status` or `goodbye`. That
+/// covers a directory an elevated command created before the service
+/// ever ran, which would otherwise inherit `C:\ProgramData`'s default
+/// ACL (readable, and creatable-in, by every user). `protect_state_dir`
+/// refuses a reparse point anywhere in the tree and resets every child to
+/// inherit, so it also repairs a key file someone loosened. It is applied
+/// on every open rather than only when something looks wrong, because a
+/// read grant is as bad as a write grant for the device key.
+///
+/// Unprivileged development runs (`--state-dir` in a temp folder, the
+/// tests) keep their ACL: a SYSTEM/Administrators-only DACL would lock
+/// the user who runs them out of their own state.
+#[cfg(windows)]
 fn secure_dir(path: &Path) -> Result<(), StateError> {
-    // TODO(windows): apply a SYSTEM/Administrators-only DACL (§3.3 Windows).
+    use faro_platform_windows::acl;
+    let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
+    let unsafe_dir = |reason: String| StateError::Unsafe {
+        path: path.to_path_buf(),
+        reason,
+    };
+    if meta.file_type().is_symlink() {
+        return Err(unsafe_dir("is a symlink".into()));
+    }
+    if !meta.is_dir() {
+        return Err(unsafe_dir("is not a directory".into()));
+    }
+    if acl::running_as_system() || acl::running_elevated() {
+        acl::protect_state_dir(path).map_err(|e| {
+            unsafe_dir(format!(
+                "cannot restrict it to SYSTEM and Administrators: {e}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn secure_dir(path: &Path) -> Result<(), StateError> {
     let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
     if !meta.is_dir() {
         return Err(StateError::Unsafe {
