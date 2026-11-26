@@ -386,7 +386,8 @@ First, what a leak costs:
   - **On macOS a second layer stops most of this.** Before installing, the updater checks the package itself (PROTOCOL.md §8.2, steps 5 and 6). It must carry Faro's Developer ID Installer signature (the Team ID compiled into the installed client) and be notarized. And the version written inside it must be the one the metadata names, and above the installed one. So the attacker also needs the Developer ID Installer key and the notary credentials, which live in the Mac runner's keychain, not in Actions. A package that fails is not installed, and allies get a tamper alert.
   - **Listing an old release under a higher version doesn't work.** The package's own version gives it away, so the attacker can't move clients back to an older release.
   - **What it doesn't stop:** a package you did sign and notarize, offered as the version it really is, when that is above what a client runs. The attacker could make clients install a build you signed but never published (a release candidate, say), or hold them on an older release that is still newer than theirs. Keep the signing keychain locked when no release is building (DEVELOPMENT.md, "Releasing").
-  - **Other platforms** have no second layer yet. There, these two keys are enough.
+  - **On Windows the second layer is the MSI's Authenticode signature** (PROTOCOL.md §8.2). The package must be signed by the certificate pinned in the installed service (`FARO_WINDOWS_SIGNER`), carry Faro's UpgradeCode, and have the version the metadata names, above the installed one. It is weaker than on a Mac in one way: the signing service's credentials (`SIGNPATH_API_TOKEN`, or the Azure secrets for Trusted Signing) are Actions secrets too. With option A, an attacker who can read the Actions secrets can get a package signed, so assume both layers fell together.
+  - **Linux** has no second layer yet. There, these two keys are enough.
 
 #### Option A: GitHub Actions secrets
 
@@ -486,13 +487,22 @@ diskutil eraseDisk APFS TRANSFER GPT diskN
 
    The checksum must match the one in the log. Push and open a pull request as usual. `release/roots/1.json` is never published. It lets the release workflow walk the whole chain from root 1, as an old client does, which it needs to carry the published `targets.json` forward after an online key is replaced.
 
-2. **The macOS package.** `build-pkg.sh` installs the file named by `FARO_UPDATE_ROOT` as `/Library/Faro/update-root.json`. A release package can't be built without it, and `check-pkg.sh` fails a release package that lacks it. The release workflow (#58) sets it:
+2. **The client packages.** On macOS, `build-pkg.sh` installs the file named by `FARO_UPDATE_ROOT` as `/Library/Faro/update-root.json`. A release package can't be built without it, and `check-pkg.sh` fails a release package that lacks it. The release workflow (#58) sets it:
 
    ```sh
    FARO_UPDATE_ROOT=release/update-root.json installers/macos/build-pkg.sh
    ```
 
    (plus the signing variables from DEVELOPMENT.md, "The macOS installer").
+
+   On Windows, `build-msi.ps1` installs the same file as `C:\Program Files\Faro\update-root.json`, and `check-msi.ps1` fails a release MSI that lacks it. The release workflow's `windows-msi` job sets it the same way:
+
+   ```powershell
+   $env:FARO_UPDATE_ROOT = 'release\update-root.json'
+   installers\windows\build-msi.ps1
+   ```
+
+   (plus `FARO_WINDOWS_SIGNING` and `FARO_WINDOWS_SIGNER` from DEVELOPMENT.md, "The Windows installer").
 
 3. **Instances** (`updates.root`, or `FARO_UPDATES_ROOT` in `faro.env`). SELF-HOSTING.md tells admins to set:
 
@@ -651,7 +661,7 @@ What clients do: they accept the new root, and from then on the old key counts f
 | What happened | What you do | What clients do |
 |---|---|---|
 | **The timestamp key leaked** | Rotate it at once ([6.3](#63-rotate-the-targets-or-timestamp-key)). | Until the new root: the attacker can hold them on the current release, but not change it. After it: they forget the attacker's timestamps and continue. |
-| **The targets key leaked** (with option A, assume the timestamp key leaked too) | Rotate **both** at once in one root. Tell instance admins. Check every published file against what you built. Find how the key leaked before trusting the new place. | Clients that installed nothing bad are fine after the new root. macOS clients refuse a package that Faro's Developer ID didn't sign and notarize, and tell allies (a tamper alert). A client that installed a package you didn't build is compromised and must be reinstalled by hand. |
+| **The targets key leaked** (with option A, assume the timestamp key leaked too) | Rotate **both** at once in one root. Tell instance admins. Check every published file against what you built. Find how the key leaked before trusting the new place. | Clients that installed nothing bad are fine after the new root. macOS clients refuse a package that Faro's Developer ID didn't sign and notarize, and Windows clients one that the pinned signer didn't sign, and tell allies (a tamper alert). If the Windows signing credentials leaked with the keys, rotate them too. A client that installed a package you didn't build is compromised and must be reinstalled by hand. |
 | **An online key was lost** (secret deleted) | Rotate it ([6.3](#63-rotate-the-targets-or-timestamp-key)). | Nothing until the timestamp expires, then no updates until you publish. They keep running. |
 | **One root drive died** | Use its backup. Copy the key to a new drive. | Nothing. |
 | **One root key is lost** (both drives) | Replace it soon ([6.4](#64-replace-a-root-key)) with the other two. | Nothing. |
