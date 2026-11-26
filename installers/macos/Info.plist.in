@@ -5,7 +5,9 @@
      so its code-signing identifier is org.faro.agent (the service's
      ipc.agent_requirement). LSUIElement: no Dock icon or app menu; its only
      UI is the menu-bar icon and the monitoring notice. CFBundleURLTypes:
-     faro://enroll links open the agent's enrollment window (issue #62). -->
+     faro://enroll links open the agent's enrollment window (issue #62).
+     CFBundleIconFile: Contents/Resources/Faro.icns, copied by build-pkg.sh
+     from assets/brand/faro-icon.icns. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -25,6 +27,8 @@
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>faro-agent</string>
+	<key>CFBundleIconFile</key>
+	<string>Faro</string>
 	<key>CFBundleIdentifier</key>
 	<string>org.faro.agent</string>
 	<key>CFBundleInfoDictionaryVersion</key>
