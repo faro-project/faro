@@ -34,8 +34,8 @@
 //! message-only one: message-only windows get no broadcasts (neither
 //! `TaskbarCreated` nor `WM_QUERYENDSESSION`/`WM_ENDSESSION`).
 //!
-//! The icon is the executable's icon resource 1 if it has one (the
-//! packaged `faro-agent.exe` should), else an eye drawn at run time.
+//! The icon is the Faro lighthouse from `assets/brand/tray/faro-tray.ico`,
+//! compiled into the agent, at the size the display scale asks for.
 //!
 //! # The status menu
 //!
