@@ -42,8 +42,10 @@
 //!    announced; detector thresholds are not configurable and tamper
 //!    thresholds can only be tightened. The agent is accepted only with a
 //!    valid code signature (root service), its departures are classified by
-//!    the service rather than by what it says, and no agent while someone
-//!    is logged in becomes an urgent `capture_failing` event.
+//!    the service rather than by what it says, a session without an agent
+//!    becomes an urgent `unmonitored_user_session` event, and a session at
+//!    the screen whose connected agent nothing is captured from becomes an
+//!    urgent `capture_failing` event.
 //! 4. **The instance is untrusted.** Responses are size-capped before
 //!    parsing; endorsements and manifests are verified locally; the instance
 //!    identity key is pinned and re-checked; redirects are not followed.
