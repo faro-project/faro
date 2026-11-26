@@ -46,7 +46,7 @@ assets/   brand assets (logo, colours)
 Faro is built on open-source software by others. The licences and copyright notices of everything it ships with are generated at build time and travel with it ([how](docs/DEVELOPMENT.md#third-party-notices)):
 
 - **On a Mac:** `/Library/Faro/notices/`, `third-party.txt` for the Rust crates, next to the image model's, the domain list's (`domains.txt`) and ONNX Runtime's notices.
-- **On Windows:** TODO(windows): where the notices are installed, and whether the MSI carries them.
+- **On Windows:** the MSI installs them in `C:\Program Files\Faro\notices`.
 - **The server image:** `/usr/share/faro/notices/`, `third-party.txt` for the Rust crates in `faro-server` and `third-party-web.txt` for the web app's npm packages.
 - **The server binaries:** `faro-server-<version>-linux-<arch>-third-party.txt`, next to each binary in the release.
 - **The web app:** the **Licences** page (`/licenses`, linked from every page's footer) of any instance.

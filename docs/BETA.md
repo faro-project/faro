@@ -40,10 +40,10 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 - **Tamper alerts**, including "Screen Recording is off", a window hidden from Faro, and Faro not seeing the screen ([section 4](#4-known-limitations-and-false-alarms)). On Windows: a stopped service, a killed agent, a changed clock, or Faro's files made writable by a non-administrator ([4.5](#45-on-windows)).
 - **The status menu** in the eye icon (the tray icon on Windows): what Faro is doing and what to do about it, **Report a problem…** and **About Faro…** ([the member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working)).
 - **`sudo /Library/Faro/bin/faro-service status`** (and `--json`), which shows whether monitoring is working, and **`faro-service diagnose`**, which makes a problem report ([section 5](#5-reporting-problems)).
-- **On Windows,** TODO(windows): the commands for the status and the problem report, and how to run them.
+- **On Windows,** run `& "C:\Program Files\Faro\faro-service.exe" status` in a terminal opened as administrator (in Command Prompt, leave out the leading `& `). A problem report is made the same way, with `diagnose` ([section 5](#5-reporting-problems)).
 - **Logs** in `/Library/Logs/Faro/faro-service.log` (any administrator of the Mac can read it) and `~/Library/Logs/Faro/faro-agent.log` for each account ([Faro's logs](MEMBER-GUIDE.md#faros-logs)).
 - **Logs on Windows:** `C:\ProgramData\Faro\logs\faro-service.log` (Administrators can read it) and `%LOCALAPPDATA%\Faro\Logs\faro-agent.log` for each account. Logs rotate at 5 MiB, and 3 old files are kept.
-- **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-computers)). On Windows, the service installs signed MSIs from the update channel itself, after checking the Authenticode signature and that the MSI's version is the expected, newer one.
+- **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-computers)). On Windows, the service checks the project-signed update metadata first, as on a Mac, and then installs the signed MSI after checking its Authenticode signature and that its version is the expected, newer one.
 - **Licences.** The notices for the software Faro is built from are in `/Library/Faro/notices/` on the Mac (**About Faro…** has a button that opens the folder), and on the **Licences** page (`/licenses`) of every instance's web app.
 - **Admin changes are never silent.** Disabling or re-enabling an account is in the admin log and is emailed to the other admins, and the person and their allies are always told.
 
@@ -92,7 +92,7 @@ FARO_UPDATES_UPSTREAM=https://updates.faro-project.org/   # updates.upstream in 
 - Check your copy with `shasum -a 256 update-root.json` and compare it with **[Maintainer: the SHA-256 of `update-root.json` for `0.1.0-beta.1`]**.
 - [Maintainer: confirm when `https://updates.faro-project.org/` serves `0.1.0-beta.1`. Until the first real release, nothing is published there, and the mirror has nothing to fetch.]
 
-Your instance can't change an update: every computer checks the project's signature itself. A Mac checks your instance for updates about every 6 hours. TODO(windows): how often a Windows PC checks, and confirm that the Windows client checks the project's update signatures, not only the MSI's Authenticode signature.
+Your instance can't change an update: every computer checks the project's signature itself. A Mac checks your instance for updates about every 6 hours, and a Windows PC checks on the same schedule. On Windows, the project-signed update metadata is checked first, as on a Mac, and then the MSI's Authenticode signature and version.
 
 ### 2.4 What to watch in `faro-server doctor`
 
@@ -142,7 +142,7 @@ pkgutil --check-signature ~/Downloads/Faro-0.1.0-beta.1.pkg
 
 It must say the package is signed with a **Developer ID Installer** certificate and is **notarized** by Apple, and name **[Maintainer: the Developer ID name and Team ID pilots should see]**. If it says `no signature`, delete the file. The package's name has no `-dev` in it.
 
-**On Windows,** the installer is `Faro-0.1.0-beta.1-x64.msi`. No Windows package is published yet, because the signing provider isn't chosen, so there is no Windows link for the beta. Don't install an unsigned build. TODO(windows): how a member checks the MSI's signature, and the publisher name to expect.
+**On Windows,** the installer is `Faro-0.1.0-beta.1-x64.msi`. No Windows package is published yet, because the signing provider isn't chosen, so there is no Windows link for the beta. Don't install an unsigned build. To check the signature, right-click the MSI, choose **Properties**, then **Digital Signatures**. TODO(windows): the publisher name to expect, which depends on the signing provider.
 
 ### 3.2 Install it
 
@@ -163,7 +163,7 @@ On Windows, the MSI installs Faro to `C:\Program Files\Faro` for the whole compu
 
 Follow [Adding your Mac or Windows PC to Faro](MEMBER-GUIDE.md): create an enrollment code on the **Computers** page, open the link with **Open in Faro** (or **Enroll this computer…** in the eye icon's menu), check the instance and the list of accounts, let an administrator approve in macOS's password dialog, then compare the code and approve the computer in the web app. Monitoring starts once you approve it.
 
-On Windows, the link opens the running Faro Agent, and an administrator approves through the Windows UAC prompt. Cancelling the UAC prompt cancels enrolling. TODO(windows): what the Windows enrollment window shows, including the list of accounts and any guest-account warning.
+On Windows, the link opens the running Faro Agent, and an administrator approves through the Windows UAC prompt. Cancelling the UAC prompt cancels enrolling. The enrollment preview and confirmation show the same content and button names as on a Mac, as ordinary Windows dialog windows: the accounts list, the guest-account warning, and the confirm button.
 
 ### 3.5 Screen Recording and Accessibility
 
@@ -273,13 +273,13 @@ The Faro project tests a lot automatically, but some things can only be checked 
 
 The same kinds of alert apply to a Windows PC, with these differences.
 
-- **Tamper alerts.** The service stopped (its check-ins stop, so allies get a missed check-in alert), an agent is killed, the clock is changed, or Faro's program files are made writable by someone who isn't an administrator. TODO(windows): does a VM or a VPN raise a tamper alert on Windows, or is it only listed in the daily report, as on a Mac?
+- **Tamper alerts.** The service stopped (its check-ins stop, so allies get a missed check-in alert), an agent is killed, the clock is changed, or Faro's program files are made writable by someone who isn't an administrator. A VPN is not an alert, as on a Mac: the daily report's **Health** may mention it ([4.1](#41-alerts-you-may-see-while-a-member-is-setting-up)). A virtual machine is treated the same as on a Mac.
 - **Hidden windows.** A window excluded from capture is reported by app name, as on a Mac ([4.3](#43-a-window-was-hidden-from-faro)). Windows' own programs in `System32` and `SystemApps` are allowed, except script hosts.
 - **The lock screen.** The lock screen, UAC prompts and the Ctrl+Alt+Del screen can't be captured. They are recorded as unavailable, not as tamper. Video with copy protection shows black.
 - **Some sessions.** Some Remote Desktop sessions and VMs use the GDI fallback for capture.
 - **Websites.** Faro reads the address bar of Edge, Chrome, Brave, Firefox, LibreWolf, Waterfox, Zen and Floorp. Only `scheme://host/` leaves the computer. Private windows can't be told apart, and Chrome hides `http://`, so a plain-http site shows as https (the host is right).
 - **The notice.** The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications.
-- **Not yet tested.** TODO(windows): the list of what hasn't been tried on a real Windows PC, as in [4.4](#44-not-yet-tested-on-real-macs).
+- **Not yet tested on a real Windows PC:** several monitors; Remote Desktop sessions; fast user switching; the lock screen and UAC screen being recorded as unavailable; Brave, Waterfox, Zen and Floorp; a real VPN or virtual machine; signed builds and updates; the image model. As on a Mac ([4.4](#44-not-yet-tested-on-real-macs)), please report anything that goes wrong.
 
 ---
 
@@ -296,7 +296,7 @@ It lists what it will put in the report and writes nothing until you agree: **s*
 - If macOS asks whether Terminal may access the Desktop, allow it, or save the report elsewhere: `sudo /Library/Faro/bin/faro-service diagnose --output ~/Documents`.
 - Read it before you send it, if you like: it is a folder of plain-text files.
 
-On Windows, TODO(windows): how a member makes a problem report, where the file goes, and what it contains.
+On Windows, run `& "C:\Program Files\Faro\faro-service.exe" diagnose` in a terminal opened as administrator, and approve the administrator prompt. Faro lists what is in the report before it writes anything: **s** reads all of it, **y** writes it, **n** stops. The file is saved on your Desktop as `faro-report-….zip`; `--output <folder>` saves it elsewhere. The tray menu's **Report a problem…** explains this and copies the command. The report holds the same kind of content as on a Mac, with private details removed: status, versions, the service state, sessions and agents, and recent service and agent logs.
 
 Send the zip to **[Maintainer: where to send problem reports]**, with a few words on what went wrong and when.
 
