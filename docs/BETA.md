@@ -5,7 +5,7 @@
 This guide covers what is different about the beta, and what to expect from it. For the step-by-step instructions it links to the other guides:
 
 - [Self-hosting Faro](SELF-HOSTING.md), for operators: setting up, email, backups, upgrading.
-- [Adding your Mac to Faro](MEMBER-GUIDE.md), for members: enrolling a Mac, checking that Faro works, problem reports.
+- [Adding your Mac or Windows PC to Faro](MEMBER-GUIDE.md), for members: enrolling a computer, checking that Faro works, problem reports.
 - [A guide for allies](ALLY-GUIDE.md), for allies: accepting an invitation, reading alerts, having the conversation.
 - [Developing Faro](DEVELOPMENT.md), for anyone who wants the technical detail behind this guide.
 
@@ -24,32 +24,38 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 
 ## 1. What the beta is
 
-- **One version: `0.1.0-beta.1`.** The Mac app and the server have the same version number.
-- **Macs only.** The package runs on Apple Silicon and Intel Macs with macOS 13 or later. [Maintainer: confirm the minimum macOS for the beta. ONNX Runtime, which runs the image model, is built for macOS 13.3, and nobody has tried Faro on 13.0 to 13.2.]
-- **The `beta` update channel.** Members' Macs get updates through their instance, and the instance offers one channel. A `0.1.0-beta.1` release goes to `beta` only. `stable` gets nothing until `0.1.0`, so every pilot instance must choose **Beta** ([2.2](#22-choose-the-beta-update-channel)).
+- **One version: `0.1.0-beta.1`.** The Mac app, the Windows client and the server have the same version number.
+- **Macs and Windows PCs.** The Mac package runs on Apple Silicon and Intel Macs with macOS 13 or later. [Maintainer: confirm the minimum macOS for the beta. ONNX Runtime, which runs the image model, is built for macOS 13.3, and nobody has tried Faro on 13.0 to 13.2.]
+- **Windows 10 and 11, x64 only.** The Windows package is an MSI. It runs on Windows 10 22H2 (build 19045) and Windows 11, on 64-bit (x64) PCs. Windows on ARM comes later.
+- **The `beta` update channel.** Members' computers get updates through their instance, and the instance offers one channel. A `0.1.0-beta.1` release goes to `beta` only. `stable` gets nothing until `0.1.0`, so every pilot instance must choose **Beta** ([2.2](#22-choose-the-beta-update-channel)).
 - **Small on purpose.** A few instances and the people they invite, so problems are found while they are easy to fix. Expect some false alarms ([section 4](#4-known-limitations-and-false-alarms)), and please report what goes wrong ([section 5](#5-reporting-problems)).
 
 ### What works
 
 - **The instance** (`faro-server`), with its web app: setup, sign-in by emailed link, the admin console, and the member and ally pages. SQLite only: Postgres is experimental and not supported in the beta ([SELF-HOSTING.md](SELF-HOSTING.md)).
 - **The Mac app**, one package with two parts: the Faro service, which checks the screen, and **Faro Agent**, the eye icon in the menu bar. Members enroll from the web app's **Open in Faro** button or the menu's **Enroll this computer…**, with an administrator of the Mac approving in macOS's own password dialog.
-- **Image checks on the Mac**, with Yahoo's OpenNSFW model, which the package includes.
-- **Website categories (adult and gambling sites).** The package includes the list, so this works from the moment Faro is installed, even before the Mac has reached the update channel. The update channel can replace the list with a newer one without a new version of the app. The list's sources and their credits are in `/Library/Faro/notices/domains.txt`. Faro can only tell which website is open with the Accessibility permission, in Safari, Chrome, Edge, Brave or Arc ([3.5](#35-screen-recording-and-accessibility)).
-- **Tamper alerts**, including "Screen Recording is off", a window hidden from Faro, and Faro not seeing the screen ([section 4](#4-known-limitations-and-false-alarms)).
-- **The status menu** in the eye icon: what Faro is doing and what to do about it, **Report a problem…** and **About Faro…** ([the member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working)).
+- **The Windows client**, one MSI with two parts: the **Faro Service** (`FaroService`), which checks the screen, and **Faro Agent**, the tray icon in the notification area. Members enroll from the link in the web app, or **Enroll this computer…** in the tray menu. An administrator approves through the Windows UAC prompt. The service starts by itself.
+- **Image checks on the Mac**, with Yahoo's OpenNSFW model, which the package includes. TODO(windows): ship the onnx model in the Windows beta? Without it, Windows PCs are rated from context signals only.
+- **Website categories (adult and gambling sites).** The package includes the list, so this works from the moment Faro is installed, even before the Mac has reached the update channel. The update channel can replace the list with a newer one without a new version of the app. The list's sources and their credits are in `/Library/Faro/notices/domains.txt`. On a Mac, Faro can only tell which website is open with the Accessibility permission, in Safari, Chrome, Edge, Brave or Arc ([3.5](#35-screen-recording-and-accessibility)). On Windows it reads the address bar in Edge, Chrome, Brave, Firefox, LibreWolf, Waterfox, Zen and Floorp, and needs no permission.
+- **Tamper alerts**, including "Screen Recording is off", a window hidden from Faro, and Faro not seeing the screen ([section 4](#4-known-limitations-and-false-alarms)). On Windows: a stopped service, a killed agent, a changed clock, or Faro's files made writable by a non-administrator ([4.5](#45-on-windows)).
+- **The status menu** in the eye icon (the tray icon on Windows): what Faro is doing and what to do about it, **Report a problem…** and **About Faro…** ([the member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working)).
 - **`sudo /Library/Faro/bin/faro-service status`** (and `--json`), which shows whether monitoring is working, and **`faro-service diagnose`**, which makes a problem report ([section 5](#5-reporting-problems)).
+- **On Windows,** TODO(windows): the commands for the status and the problem report, and how to run them.
 - **Logs** in `/Library/Logs/Faro/faro-service.log` (any administrator of the Mac can read it) and `~/Library/Logs/Faro/faro-agent.log` for each account ([Faro's logs](MEMBER-GUIDE.md#faros-logs)).
-- **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-macs)).
+- **Logs on Windows:** `C:\ProgramData\Faro\logs\faro-service.log` (Administrators can read it) and `%LOCALAPPDATA%\Faro\Logs\faro-agent.log` for each account. Logs rotate at 5 MiB, and 3 old files are kept.
+- **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-computers)). On Windows, the service installs signed MSIs from the update channel itself, after checking the Authenticode signature and that the MSI's version is the expected, newer one.
 - **Licences.** The notices for the software Faro is built from are in `/Library/Faro/notices/` on the Mac (**About Faro…** has a button that opens the folder), and on the **Licences** page (`/licenses`) of every instance's web app.
 - **Admin changes are never silent.** Disabling or re-enabling an account is in the admin log and is emailed to the other admins, and the person and their allies are always told.
 
 ### What isn't built yet
 
-- **Windows and Linux.** There is no package for either.
+- **Linux.** There is no package for it.
+- **Windows on ARM.** Only x64 is supported for now.
+- **Signed Windows packages.** No Windows release is published until a signing provider is chosen. Until then there are only unsigned development builds, which are not safe to use on anyone.
 - **Passkeys.** Everyone signs in with an emailed link.
 - **Web Push and phone notifications.** Alerts come by email only.
 - **S3 storage.** Encrypted attachments are kept on the instance's own disk.
-- **The browser extension.** Faro reads the website from the browser through Accessibility instead, which can't tell a private window from an ordinary one.
+- **The browser extension.** Faro reads the website from the browser instead: through Accessibility on a Mac, and UI Automation on Windows. Neither can tell a private window from an ordinary one.
 - **Pausing.** There is no way for a member to pause monitoring yet: neither the web app nor the menu has one.
 - **An allowlist for apps that hide their windows.** Every third-party app that does it is reported by name ([4.3](#43-a-window-was-hidden-from-faro)).
 - **A desktop app for allies.** Allies read their alerts in the instance's web app.
@@ -69,13 +75,13 @@ Follow [SELF-HOSTING.md](SELF-HOSTING.md): what you need, the three ways to host
 
 ### 2.2 Choose the beta update channel
 
-On the admin console's **Settings** page, under **Software updates**, choose **Beta** and save. (If that section says the server isn't passing on updates yet, set up the mirror first: [2.3](#23-updates-for-members-macs).) You can also set `FARO_UPDATES_CHANNEL=beta` in `faro.env`, or `channel = "beta"` in the `[updates]` section of `faro.toml`. A choice saved on the Settings page wins over the file.
+On the admin console's **Settings** page, under **Software updates**, choose **Beta** and save. (If that section says the server isn't passing on updates yet, set up the mirror first: [2.3](#23-updates-for-members-computers).) You can also set `FARO_UPDATES_CHANNEL=beta` in `faro.env`, or `channel = "beta"` in the `[updates]` section of `faro.toml`. A choice saved on the Settings page wins over the file.
 
-On **Stable**, the default, members' Macs on `0.1.0-beta.1` get no updates at all until `0.1.0` exists. **One release behind** has nothing to offer either.
+On **Stable**, the default, members' computers on `0.1.0-beta.1` get no updates at all until `0.1.0` exists. **One release behind** has nothing to offer either.
 
-### 2.3 Updates for members' Macs
+### 2.3 Updates for members' computers
 
-Members' Macs get updates only through your instance, and only if its update mirror is on. It needs two settings ([Updates for members' computers](SELF-HOSTING.md#updates-for-members-computers)):
+Members' computers get updates only through your instance, and only if its update mirror is on. It needs two settings ([Updates for members' computers](SELF-HOSTING.md#updates-for-members-computers)):
 
 ```sh
 FARO_UPDATES_ROOT=/usr/share/faro/update-root.json   # the project's root of trust
@@ -86,7 +92,7 @@ FARO_UPDATES_UPSTREAM=https://updates.faro-project.org/   # updates.upstream in 
 - Check your copy with `shasum -a 256 update-root.json` and compare it with **[Maintainer: the SHA-256 of `update-root.json` for `0.1.0-beta.1`]**.
 - [Maintainer: confirm when `https://updates.faro-project.org/` serves `0.1.0-beta.1`. Until the first real release, nothing is published there, and the mirror has nothing to fetch.]
 
-Your instance can't change an update: every Mac checks the project's signature itself. A Mac checks your instance for updates about every 6 hours.
+Your instance can't change an update: every computer checks the project's signature itself. A Mac checks your instance for updates about every 6 hours. TODO(windows): how often a Windows PC checks, and confirm that the Windows client checks the project's update signatures, not only the MSI's Authenticode signature.
 
 ### 2.4 What to watch in `faro-server doctor`
 
@@ -94,7 +100,7 @@ Run `faro-server doctor` after setting up, after every upgrade and whenever some
 
 | Line | What you want | If it says something else |
 |---|---|---|
-| `updates` | `[OK  ]` `release metadata version …` | `off: clients get no updates through this instance`: set the two settings in [2.3](#23-updates-for-members-macs). `no release mirrored yet`: the mirror hasn't fetched a release; check the upstream address and the log. `… has expired`: the latest refreshes failed, so Macs take no update until the next good one. |
+| `updates` | `[OK  ]` `release metadata version …` | `off: clients get no updates through this instance`: set the two settings in [2.3](#23-updates-for-members-computers). `no release mirrored yet`: the mirror hasn't fetched a release; check the upstream address and the log. `… has expired`: the latest refreshes failed, so Macs take no update until the next good one. |
 | `smtp` | `[OK  ]` | Fix email first ([section 7](SELF-HOSTING.md#7-email-smtp) of SELF-HOSTING.md). Without email, nobody can sign in, allies get no alerts, and account deletions wait. |
 | `deletions` | `no account deletions pending` | A `WARN` means a deletion has waited more than a week past its 7-day hold, almost always because email isn't getting through. |
 | `database` | `sqlite reachable, schema up to date` | A `postgres` `WARN` line means you're on Postgres, which the beta doesn't support. |
@@ -106,7 +112,7 @@ Run `faro-server doctor` after setting up, after every upgrade and whenever some
 ### 2.5 Before you invite members
 
 - **Read what you can and can't see** ([section 11](SELF-HOSTING.md#11-what-you-as-the-operator-can-and-cannot-see) of SELF-HOSTING.md), publish your own privacy notice ([template](operators/PRIVACY-NOTICE.md)), and read [what to do about apparently illegal material](operators/ILLEGAL-MATERIAL.md). Give that guide to your allies before anything happens.
-- **Only people who choose Faro for themselves.** Don't enroll minors. Faro monitors **every account** on a Mac, including ones added later and the guest account, and everyone who logs in is told. So only install it on a member's own Mac, never on a shared computer such as a lab or office Mac that other people use without having chosen Faro.
+- **Only people who choose Faro for themselves.** Don't enroll minors. Faro monitors **every account** on a Mac, including ones added later and the guest account. On Windows, it monitors every signed-in session of every account, including Remote Desktop. Everyone who logs in is told. So only install it on a member's own computer, never on a shared computer such as a lab or office Mac or PC that other people use without having chosen Faro.
 - **Send your members and allies this guide,** especially [section 4](#4-known-limitations-and-false-alarms), so allies aren't alarmed by the alerts that setting up causes.
 - **Make a second admin** ([More than one admin](SELF-HOSTING.md#more-than-one-admin)), so the instance doesn't depend on one person's email.
 
@@ -119,7 +125,7 @@ The order that works best:
 1. Accept the invitation to your instance and set up your keys ([3.3](#33-your-account-your-keys-and-your-allies)).
 2. Invite your allies and approve them. Then they see everything from the start, including the alerts setting up causes, and they know what to expect ([section 4](#4-known-limitations-and-false-alarms)).
 3. Download and install Faro ([3.1](#31-download-only-the-signed-package), [3.2](#32-install-it)).
-4. Enroll the Mac ([3.4](#34-enroll-the-mac)) and grant the permissions straight away ([3.5](#35-screen-recording-and-accessibility)).
+4. Enroll the computer ([3.4](#34-enroll-the-computer)) and grant the permissions straight away ([3.5](#35-screen-recording-and-accessibility)).
 5. Check that Faro is working ([3.6](#36-check-that-it-works)).
 
 ### 3.1 Download: only the signed package
@@ -136,22 +142,28 @@ pkgutil --check-signature ~/Downloads/Faro-0.1.0-beta.1.pkg
 
 It must say the package is signed with a **Developer ID Installer** certificate and is **notarized** by Apple, and name **[Maintainer: the Developer ID name and Team ID pilots should see]**. If it says `no signature`, delete the file. The package's name has no `-dev` in it.
 
+**On Windows,** the installer is `Faro-0.1.0-beta.1-x64.msi`. No Windows package is published yet, because the signing provider isn't chosen, so there is no Windows link for the beta. Don't install an unsigned build. TODO(windows): how a member checks the MSI's signature, and the publisher name to expect.
+
 ### 3.2 Install it
 
 Double-click the package and follow the installer. Faro installs for the whole Mac, so macOS asks for an administrator name and password. The installer's first page says what Faro does: read it, especially the part about every account being monitored. If the guest account is on, turn it off first (System Settings → Users & Groups).
 
-After installing, the eye icon is in the menu bar and its menu says **Status: Not enrolled**. Faro monitors nothing until you enroll the Mac.
+After installing, the eye icon is in the menu bar and its menu says **Status: Not enrolled**. Faro monitors nothing until you enroll the computer.
+
+On Windows, the MSI installs Faro to `C:\Program Files\Faro` for the whole computer, so Windows asks for an administrator. The Faro Service starts by itself. The tray icon is in the notification area, and its menu also says **Status: Not enrolled**.
 
 ### 3.3 Your account, your keys and your allies
 
 1. **Accept the invitation.** Your operator invites you by email. Open the link and sign in: Faro emails you a sign-in link (there is no password).
-2. **Set up your keys** on the **Keys** page: choose a passphrase, click **Create my keys**, and save the recovery code the page shows once. Then sign your recipient list there (**Sign my recipient list**). Your Macs can't start until you have.
+2. **Set up your keys** on the **Keys** page: choose a passphrase, click **Create my keys**, and save the recovery code the page shows once. Then sign your recipient list there (**Sign my recipient list**). Your computers can't start until you have.
 3. **Invite your allies** on the **Allies** page: type their email address and click **Send invitation**. Each invitation works for 7 days. Send them the [ally guide](ALLY-GUIDE.md).
 4. **Approve each ally** once they have accepted: compare the safety code with them in person or on a call, then approve them on the **Allies** page ([Comparing the safety code](ALLY-GUIDE.md#4-comparing-the-safety-code)). Allies only see what happened after you approved them.
 
-### 3.4 Enroll the Mac
+### 3.4 Enroll the computer
 
-Follow [Adding your Mac to Faro](MEMBER-GUIDE.md): create an enrollment code on the **Computers** page, open the link with **Open in Faro** (or **Enroll this computer…** in the eye icon's menu), check the instance and the list of accounts, let an administrator approve in macOS's password dialog, then compare the code and approve the computer in the web app. Monitoring starts once you approve it.
+Follow [Adding your Mac or Windows PC to Faro](MEMBER-GUIDE.md): create an enrollment code on the **Computers** page, open the link with **Open in Faro** (or **Enroll this computer…** in the eye icon's menu), check the instance and the list of accounts, let an administrator approve in macOS's password dialog, then compare the code and approve the computer in the web app. Monitoring starts once you approve it.
+
+On Windows, the link opens the running Faro Agent, and an administrator approves through the Windows UAC prompt. Cancelling the UAC prompt cancels enrolling. TODO(windows): what the Windows enrollment window shows, including the list of accounts and any guest-account warning.
 
 ### 3.5 Screen Recording and Accessibility
 
@@ -163,9 +175,11 @@ If you missed the question, or the menu says **Status: Screen Recording is off**
 
 [Maintainer: whether recent versions of macOS ask again from time to time if Faro Agent may keep recording the screen, and what members should answer.]
 
+**On Windows,** there is no Screen Recording or Accessibility permission, and Windows asks for nothing. Websites are read with no permission. The lock screen, UAC prompts and the Ctrl+Alt+Del screen can't be captured, so they are recorded as unavailable, not as tamper. Video with copy protection shows black in Faro's captures.
+
 ### 3.6 Check that it works
 
-Click the eye icon. **Status: Monitoring** means Faro is working. The [member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working) says what every other status means and what to do. For more detail, someone with an administrator password can run:
+Click the eye icon (the tray icon on Windows). **Status: Monitoring** means Faro is working. The [member guide's table](MEMBER-GUIDE.md#checking-that-faro-is-working) says what every other status means and what to do. For more detail, someone with an administrator password can run:
 
 ```sh
 sudo /Library/Faro/bin/faro-service status
@@ -187,7 +201,9 @@ sudo /Library/Faro/bin/faro-uninstall
 
 It tells your allies first, with an urgent **"Faro stopped on a computer"** ("Faro was uninstalled from this computer"), then removes Faro, its settings and its logs. If your instance can't be reached, it removes nothing, so that allies aren't left in the dark: try again when the Mac is online. `--force` removes Faro anyway, and allies then see a missed check-in instead.
 
-To stop a Mac reporting without uninstalling, remove it on the **Computers** page (**Remove…**). Your allies get an urgent alert that a computer was removed. Uninstall Faro on it afterwards, too.
+On Windows, uninstall in **Settings → Apps**, or run `msiexec /x` with the MSI. Faro tells the allies first. If the instance can't be reached, it still uninstalls, but then it can't tell them.
+
+To stop a computer reporting without uninstalling, remove it on the **Computers** page (**Remove…**). Your allies get an urgent alert that a computer was removed. Uninstall Faro on it afterwards, too.
 
 ---
 
@@ -217,7 +233,7 @@ To stop a Mac reporting without uninstalling, remove it on the **Computers** pag
 
 - **Ordinary swimwear and other suggestive images aren't flagged.** The image model (OpenNSFW) has no "suggestive" output, only explicit or not. It rates an ordinary swimwear photo about 0.06 to 0.15, and Faro only counts a screen as low at 0.40 and flags it at 0.60. That is deliberate, but it means Faro is mostly blind to suggestive content.
 - **It makes mistakes the other way too.** Faro decides on the Mac, by itself, and a flag is a reason to ask, not a verdict. How the screenshot is prepared for the model is still being decided by the project, so the image checks may change during the beta, through an update.
-- **Websites only with Accessibility, and only in Safari, Chrome, Edge, Brave and Arc.** In Firefox or any other browser, or without Accessibility ([3.5](#35-screen-recording-and-accessibility)), Faro doesn't know which website is open and judges by the screen alone. Private windows can't be told apart from ordinary ones.
+- **Websites only with Accessibility, and only in Safari, Chrome, Edge, Brave and Arc.** In Firefox or any other browser, or without Accessibility ([3.5](#35-screen-recording-and-accessibility)), Faro doesn't know which website is open and judges by the screen alone. Private windows can't be told apart from ordinary ones. On Windows, the browsers are listed in [4.5](#45-on-windows).
 - **Adult sites are flagged; gambling sites are counted.** A site on the adult list is flagged as medium (high if the screen also looks explicit). A gambling site is rated low, which only shows in the daily report's counts.
 - **Faro looks at screenshots now and then, not all the time.** What it doesn't happen to catch isn't reported.
 
@@ -235,6 +251,8 @@ Only macOS's own windows (password and Touch ID prompts, the screenshot toolbar,
 
 So when an alert names a password manager or a video-call app, the member was probably using it. A browser, an image viewer or an app you don't recognize deserves a question. A member who doesn't need the window can close it, or turn off the app's setting that hides its windows from screen sharing, if it has one.
 
+On Windows, the same applies to windows excluded from capture: Faro reports the app by name, with the same kind of alert. Windows' own programs in `System32` and `SystemApps` are allowed, except script hosts ([4.5](#45-on-windows)).
+
 ### 4.4 Not yet tested on real Macs
 
 The Faro project tests a lot automatically, but some things can only be checked by a person on a real Mac, and these haven't been yet. If any of them goes wrong for you, please send a problem report ([section 5](#5-reporting-problems)).
@@ -251,6 +269,18 @@ The Faro project tests a lot automatically, but some things can only be checked 
 - **The uninstaller** on a real Mac.
 - **Older Macs and Intel:** macOS 13.0 to 13.2 hasn't been tried, and Intel Macs have only been checked by the project's automated tests.
 
+### 4.5 On Windows
+
+The same kinds of alert apply to a Windows PC, with these differences.
+
+- **Tamper alerts.** The service stopped (its check-ins stop, so allies get a missed check-in alert), an agent is killed, the clock is changed, or Faro's program files are made writable by someone who isn't an administrator. TODO(windows): does a VM or a VPN raise a tamper alert on Windows, or is it only listed in the daily report, as on a Mac?
+- **Hidden windows.** A window excluded from capture is reported by app name, as on a Mac ([4.3](#43-a-window-was-hidden-from-faro)). Windows' own programs in `System32` and `SystemApps` are allowed, except script hosts.
+- **The lock screen.** The lock screen, UAC prompts and the Ctrl+Alt+Del screen can't be captured. They are recorded as unavailable, not as tamper. Video with copy protection shows black.
+- **Some sessions.** Some Remote Desktop sessions and VMs use the GDI fallback for capture.
+- **Websites.** Faro reads the address bar of Edge, Chrome, Brave, Firefox, LibreWolf, Waterfox, Zen and Floorp. Only `scheme://host/` leaves the computer. Private windows can't be told apart, and Chrome hides `http://`, so a plain-http site shows as https (the host is right).
+- **The notice.** The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications.
+- **Not yet tested.** TODO(windows): the list of what hasn't been tried on a real Windows PC, as in [4.4](#44-not-yet-tested-on-real-macs).
+
 ---
 
 ## 5. Reporting problems
@@ -266,6 +296,8 @@ It lists what it will put in the report and writes nothing until you agree: **s*
 - If macOS asks whether Terminal may access the Desktop, allow it, or save the report elsewhere: `sudo /Library/Faro/bin/faro-service diagnose --output ~/Documents`.
 - Read it before you send it, if you like: it is a folder of plain-text files.
 
+On Windows, TODO(windows): how a member makes a problem report, where the file goes, and what it contains.
+
 Send the zip to **[Maintainer: where to send problem reports]**, with a few words on what went wrong and when.
 
 **Operators:** for a problem with the instance itself, send the output of `faro-server doctor` and the relevant log lines ([Troubleshooting](SELF-HOSTING.md#13-troubleshooting)). Never send `faro.env`, `identity.key`, backup files, setup tokens or sign-in links.
@@ -279,10 +311,10 @@ Send the zip to **[Maintainer: where to send problem reports]**, with a few word
 ### A member leaving
 
 1. **Tell your allies** first, so the alerts don't come as a surprise.
-2. **Uninstall Faro on each Mac** ([3.8](#38-uninstalling)). Allies get "Faro was uninstalled". Problem reports you saved on the Desktop are your own files: Faro doesn't remove them.
+2. **Uninstall Faro on each computer** ([3.8](#38-uninstalling)). Allies get "Faro was uninstalled". Problem reports you saved on the Desktop are your own files: Faro doesn't remove them.
 3. **Delete your account** in the web app: **Settings**, then **Delete your account** at the bottom. Your allies are emailed straight away. For 7 days nothing else changes and you can cancel. After that, once everyone has been told, the instance removes everything about you.
 
-If you delete your account without uninstalling, your Macs keep being monitored until the 7 days are up; after that the instance refuses them, and they report nothing more. Uninstall Faro on them anyway.
+If you delete your account without uninstalling, your computers keep being monitored until the 7 days are up; after that the instance refuses them, and they report nothing more. Uninstall Faro on them anyway.
 
 ### An ally leaving
 
