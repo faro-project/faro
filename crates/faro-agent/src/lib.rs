@@ -53,10 +53,16 @@
 //!   the Accessibility trust check for the `Permission` message. The binary
 //!   also shows the menu-bar icon and the service's notices
 //!   (`faro_platform_macos::ui`, §12), which take the main thread.
-//! * **Windows, Linux**: no platform layer exists yet (ARCHITECTURE.md §3.3
-//!   puts Linux in Phase 2; the Windows named-pipe transport is not written,
-//!   see `faro_ipc`). The binary refuses to start there rather than pretend.
-//!   The run loop itself is Unix-socket based and compiles on any Unix.
+//! * **Windows**: `faro_platform_windows::WinPlatform::agent_platform()`.
+//!   The binary is a GUI-subsystem program (`WM_ENDSESSION` needs that) that
+//!   shows the tray icon, the notice and the enrollment windows
+//!   (`faro_platform_windows::ui`), and takes `faro://` links through
+//!   `faro-agent open-url "<link>"`. The service is a LocalSystem service
+//!   on a named pipe; enrollment is approved by an elevated
+//!   `faro-service approve-enroll` helper (UAC).
+//! * **Linux**: no platform layer yet (ARCHITECTURE.md §3.3 puts it in
+//!   Phase 2). The binary refuses to start there rather than pretend. The
+//!   run loop itself is transport-generic and compiles on any Unix.
 //!
 //! ## Synthetic mode
 //!
@@ -72,11 +78,11 @@ pub mod enroll;
 pub mod frames;
 pub mod identity;
 pub mod notice;
-// The pending-signal queue only serves the agent loop, which is Unix only.
-#[cfg(unix)]
+// The pending-signal queue only serves the agent loop, which runs on Unix and Windows.
+#[cfg(any(unix, windows))]
 mod pending;
 pub mod platform;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod run;
 pub mod status_menu;
 
@@ -85,5 +91,5 @@ pub use notice::{
     window_hidden_notice, LogNotices, NoticeSink, SettingsNotice, SCREEN_RECORDING_OFF,
 };
 pub use platform::{AccessibilityProbe, PlatformWorker, WorkerGone};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use run::{Agent, AgentError, ExitReason, AGENT_VERSION};

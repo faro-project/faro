@@ -27,12 +27,12 @@ use std::future::Future;
 use std::pin::{pin, Pin};
 use std::time::Duration;
 
+use faro_ipc::ClientStream as UnixStream;
 use faro_ipc::{
     hello, AgentConnection, AgentHello, AgentMsg, IpcClient, IpcError, PeerVerifier, ServiceMsg,
     ShutdownReason, WirePermissionState,
 };
 use faro_platform::{AgentPlatform, AppInfo, BrowserContext, PermissionState, TamperSignal};
-use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
@@ -366,9 +366,10 @@ impl Runtime {
     /// Ask the enroll socket whether the computer is enrolled and approved
     /// (`Status`, which changes nothing).
     async fn enrollment(&mut self) -> Enrollment {
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        let socket = faro_ipc::resolve_enroll_socket(&self.config.socket_path, uid);
+        let socket = match faro_ipc::current_account() {
+            Ok(account) => faro_ipc::resolve_enroll_socket(&self.config.socket_path, account),
+            Err(_) => self.config.socket_path.clone(),
+        };
         let answer = crate::enroll::enrollment_status(
             &socket,
             self.config.service_trust,
@@ -635,9 +636,10 @@ async fn goodbye(conn: &mut AgentConnection<UnixStream>) {
 /// The socket to connect to: this account's own socket next to the
 /// configured path if the service bound one, else the configured path.
 fn resolve_socket(base: &std::path::Path) -> std::path::PathBuf {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    faro_ipc::resolve_agent_socket(base, uid)
+    match faro_ipc::current_account() {
+        Ok(account) => faro_ipc::resolve_agent_socket(base, account),
+        Err(_) => base.to_path_buf(),
+    }
 }
 
 #[cfg(test)]

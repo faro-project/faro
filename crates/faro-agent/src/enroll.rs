@@ -266,13 +266,14 @@ fn with_detail(mut s: Screen, detail: &str) -> Screen {
     s
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use flow::{enrollment_status, run_flow, Authorizer, EnrollUi, ANSWER_TIMEOUT, ENROLL_TIMEOUT};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod flow {
     use super::*;
     use crate::ServiceTrust;
+    use faro_ipc::ClientStream as UnixStream;
     use faro_ipc::{
         EnrollClientConnection, EnrollRequest, EnrollResponse, IpcClient, IpcError,
         AUTHORIZATION_LEN,
@@ -280,7 +281,6 @@ mod flow {
     use std::any::Any;
     use std::path::Path;
     use std::time::Duration;
-    use tokio::net::UnixStream;
 
     /// How long `Status` and `Preview` may take (the service's network
     /// timeout is 30 s).

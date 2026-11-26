@@ -1053,12 +1053,14 @@ dependencies = [
  "faro-ipc",
  "faro-platform",
  "faro-platform-macos",
+ "faro-platform-windows",
  "libc",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]

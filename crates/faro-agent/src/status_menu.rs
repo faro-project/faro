@@ -439,6 +439,42 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// The local time's offset from UTC at `at_ms`, in seconds.
+#[cfg(windows)]
+pub fn local_utc_offset_secs(at_ms: i64) -> i64 {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{
+        FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime,
+    };
+    // FILETIME counts 100 ns from 1601; the Unix epoch is 11 644 473 600 s later.
+    let ticks = (at_ms.saturating_add(11_644_473_600_000)).saturating_mul(10_000);
+    let Ok(ticks) = u64::try_from(ticks) else {
+        return 0;
+    };
+    let ft = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    // SAFETY: every pointer is valid for the call.
+    let ok = unsafe {
+        FileTimeToSystemTime(&ft, &mut utc).is_ok()
+            && SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok()
+    };
+    if !ok {
+        return 0;
+    }
+    // Reading the local wall-clock fields as if they were UTC gives the
+    // local time's FILETIME; the difference is the offset.
+    let mut local_as_utc = FILETIME::default();
+    // SAFETY: both pointers are valid for the call.
+    if unsafe { SystemTimeToFileTime(&local, &mut local_as_utc) }.is_err() {
+        return 0;
+    }
+    let ticks = |f: &FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    (ticks(&local_as_utc) as i64 - ticks(&ft) as i64) / 10_000_000
+}
+
 #[cfg(unix)]
 pub fn local_utc_offset_secs(at_ms: i64) -> i64 {
     let t: libc::time_t = (at_ms.div_euclid(1000)) as libc::time_t;
