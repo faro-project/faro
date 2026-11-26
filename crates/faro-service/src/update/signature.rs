@@ -520,8 +520,14 @@ mod tests {
     ) -> Result<Accepted, PackageCheckError> {
         let mut calls = Vec::new();
         let mut run = canned(pkgutil, spctl, &mut calls);
-        check_with(policy, Path::new("/var/faro/updates/ab.pkg"), &mut run)
+        check_with(policy, Path::new(PKG), &mut run)
     }
+
+    /// An absolute path on the platform running the tests.
+    #[cfg(unix)]
+    const PKG: &str = "/var/faro/updates/ab.pkg";
+    #[cfg(windows)]
+    const PKG: &str = r"C:\faro\updates\ab.pkg";
 
     const REQUIRE: PackagePolicy = PackagePolicy::Require { team_id: TEAM };
 
@@ -562,13 +568,13 @@ mod tests {
         let mut calls = Vec::new();
         let r = check_with(
             PackagePolicy::Unchecked,
-            Path::new("/x.pkg"),
+            Path::new(PKG),
             &mut canned(ok(""), ok(""), &mut calls),
         );
         assert!(matches!(r, Err(Unconfirmed(_))), "{r:?}");
         let r = check_with(
             PackagePolicy::RefuseAll,
-            Path::new("/x.pkg"),
+            Path::new(PKG),
             &mut canned(ok(pkgutil_ok(TEAM)), ok(spctl_ok(TEAM)), &mut calls),
         );
         assert!(matches!(r, Err(Unconfirmed(_))), "{r:?}");
@@ -583,7 +589,7 @@ mod tests {
         let mut calls = Vec::new();
         let r = check_with(
             PackagePolicy::Unchecked,
-            Path::new("/x.pkg"),
+            Path::new(PKG),
             &mut canned(ok("Status: no signature"), ok(""), &mut calls),
         );
         assert_eq!(r, Ok(Accepted::Unchecked));
@@ -708,7 +714,7 @@ mod tests {
         let mut fail =
             |_: Tool, _: &Path| -> Result<ToolOutput, String> { Err("no such file".into()) };
         assert!(matches!(
-            check_with(REQUIRE, Path::new("/p.pkg"), &mut fail),
+            check_with(REQUIRE, Path::new(PKG), &mut fail),
             Err(Unconfirmed(_))
         ));
         // A relative path is never handed to a tool.
@@ -727,7 +733,7 @@ mod tests {
         let mut calls = Vec::new();
         let r = check_with(
             REQUIRE,
-            Path::new("/p.pkg"),
+            Path::new(PKG),
             &mut canned(
                 exit(1, "Status: no signature"),
                 ok(spctl_ok(TEAM)),
@@ -739,7 +745,7 @@ mod tests {
         calls.clear();
         let r = check_with(
             REQUIRE,
-            Path::new("/p.pkg"),
+            Path::new(PKG),
             &mut canned(ok(pkgutil_ok(TEAM)), ok(spctl_ok(TEAM)), &mut calls),
         );
         assert!(r.is_ok());
