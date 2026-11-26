@@ -9,6 +9,7 @@
 > - CI builds the container image, but has **not yet tested a running instance inside Docker**. The commands in this guide were checked against the real `faro-server` binary.
 > - **The beta supports SQLite only.** Use the built-in SQLite database, which is the right choice for almost everyone anyway. `faro-server` can also run on Postgres (`FARO_DATABASE_URL=postgres://…`), but that is **experimental and not supported in this release**: nothing tests it, and `faro-server doctor` and the startup log warn about it.
 > - The **update mirror** is built, and the macOS client installs updates from it, but the Faro project hasn't published a signed release or its root of trust yet, so there is nothing to mirror. See [Updates for members' computers](#updates-for-members-computers).
+> - **Running a pilot instance in the closed beta?** Read [BETA.md](BETA.md) too: the `beta` update channel, what to check, and the alerts your members' allies should expect.
 > - Not built yet: passkey sign-in (you sign in with email links for now), Web Push notifications (email only), and S3 storage for attachments (local disk only).
 
 ## Contents
