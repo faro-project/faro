@@ -51,3 +51,12 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | Enrollment stopped to keep you safe | The instance answered with a key that doesn't match your link. Don't continue. Remove the new computer in the web app if it appears there, and tell whoever runs your instance. |
 | This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. |
 | Nothing happens when you click the link | Restart the Mac, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the eye icon and paste the link. |
+
+### Faro's logs
+
+If something doesn't work and you want to see why, or someone helping you asks for the logs, Faro keeps them on the Mac:
+
+- **The service:** `/Library/Logs/Faro/faro-service.log`. Any administrator of the Mac can read it.
+- **The menu-bar agent, for each account:** `~/Library/Logs/Faro/faro-agent.log`, readable only by that account.
+
+Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.

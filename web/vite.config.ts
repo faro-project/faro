@@ -2,6 +2,7 @@ import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, searchForWorkspaceRoot } from 'vite';
+import { thirdPartyNotices } from './scripts/third-party.ts';
 
 // The Faro web app: a static SvelteKit build that faro-server embeds and
 // serves from the instance's own origin (docs/ARCHITECTURE.md §4.5). There is
@@ -32,7 +33,10 @@ export default defineConfig({
 			})
 			// Leave `inlineStyleThreshold` at its default of 0: the server's
 			// CSP allows stylesheets from 'self' only, never inline <style>.
-		})
+		}),
+		// third-party-licenses.txt: the npm packages in the browser bundle,
+		// their licences checked against deny.toml (scripts/third-party.ts).
+		thirdPartyNotices()
 	],
 	resolve: {
 		alias: { $brand: BRAND }

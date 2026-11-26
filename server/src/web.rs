@@ -390,6 +390,28 @@ mod tests {
         assert_eq!(r.headers()[header::CONTENT_TYPE], "application/json");
     }
 
+    /// The web app carries the licences of the npm packages it bundles,
+    /// which `/licenses` shows (FARO_REQUIRE_WEB=1 builds always have them).
+    #[tokio::test]
+    async fn the_embedded_bundle_serves_its_third_party_notices() {
+        if !is_embedded() {
+            return;
+        }
+        let r = serve(embedded(), &Method::GET, "/third-party-licenses.txt");
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        let text = String::from_utf8(body(r).await).unwrap();
+        assert!(text.starts_with("Third-party software in the Faro web app"));
+        assert!(text.contains("@noble/hashes"));
+        assert_eq!(
+            serve(embedded(), &Method::GET, "/licenses").status(),
+            StatusCode::OK
+        );
+    }
+
     #[test]
     fn embedded_bundle_is_sorted_for_binary_search() {
         assert!(embedded().files.windows(2).all(|w| w[0].path < w[1].path));

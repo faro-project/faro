@@ -1,6 +1,7 @@
 //! The regression gate: compare a run's report with the checked-in
 //! baseline and fail when explicit recall or p95 latency got worse by more
-//! than the allowed margin.
+//! than the allowed margin. Another model, preprocessing, policy or machine
+//! is only a note.
 
 use super::{BenchReport, EXPLICIT};
 use crate::error::DetectError;
@@ -127,6 +128,12 @@ pub fn gate(
             mc.name,
             mc.version,
             short(&mc.blake3)
+        ));
+    }
+    if mb.resize != mc.resize {
+        notes.push(format!(
+            "different preprocessing: baseline resize {}, now {}",
+            mb.resize, mc.resize
         ));
     }
     if baseline.policy != current.policy {

@@ -11,8 +11,10 @@
 //! Each image is a folder-labelled PNG (layout in [`set`]). It is read and
 //! decoded into a [`Frame`](faro_platform::Frame), downscaled to
 //! [`MAX_FRAME_SIDE`] exactly as [`Detector::process`](crate::Detector)
-//! does, classified, fused by the [`PolicyEngine`] with no context signals,
-//! and destroyed (zeroized) before the next image is read.
+//! does, classified (preprocessed per the model info's
+//! [`Resize`], as in the service), fused by the [`PolicyEngine`] with no
+//! context signals, and destroyed (zeroized) before the next image is read.
+//! [`compare_text`] puts runs of several modes on one set side by side.
 //!
 //! * **Predicted class.** `neutral` when the policy rates the image clean.
 //!   Otherwise the policy kind of its top reason: `explicit` for any of the
@@ -39,7 +41,7 @@
 //! single image can be identified or recovered. There are no per-image
 //! results anywhere, not even file names.
 
-use crate::classifier::{Classifier, ImageScores, InputSize};
+use crate::classifier::{Classifier, ImageScores, InputSize, Resize};
 use crate::error::DetectError;
 use crate::fusion::{PolicyConfig, PolicyEngine};
 use faro_platform::MAX_FRAME_SIDE;
@@ -51,10 +53,12 @@ use std::time::Instant;
 
 #[cfg(feature = "onnx")]
 pub mod cli;
+mod compare;
 mod gate;
 pub mod set;
 pub mod synthetic;
 
+pub use compare::compare_text;
 pub use gate::{gate, GateCheck, GateConfig, GateOutcome};
 pub use set::{EvalImage, EvalSet};
 
@@ -193,6 +197,7 @@ pub fn run(
             license: info.license.clone(),
             blake3: info.blake3.clone(),
             input_size: info.input_size,
+            resize: info.resize,
             labels: info.labels.clone(),
         },
         policy: PolicySummary {
@@ -252,6 +257,10 @@ pub struct ModelSummary {
     pub license: String,
     pub blake3: String,
     pub input_size: InputSize,
+    /// Absent (direct) in reports from before the setting, and still
+    /// written only when it isn't direct.
+    #[serde(default, skip_serializing_if = "Resize::is_direct")]
+    pub resize: Resize,
     pub labels: Vec<String>,
 }
 
@@ -431,13 +440,14 @@ impl BenchReport {
         let p = &self.policy;
         let _ = writeln!(
             s,
-            "model    {} {} ({}, blake3 {}), input {}x{}",
+            "model    {} {} ({}, blake3 {}), input {}x{}, resize {}",
             m.name,
             m.version,
             m.license,
             m.blake3.get(..16).unwrap_or(&m.blake3),
             m.input_size.width,
-            m.input_size.height
+            m.input_size.height,
+            m.resize
         );
         let ignored = self.ignored_labels();
         if !ignored.is_empty() {

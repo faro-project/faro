@@ -17,8 +17,9 @@
 #      computer (its member removed it, or the account was deleted), allies
 #      were told then: goodbye says so and the uninstall goes ahead.
 #   3. Stop the agent in every account's session, then remove the programs,
-#      the launchd jobs, the state directory (device key and outbox) and the
-#      package receipt.
+#      the launchd jobs, the state directory (device key and outbox), the
+#      logs (/Library/Logs/Faro and each account's ~/Library/Logs/Faro) and
+#      the package receipt.
 #
 #   --yes    don't ask for confirmation
 #   --force  remove Faro even if allies can't be told first
@@ -30,6 +31,10 @@ DAEMON_PLIST=/Library/LaunchDaemons/org.faro.service.plist
 AGENT_PLIST=/Library/LaunchAgents/org.faro.agent.plist
 FARO_DIR=/Library/Faro
 STATE_DIR="/Library/Application Support/Faro"
+# The logs (faro_platform_macos::pkg_layout): the service's, and the
+# agent's in each account's home.
+LOG_DIR=/Library/Logs/Faro
+USERS_DIR=/Users
 SERVICE="$FARO_DIR/bin/faro-service"
 PKG_ID=org.faro.pkg
 # `faro-service goodbye` exit status: written but not delivered.
@@ -117,6 +122,14 @@ done
 # The plists go first, so nothing starts a Faro program again.
 rm -f "$DAEMON_PLIST" "$AGENT_PLIST"
 rm -rf "$STATE_DIR"
+rm -rf "$LOG_DIR"
+# Each account owns its home, so never follow a symbolic link in it: that
+# would let an account point root's rm somewhere else.
+for home in "$USERS_DIR"/*; do
+    logs="$home/Library/Logs/Faro"
+    [[ -L "$home/Library" || -L "$home/Library/Logs" || -L "$logs" ]] && continue
+    [[ -d "$logs" ]] && rm -rf "$logs"
+done
 # Bash has read this script from an open file, so it can remove itself.
 rm -rf "$FARO_DIR"
 pkgutil --forget "$PKG_ID" >/dev/null 2>&1 || true

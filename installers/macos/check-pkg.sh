@@ -10,12 +10,14 @@
 # `--arch` names the one architecture of a local single-architecture build.
 #
 # The image model must be there with its manifest, and the notices with
-# the model's BSD-2-Clause text and attribution and ONNX Runtime's licence
-# and third-party notices. faro-service must link ONNX Runtime statically,
+# the model's BSD-2-Clause text and attribution, ONNX Runtime's licence
+# and third-party notices, and the Rust crates' licences (third-party.txt,
+# from release/notices/third-party.sh). faro-service must link ONNX Runtime statically,
 # and the slice for this Mac's architecture must load the model (licence,
 # attribution and digest checks) and score three solid colours within
-# MODEL_TOLERANCE of Yahoo's original Caffe model. A release package's
-# service must ignore [dev_thresholds] in service.toml.
+# MODEL_TOLERANCE of Yahoo's original Caffe model. Each program must name
+# its log file, and neither launchd job may send output to a file. A
+# release package's service must ignore [dev_thresholds] in service.toml.
 #
 #   installers/macos/check-pkg.sh target/pkg/Faro-<version>[-dev].pkg
 #   installers/macos/check-pkg.sh --arch arm64 target/pkg/Faro-<version>-dev.pkg
@@ -125,6 +127,7 @@ expect "$model_dir/opennsfw-int8.onnx" 100644
 expect "Library/Faro/notices/opennsfw.txt" 100644
 expect "Library/Faro/notices/onnxruntime-LICENSE.txt" 100644
 expect "Library/Faro/notices/onnxruntime-ThirdPartyNotices.txt" 100644
+expect "Library/Faro/notices/third-party.txt" 100644
 # What the licences ask to travel with the binaries.
 notices="$work/payload/Library/Faro/notices"
 has() { grep -qF -- "$2" "$notices/$1" || fail "notices/$1 lacks \"$2\""; }
@@ -135,6 +138,15 @@ has opennsfw.txt "https://github.com/yahoo/open_nsfw/"
 has onnxruntime-LICENSE.txt "Copyright (c) Microsoft Corporation"
 has onnxruntime-LICENSE.txt "Permission is hereby granted, free of charge"
 has onnxruntime-ThirdPartyNotices.txt "THIRD PARTY SOFTWARE NOTICES AND INFORMATION"
+# Both programs' crates, each listed with its licence's text.
+has third-party.txt "Third-party software in the Faro package for macOS"
+for section in faro-service faro-agent; do
+    grep -qx -- "$section" "$notices/third-party.txt" || fail "notices/third-party.txt has no $section section"
+done
+has third-party.txt "  ort "
+has third-party.txt "  ed25519-dalek "
+has third-party.txt "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
+has third-party.txt "Permission is hereby granted, free of charge"
 # The update root of trust: required in a release package (without it the
 # service never updates), optional in a development one.
 update_root="$work/payload/Library/Faro/update-root.json"
@@ -190,6 +202,19 @@ if [[ "$(basename "$pkg")" != *-dev.pkg ]]; then
             || fail "faro-service ($a) was built without the Team ID $team (FARO_TEAM_ID)"
     done
 fi
+# The logs (faro_platform_macos::pkg_layout): the programs write them
+# themselves, rotated, so launchd must not open them as the jobs' stdout or
+# stderr. Each program names its log.
+service_log=/Library/Logs/Faro/faro-service.log
+agent_log=Library/Logs/Faro/faro-agent.log
+LC_ALL=C grep -qaF "$service_log" "$service" || fail "faro-service does not log to $service_log"
+LC_ALL=C grep -qaF "$agent_log" "$work/payload/Library/Faro/Faro Agent.app/Contents/MacOS/faro-agent" \
+    || fail "faro-agent does not log to ~/$agent_log"
+for plist in Library/LaunchDaemons/org.faro.service.plist Library/LaunchAgents/org.faro.agent.plist; do
+    if grep -qE 'Standard(Out|Error)Path' "$work/payload/$plist"; then
+        fail "/$plist sends output to a file; the programs keep their own logs"
+    fi
+done
 if otool -L "$service" | grep -qi onnxruntime; then
     fail "faro-service loads ONNX Runtime dynamically: $(otool -L "$service" | grep -i onnxruntime)"
 fi
