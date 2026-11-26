@@ -40,11 +40,13 @@
 
 	// Pages that are a single form or message read better narrow.
 	let narrow = $derived(
-		/\/(signin|auth\/verify|invite|setup|keys|privacy|licenses)$/.test(page.url.pathname)
+		/\/(signin|auth\/verify|invite|group-invite|setup|keys|privacy|licenses)$/.test(
+			page.url.pathname
+		)
 	);
 
 	type NavItem = {
-		path: '/' | '/activity' | '/computers' | '/allies' | '/supporting' | '/admin';
+		path: '/' | '/activity' | '/computers' | '/allies' | '/groups' | '/supporting' | '/admin';
 		label: string;
 		match: RegExp;
 	};
@@ -60,6 +62,10 @@
 			);
 		}
 		if (r.ally) items.push({ path: '/supporting', label: 'Supporting', match: /^\/supporting/ });
+		// Groups are for everyone with an account: joining one needs neither role.
+		// FIND-A-GROUP (#122): a "Find a group" item goes next to this one,
+		// shown when the instance has listed groups.
+		items.push({ path: '/groups', label: 'Groups', match: /^\/groups/ });
 		if (r.admin) items.push({ path: '/admin', label: 'Admin', match: /^\/admin/ });
 		return items;
 	});
