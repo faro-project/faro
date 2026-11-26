@@ -131,6 +131,10 @@ extern "C" {
         bundle: *const c_void,
         locale_table_name: *const c_void,
     ) -> OSStatus;
+    fn AuthorizationRightRemove(
+        authorization: AuthorizationRef,
+        right_name: *const c_char,
+    ) -> OSStatus;
     fn SecCodeCopySelf(flags: u32, self_code: *mut *const c_void) -> OSStatus;
     fn SecRequirementCreateWithString(
         text: *const c_void,
@@ -508,6 +512,23 @@ impl Owned {
 
 /// Write Faro's rule for [`ENROLL_RIGHT`]. Needs root (or an
 /// administrator): `config.modify.` for a right that exists.
+/// Remove [`ENROLL_RIGHT`] from the authorization database. Root only.
+fn remove_enroll_rule() -> Result<(), AuthError> {
+    let auth = Authorization::new_empty()?;
+    let name = CString::new(ENROLL_RIGHT).map_err(|_| AuthError::Os {
+        call: "AuthorizationRightRemove",
+        status: 0,
+    })?;
+    // SAFETY: `auth.0` is a live AuthorizationRef owned by `auth` for the
+    // call; `name` is NUL-terminated.
+    let status = unsafe { AuthorizationRightRemove(auth.0, name.as_ptr()) };
+    if status == ERR_DENIED && read_rule(ENROLL_RIGHT)?.is_none() {
+        // Already gone.
+        return Ok(());
+    }
+    check("AuthorizationRightRemove", status)
+}
+
 fn write_enroll_rule() -> Result<(), AuthError> {
     let mut entries: Vec<(CFRetained<CFString>, Owned)> = enroll_rule()
         .into_iter()
@@ -601,6 +622,16 @@ pub fn ensure_enroll_rule(may_write: bool) -> Result<RuleCheck, AuthError> {
             Some(why) => AuthError::RuleAltered(why),
             None => AuthError::RuleMissing,
         });
+    }
+    // authd records who created a rule (`identifier`, `requirement`) only
+    // when it is created, and keeps that through later rewrites. So a rule
+    // created by another program, or by an earlier development build (its
+    // requirement is a cdhash), would still name that program after a
+    // rewrite. Remove it first, so the rule is created afresh by this
+    // service. If something defines the right again in between, the read
+    // back below fails, and enrolling stays refused.
+    if problem.is_some() {
+        remove_enroll_rule()?;
     }
     write_enroll_rule()?;
     match read_rule(ENROLL_RIGHT)? {
