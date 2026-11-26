@@ -136,6 +136,12 @@ pub enum EnrollRequest {
         /// with no rights.
         authorization: [u8; AUTHORIZATION_LEN],
     },
+    /// Windows only: an elevated administrator's helper
+    /// (`faro-service approve-enroll`) asks the service to record that it
+    /// approved the enrollment the agent will request with `request` as its
+    /// `authorization`. The service checks the helper's own token. Appended
+    /// last, so the encodings of the other variants are unchanged.
+    ApproveEnroll { request: [u8; AUTHORIZATION_LEN] },
 }
 
 impl fmt::Debug for EnrollRequest {
@@ -152,6 +158,8 @@ impl fmt::Debug for EnrollRequest {
                 .field("target", target)
                 .field("confirmed_instance", &clip(confirmed_instance, 80))
                 .finish_non_exhaustive(),
+            // The request id is the secret the approval is redeemed with.
+            EnrollRequest::ApproveEnroll { .. } => f.write_str("ApproveEnroll(..)"),
         }
     }
 }
@@ -163,6 +171,7 @@ impl EnrollRequest {
             EnrollRequest::Status => "Status",
             EnrollRequest::Preview(_) => "Preview",
             EnrollRequest::Enroll { .. } => "Enroll",
+            EnrollRequest::ApproveEnroll { .. } => "ApproveEnroll",
         }
     }
 }
@@ -248,7 +257,13 @@ pub enum EnrollResponse {
     Status(EnrollStatus),
     Preview(EnrollPreview),
     Enrolled(EnrollDone),
-    Failed { kind: FailureKind, detail: String },
+    Failed {
+        kind: FailureKind,
+        detail: String,
+    },
+    /// The answer to `ApproveEnroll`: the approval was recorded. A refusal
+    /// is `Failed { kind: NotApproved, .. }`. Appended last.
+    Approved,
 }
 
 impl EnrollResponse {
@@ -259,6 +274,7 @@ impl EnrollResponse {
             EnrollResponse::Preview(_) => "Preview",
             EnrollResponse::Enrolled(_) => "Enrolled",
             EnrollResponse::Failed { .. } => "Failed",
+            EnrollResponse::Approved => "Approved",
         }
     }
 
@@ -312,7 +328,7 @@ impl EnrollTarget {
 impl WireMessage for EnrollRequest {
     fn validate(&self) -> Result<()> {
         match self {
-            EnrollRequest::Status => Ok(()),
+            EnrollRequest::Status | EnrollRequest::ApproveEnroll { .. } => Ok(()),
             EnrollRequest::Preview(t) => t.validate(),
             EnrollRequest::Enroll {
                 target,
@@ -368,6 +384,7 @@ impl WireMessage for EnrollResponse {
                 check_len("member_fingerprint", &d.member_fingerprint, MAX_TEXT_LEN)
             }
             EnrollResponse::Failed { detail, .. } => check_len("detail", detail, MAX_DETAIL_LEN),
+            EnrollResponse::Approved => Ok(()),
         }
     }
 
@@ -396,6 +413,9 @@ mod tests {
                 confirmed_identity: [7; 32],
                 authorization: [9; AUTHORIZATION_LEN],
             },
+            EnrollRequest::ApproveEnroll {
+                request: [9; AUTHORIZATION_LEN],
+            },
         ]
     }
 
@@ -423,6 +443,7 @@ mod tests {
                 member_key_checked: true,
             }),
             EnrollResponse::failed(FailureKind::WrongCode, "nope"),
+            EnrollResponse::Approved,
         ]
     }
 

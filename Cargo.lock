@@ -1229,6 +1229,7 @@ dependencies = [
  "faro-ipc",
  "faro-platform",
  "faro-platform-macos",
+ "faro-platform-windows",
  "faro-proto",
  "faro-server",
  "faro-update",
@@ -1255,6 +1256,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows",
  "zeroize",
 ]
 

@@ -70,9 +70,9 @@ use super::{
     BoxFuture, CaptureTarget, FrameSource, SessionStatus, SourceCommand, SourceEvent, SourceIo,
 };
 use faro_ipc::{
-    read_agent_hello, welcome_agent, AgentHello, AgentMsg, BindOptions, IpcError, IpcServer,
-    MemberStatus, PeerInfo, ServiceConnection, ServiceMsg, ShutdownReason, StatusReport,
-    HELLO_TIMEOUT,
+    read_agent_hello, welcome_agent, AccountId, AgentHello, AgentMsg, BindOptions, IpcError,
+    IpcServer, MemberStatus, PeerInfo, ServerStream, ServiceConnection, ServiceMsg, ShutdownReason,
+    StatusReport, HELLO_TIMEOUT,
 };
 use faro_proto::body::account_label;
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,7 +80,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -114,7 +113,7 @@ pub enum PeerPolicy {
 #[derive(Clone)]
 pub struct IpcFrameSource {
     socket_path: PathBuf,
-    allowed_uids: BTreeSet<u32>,
+    allowed_uids: BTreeSet<AccountId>,
     ping_every: Duration,
     ping_timeout: Duration,
     code_requirement: Option<String>,
@@ -140,7 +139,7 @@ impl fmt::Debug for IpcFrameSource {
 impl IpcFrameSource {
     pub fn new(
         socket_path: impl Into<PathBuf>,
-        allowed_uids: impl IntoIterator<Item = u32>,
+        allowed_uids: impl IntoIterator<Item = AccountId>,
     ) -> Self {
         IpcFrameSource {
             socket_path: socket_path.into(),
@@ -149,7 +148,7 @@ impl IpcFrameSource {
             ping_timeout: faro_ipc::DEFAULT_PING_TIMEOUT,
             code_requirement: None,
             sessions: sessions::default_lister(),
-            per_account_sockets: euid() == 0,
+            per_account_sockets: sessions::is_privileged(),
             capture_window: CAPTURE_ANSWER_WINDOW,
             session_end_grace: SESSION_END_GRACE,
             recheck: SESSION_RECHECK,
@@ -208,7 +207,7 @@ pub fn peer_policy(code_requirement: Option<&str>) -> Result<PeerPolicy, String>
         codesign::check_requirement(r).map_err(|e| format!("ipc.agent_requirement: {e}"))?;
         return Ok(PeerPolicy::CodeRequirement(r.to_owned()));
     }
-    if euid() != 0 || cfg!(feature = "dev") {
+    if !sessions::is_privileged() || cfg!(feature = "dev") {
         return Ok(PeerPolicy::UidOnly);
     }
     Err(
@@ -232,15 +231,23 @@ pub(crate) fn check_policy(
     }
 }
 
-fn euid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
+/// The account a connecting peer runs as: its uid on Unix, the SID of the
+/// token it opened the pipe with on Windows.
+pub(crate) fn peer_account(peer: &PeerInfo) -> Option<AccountId> {
+    #[cfg(unix)]
+    {
+        Some(peer.uid)
+    }
+    #[cfg(windows)]
+    {
+        peer.windows_sid
+    }
 }
 
 /// The last good session list, shared with the peer verifiers.
 type SessionSnapshot = Arc<Mutex<Vec<SessionEntry>>>;
 
-fn snapshot_uids(s: &SessionSnapshot) -> BTreeSet<u32> {
+fn snapshot_uids(s: &SessionSnapshot) -> BTreeSet<AccountId> {
     s.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .iter()
@@ -252,33 +259,62 @@ fn snapshot_uids(s: &SessionSnapshot) -> BTreeSet<u32> {
 #[derive(Clone)]
 enum Admit {
     /// A per-account socket: only that account (or an allowed uid).
-    Account(u32),
+    Account(AccountId),
     /// The development socket: any uid that owns a listed session.
     AnySession(SessionSnapshot),
 }
 
 fn verifier(
     admit: Admit,
-    allowed: BTreeSet<u32>,
+    allowed: BTreeSet<AccountId>,
     policy: Result<PeerPolicy, String>,
 ) -> impl Fn(&PeerInfo) -> faro_ipc::Result<()> + Send + Sync {
     move |peer: &PeerInfo| {
-        let ok = allowed.contains(&peer.uid)
-            || match &admit {
-                Admit::Account(uid) => peer.uid == *uid,
-                Admit::AnySession(s) => snapshot_uids(s).contains(&peer.uid),
-            };
+        let account = peer_account(peer);
+        let ok = account.is_some_and(|a| {
+            allowed.contains(&a)
+                || match &admit {
+                    Admit::Account(uid) => a == *uid,
+                    Admit::AnySession(s) => snapshot_uids(s).contains(&a),
+                }
+        });
         if !ok {
             return Err(IpcError::peer_rejected(format!(
-                "uid {} has no session this socket serves",
-                peer.uid
+                "account {} has no session this socket serves",
+                account.map_or_else(|| "?".to_owned(), |a| a.to_string())
             )));
         }
         check_policy(peer, &policy)
     }
 }
 
+/// How a listener is bound: an owner-only socket (mode 0600, owned by the
+/// account) on Unix; a pipe whose DACL names the account on Windows.
+/// `None`: the account this process runs as (a development service).
+pub(crate) fn bind_options(owner: Option<AccountId>) -> BindOptions {
+    #[cfg(unix)]
+    {
+        BindOptions {
+            mode: 0o600,
+            group: None,
+            owner,
+        }
+    }
+    #[cfg(windows)]
+    {
+        owner.map_or_else(BindOptions::default, BindOptions::for_account)
+    }
+}
+
+/// Create the socket's directory (0755) if it is missing. A pipe name has
+/// no directory.
+#[cfg(windows)]
+pub(crate) fn ensure_socket_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Create the socket's directory (0755) if it is missing.
+#[cfg(unix)]
 pub(crate) fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         if !dir.exists() {
@@ -293,7 +329,7 @@ pub(crate) fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
 
 /// A connection whose `Hello` was read but not yet answered.
 struct Arrival {
-    conn: ServiceConnection<UnixStream>,
+    conn: ServiceConnection<ServerStream>,
     hello: AgentHello,
 }
 
@@ -342,7 +378,7 @@ struct Inbound {
 /// Own one agent's connection: forward what it sends, send what the source
 /// queues. Ends when either side closes; a `Shutdown` is the last message.
 async fn serve_agent(
-    mut conn: ServiceConnection<UnixStream>,
+    mut conn: ServiceConnection<ServerStream>,
     conn_id: u64,
     mut outbox: mpsc::Receiver<ServiceMsg>,
     inbox: mpsc::Sender<Inbound>,
@@ -477,7 +513,7 @@ struct Run {
     inbox_tx: mpsc::Sender<Inbound>,
     sessions: Vec<SessionEntry>,
     snapshot: SessionSnapshot,
-    listeners: BTreeMap<Option<u32>, Listener>,
+    listeners: BTreeMap<Option<AccountId>, Listener>,
     agents: BTreeMap<String, Agent>,
     departed: BTreeMap<String, Departure>,
     /// The last `Sessions` sent to the core.
@@ -519,13 +555,14 @@ impl Run {
         self.sessions.iter().find(|s| s.id == session)
     }
 
-    fn bind(&self, path: &Path, owner: Option<u32>, admit: Admit) -> faro_ipc::Result<IpcServer> {
+    fn bind(
+        &self,
+        path: &Path,
+        owner: Option<AccountId>,
+        admit: Admit,
+    ) -> faro_ipc::Result<IpcServer> {
         ensure_socket_dir(path)?;
-        let options = BindOptions {
-            mode: 0o600,
-            group: None,
-            owner,
-        };
+        let options = bind_options(owner);
         IpcServer::bind_with(
             path,
             options,
@@ -536,7 +573,7 @@ impl Run {
     /// Bind sockets for accounts that gained a session, close those whose
     /// sessions all ended.
     fn sync_listeners(&mut self) {
-        let wanted: BTreeSet<Option<u32>> = if self.cfg.per_account_sockets {
+        let wanted: BTreeSet<Option<AccountId>> = if self.cfg.per_account_sockets {
             self.sessions
                 .iter()
                 .map(|s| s.uid)
@@ -588,6 +625,13 @@ impl Run {
     }
 
     async fn report_sessions(&mut self) -> Step {
+        #[cfg(windows)]
+        crate::win::set_connected_agents(
+            self.agents
+                .keys()
+                .filter_map(|id| id.strip_prefix("wts:")?.parse().ok())
+                .collect(),
+        );
         let now = self.statuses();
         if self.reported.as_ref() == Some(&now) {
             return Ok(());
@@ -790,7 +834,7 @@ impl Run {
     }
 
     async fn on_arrival(&mut self, mut arrival: Arrival) -> Step {
-        let peer_uid = arrival.conn.peer().map(|p| p.uid);
+        let peer_uid = arrival.conn.peer().and_then(peer_account);
         let hello = arrival.hello;
         if self.listed(&hello.session).is_none() {
             // Perhaps a login the last recheck has not seen yet.
@@ -801,7 +845,7 @@ impl Run {
             _ => false,
         };
         if !owner_ok {
-            tracing::warn!(session = %hello.session, uid = ?peer_uid, "refusing an agent for a session that is not listed or not its own");
+            tracing::warn!(session = %hello.session, uid = ?peer_uid.map(|a| a.to_string()), "refusing an agent for a session that is not listed or not its own");
             return Ok(());
         }
         if self.agents.contains_key(&hello.session) {
@@ -809,7 +853,7 @@ impl Run {
             // dropped by the ping check). A second connection is either an
             // impostor or a relaunched agent racing the old one's close;
             // closing before `Welcome` makes a real agent retry shortly.
-            tracing::warn!(session = %hello.session, uid = ?peer_uid, "refusing a second agent connection for a session whose agent is connected");
+            tracing::warn!(session = %hello.session, uid = ?peer_uid.map(|a| a.to_string()), "refusing a second agent connection for a session whose agent is connected");
             return Ok(());
         }
         if let Err(e) = welcome_agent(&mut arrival.conn).await {
@@ -834,7 +878,7 @@ impl Run {
             rx,
             self.inbox_tx.clone(),
         ));
-        tracing::info!(pid = hello.pid, uid = ?peer_uid, account = %account, version = %hello.agent_version, "agent connected");
+        tracing::info!(pid = hello.pid, uid = ?peer_uid.map(|a| a.to_string()), account = %account, version = %hello.agent_version, "agent connected");
         self.agents.insert(
             hello.session.clone(),
             Agent {
@@ -1043,7 +1087,30 @@ impl Run {
             let _ = tokio::time::timeout(left, tx.closed()).await;
         }
         self.listeners.clear();
+        #[cfg(windows)]
+        crate::win::set_connected_agents(Default::default());
     }
+}
+
+/// Session changes the SCM reported (Windows), so the list is re-read at
+/// once rather than at the next recheck. Never ready elsewhere.
+#[cfg(windows)]
+fn session_change_feed() -> Option<watch::Receiver<u64>> {
+    Some(crate::win::session_changes())
+}
+
+#[cfg(not(windows))]
+fn session_change_feed() -> Option<watch::Receiver<u64>> {
+    None
+}
+
+async fn session_changed(feed: &mut Option<watch::Receiver<u64>>) {
+    if let Some(rx) = feed {
+        if rx.changed().await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }
 
 impl IpcFrameSource {
@@ -1063,6 +1130,7 @@ impl IpcFrameSource {
         let (inbox_tx, mut inbox) = mpsc::channel(32);
         let mut ping_tick = tokio::time::interval(self.ping_every);
         ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut session_feed = session_change_feed();
         let mut recheck = tokio::time::interval(self.recheck);
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut run = Run {
@@ -1099,6 +1167,7 @@ impl IpcFrameSource {
                 Some(m) = inbox.recv() => run.on_inbound(m).await,
                 _ = ping_tick.tick() => run.on_ping().await,
                 _ = recheck.tick() => run.on_recheck().await,
+                _ = session_changed(&mut session_feed) => run.on_recheck().await,
                 r = run.status.changed(), if run.status_open => {
                     match r {
                         Ok(()) => run.offer_status_to_all(),
@@ -1278,6 +1347,10 @@ mod tests {
     use super::*;
     use faro_ipc::{hello, AgentConnection, IpcClient, WireFrame, WirePixelFormat};
 
+    fn own_account() -> AccountId {
+        faro_ipc::current_account().unwrap()
+    }
+
     fn wire_frame() -> WireFrame {
         WireFrame::new(4, 4, WirePixelFormat::Rgba8, 0, vec![7u8; 64]).unwrap()
     }
@@ -1299,7 +1372,7 @@ mod tests {
         fn log_in(&self, id: &str, active: bool) {
             self.0.lock().unwrap().push(SessionEntry {
                 id: id.into(),
-                uid: euid(),
+                uid: own_account(),
                 account: format!("acct-{id}"),
                 active,
             });
@@ -1333,11 +1406,22 @@ mod tests {
             // Private, whatever the umask: the socket checks refuse a group-writable
             // directory, and tempfile leaves the mode to the umask (002 on many Linux
             // accounts).
+            #[cfg(unix)]
             let dir = tempfile::Builder::new()
                 .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
                 .tempdir()
                 .unwrap();
+            #[cfg(windows)]
+            let dir = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
             let sock = dir.path().join("run").join("agent.sock");
+            // A pipe name is unique per harness; the temp directory only
+            // supplies the unique part.
+            #[cfg(windows)]
+            let sock = PathBuf::from(format!(
+                r"\\.\pipe\faro-test-{}\agent",
+                dir.path().file_name().unwrap().to_string_lossy()
+            ));
             let mut src = IpcFrameSource::new(&sock, [])
                 .with_ping(Duration::from_millis(50), Duration::from_secs(60))
                 .with_sessions(logins.lister())
@@ -1357,6 +1441,8 @@ mod tests {
                 status: status_rx,
             }));
             assert!(matches!(ev.recv().await, Some(SourceEvent::Sessions(_))));
+            // The listeners are bound before the first `Sessions` report.
+            #[cfg(unix)]
             for _ in 0..400 {
                 if sock.exists() {
                     break;
@@ -1375,15 +1461,29 @@ mod tests {
 
         /// Connect an agent for `session`; returns once the source reports
         /// it connected.
-        async fn connect(&mut self, session: &str) -> AgentConnection<UnixStream> {
-            let mut agent = IpcClient::connect(&self.sock).await.unwrap();
-            hello(
-                &mut agent,
-                AgentHello::new("test-agent", session, "me"),
-                Duration::from_secs(5),
-            )
-            .await
-            .unwrap();
+        async fn connect(&mut self, session: &str) -> AgentConnection<faro_ipc::ClientStream> {
+            // A pipe notices an agent's departure a moment after a socket
+            // would, so a reconnect can be refused (before `Welcome`, as a
+            // real agent expects) while the old connection is still being
+            // cleared. Retry like a real agent.
+            let mut tries = 0;
+            let agent = loop {
+                let mut agent = IpcClient::connect(&self.sock).await.unwrap();
+                let said = hello(
+                    &mut agent,
+                    AgentHello::new("test-agent", session, "me"),
+                    Duration::from_secs(5),
+                )
+                .await;
+                match said {
+                    Ok(_) => break agent,
+                    Err(_) if tries < 50 => {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(e) => panic!("agent handshake: {e}"),
+                }
+            };
             self.until(
                 |e| matches!(e, SourceEvent::AgentConnected { session: s, .. } if s == session),
             )
@@ -1420,7 +1520,7 @@ mod tests {
 
     /// Answer pings until `want` arrives.
     async fn serve_until(
-        agent: &mut AgentConnection<UnixStream>,
+        agent: &mut AgentConnection<faro_ipc::ClientStream>,
         mut want: impl FnMut(&ServiceMsg) -> bool,
     ) -> ServiceMsg {
         loop {
@@ -1436,7 +1536,7 @@ mod tests {
     }
 
     /// Answer pings for `d` of real time.
-    async fn serve_for(agent: &mut AgentConnection<UnixStream>, d: Duration) {
+    async fn serve_for(agent: &mut AgentConnection<faro_ipc::ClientStream>, d: Duration) {
         let _ = tokio::time::timeout(d, serve_until(agent, |_| false)).await;
     }
 
@@ -1590,13 +1690,16 @@ mod tests {
 
         // Frames for requests that were never made: a flood ends it.
         for i in 0..=(MAX_UNSOLICITED + MAX_LATE) {
-            agent
+            let sent = agent
                 .send(&AgentMsg::Frames {
                     captured_at_mono_ms: 1_000 + u64::from(i),
                     frames: vec![wire_frame()],
                 })
-                .await
-                .unwrap();
+                .await;
+            // The service may close the connection before the last one.
+            if sent.is_err() {
+                break;
+            }
         }
         match h
             .until(|e| matches!(e, SourceEvent::AgentDisconnected { .. }))
@@ -1836,7 +1939,7 @@ mod tests {
     #[test]
     fn uid_only_policy_is_for_non_root_or_dev() {
         let src = IpcFrameSource::new("/tmp/x.sock", []);
-        if euid() != 0 || cfg!(feature = "dev") {
+        if !sessions::is_privileged() || cfg!(feature = "dev") {
             assert_eq!(src.peer_policy(), Ok(PeerPolicy::UidOnly));
         } else {
             assert!(src.peer_policy().is_err());
@@ -1887,7 +1990,7 @@ mod tests {
     }
 
     /// Answer pings until a `Status` arrives.
-    async fn next_status(agent: &mut AgentConnection<UnixStream>) -> MemberStatus {
+    async fn next_status(agent: &mut AgentConnection<faro_ipc::ClientStream>) -> MemberStatus {
         match serve_until(agent, |m| matches!(m, ServiceMsg::Status(_))).await {
             ServiceMsg::Status(s) => s,
             _ => unreachable!(),
