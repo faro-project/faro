@@ -76,9 +76,11 @@ impl FrameSource for InProcessFrameSource {
 
     fn run(self: Box<Self>, io: SourceIo) -> BoxFuture {
         Box::pin(async move {
+            // No agent, so no status menu to feed.
             let SourceIo {
                 mut commands,
                 events,
+                ..
             } = io;
             let platform = self.platform;
             // One session that is always at the screen; it has no OS
@@ -205,10 +207,7 @@ mod tests {
         ));
         let (cmd_tx, cmd_rx) = mpsc::channel(4);
         let (ev_tx, mut ev_rx) = mpsc::channel(16);
-        let task = tokio::spawn(src.run(SourceIo {
-            commands: cmd_rx,
-            events: ev_tx,
-        }));
+        let task = tokio::spawn(src.run(SourceIo::new(cmd_rx, ev_tx)));
         assert!(matches!(
             ev_rx.recv().await,
             Some(SourceEvent::AgentConnected { .. })

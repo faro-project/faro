@@ -214,6 +214,17 @@ impl Uploader {
     }
 }
 
+/// A heartbeat failure that means the instance can't be reached: no
+/// answer at all, or a server error (a proxy in front of a stopped
+/// instance answers 502). The status menu shows it as "Can't reach …".
+fn unreachable(e: &ClientError) -> bool {
+    match e {
+        ClientError::Transport(_) => true,
+        ClientError::Api { status, .. } => status.is_server_error(),
+        _ => false,
+    }
+}
+
 fn is_permanent_report_error(e: &ClientError) -> bool {
     match e.status() {
         Some(s) => {
@@ -268,11 +279,22 @@ impl Heartbeater {
         }
         let hb = self.build(state).await.map_err(UploadStop::Outbox)?;
         let signed = self.key.sign_heartbeat(hb);
-        let resp = self
-            .client
-            .heartbeat(&signed)
-            .await
-            .map_err(UploadStop::Client)?;
+        let answer = self.client.heartbeat(&signed).await;
+        let now = self.clock.wall_ms();
+        match &answer {
+            Err(e) if unreachable(e) => self.status.update_if(|s| {
+                let first = s.unreachable_since_ms.is_none();
+                s.unreachable_since_ms.get_or_insert(now);
+                first
+            }),
+            // An answer, even a refusal: the instance is there.
+            Ok(_) | Err(ClientError::Api { .. }) => self.status.update(|s| {
+                s.last_contact_ms = Some(now);
+                s.unreachable_since_ms = None;
+            }),
+            Err(_) => {}
+        }
+        let resp = answer.map_err(UploadStop::Client)?;
         if let Some(acked) = resp.acked_through {
             match self.outbox.run(move |o| o.ack_through(acked)).await {
                 Ok(_) | Err(OutboxError::AckBeyondHead { .. }) => {}
@@ -405,5 +427,27 @@ pub async fn periodic<F, Fut>(
         } else {
             wait = backoff.next_delay().min(every);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api(status: u16) -> ClientError {
+        ClientError::Api {
+            status: StatusCode::from_u16(status).unwrap(),
+            code: "x".into(),
+            message: "y".into(),
+        }
+    }
+
+    #[test]
+    fn server_errors_are_unreachable_and_refusals_are_not() {
+        assert!(unreachable(&api(502)));
+        assert!(unreachable(&api(503)));
+        assert!(!unreachable(&api(403)));
+        assert!(!unreachable(&api(401)));
+        assert!(!unreachable(&ClientError::NoCredentials));
     }
 }

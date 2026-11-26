@@ -248,7 +248,14 @@ impl EnrollService {
 
     /// Answer one request.
     pub async fn handle(&self, req: EnrollRequest) -> EnrollResponse {
-        tracing::info!(request = req.kind(), "enroll request from the agent");
+        // The status menu asks for `Status` about every 30 s while the
+        // agent has no session connection: keep that out of the log.
+        let status_only = matches!(req, EnrollRequest::Status);
+        if status_only {
+            tracing::debug!("enroll status request from the agent");
+        } else {
+            tracing::info!(request = req.kind(), "enroll request from the agent");
+        }
         let answer = match req {
             EnrollRequest::Status => self.status(),
             EnrollRequest::Preview(target) => self.preview(&target).await,
@@ -271,6 +278,9 @@ impl EnrollService {
         match &resp {
             EnrollResponse::Failed { kind, detail } => {
                 tracing::info!(?kind, %detail, "enroll request refused")
+            }
+            other if status_only => {
+                tracing::debug!(response = other.kind(), "enroll request answered")
             }
             other => tracing::info!(response = other.kind(), "enroll request answered"),
         }

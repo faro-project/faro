@@ -58,6 +58,11 @@
 //!   The session list, with whether each session has an agent, is reported
 //!   to the core as [`SourceEvent::Sessions`], so it can raise tamper for a
 //!   session nobody monitors.
+//! * **Status menu.** Each agent gets `ServiceMsg::Status` right after
+//!   `Welcome` and whenever its view changes: [`MemberStatus::for_session`]
+//!   of the service's latest report (`SourceIo::status`), so one account's
+//!   agent never hears another's name, session or permissions. Only the
+//!   service sends it; nothing an agent sends changes it.
 
 use super::codesign;
 use super::sessions::{self, SessionEntry, SessionLister};
@@ -66,7 +71,8 @@ use super::{
 };
 use faro_ipc::{
     read_agent_hello, welcome_agent, AgentHello, AgentMsg, BindOptions, IpcError, IpcServer,
-    PeerInfo, ServiceConnection, ServiceMsg, ShutdownReason, HELLO_TIMEOUT,
+    MemberStatus, PeerInfo, ServiceConnection, ServiceMsg, ShutdownReason, StatusReport,
+    HELLO_TIMEOUT,
 };
 use faro_proto::body::account_label;
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,7 +81,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -443,6 +449,8 @@ struct Agent {
     ping: Option<(u64, Instant)>,
     goodbye: bool,
     cached: Cached,
+    /// The status view last queued to this agent.
+    status_sent: Option<MemberStatus>,
 }
 
 /// An agent that closed its connection; whether that was expected is
@@ -478,6 +486,10 @@ struct Run {
     target: Option<CaptureTarget>,
     next_conn: u64,
     nonce: u64,
+    /// The service's status reports, made into each agent's view.
+    status: watch::Receiver<Option<Arc<StatusReport>>>,
+    /// The feed's sender is still there (a closed feed is not polled).
+    status_open: bool,
 }
 
 /// The core is gone: stop.
@@ -725,6 +737,35 @@ impl Run {
         self.sync_target().await
     }
 
+    /// Queue `session`'s status view to its agent if it changed since the
+    /// last one (`ServiceMsg::Status`, for the status menu). The view is
+    /// [`MemberStatus::for_session`]: that session's own state and the
+    /// computer's, nothing about other accounts. Best effort: a full queue
+    /// skips it (the next change brings it up to date) rather than counting
+    /// against the agent, since the service, not the agent, chose to send.
+    fn offer_status(&mut self, session: &str) {
+        let Some(report) = self.status.borrow().clone() else {
+            return;
+        };
+        let Some(a) = self.agents.get_mut(session) else {
+            return;
+        };
+        let view = MemberStatus::for_session(&report, session);
+        if a.status_sent.as_ref() == Some(&view) {
+            return;
+        }
+        if a.tx.try_send(ServiceMsg::Status(view.clone())).is_ok() {
+            a.status_sent = Some(view);
+        }
+    }
+
+    fn offer_status_to_all(&mut self) {
+        let sessions: Vec<String> = self.agents.keys().cloned().collect();
+        for s in sessions {
+            self.offer_status(&s);
+        }
+    }
+
     /// Queue a message to an agent; a full or closed queue means the agent
     /// is gone or stuck.
     async fn send_to(&mut self, session: &str, msg: ServiceMsg) -> Step {
@@ -808,8 +849,10 @@ impl Run {
                 ping: None,
                 goodbye: false,
                 cached: Cached::default(),
+                status_sent: None,
             },
         );
+        self.offer_status(&hello.session);
         self.emit(SourceEvent::AgentConnected {
             session: hello.session,
             account,
@@ -1008,6 +1051,7 @@ impl IpcFrameSource {
         let SourceIo {
             mut commands,
             events,
+            status,
         } = io;
         let policy = self.peer_policy();
         if let Err(why) = &policy {
@@ -1036,6 +1080,8 @@ impl IpcFrameSource {
             target: None,
             next_conn: 0,
             nonce: 0,
+            status,
+            status_open: true,
         };
         run.refresh_sessions();
         run.sync_listeners();
@@ -1053,6 +1099,13 @@ impl IpcFrameSource {
                 Some(m) = inbox.recv() => run.on_inbound(m).await,
                 _ = ping_tick.tick() => run.on_ping().await,
                 _ = recheck.tick() => run.on_recheck().await,
+                r = run.status.changed(), if run.status_open => {
+                    match r {
+                        Ok(()) => run.offer_status_to_all(),
+                        Err(_) => run.status_open = false,
+                    }
+                    Ok(())
+                }
             };
             if step.is_err() {
                 break;
@@ -1271,6 +1324,7 @@ mod tests {
         cmd: mpsc::Sender<SourceCommand>,
         ev: mpsc::Receiver<SourceEvent>,
         task: JoinHandle<()>,
+        status: watch::Sender<Option<Arc<StatusReport>>>,
         _dir: tempfile::TempDir,
     }
 
@@ -1296,9 +1350,11 @@ mod tests {
             src.per_account_sockets = false;
             let (cmd, cmd_rx) = mpsc::channel(4);
             let (ev_tx, mut ev) = mpsc::channel(64);
+            let (status, status_rx) = watch::channel(None);
             let task = tokio::spawn(Box::new(src).run(SourceIo {
                 commands: cmd_rx,
                 events: ev_tx,
+                status: status_rx,
             }));
             assert!(matches!(ev.recv().await, Some(SourceEvent::Sessions(_))));
             for _ in 0..400 {
@@ -1312,6 +1368,7 @@ mod tests {
                 cmd,
                 ev,
                 task,
+                status,
                 _dir: dir,
             }
         }
@@ -1802,5 +1859,77 @@ mod tests {
             let req = src.with_code_requirement(Some("anything".into()));
             assert!(req.peer_policy().is_err(), "no silent fallback to uid-only");
         }
+    }
+
+    fn status_report(target: &str, failures: u32) -> StatusReport {
+        use faro_ipc::status::{CaptureState, SessionReport};
+        let mut r = StatusReport {
+            instance_name: Some("Sam's Faro".into()),
+            instance_url: Some("https://faro.example.org/".into()),
+            ..StatusReport::default()
+        };
+        for s in ["s1", "s2"] {
+            r.sessions.push(SessionReport {
+                session: s.into(),
+                account: format!("acct-{s}"),
+                at_screen: s == target,
+                agent_connected: true,
+                capture_target: s == target,
+                ..SessionReport::default()
+            });
+        }
+        r.capture.state = CaptureState::Active;
+        r.capture.target_account = Some(format!("acct-{target}"));
+        r.capture.consecutive_failures = failures;
+        r.permissions.account = Some(format!("acct-{target}"));
+        r.permissions.accessibility = Some(true);
+        r
+    }
+
+    /// Answer pings until a `Status` arrives.
+    async fn next_status(agent: &mut AgentConnection<UnixStream>) -> MemberStatus {
+        match serve_until(agent, |m| matches!(m, ServiceMsg::Status(_))).await {
+            ServiceMsg::Status(s) => s,
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn each_agent_gets_its_own_status_view() {
+        use faro_ipc::status::CaptureState;
+        let logins = Logins::with(&[("s1", true), ("s2", false)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        h.status
+            .send(Some(Arc::new(status_report("s1", 0))))
+            .unwrap();
+
+        // On connecting, each agent is sent its view at once.
+        let mut a1 = h.connect("s1").await;
+        let s1 = next_status(&mut a1).await;
+        assert_eq!(s1.capture, Some(CaptureState::Active));
+        assert_eq!(s1.accessibility, Some(true));
+        assert_eq!(s1.instance_name, "Sam's Faro");
+        let mut a2 = h.connect("s2").await;
+        let s2 = next_status(&mut a2).await;
+        assert_eq!((s2.capture, s2.accessibility), (None, None));
+        assert_eq!(s2.instance_url, "https://faro.example.org/");
+
+        // A change only one view sees goes to that agent only.
+        h.status
+            .send(Some(Arc::new(status_report("s1", 4))))
+            .unwrap();
+        assert_eq!(next_status(&mut a1).await.consecutive_failures, 4);
+        serve_for(&mut a2, Duration::from_millis(300)).await;
+
+        // The screen changes hands: both views change.
+        h.status
+            .send(Some(Arc::new(status_report("s2", 0))))
+            .unwrap();
+        assert_eq!(next_status(&mut a1).await.capture, None);
+        assert_eq!(
+            next_status(&mut a2).await.capture,
+            Some(CaptureState::Active)
+        );
+        h.stop().await;
     }
 }

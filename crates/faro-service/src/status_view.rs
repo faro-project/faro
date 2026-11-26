@@ -528,6 +528,7 @@ mod tests {
                     at_ms: 40_000,
                     reason: "permission denied: screen_recording".into(),
                 }),
+                ..CaptureReport::default()
             },
             permissions: PermissionsReport {
                 account: Some("alex".into()),

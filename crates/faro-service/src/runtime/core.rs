@@ -232,6 +232,9 @@ pub enum Control {
 
 struct MemberPause {
     until_mono: Option<u64>,
+    /// The same end on the wall clock, as allies were told it, for the
+    /// status (the menu's "Paused until …"). Never used to end the pause.
+    until_ms: Option<i64>,
 }
 
 #[derive(Default)]
@@ -955,10 +958,14 @@ impl Core {
     fn publish_state(&self) {
         let state = self.capture_state();
         let account = self.target_account();
+        let paused_until = self.member_pause.as_ref().and_then(|p| p.until_ms);
         self.status.update_if(|s| {
-            let changed = s.capture.state != state || s.capture.target_account != account;
+            let changed = s.capture.state != state
+                || s.capture.target_account != account
+                || s.capture.paused_until_ms != paused_until;
             s.capture.state = state;
             s.capture.target_account = account;
+            s.capture.paused_until_ms = paused_until;
             changed
         });
         let s = self.device_state();
@@ -1605,7 +1612,10 @@ impl Core {
                 {
                     self.journal.seq(seq);
                 }
-                self.member_pause = Some(MemberPause { until_mono });
+                self.member_pause = Some(MemberPause {
+                    until_mono,
+                    until_ms,
+                });
             }
             (None, true) => {
                 self.member_pause = None;
