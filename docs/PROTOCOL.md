@@ -103,6 +103,8 @@ An interactive session of any OS account with no connected agent for 90 s **is**
 
 A `capture_failing` tamper event is raised for repeated failed captures, and also when the session at the screen has a connected agent that nothing is captured from: no capture attempt for the longest regular interval plus two mean intervals of awake time, while no member pause, lock, idle or sleep explains it. `consecutive_failures` then counts the captures missed at the mean interval.
 
+When the failures are because Screen Recording is off, the event is `permission_revoked` (`permission: "screen_recording"`) instead, and no `capture_failing` follows for the same run of failures. Its optional `never_granted` (boolean, default `false`, left out when `false`) is `true` when the device never saw the permission granted to that account on this enrollment, rather than saw it turned off. Readers must accept bodies without it, and readers that predate it read the event as a permission turned off. The agent ↔ service IPC doesn't carry the field: only the service decides it.
+
 `flag` and `tamper` bodies carry an optional `account` field: the short name of the OS account the event came from, when it concerns one session (ARCHITECTURE §3.6). Report flagged moments, tamper records and timeline spans carry it too. It is inside the encrypted body, so the instance never sees it. Readers must accept bodies without it.
 
 ## 4. Encryption
