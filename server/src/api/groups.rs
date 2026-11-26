@@ -23,9 +23,13 @@
 //! **Nothing here touches `ally_links`.** Leaving or being removed never
 //! ends an alliance (GROUPS.md principle 4).
 
+use super::group_listing::{
+    my_reminders, require_may_list, Listing, ListingInput, MyMeetingReminders,
+};
 use super::ApiJson;
 use crate::auth::normalize_email;
 use crate::auth::session::SessionUser;
+use crate::db::repo::group_listing;
 use crate::db::repo::group_notices::NoticeKind;
 use crate::db::repo::groups::{
     self, Ended, Group, GroupUpdate, HistoryEntry, HistoryKind, Invite, InviteForMe, InviteStatus,
@@ -34,6 +38,7 @@ use crate::db::repo::groups::{
 use crate::db::repo::{is_unique_violation, users};
 use crate::error::{AppError, AppResult};
 use crate::mailer::Email;
+use crate::meetings::{self, Meeting, MeetingInput};
 use crate::settings::{GroupSettings, WhoCanCreateGroups, WhoCanInvite};
 use crate::state::AppState;
 use crate::tokens::{is_token_shaped, new_token, TokenPurpose};
@@ -59,12 +64,16 @@ const INVITE_LIST_LIMIT: i64 = 200;
 
 // ---- Shared helpers ----------------------------------------------------------
 
-fn group_settings(state: &AppState) -> GroupSettings {
+pub(crate) fn group_settings(state: &AppState) -> GroupSettings {
     state.settings().groups
 }
 
 /// The caller's group, or `404`. See the module docs.
-async fn load(state: &AppState, s: &SessionUser, id: &str) -> AppResult<(Group, Participant)> {
+pub(crate) async fn load(
+    state: &AppState,
+    s: &SessionUser,
+    id: &str,
+) -> AppResult<(Group, Participant)> {
     load_in(state.db().pool(), &s.user.id, id).await
 }
 
@@ -80,7 +89,7 @@ async fn load_in<'e>(
     Ok((group, me))
 }
 
-fn require_facilitator(me: &Participant) -> AppResult<()> {
+pub(crate) fn require_facilitator(me: &Participant) -> AppResult<()> {
     if me.role == Role::Facilitator {
         Ok(())
     } else {
@@ -89,7 +98,7 @@ fn require_facilitator(me: &Participant) -> AppResult<()> {
 }
 
 /// Changes are refused on an archived group and while groups are off.
-fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
+pub(crate) fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
     if group.is_archived() {
         return Err(AppError::conflict(
             "group_archived",
@@ -99,7 +108,7 @@ fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
     require_enabled(state)
 }
 
-fn require_enabled(state: &AppState) -> AppResult<()> {
+pub(crate) fn require_enabled(state: &AppState) -> AppResult<()> {
     if group_settings(state).enabled {
         Ok(())
     } else {
@@ -123,7 +132,7 @@ fn can_invite(settings: &GroupSettings, group: &Group, me: &Participant) -> bool
         || effective_who_can_invite(settings, group) == WhoCanInvite::Participants
 }
 
-fn parse_json_field(raw: &Option<String>) -> Option<serde_json::Value> {
+pub(crate) fn parse_json_field(raw: &Option<String>) -> Option<serde_json::Value> {
     raw.as_deref().and_then(|s| serde_json::from_str(s).ok())
 }
 
@@ -174,9 +183,14 @@ pub struct GroupView {
     /// Whether the caller may invite right now.
     pub can_invite: bool,
     pub max_participants: Option<i64>,
-    /// Set by the meetings work.
+    /// `{cadence, weekday, minute_of_day, tz_offset_min, place?, anchor_ms}`.
     pub meeting: Option<serde_json::Value>,
+    /// The start of the next meeting (Unix ms), if there is a schedule.
+    pub next_meeting_at_ms: Option<i64>,
+    /// The caller's own reminder choices for this group.
+    pub my_meeting_reminders: MyMeetingReminders,
     pub listed: bool,
+    /// `{show_meeting_time, show_place}`; `null` until first set.
     pub listing: Option<serde_json::Value>,
     pub archived_at_ms: Option<i64>,
     /// When an archived group is deleted.
@@ -190,10 +204,15 @@ pub struct GroupView {
     pub groups_disabled: bool,
 }
 
-async fn view(state: &AppState, group: &Group, me: &Participant) -> AppResult<GroupView> {
+pub(crate) async fn view(
+    state: &AppState,
+    group: &Group,
+    me: &Participant,
+) -> AppResult<GroupView> {
     let pool = state.db().pool();
     let settings = group_settings(state);
     let facilitators = groups::facilitators(pool, &group.id).await?;
+    let participant_count = groups::count_active(pool, &group.id).await?;
     let offer = (group.facilitator_offer_user.as_ref() == Some(&me.user_id))
         .then_some(group.facilitator_offer_until_ms)
         .flatten()
@@ -204,13 +223,20 @@ async fn view(state: &AppState, group: &Group, me: &Participant) -> AppResult<Gr
         description: group.description.clone(),
         created_at_ms: group.created_at_ms,
         my_role: me.role,
-        participant_count: groups::count_active(pool, &group.id).await?,
+        participant_count,
         no_facilitator: facilitators.is_empty() && !group.is_archived(),
         facilitators,
         who_can_invite: effective_who_can_invite(&settings, group),
         can_invite: !group.is_archived() && settings.enabled && can_invite(&settings, group, me),
         max_participants: group.max_participants,
         meeting: parse_json_field(&group.meeting_json),
+        next_meeting_at_ms: group
+            .meeting_json
+            .as_deref()
+            .and_then(Meeting::parse)
+            .filter(|_| !group.is_archived())
+            .map(|m| m.next_start(state.now_ms())),
+        my_meeting_reminders: my_reminders(pool, &group.id, &me.user_id, participant_count).await?,
         listed: group.listed && settings.enabled,
         listing: parse_json_field(&group.listing_json),
         archived_at_ms: group.archived_at_ms,
@@ -277,7 +303,7 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(view(&state, &group, &me).await?)))
 }
 
-fn too_many_groups(settings: &GroupSettings) -> AppError {
+pub(crate) fn too_many_groups(settings: &GroupSettings) -> AppError {
     AppError::conflict(
         "too_many_groups",
         format!(
@@ -344,7 +370,7 @@ pub struct RosterQuery {
     pub cursor: Option<String>,
 }
 
-fn cursor_of(raw: &Option<String>) -> AppResult<Option<(i64, String)>> {
+pub(crate) fn cursor_of(raw: &Option<String>) -> AppResult<Option<(i64, String)>> {
     raw.as_deref()
         .filter(|c| !c.is_empty())
         .map(|c| {
@@ -390,11 +416,17 @@ pub async fn history(
 
 // ---- Edit and archive --------------------------------------------------------
 
-/// `PATCH /v1/groups/{id}`. Meeting and listing fields come with their own
-/// routes' work and are refused until then.
+/// `PATCH /v1/groups/{id}`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchGroup {
+    /// List the group in the directory, or take it out (§8.8).
+    pub listed: Option<bool>,
+    /// What a listing shows; fields left out stay as they are.
+    pub listing: Option<ListingInput>,
+    /// Replaces the schedule; `null` removes it (§8.4).
+    #[serde(default, deserialize_with = "double_option")]
+    pub meeting: Option<Option<MeetingInput>>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub who_can_invite: Option<WhoCanInvite>,
@@ -439,6 +471,34 @@ pub async fn patch(
     let (group, me) = load_in_tx(&mut tx, &s.user.id, &id).await?;
     require_facilitator(&me)?;
     require_writable(&state, &group)?;
+    let listed_change = match req.listed {
+        Some(want) if want != group.listed => {
+            if want {
+                require_may_list(&settings, &s.user.roles)?;
+            }
+            Some(want)
+        }
+        _ => None,
+    };
+    let listing_json = match (&req.listing, listed_change) {
+        (Some(patch), _) => Some(
+            Listing::from_json(group.listing_json.as_deref())
+                .updated(patch)
+                .to_json(),
+        ),
+        (None, Some(true)) if group.listing_json.is_none() => Some(Listing::default().to_json()),
+        _ => None,
+    };
+    let meeting_json = match &req.meeting {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(input)) => {
+            let current = group.meeting_json.as_deref().and_then(Meeting::parse);
+            let m = meetings::build(input, current.as_ref(), now)
+                .map_err(|msg| AppError::bad_request("invalid_meeting", msg))?;
+            Some(Some(m.to_json()))
+        }
+    };
     if let Some(Some(m)) = req.max_participants {
         if m < groups::count_active(&mut *tx, &id).await? {
             return Err(AppError::conflict(
@@ -456,9 +516,38 @@ pub async fn patch(
             description,
             who_can_invite: req.who_can_invite.map(Some),
             max_participants: req.max_participants,
+            meeting_json,
+            listing_json,
+            listed: listed_change,
         },
     )
     .await?;
+    match listed_change {
+        Some(true) => {
+            groups::add_history(
+                &mut *tx,
+                &id,
+                HistoryKind::Listed,
+                None,
+                Some(&s.user.id),
+                now,
+            )
+            .await?;
+        }
+        Some(false) => {
+            groups::add_history(
+                &mut *tx,
+                &id,
+                HistoryKind::Unlisted,
+                None,
+                Some(&s.user.id),
+                now,
+            )
+            .await?;
+            group_listing::void_open(&mut tx, &id, now).await?;
+        }
+        None => {}
+    }
     if renamed {
         groups::add_history(
             &mut *tx,
@@ -476,7 +565,7 @@ pub async fn patch(
 }
 
 /// [`load`] inside a write transaction.
-async fn load_in_tx(
+pub(crate) async fn load_in_tx(
     tx: &mut sqlx::AnyConnection,
     user: &UserId,
     id: &str,
@@ -952,7 +1041,7 @@ pub async fn create_invites(
 }
 
 /// `409 group_full` when a participant limit is set and reached.
-async fn ensure_room(conn: &mut sqlx::AnyConnection, group: &Group) -> AppResult<()> {
+pub(crate) async fn ensure_room(conn: &mut sqlx::AnyConnection, group: &Group) -> AppResult<()> {
     if let Some(max) = group.max_participants {
         if groups::count_active(&mut *conn, &group.id).await? >= max {
             return Err(AppError::conflict("group_full", "This group is full"));

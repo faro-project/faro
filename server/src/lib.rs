@@ -55,6 +55,7 @@ pub mod groups;
 pub mod identity;
 pub mod liveness;
 pub mod mailer;
+pub mod meetings;
 pub mod notify;
 pub mod ratelimit;
 pub mod retention;

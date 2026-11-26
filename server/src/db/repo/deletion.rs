@@ -59,6 +59,9 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("group_invites", "used_by", Clears::SetNull),
     ("group_notices", "recipient_id", Clears::Rows),
     ("group_notices", "actor_id", Clears::SetNull),
+    ("group_join_requests", "user_id", Clears::Rows),
+    ("group_join_requests", "decided_by", Clears::SetNull),
+    ("group_meeting_prefs", "user_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -130,6 +133,9 @@ pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM group_invites WHERE user_id = $1",
     "UPDATE group_notices SET actor_id = NULL WHERE actor_id = $1",
     "DELETE FROM group_notices WHERE recipient_id = $1",
+    "UPDATE group_join_requests SET decided_by = NULL WHERE decided_by = $1",
+    "DELETE FROM group_join_requests WHERE user_id = $1",
+    "DELETE FROM group_meeting_prefs WHERE user_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

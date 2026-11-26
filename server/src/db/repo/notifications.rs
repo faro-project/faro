@@ -118,6 +118,8 @@ pub struct GroupNoticeInfo {
     pub kind: String,
     /// A daily summary rather than one notice per change.
     pub summary: bool,
+    /// A meeting reminder's time (see `group_notices.detail`).
+    pub detail: Option<String>,
 }
 
 /// What a notification about an admin log entry needs to word it.
@@ -151,7 +153,7 @@ pub async fn due<'e>(
                 ab.display_name AS about_name,
                 al.action AS log_action, al.via AS log_via, al.actor_id AS log_actor_id,
                 act.display_name AS log_actor_name,
-                gn.kind AS group_kind, gn.summary AS group_summary,
+                gn.kind AS group_kind, gn.summary AS group_summary, gn.detail AS group_detail,
                 CASE WHEN n.admin_log_id IS NOT NULL
                        OR n.group_notice_id IS NOT NULL
                        OR n.recipient_id = COALESCE(a.member_id, rp.member_id)
@@ -226,6 +228,7 @@ pub async fn due<'e>(
                             kind,
                             summary: r.try_get::<Option<i64>, _>("group_summary")?.unwrap_or(0)
                                 != 0,
+                            detail: r.try_get("group_detail")?,
                         })
                     })
                     .transpose()?,
