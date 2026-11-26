@@ -28,13 +28,18 @@
 # never taken from the repository. Both need network access the first
 # time, and CPython 3.9 (/usr/bin/python3 from the Command Line Tools).
 #
+# The Rust crates' licences come from Cargo.lock through
+# release/notices/third-party.sh, which needs cargo-about at its pinned
+# version (the script prints the `cargo install` line if it is missing).
+#
 # What it installs (faro_platform_macos::pkg_layout):
 #   /Library/Faro/bin/faro-service              the privileged service
 #   /Library/Faro/bin/faro-uninstall            removes Faro, telling allies first
 #   /Library/Faro/Faro Agent.app                the session agent (org.faro.agent)
 #   /Library/Faro/models/opennsfw/              the image model and its manifest
-#   /Library/Faro/notices/                      licences and attribution of the model
-#                                               and of ONNX Runtime
+#   /Library/Faro/notices/                      licences and attribution of the model,
+#                                               of ONNX Runtime, and of the Rust crates
+#                                               (third-party.txt)
 #   /Library/Faro/service.toml.default          copied to the state dir if absent
 #   /Library/Faro/update-root.json              the project's update root of trust
 #                                               (FARO_UPDATE_ROOT; optional for --dev)
@@ -131,6 +136,9 @@ root="$work/root"
 rm -rf "$work"
 mkdir -p "$root" "$out"
 
+echo "==> third-party notices"
+"$repo/release/notices/third-party.sh" macos "$work/notices/third-party.txt"
+
 echo "==> the image model"
 models="$work/models"
 "$repo/crates/faro-detect/models/opennsfw/build.sh" "$models"
@@ -180,6 +188,8 @@ install -m 644 "$models/manifest.json" "$models/opennsfw-int8.onnx" "$root/Libra
 install -m 644 "$models/NOTICE.txt" "$root/Library/Faro/notices/opennsfw.txt"
 install -m 644 "$ort/notices/onnxruntime-LICENSE.txt" "$ort/notices/onnxruntime-ThirdPartyNotices.txt" \
     "$root/Library/Faro/notices/"
+# The Rust crates faro-service and faro-agent are built from.
+install -m 644 "$work/notices/third-party.txt" "$root/Library/Faro/notices/third-party.txt"
 if [[ -n "${FARO_UPDATE_ROOT:-}" ]]; then
     [[ -f "$FARO_UPDATE_ROOT" ]] || { echo "FARO_UPDATE_ROOT: no such file $FARO_UPDATE_ROOT" >&2; exit 1; }
     install -m 644 "$FARO_UPDATE_ROOT" "$root/Library/Faro/update-root.json"

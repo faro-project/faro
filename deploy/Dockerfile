@@ -24,6 +24,9 @@
 #   /usr/local/bin/faro-server   the binary (ENTRYPOINT; default command `serve`)
 #   /usr/share/faro/update-root.json
 #                                the project's update root of trust, once it exists
+#   /usr/share/faro/notices/     third-party licences: third-party.txt (the Rust
+#                                crates) and third-party-web.txt (the web app's
+#                                npm packages)
 #   /data                        data directory (identity key, SQLite DB, blobs,
 #                                ACME certificates): mount a volume here
 #   port 8080                    the listen port inside the container, plain
@@ -40,9 +43,25 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json web/.npmrc ./
 RUN --mount=type=cache,target=/root/.npm,sharing=locked npm ci
 COPY web/ ./
-# The logo files, which the web app imports from ../assets/brand.
+# The logo files, which the web app imports from ../assets/brand, and the
+# licence allowlist its third-party notices are checked against.
 COPY assets/brand/ /assets/brand/
+COPY deny.toml /deny.toml
 RUN npm run build
+
+# Third-party notices for faro-server's Rust crates, from Cargo.lock
+# (release/notices/third-party.sh). The same for every platform, so made
+# once on the build machine's own, like the web app.
+FROM --platform=$BUILDPLATFORM rust:1.99.1-slim-trixie AS notices
+
+WORKDIR /src
+COPY release/notices/third-party.sh /tmp/third-party.sh
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    cargo install --locked cargo-about --features cli \
+        --version "$(/tmp/third-party.sh --cargo-about-version)"
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    release/notices/third-party.sh server /out/notices/third-party.txt
 
 # Builder: Rust 1.99.1 on Debian 13 (trixie). The workspace needs Rust >= 1.94.
 # The runtime stage below must use the same Debian release, because the
@@ -98,6 +117,10 @@ RUN groupadd --system --gid 10001 faro \
 
 COPY --from=builder /usr/local/bin/faro-server /usr/local/bin/faro-server
 COPY --from=builder /out/share/faro/ /usr/share/faro/
+# Licences of the software in the image: the Rust crates in faro-server and
+# the npm packages in the web app it serves (also at /licenses).
+COPY --from=notices /out/notices/third-party.txt /usr/share/faro/notices/third-party.txt
+COPY --from=web /web/build/third-party-licenses.txt /usr/share/faro/notices/third-party-web.txt
 COPY --chmod=0755 deploy/healthcheck.sh /usr/local/bin/faro-healthcheck
 
 # Defaults for the container. Everything else (public URL, TLS mode, SMTP)
