@@ -205,11 +205,12 @@ fn fixture() -> Fixture {
     let sources = Sources {
         config_file: dir.path().join("service.toml"),
         service_log: Some(source(dir.path().join("faro-service.log"))),
-        agent_log: Some(("alex".into(), source(dir.path().join("faro-agent.log")))),
+        agent_logs: vec![("alex".into(), source(dir.path().join("faro-agent.log")))],
         lines: 50,
         listings: vec![config.state_dir.clone(), dir.path().join("run")],
         system: false,
         agent_uid: None,
+        agent_log_notes: String::new(),
     };
     Fixture {
         _dir: dir,
@@ -218,29 +219,26 @@ fn fixture() -> Fixture {
     }
 }
 
-// Expects Unix modes and sockets in the listing.
-#[cfg(unix)]
 #[test]
 fn a_report_holds_what_helps_and_nothing_private() {
     let f = fixture();
     let report = collect(&f.config, &f.sources, 1_795_601_700_000);
     assert_eq!(report.name, "faro-report-20261125-101500Z");
     let names: Vec<_> = report.files.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(
-        names,
-        [
-            "README.txt",
-            "status.txt",
-            "status.json",
-            "permissions.txt",
-            "system.txt",
-            "files.txt",
-            "config.txt",
-            "logs/faro-service.log",
-            "logs/faro-agent.log",
-            "logs/update-install.log",
-        ]
-    );
+    // Screen Recording and Accessibility are macOS permissions.
+    let mut want = vec!["README.txt", "status.txt", "status.json"];
+    if cfg!(not(windows)) {
+        want.push("permissions.txt");
+    }
+    want.extend([
+        "system.txt",
+        "files.txt",
+        "config.txt",
+        "logs/faro-service.log",
+        "logs/faro-agent.log",
+        "logs/update-install.log",
+    ]);
+    assert_eq!(names, want);
     let all = report.full_text();
     for s in SECRETS.iter().chain(&["KEY-MATERIAL", "EVENT-CONTENT"]) {
         assert!(!all.contains(s), "{s:?} is in the report:\n{all}");
@@ -248,12 +246,12 @@ fn a_report_holds_what_helps_and_nothing_private() {
     let status = report.file("status.txt").unwrap().contents();
     assert!(status.starts_with("Not enrolled."), "{status}");
     let files = report.file("files.txt").unwrap().contents();
-    for want in [
-        "device.key",
-        "outbox.sqlite3",
-        "agent.501.sock",
-        "drwx------",
-    ] {
+    // Unix modes are in the listing on Unix only.
+    let mut listed = vec!["device.key", "outbox.sqlite3", "agent.501.sock"];
+    if cfg!(unix) {
+        listed.push("drwx------");
+    }
+    for want in listed {
         assert!(files.contains(want), "missing {want:?} in\n{files}");
     }
     let agent = report.file("logs/faro-agent.log").unwrap();
@@ -317,6 +315,97 @@ fn the_zip_holds_the_files_as_shown_and_never_replaces_one() {
     assert_eq!(count, report.files.len(), "nothing but the report's files");
     let again = write_zip(&report, out.path(), None).unwrap_err();
     assert!(again.to_string().contains("exists"), "{again}");
+}
+
+#[cfg(windows)]
+#[test]
+fn the_zip_is_a_stored_archive_of_the_files_and_never_replaces_one() {
+    let f = fixture();
+    let report = collect(&f.config, &f.sources, 1_795_601_700_000);
+    let out = tempfile::tempdir().unwrap();
+    let zip = write_zip(&report, out.path(), None).unwrap();
+    assert_eq!(zip, out.path().join("faro-report-20261125-101500Z.zip"));
+    let entries = zipw::read_stored(&std::fs::read(&zip).unwrap()).unwrap();
+    assert_eq!(
+        entries.len(),
+        report.files.len(),
+        "nothing but the report's files"
+    );
+    for file in &report.files {
+        let name = format!("{}/{}", report.name, file.name);
+        let (_, data) = entries.iter().find(|(n, _)| *n == name).unwrap();
+        assert_eq!(data.as_slice(), file.contents().as_bytes(), "{name}");
+    }
+    let before = std::fs::read(&zip).unwrap();
+    let again = write_zip(&report, out.path(), None).unwrap_err();
+    assert!(again.to_string().contains("exists"), "{again}");
+    assert_eq!(std::fs::read(&zip).unwrap(), before, "left as it was");
+}
+
+#[cfg(windows)]
+#[test]
+fn the_zip_is_never_written_through_a_link() {
+    let f = fixture();
+    let report = collect(&f.config, &f.sources, 0);
+    let out = tempfile::tempdir().unwrap();
+    let target = out.path().join("precious.txt");
+    std::fs::write(&target, "precious").unwrap();
+    let dest = out.path().join(format!("{}.zip", report.name));
+    // Creating a symbolic link needs a privilege; skip where it is missing.
+    if std::os::windows::fs::symlink_file(&target, &dest).is_err() {
+        return;
+    }
+    assert!(write_zip(&report, out.path(), None).is_err());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_linked_log_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("device.key");
+    std::fs::write(&key, "SECRET KEY BYTES\n").unwrap();
+    let log = dir.path().join("faro-agent.log");
+    if std::os::windows::fs::symlink_file(&key, &log).is_err() {
+        return;
+    }
+    let t = tail_text(&source(log), 10);
+    assert!(!t.contains("SECRET"), "{t}");
+    assert!(t.contains("symbolic link"), "{t}");
+}
+
+#[test]
+fn a_zip_reads_back_with_its_checksums() {
+    let big = vec![b'x'; 70_000];
+    let entries = [
+        zipw::Entry {
+            name: "r/a.txt",
+            data: b"hello\n",
+        },
+        zipw::Entry {
+            name: "r/logs/b.log",
+            data: b"",
+        },
+        zipw::Entry {
+            name: "r/big.txt",
+            data: &big,
+        },
+    ];
+    let zip = zipw::stored_zip(&entries, zipw::dos_datetime(1_795_601_700_000)).unwrap();
+    let back = zipw::read_stored(&zip).unwrap();
+    assert_eq!(back.len(), 3);
+    for (e, (n, d)) in entries.iter().zip(&back) {
+        assert_eq!((e.name, e.data), (n.as_str(), d.as_slice()));
+    }
+    // A flipped byte in a file is caught by its CRC.
+    let mut bad = zip.clone();
+    bad[40] ^= 1;
+    assert!(zipw::read_stored(&bad).is_err());
+    // 2026-11-25 10:15:00 as DOS date and time.
+    assert_eq!(
+        zipw::dos_datetime(1_795_601_700_000),
+        ((46 << 9) | (11 << 5) | 25, (10 << 11) | (15 << 5))
+    );
 }
 
 #[cfg(unix)]

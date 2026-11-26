@@ -64,11 +64,11 @@ pub const EXTRA_PRIVATE_WORDS: &[&str] = &[
 ];
 
 /// File extensions that look like a top-level domain but are file names
-/// Faro logs (`faro-service.log`, `service.toml`).
+/// Faro logs (`faro-service.log`, `service.toml`, `faro-service.exe`).
 const FILE_EXTENSIONS: &[&str] = &[
     "log", "toml", "json", "plist", "sock", "pkg", "txt", "bin", "onnx", "lock", "zip", "sh", "rs",
     "gz", "sqlite", "sqlite3", "db", "xml", "html", "md", "tmp", "partial", "key", "pem",
-    "default", "bak", "old", "new",
+    "default", "bak", "old", "new", "exe", "msi", "dll",
 ];
 
 /// Removes private data from a report's text ([module docs](self)).
