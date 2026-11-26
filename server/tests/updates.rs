@@ -527,6 +527,68 @@ async fn admin_channel_setting_drives_clients_and_prefetch() {
     assert_eq!(info.body, json!({"available": true, "channel": "beta"}));
 }
 
+/// Models and blocklists (platform `any`) are prefetched like client
+/// packages: the newest in the instance's channel, whatever `min_client`
+/// it needs (older clients' choices are fetched on demand). A client
+/// downloads exactly the signed bytes.
+#[tokio::test]
+async fn models_and_blocklists_are_prefetched_for_the_channel() {
+    let now = now();
+    let mut up = Upstr::new(now);
+    let art = |name: &str, kind, version: &str| {
+        Artifact::new(name, kind, "any", "any", version, name.as_bytes())
+    };
+    up.publish(
+        &[
+            art("model/any/m-1.0.0-stable.data", TargetKind::Model, "1.0.0"),
+            art("model/any/m-1.1.0-beta.data", TargetKind::Model, "1.1.0").channels(&["beta"]),
+            art(
+                "blocklist/any/domains-1.0.0-stable.data",
+                TargetKind::Blocklist,
+                "1.0.0",
+            ),
+            art(
+                "blocklist/any/domains-2.0.0-stable.data",
+                TargetKind::Blocklist,
+                "2.0.0",
+            )
+            .min_client("9.0.0"),
+        ],
+        now + 7 * DAY_MS,
+    );
+    let t = online(&up).await;
+    t.clock.set_ms(now);
+
+    let status = refresh(&t).await.unwrap();
+    assert!(status.failed.is_empty(), "{:?}", status.failed);
+    let mut names = cached_names(&status);
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "blocklist/any/domains-2.0.0-stable.data",
+            "model/any/m-1.0.0-stable.data"
+        ]
+    );
+    let kinds: Vec<_> = status.cached.iter().map(|a| a.kind).collect();
+    assert!(kinds.contains(&TargetKind::Model) && kinds.contains(&TargetKind::Blocklist));
+    // The older list, for clients below its min_client, on demand.
+    let old = t
+        .get(
+            "/v1/updates/targets/blocklist/any/domains-1.0.0-stable.data",
+            None,
+        )
+        .await;
+    assert_eq!(old.status, StatusCode::OK);
+    assert_eq!(old.raw, b"blocklist/any/domains-1.0.0-stable.data");
+
+    let status = mirror(&t)
+        .refresh(t.clock_ms(), &Channel::Named("beta".into()))
+        .await
+        .unwrap();
+    assert!(cached_names(&status).contains(&"model/any/m-1.1.0-beta.data".to_owned()));
+}
+
 #[tokio::test]
 async fn doctor_reports_mirror_health() {
     use faro_server::doctor::{check_updates, Level, Report};

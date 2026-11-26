@@ -14,9 +14,12 @@
 //!
 //! **What is cached.** Each refresh prefetches, for every kind, platform
 //! and arch the release lists, the artifact the instance's channel selects
-//! (what an up-to-date client will ask for). Any other listed artifact
-//! (an older release for an older OS, say) is fetched from upstream the
-//! first time a client asks for it. Artifacts are stored by BLAKE3, so a
+//! (what an up-to-date client will ask for). That covers models and
+//! blocklists too (platform and arch `any`): the newest in the channel,
+//! whatever its `min_client`. Any other listed artifact (an older release
+//! for an older OS, or a model for clients below a newer one's
+//! `min_client`) is fetched from upstream the first time a client asks
+//! for it. Artifacts are stored by BLAKE3, so a
 //! name reused across releases can never serve stale bytes, and anything no
 //! longer listed is deleted after the next successful refresh. Server
 //! releases (`kind = server`) are listed but never fetched: no client

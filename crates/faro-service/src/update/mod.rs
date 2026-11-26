@@ -49,6 +49,7 @@
 //! Linux, where packages will come from the project's repository) the
 //! updater still checks and logs what is available, but installs nothing.
 
+pub mod artifacts;
 pub mod fetch;
 pub mod install;
 pub mod package_version;

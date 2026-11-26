@@ -124,9 +124,38 @@ pub fn check_attribution<'a>(
     Ok(())
 }
 
+/// The licence identifiers in an SPDX expression (operators and
+/// parentheses dropped; `WITH` is kept, so it never matches the allowlist).
+pub fn spdx_ids(expr: &str) -> Vec<&str> {
+    expr.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter(|t| !t.is_empty() && *t != "AND" && *t != "OR")
+        .collect()
+}
+
+/// Whether every identifier in an SPDX expression is on
+/// [`ALLOWED_MODEL_LICENSES`](crate::ALLOWED_MODEL_LICENSES). Deliberately
+/// conservative: `OR` is treated like `AND`, and `WITH` exceptions are not
+/// accepted.
+pub fn license_is_allowed(expr: &str) -> bool {
+    let ids = spdx_ids(expr);
+    !ids.is_empty()
+        && ids
+            .iter()
+            .all(|id| crate::ALLOWED_MODEL_LICENSES.contains(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spdx_expressions() {
+        assert_eq!(spdx_ids("(MIT OR Apache-2.0)"), ["MIT", "Apache-2.0"]);
+        assert!(license_is_allowed("MIT AND CC-BY-4.0"));
+        assert!(!license_is_allowed("MIT OR GPL-3.0-only"));
+        assert!(!license_is_allowed("Apache-2.0 WITH LLVM-exception"));
+        assert!(!license_is_allowed(""));
+    }
 
     fn full() -> Attribution {
         Attribution {

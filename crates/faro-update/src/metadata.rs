@@ -244,6 +244,14 @@ pub struct TargetCustom {
     /// Minimum OS version, dotted numeric (`"13"`, `"10.0.19045"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_os: Option<String>,
+    /// Minimum client version that may install this artifact. Meant for
+    /// models and blocklists that need a newer client than the oldest one
+    /// that fetches them (a new label, a new manifest field). Clients older
+    /// than this skip the target ([`VerifiedTargets::select_for`]).
+    ///
+    /// [`VerifiedTargets::select_for`]: crate::VerifiedTargets::select_for
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_client: Option<Version>,
 }
 
 /// One downloadable artifact.

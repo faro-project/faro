@@ -36,6 +36,7 @@ pub struct Artifact {
     pub version: Version,
     pub channels: Vec<String>,
     pub min_os: Option<String>,
+    pub min_client: Option<Version>,
     pub content: Vec<u8>,
 }
 
@@ -57,6 +58,7 @@ impl Artifact {
             version: Version::parse(version).expect("valid semver"),
             channels: vec![crate::STABLE_CHANNEL.to_owned()],
             min_os: None,
+            min_client: None,
             content: content.to_vec(),
         }
     }
@@ -64,6 +66,12 @@ impl Artifact {
     /// Replace the channels.
     pub fn channels(mut self, channels: &[&str]) -> Self {
         self.channels = channels.iter().map(|c| (*c).to_owned()).collect();
+        self
+    }
+
+    /// Set the minimum client version.
+    pub fn min_client(mut self, version: &str) -> Self {
+        self.min_client = Some(Version::parse(version).expect("valid semver"));
         self
     }
 
@@ -78,6 +86,7 @@ impl Artifact {
                 version: self.version.clone(),
                 channels: self.channels.clone(),
                 min_os: self.min_os.clone(),
+                min_client: self.min_client.clone(),
             },
         }
     }

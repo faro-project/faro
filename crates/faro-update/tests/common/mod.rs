@@ -96,6 +96,7 @@ pub fn target(
             version: Version::parse(version).unwrap(),
             channels: channels.iter().map(|c| c.to_string()).collect(),
             min_os: None,
+            min_client: None,
         },
     }
 }

@@ -61,6 +61,10 @@ pub struct ServiceStatus {
     /// Set when the instance served a manifest the device refused
     /// (rollback, equivocation, bad signature). Shown to the member.
     pub manifest_warning: Option<String>,
+    /// The image model in use (`opennsfw 1.0.0+int8`; `null 0` without one).
+    pub model: Option<String>,
+    /// The domain list in use (`domains 1.0.0`), if any.
+    pub blocklist: Option<String>,
     /// The instance's identity no longer matches the pin; uploads paused.
     pub identity_mismatch: bool,
     pub last_error: Option<String>,

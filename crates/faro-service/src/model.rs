@@ -127,6 +127,39 @@ pub fn load_classifier(manifest: Option<&Path>, required: bool) -> ModelLoad {
     }
 }
 
+/// Turns a verified model into a classifier: ONNX Runtime in builds with
+/// the `onnx` feature ([`default_runtime`]). The update channel uses it
+/// for models it installs (`crate::update::artifacts`); tests inject a
+/// stand-in. It gets the bytes that were checked, never a path.
+pub trait ModelRuntime: Send + Sync + std::fmt::Debug {
+    fn open(&self, model: faro_detect::VerifiedModel) -> Result<Box<dyn Classifier>, DetectError>;
+}
+
+/// ONNX Runtime's CPU provider (`faro_detect::OnnxClassifier`).
+#[cfg(feature = "onnx")]
+#[derive(Debug, Clone, Copy)]
+pub struct OnnxRuntime;
+
+#[cfg(feature = "onnx")]
+impl ModelRuntime for OnnxRuntime {
+    fn open(&self, model: faro_detect::VerifiedModel) -> Result<Box<dyn Classifier>, DetectError> {
+        Ok(Box::new(faro_detect::OnnxClassifier::new(model)?))
+    }
+}
+
+/// The runtime of this build, or `None` without ONNX Runtime (then the
+/// service doesn't fetch models: it couldn't run them).
+pub fn default_runtime() -> Option<std::sync::Arc<dyn ModelRuntime>> {
+    #[cfg(feature = "onnx")]
+    {
+        Some(std::sync::Arc::new(OnnxRuntime))
+    }
+    #[cfg(not(feature = "onnx"))]
+    {
+        None
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     #[error(transparent)]

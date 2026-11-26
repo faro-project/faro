@@ -1,6 +1,6 @@
 {
   "name": "opennsfw",
-  "version": "1-fp32",
+  "version": "1.0.0+fp32",
   "file": "opennsfw-fp32.onnx",
   "input_size": {
     "width": 224,

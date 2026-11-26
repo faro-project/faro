@@ -1,6 +1,6 @@
 {
   "name": "opennsfw",
-  "version": "1-int8",
+  "version": "1.0.0+int8",
   "file": "opennsfw-int8.onnx",
   "input_size": {
     "width": 224,
