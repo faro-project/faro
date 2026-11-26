@@ -48,6 +48,9 @@ pub fn all_tamper_signals() -> Vec<TamperSignal> {
         TamperSignal::UnmonitoredUserSession {
             user: "guest".into(),
         },
+        TamperSignal::WindowHiddenFromCapture {
+            app: "Viewer".into(),
+        },
     ]
 }
 
@@ -213,6 +216,7 @@ pub fn arb_tamper() -> impl Strategy<Value = TamperSignal> {
         Just(TamperSignal::VirtualMachine),
         Just(TamperSignal::RemoteDesktop),
         text().prop_map(|user| TamperSignal::UnmonitoredUserSession { user }),
+        text().prop_map(|app| TamperSignal::WindowHiddenFromCapture { app }),
     ]
 }
 

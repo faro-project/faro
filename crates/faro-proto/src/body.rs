@@ -177,6 +177,14 @@ pub enum TamperSignal {
     UnmonitoredUserSession {
         user: String,
     },
+    /// A large on-screen window of the app named `app` is excluded from
+    /// screen capture (on macOS, `NSWindow.sharingType = .none`), so
+    /// captures show what is behind it instead (§3.7). `app` is the app's
+    /// display name, or its bundle id when it has none; never a window
+    /// title.
+    WindowHiddenFromCapture {
+        app: String,
+    },
     // Context-only (reported in the daily report, never paged):
     BrowserWithoutExtension {
         browser: String,
@@ -339,6 +347,17 @@ mod tests {
         };
         assert!(!s.is_context_only());
         assert!(TamperSignal::VpnActive.is_context_only());
+    }
+
+    #[test]
+    fn hidden_window_is_active_tamper() {
+        let s = TamperSignal::WindowHiddenFromCapture {
+            app: "Viewer".into(),
+        };
+        assert!(!s.is_context_only());
+        let j = serde_json::to_value(EventBody::tamper(s.clone())).unwrap();
+        assert_eq!(j["signal"]["signal"], "window_hidden_from_capture");
+        assert_eq!(j["signal"]["app"], "Viewer");
     }
 
     #[test]

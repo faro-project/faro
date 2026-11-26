@@ -422,6 +422,10 @@ mod tests {
             TamperSignal::UnmonitoredUserSession {
                 user: "guest".into(),
             },
+            // A window hidden from capture shows things Faro can't see.
+            TamperSignal::WindowHiddenFromCapture {
+                app: "Viewer".into(),
+            },
             TamperSignal::PermissionRevoked {
                 permission: "screen".into(),
             },

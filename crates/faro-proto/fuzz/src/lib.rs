@@ -487,6 +487,9 @@ fn bodies() -> Vec<EventBody> {
         EventBody::tamper(TamperSignal::UnmonitoredUserSession {
             user: "guest".into(),
         }),
+        EventBody::tamper(TamperSignal::WindowHiddenFromCapture {
+            app: "Viewer".into(),
+        }),
         EventBody::tamper(TamperSignal::VpnActive),
         EventBody::SettingsChange {
             changes: vec![SettingChange {
