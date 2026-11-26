@@ -21,6 +21,8 @@
 //! * [`enroll`] — the separate request/response protocol on the enroll
 //!   socket, with which the agent asks the service to enroll the computer
 //!   (an administrator approves it).
+//! * [`status`] — [`StatusReport`], what the running service is doing
+//!   (`faro-service status`). Plain data; no message carries it yet.
 //!
 //! ## Privacy invariant
 //!
@@ -46,6 +48,7 @@ pub mod error;
 pub mod handshake;
 pub mod messages;
 pub mod peer;
+pub mod status;
 #[cfg(unix)]
 pub mod transport;
 pub mod wire_frame;
@@ -74,6 +77,7 @@ pub use messages::{
 #[cfg(unix)]
 pub use peer::AllowSameUid;
 pub use peer::{AllowUids, PeerInfo, PeerVerifier};
+pub use status::{StatusReport, STATUS_SCHEMA};
 #[cfg(unix)]
 pub use transport::{resolve_agent_socket, session_socket_path, BindOptions, IpcClient, IpcServer};
 pub use wire_frame::{WireFrame, WirePixelFormat, MAX_FRAME_BYTES};
