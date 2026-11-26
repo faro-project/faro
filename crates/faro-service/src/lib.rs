@@ -21,6 +21,7 @@
 //! | [`thresholds`] | `[dev_thresholds]`: lower detection thresholds, in `dev` builds only |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
 //! | [`status_view`] | `status`: the state directory and the running service's [`runtime::status`] report, as text or JSON |
+//! | [`diagnose`] | `diagnose`: a redacted problem report the member sees before it is written |
 //! | [`update`] | client self-update: verify against the project root, download, install; models and blocklists from the same channel ([`update::artifacts`]) |
 //! | [`logging`] | where the log goes (the packaged service's log file) and how much |
 //! | [`cli`] | the command line |
@@ -58,6 +59,7 @@ pub mod backoff;
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod diagnose;
 pub mod enroll;
 pub mod enroll_server;
 pub mod link;

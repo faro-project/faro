@@ -1,9 +1,10 @@
 //! Shared message samples and proptest strategies for the integration tests.
 #![allow(dead_code)] // each test binary uses a different subset
 
+use faro_ipc::status::{CaptureState, ServicePhase};
 use faro_ipc::{
-    AgentMsg, CaptureReason, ServiceMsg, ShutdownReason, WireFrame, WirePermissionState,
-    WirePixelFormat, WireSessionChange, MAX_FRAMES_PER_MESSAGE,
+    AgentMsg, CaptureReason, MemberStatus, ServiceMsg, ShutdownReason, WireFrame,
+    WirePermissionState, WirePixelFormat, WireSessionChange, MAX_FRAMES_PER_MESSAGE,
 };
 use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};
 use proptest::prelude::*;
@@ -171,7 +172,85 @@ pub fn all_service_msgs() -> Vec<ServiceMsg> {
     ] {
         v.push(ServiceMsg::Shutdown { reason: r });
     }
+    v.push(ServiceMsg::Status(MemberStatus::default()));
+    v.push(ServiceMsg::Status(MemberStatus {
+        service_version: "0.1.0-beta.1".into(),
+        phase: ServicePhase::Running,
+        instance_name: "Sam's Faro".into(),
+        instance_url: "https://faro.example.org/".into(),
+        capture: Some(CaptureState::Paused),
+        paused_until_ms: Some(1_700_000_000_000),
+        screen_recording: Some(WirePermissionState::Denied),
+        accessibility: Some(false),
+        consecutive_failures: 7,
+        unreachable_since_ms: Some(-1),
+        identity_mismatch: true,
+        updates_failing: true,
+    }));
     v
+}
+
+fn arb_member_status() -> impl Strategy<Value = MemberStatus> {
+    (
+        (text(), text(), text()),
+        prop_oneof![
+            Just(ServicePhase::Starting),
+            Just(ServicePhase::AwaitingEndorsement),
+            Just(ServicePhase::Running),
+            Just(ServicePhase::ShuttingDown),
+            Just(ServicePhase::Stopped),
+        ],
+        proptest::option::of(prop_oneof![
+            Just(CaptureState::NotStarted),
+            Just(CaptureState::Active),
+            Just(CaptureState::Idle),
+            Just(CaptureState::Locked),
+            Just(CaptureState::Asleep),
+            Just(CaptureState::Paused),
+            Just(CaptureState::LoginWindow),
+            Just(CaptureState::NoAgent),
+            Just(CaptureState::Stopped),
+        ]),
+        proptest::option::of(any::<i64>()),
+        proptest::option::of(prop_oneof![
+            Just(WirePermissionState::Granted),
+            Just(WirePermissionState::Denied),
+            Just(WirePermissionState::NotDetermined),
+            Just(WirePermissionState::NotRequired),
+        ]),
+        proptest::option::of(any::<bool>()),
+        any::<u32>(),
+        proptest::option::of(any::<i64>()),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(
+                (service_version, instance_name, instance_url),
+                phase,
+                capture,
+                paused_until_ms,
+                screen_recording,
+                accessibility,
+                consecutive_failures,
+                unreachable_since_ms,
+                identity_mismatch,
+                updates_failing,
+            )| MemberStatus {
+                service_version,
+                phase,
+                instance_name,
+                instance_url,
+                capture,
+                paused_until_ms,
+                screen_recording,
+                accessibility,
+                consecutive_failures,
+                unreachable_since_ms,
+                identity_mismatch,
+                updates_failing,
+            },
+        )
 }
 
 fn text() -> impl Strategy<Value = String> {
@@ -323,6 +402,7 @@ pub fn arb_service_msg() -> impl Strategy<Value = ServiceMsg> {
             Just(ShutdownReason::Uninstalling),
         ]
         .prop_map(|reason| ServiceMsg::Shutdown { reason }),
+        arb_member_status().prop_map(ServiceMsg::Status),
     ]
 }
 

@@ -1,5 +1,6 @@
 //! Observable service status, for `faro-service status`, tests driving the
-//! runtime in-process, and (later) the agent's status menu.
+//! runtime in-process, and the agent's status menu (each agent gets a
+//! `faro_ipc::MemberStatus` made from the report, see [`feed_loop`]).
 //!
 //! The runtime keeps a [`ServiceStatus`] in a watch channel. While it runs,
 //! [`write_loop`] turns it into a [`StatusReport`] (`faro_ipc::status`, the
@@ -114,6 +115,13 @@ pub struct ServiceStatus {
     pub detection: DetectionReport,
     /// Client updates.
     pub updates: UpdatesReport,
+    /// The enrolled instance's name and address.
+    pub instance_name: Option<String>,
+    pub instance_url: Option<String>,
+    /// The last time the instance answered a heartbeat.
+    pub last_contact_ms: Option<i64>,
+    /// Since when heartbeats fail because the instance can't be reached.
+    pub unreachable_since_ms: Option<i64>,
 }
 
 impl ServiceStatus {
@@ -151,8 +159,12 @@ impl ServiceStatus {
                 manifest_warning: self.manifest_warning.clone(),
                 identity_mismatch: self.identity_mismatch,
                 last_error: self.last_error.clone(),
+                last_contact_ms: self.last_contact_ms,
+                unreachable_since_ms: self.unreachable_since_ms,
             },
             log_file: crate::logging::log_file().map(str::to_owned),
+            instance_name: self.instance_name.clone(),
+            instance_url: self.instance_url.clone(),
         }
     }
 }
@@ -228,6 +240,38 @@ pub async fn write_loop(
                 _ = tokio::time::sleep(WRITE_DEBOUNCE) => {}
                 _ = stop.wait_for(|s| *s) => return,
             }
+        }
+    }
+}
+
+/// The reports the capture source turns into each agent's
+/// `faro_ipc::MemberStatus` (`SourceIo::status`).
+pub type StatusFeed = watch::Receiver<Option<Arc<StatusReport>>>;
+
+/// Keep `feed` at the latest report until `stop` flips: on every change,
+/// at most about once a second ([`WRITE_DEBOUNCE`]). The source sends an
+/// agent a new status only when its view changed, so the counters that
+/// change with every capture cost nothing.
+pub async fn feed_loop(
+    mut rx: watch::Receiver<ServiceStatus>,
+    feed: watch::Sender<Option<Arc<StatusReport>>>,
+    clock: Arc<dyn Clock>,
+    started_ms: i64,
+    mut stop: watch::Receiver<bool>,
+) {
+    loop {
+        let snapshot = rx.borrow_and_update().clone();
+        let report = Arc::new(snapshot.report(started_ms, clock.wall_ms()));
+        if feed.send(Some(report)).is_err() {
+            return;
+        }
+        tokio::select! {
+            r = rx.changed() => if r.is_err() { return },
+            _ = stop.wait_for(|s| *s) => return,
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(WRITE_DEBOUNCE) => {}
+            _ = stop.wait_for(|s| *s) => return,
         }
     }
 }

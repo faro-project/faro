@@ -36,13 +36,14 @@ pub mod sessions;
 
 pub use in_process::InProcessFrameSource;
 
-use faro_ipc::CaptureReason;
+use faro_ipc::{CaptureReason, StatusReport};
 use faro_platform::{Frame, PermissionState, SessionChange};
 use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
 
 /// Commands from the service to the capture side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +211,24 @@ pub struct SourceIo {
     /// then stop.
     pub commands: mpsc::Receiver<SourceCommand>,
     pub events: mpsc::Sender<SourceEvent>,
+    /// The service's latest status report (`None` until the first). A
+    /// source with agents sends each one its
+    /// [`MemberStatus`](faro_ipc::MemberStatus) view of it
+    /// (`ServiceMsg::Status`); others ignore it.
+    pub status: watch::Receiver<Option<Arc<StatusReport>>>,
+}
+
+impl SourceIo {
+    /// The channels with a status feed that never changes (tests, and
+    /// sources driven without a service).
+    pub fn new(commands: mpsc::Receiver<SourceCommand>, events: mpsc::Sender<SourceEvent>) -> Self {
+        let (_tx, status) = watch::channel(None);
+        SourceIo {
+            commands,
+            events,
+            status,
+        }
+    }
 }
 
 /// A boxed, sendable future.

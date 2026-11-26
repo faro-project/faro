@@ -1304,3 +1304,57 @@ async fn goodbye_from_a_retired_device_writes_nothing_and_lets_the_uninstall_go_
     );
     assert_eq!(head(&deleted), next, "nothing was written");
 }
+
+/// 13. A problem report (`faro-service diagnose`) from an active device
+///     names its instance and says what the status says, and holds none of
+///     the device's secrets or the accounts' email addresses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_problem_report_names_the_instance_and_holds_no_secret() {
+    use faro_core::clock::Clock;
+    use faro_service::diagnose::{collect, Sources};
+    let w = World::new().await;
+    let mut dev = w.active_device(quiet_classifier()).await;
+    let config = faro_service::Config {
+        state_dir: dev.state_dir.clone(),
+        ..Default::default()
+    };
+    let sources = Sources {
+        config_file: dev.state_dir.join("service.toml"),
+        service_log: None,
+        agent_log: None,
+        lines: 100,
+        listings: vec![dev.state_dir.clone()],
+        system: false,
+        agent_uid: None,
+    };
+    let report = collect(&config, &sources, dev.clock.wall_ms());
+    let instance = url::Url::parse(&dev.enrollment.instance_url).expect("instance URL");
+    assert_eq!(report.instance_host.as_deref(), instance.host_str());
+    let status = report.file("status.txt").expect("status.txt").contents();
+    assert!(
+        status.contains(&format!("({})", dev.enrollment.instance_url)),
+        "the instance's address stays:\n{status}"
+    );
+    assert!(
+        status.contains(&dev.enrollment.device_id.to_string()),
+        "{status}"
+    );
+    assert!(status.contains(&dev.fingerprint()), "{status}");
+
+    let all = report.full_text();
+    let key = dev
+        .dir
+        .read_secret(faro_service::state::DEVICE_KEY_FILE)
+        .expect("read the key")
+        .expect("a device key");
+    assert!(
+        !all.contains(&hex::encode(&key[..])),
+        "the device key is in the report"
+    );
+    for email in [MEMBER_EMAIL, ALLY_EMAIL, ADMIN_EMAIL] {
+        assert!(!all.contains(email), "{email} is in the report");
+    }
+    let files = report.file("files.txt").expect("files.txt").contents();
+    assert!(files.contains("outbox.sqlite3"), "{files}");
+    dev.shutdown().await;
+}

@@ -267,7 +267,7 @@ fn with_detail(mut s: Screen, detail: &str) -> Screen {
 }
 
 #[cfg(unix)]
-pub use flow::{run_flow, Authorizer, EnrollUi, ANSWER_TIMEOUT, ENROLL_TIMEOUT};
+pub use flow::{enrollment_status, run_flow, Authorizer, EnrollUi, ANSWER_TIMEOUT, ENROLL_TIMEOUT};
 
 #[cfg(unix)]
 mod flow {
@@ -318,6 +318,26 @@ mod flow {
             IpcClient::connect_verified_typed(socket, &*verifier).await?;
         conn.send(req).await?;
         conn.recv_timeout(timeout, "the service's answer").await
+    }
+
+    /// Ask the service whether the computer is enrolled (`Status`, which
+    /// changes nothing), for the status menu while the agent has no session
+    /// connection. `Err` with a short reason when the service doesn't
+    /// answer.
+    pub async fn enrollment_status(
+        socket: &Path,
+        trust: ServiceTrust,
+        timeout: Duration,
+    ) -> Result<EnrollStatus, String> {
+        let asked =
+            tokio::time::timeout(timeout, ask(socket, trust, &EnrollRequest::Status, timeout));
+        match asked.await {
+            Ok(Ok(EnrollResponse::Status(s))) => Ok(s),
+            Ok(Ok(EnrollResponse::Failed { kind, .. })) => Err(format!("refused ({kind:?})")),
+            Ok(Ok(other)) => Err(format!("unexpected answer {}", other.kind())),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("no answer in time".to_owned()),
+        }
     }
 
     /// Run the whole flow (see the module docs), blocking. `link` is the

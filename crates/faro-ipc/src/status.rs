@@ -2,11 +2,12 @@
 //!
 //! The service keeps one of these up to date and writes it to
 //! `status.json` in its state directory (`faro-service status` reads it
-//! there). It lives in this crate, not in `faro-service`, so that the agent
-//! can show it too (a menu-bar status menu) without depending on the
-//! service: no [`AgentMsg`](crate::AgentMsg) or
-//! [`ServiceMsg`](crate::ServiceMsg) carries it yet, so defining it here
-//! changes nothing on the wire.
+//! there). The file is root's, so the agent never sees the whole report:
+//! the service sends each session's agent a [`MemberStatus`], a view
+//! scoped to that session and this computer
+//! ([`ServiceMsg::Status`](crate::ServiceMsg::Status)), for the menu-bar
+//! status menu. [`MemberStatus::for_session`] makes it, and is the one
+//! place that decides what a session may see.
 //!
 //! **No content.** A report holds states, times, counters, account short
 //! names, versions and short diagnostics. Never a URL, a window title, an
@@ -59,6 +60,10 @@ pub struct StatusReport {
     /// The log file the service writes (`/Library/Logs/Faro/faro-service.log`),
     /// or `None` when it logs to stderr (a development run).
     pub log_file: Option<String>,
+    /// The enrolled instance's name, as the enrollment recorded it.
+    pub instance_name: Option<String>,
+    /// The enrolled instance's address (`https://faro.example.org/`).
+    pub instance_url: Option<String>,
 }
 
 /// How often the service rewrites the status file when nothing changed.
@@ -80,6 +85,8 @@ impl Default for StatusReport {
             updates: UpdatesReport::default(),
             health: HealthReport::default(),
             log_file: None,
+            instance_name: None,
+            instance_url: None,
         }
     }
 }
@@ -173,6 +180,9 @@ pub struct CaptureReport {
     pub consecutive_failures: u32,
     /// The most recent failure, even if a capture succeeded since.
     pub last_failure: Option<CaptureFailure>,
+    /// With `paused`: when the member's pause ends by itself, if it has an
+    /// end.
+    pub paused_until_ms: Option<i64>,
 }
 
 /// A failed capture.
@@ -313,6 +323,127 @@ pub struct HealthReport {
     pub identity_mismatch: bool,
     /// The last error the service recorded.
     pub last_error: Option<String>,
+    /// The last time the instance answered a heartbeat (with anything, even
+    /// a refusal).
+    pub last_contact_ms: Option<i64>,
+    /// Since when heartbeats fail because the instance can't be reached (a
+    /// network error, or a server error from it); `None` once it answers.
+    pub unreachable_since_ms: Option<i64>,
+}
+
+/// Longest text field in a [`MemberStatus`] (the instance's name and
+/// address, the service's version).
+pub const MAX_MEMBER_TEXT: usize = 2048;
+
+/// What one session's agent is told about the service, for its status menu
+/// ([`ServiceMsg::Status`](crate::ServiceMsg::Status)).
+///
+/// **Scoped.** Only what concerns that session and this computer: never
+/// another account's name, session or permissions, and nothing from the
+/// screen. [`for_session`](Self::for_session) is the one place that
+/// decides it. **Read only.** No message lets the agent change any of it.
+///
+/// Fields are append-only, as in [`messages`](crate::messages).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemberStatus {
+    /// The service's version.
+    pub service_version: String,
+    pub phase: ServicePhase,
+    /// The enrolled instance's name and address (empty if unknown).
+    pub instance_name: String,
+    pub instance_url: String,
+    /// The capture state, when it concerns this session: always for the
+    /// states that are the computer's (`not_started`, `paused`, `asleep`,
+    /// `stopped`), and the others only while this session is the one at
+    /// the screen. `None` otherwise: what another session does is not this
+    /// one's business.
+    pub capture: Option<CaptureState>,
+    /// With `paused`: when the pause ends by itself, if it has an end.
+    pub paused_until_ms: Option<i64>,
+    /// Screen Recording for this session's account, while it is the capture
+    /// target: `denied` also when the latest captures were refused for want
+    /// of it.
+    pub screen_recording: Option<WirePermissionState>,
+    /// Accessibility for this session's account, while it is the capture
+    /// target.
+    pub accessibility: Option<bool>,
+    /// This session's captures that failed in a row (0 unless it is the
+    /// capture target).
+    pub consecutive_failures: u32,
+    /// Since when the instance can't be reached, if it can't.
+    pub unreachable_since_ms: Option<i64>,
+    /// The instance's identity no longer matches the one pinned at
+    /// enrollment, so nothing is sent to it.
+    pub identity_mismatch: bool,
+    /// The last update check failed.
+    pub updates_failing: bool,
+}
+
+/// The failure reason the agent's refused captures carry.
+const SCREEN_RECORDING_DENIED: &str = "permission denied: screen_recording";
+
+impl MemberStatus {
+    /// The view of `report` for the agent of `session` (`uid:501`).
+    pub fn for_session(report: &StatusReport, session: &str) -> Self {
+        let target = !session.is_empty()
+            && report
+                .sessions
+                .iter()
+                .any(|s| s.session == session && s.capture_target);
+        let state = report.capture.state;
+        let capture = match state {
+            CaptureState::NotStarted
+            | CaptureState::Paused
+            | CaptureState::Asleep
+            | CaptureState::Stopped => Some(state),
+            _ if target => Some(state),
+            _ => None,
+        };
+        let refused = report.capture.consecutive_failures > 0
+            && report
+                .capture
+                .last_failure
+                .as_ref()
+                .is_some_and(|f| f.reason.contains(SCREEN_RECORDING_DENIED));
+        let screen_recording = if !target {
+            None
+        } else if refused {
+            Some(WirePermissionState::Denied)
+        } else {
+            report.permissions.screen_recording
+        };
+        let text = |s: &Option<String>| clip(s.as_deref().unwrap_or_default());
+        MemberStatus {
+            service_version: clip(&report.service_version),
+            phase: report.phase,
+            instance_name: text(&report.instance_name),
+            instance_url: text(&report.instance_url),
+            capture,
+            paused_until_ms: (state == CaptureState::Paused)
+                .then_some(report.capture.paused_until_ms)
+                .flatten(),
+            screen_recording,
+            accessibility: report.permissions.accessibility.filter(|_| target),
+            consecutive_failures: if target {
+                report.capture.consecutive_failures
+            } else {
+                0
+            },
+            unreachable_since_ms: report.health.unreachable_since_ms,
+            identity_mismatch: report.health.identity_mismatch,
+            updates_failing: report.updates.enabled && report.updates.last_check_failed,
+        }
+    }
+}
+
+/// `s`, cut to at most [`MAX_MEMBER_TEXT`] bytes on a character boundary.
+fn clip(s: &str) -> String {
+    let mut end = s.len().min(MAX_MEMBER_TEXT);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -345,6 +476,7 @@ mod tests {
                     at_ms: 1_900,
                     reason: "permission denied: screen_recording".into(),
                 }),
+                paused_until_ms: None,
             },
             permissions: PermissionsReport {
                 account: Some("alex".into()),
@@ -418,5 +550,97 @@ mod tests {
     #[test]
     fn reasons_are_capped() {
         assert_eq!(short_reason(&"é".repeat(500)).chars().count(), 200);
+    }
+
+    fn two_sessions() -> StatusReport {
+        let mut r = sample();
+        r.instance_name = Some("Sam's Faro".into());
+        r.instance_url = Some("https://faro.example.org/".into());
+        r.sessions.push(SessionReport {
+            session: "uid:502".into(),
+            account: "guest".into(),
+            agent_connected: true,
+            ..SessionReport::default()
+        });
+        r
+    }
+
+    #[test]
+    fn the_session_at_the_screen_sees_its_capture_and_permissions() {
+        let m = MemberStatus::for_session(&two_sessions(), "uid:501");
+        assert_eq!(m.capture, Some(CaptureState::Active));
+        // The last capture was refused for want of Screen Recording.
+        assert_eq!(m.screen_recording, Some(WirePermissionState::Denied));
+        assert_eq!(m.accessibility, Some(true));
+        assert_eq!(m.consecutive_failures, 1);
+        assert_eq!(m.instance_name, "Sam's Faro");
+        assert_eq!(m.instance_url, "https://faro.example.org/");
+        assert_eq!(m.service_version, "0.1.0-beta.1");
+    }
+
+    #[test]
+    fn another_session_sees_nothing_of_the_one_at_the_screen() {
+        let m = MemberStatus::for_session(&two_sessions(), "uid:502");
+        assert_eq!(m.capture, None);
+        assert_eq!(m.screen_recording, None);
+        assert_eq!(m.accessibility, None);
+        assert_eq!(m.consecutive_failures, 0);
+        // Nothing in it names the other account or session.
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("alex"), "{json}");
+        assert!(!json.contains("uid:"), "{json}");
+        // An unknown or empty session is treated the same.
+        for s in ["", "uid:999"] {
+            let m = MemberStatus::for_session(&two_sessions(), s);
+            assert_eq!((m.capture, m.screen_recording), (None, None));
+        }
+    }
+
+    #[test]
+    fn the_computers_own_states_reach_every_session() {
+        let mut r = two_sessions();
+        r.capture.state = CaptureState::Paused;
+        r.capture.paused_until_ms = Some(9_000);
+        r.health.unreachable_since_ms = Some(5_000);
+        r.health.identity_mismatch = true;
+        r.updates.last_check_failed = true;
+        let m = MemberStatus::for_session(&r, "uid:502");
+        assert_eq!(m.capture, Some(CaptureState::Paused));
+        assert_eq!(m.paused_until_ms, Some(9_000));
+        assert_eq!(m.unreachable_since_ms, Some(5_000));
+        assert!(m.identity_mismatch);
+        assert!(m.updates_failing);
+        // A pause end is only reported while paused.
+        r.capture.state = CaptureState::Active;
+        assert_eq!(
+            MemberStatus::for_session(&r, "uid:501").paused_until_ms,
+            None
+        );
+    }
+
+    #[test]
+    fn granted_permission_is_reported_when_captures_work() {
+        let mut r = two_sessions();
+        r.capture.consecutive_failures = 0;
+        r.permissions.screen_recording = Some(WirePermissionState::Granted);
+        let m = MemberStatus::for_session(&r, "uid:501");
+        assert_eq!(m.screen_recording, Some(WirePermissionState::Granted));
+    }
+
+    #[test]
+    fn member_status_is_bounded_and_round_trips() {
+        let mut r = two_sessions();
+        r.instance_name = Some("é".repeat(5_000));
+        let m = MemberStatus::for_session(&r, "uid:501");
+        assert!(m.instance_name.len() <= MAX_MEMBER_TEXT);
+        let msg = crate::ServiceMsg::Status(m.clone());
+        assert!(crate::WireMessage::validate(&msg).is_ok());
+        let too_long = crate::ServiceMsg::Status(MemberStatus {
+            instance_url: "x".repeat(MAX_MEMBER_TEXT + 1),
+            ..m.clone()
+        });
+        assert!(crate::WireMessage::validate(&too_long).is_err());
+        let bytes = postcard::to_allocvec(&m).unwrap();
+        assert_eq!(postcard::from_bytes::<MemberStatus>(&bytes).unwrap(), m);
     }
 }

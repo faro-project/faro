@@ -13,7 +13,11 @@
 //!   read it, session state (idle, locked, display asleep), permission
 //!   state, session edges and tamper signals, both periodically and when
 //!   they change;
-//! * answers liveness pings, shows service notices, and exits when told to.
+//! * answers liveness pings, shows service notices, and exits when told to;
+//! * hands what it knows of the service to the menu-bar status menu
+//!   ([`status_menu`]): the service's `Status` view of this session while
+//!   connected, and the enroll socket's answer (not enrolled, waiting for
+//!   approval) while not.
 //!
 //! On macOS it also opens `faro://enroll` links ([`enroll`]): it shows
 //! the instance to confirm and asks the service to enroll the computer,
@@ -74,6 +78,7 @@ mod pending;
 pub mod platform;
 #[cfg(unix)]
 mod run;
+pub mod status_menu;
 
 pub use config::{AgentConfig, Backoff, ServiceTrust, DEFAULT_SOCKET_PATH};
 pub use notice::{

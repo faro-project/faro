@@ -65,6 +65,13 @@ pub trait NoticeSink: Send {
     fn screen_recording_off(&mut self) {
         self.show(SCREEN_RECORDING_OFF.title, SCREEN_RECORDING_OFF.body);
     }
+
+    /// What the agent now knows of the service, for a status menu
+    /// ([`crate::status_menu`]). Called when it changes. Without a menu
+    /// there is nothing to show, so by default it is only logged.
+    fn status(&mut self, seen: &crate::status_menu::Seen) {
+        tracing::debug!(?seen, "service status");
+    }
 }
 
 /// Logs notices. The title goes to `info` so it is visible in the unified

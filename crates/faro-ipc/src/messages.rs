@@ -21,6 +21,7 @@ use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};
 
 use crate::codec::MAX_FRAMES_PER_MESSAGE;
 use crate::error::{IpcError, Result};
+use crate::status::{MemberStatus, MAX_MEMBER_TEXT};
 use crate::wire_frame::WireFrame;
 
 /// Messages the agent sends to the service.
@@ -103,6 +104,11 @@ pub enum ServiceMsg {
     ShowNotice { title: String, body: String },
     /// The agent should exit.
     Shutdown { reason: ShutdownReason },
+    /// What the service is doing, as far as it concerns this session and
+    /// this computer, for the agent's status menu. Sent after `Welcome` and
+    /// whenever it changes. The agent only shows it: no message changes
+    /// any of it. See [`MemberStatus`] for what it may hold.
+    Status(MemberStatus),
 }
 
 /// Why the service asked for a capture (§3.4). Carried so the agent can make
@@ -259,6 +265,7 @@ impl ServiceMsg {
             ServiceMsg::Ping { .. } => "Ping",
             ServiceMsg::ShowNotice { .. } => "ShowNotice",
             ServiceMsg::Shutdown { .. } => "Shutdown",
+            ServiceMsg::Status(_) => "Status",
         }
     }
 }
@@ -387,6 +394,21 @@ impl WireMessage for AgentMsg {
 
 impl WireMessage for ServiceMsg {
     fn validate(&self) -> Result<()> {
+        if let ServiceMsg::Status(s) = self {
+            for (field, text) in [
+                ("service_version", &s.service_version),
+                ("instance_name", &s.instance_name),
+                ("instance_url", &s.instance_url),
+            ] {
+                if text.len() > MAX_MEMBER_TEXT {
+                    return Err(IpcError::FieldTooLong {
+                        field,
+                        len: text.len(),
+                        max: MAX_MEMBER_TEXT,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
