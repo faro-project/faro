@@ -11,8 +11,10 @@
 //! Each image is a folder-labelled PNG (layout in [`set`]). It is read and
 //! decoded into a [`Frame`](faro_platform::Frame), downscaled to
 //! [`MAX_FRAME_SIDE`] exactly as [`Detector::process`](crate::Detector)
-//! does, classified, fused by the [`PolicyEngine`] with no context signals,
-//! and destroyed (zeroized) before the next image is read.
+//! does, classified (preprocessed per the model info's
+//! [`Resize`], as in the service), fused by the [`PolicyEngine`] with no
+//! context signals, and destroyed (zeroized) before the next image is read.
+//! [`compare_text`] puts runs of several modes on one set side by side.
 //!
 //! * **Predicted class.** `neutral` when the policy rates the image clean.
 //!   Otherwise the policy kind of its top reason: `explicit` for any of the

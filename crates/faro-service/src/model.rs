@@ -245,6 +245,11 @@ pub fn check(manifest: &Path, runs: usize, out: &mut dyn Write) -> Result<(), Op
     if let Some(a) = &i.attribution {
         let _ = writeln!(out, "             by {}; {}", a.author, a.source_url);
     }
+    let _ = writeln!(
+        out,
+        "input        {}x{}, resize {}",
+        i.input_size.width, i.input_size.height, i.resize
+    );
     let frames = check_frames();
     for (name, frame) in &frames {
         let scores = c.classify(frame)?;
