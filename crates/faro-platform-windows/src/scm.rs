@@ -818,6 +818,23 @@ mod tests {
         }
     }
 
+    /// The MSI's service DACL and the one `check-msi.ps1` expects are this
+    /// module's [`SERVICE_SDDL`], not a second, looser copy.
+    #[test]
+    fn the_installer_uses_the_same_service_sddl() {
+        let wxs = include_str!("../../../installers/windows/Faro.wxs");
+        let check = include_str!("../../../installers/windows/check-msi.ps1");
+        let quoted = format!("Sddl=\"{SERVICE_SDDL}\"");
+        assert!(
+            wxs.contains(&quoted),
+            "Faro.wxs service PermissionEx differs"
+        );
+        assert!(
+            check.contains(&format!("$ServiceSddl = '{SERVICE_SDDL}'")),
+            "check-msi.ps1 expects another service DACL"
+        );
+    }
+
     #[test]
     fn controls_decode() {
         // SAFETY: no data needed for these controls.

@@ -227,7 +227,7 @@ mod imp {
 mod imp {
     use super::CodeSignError;
     use faro_ipc::PeerInfo;
-    use faro_platform_windows::authenticode::{verify_process, SignerRequirement};
+    use faro_platform_windows::authenticode::{verify_process_with, Fetch, SignerRequirement};
 
     pub(super) fn check_requirement(text: &str) -> Result<(), CodeSignError> {
         SignerRequirement::parse(text)
@@ -239,7 +239,8 @@ mod imp {
         let req = SignerRequirement::parse(text)
             .map_err(|e| CodeSignError::BadWindowsRequirement(e.to_string()))?;
         let pid = peer.pid.ok_or(CodeSignError::NoPid)?;
-        verify_process(pid, &req)
+        // Cache-only revocation: this runs for every agent connection.
+        verify_process_with(pid, &req, Fetch::CacheOnly)
             .map(|_| ())
             .map_err(|e| CodeSignError::NotSigned(e.to_string()))
     }

@@ -60,7 +60,12 @@ impl FakeAdmin {
 }
 
 impl Approver for FakeAdmin {
-    fn approve(&self, authorization: &[u8; 32], prompt: &str) -> Result<(), ApprovalError> {
+    fn approve(
+        &self,
+        authorization: &[u8; 32],
+        prompt: &str,
+        _subject: &faro_service::enroll_server::ApprovalSubject<'_>,
+    ) -> Result<(), ApprovalError> {
         self.prompts.lock().unwrap().push(prompt.to_owned());
         self.authorizations.lock().unwrap().push(*authorization);
         let answer = *self.answer.lock().unwrap();

@@ -9,11 +9,15 @@
 //! their desktop) and starts it again when it exits.
 //!
 //! * **Startup.** Every user session gets an agent, including one switched
-//!   away from (its programs keep running). An agent that is already
-//!   running there (the service restarted; the agent outlives it) is
-//!   adopted, not duplicated: found by image name, session **and** full
-//!   image path, so a same-named program the user ran from somewhere they
-//!   can write does not keep the real agent from starting.
+//!   away from (its programs keep running). An agent already running there
+//!   (the service restarted; the agent outlives it) is **not** adopted:
+//!   the service has no handle it can trust to be the process it started,
+//!   and the user can start the installed image themselves. A process with
+//!   the agent image name, session **and** full image path is stopped and
+//!   replaced by one the service spawns, which has the protected process
+//!   descriptor (`faro_platform_windows::service`); the IPC source admits
+//!   only the pid the launcher recorded for the session. Same-named
+//!   programs from other paths are left alone.
 //! * **Relaunch.** The agent's process handle is waited on, so a killed
 //!   agent is noticed at once; each restart is logged as `agent_restarted`
 //!   and started again after a short, growing delay. The *tamper* signal is
@@ -42,7 +46,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 
 /// How often the session list is re-read when nothing reports a change.
@@ -54,7 +59,6 @@ const HEALTHY_AFTER: Duration = Duration::from_secs(60);
 struct Running {
     process: OwnedHandle,
     pid: u32,
-    adopted: bool,
 }
 
 /// Launches agents. See the module docs.
@@ -82,7 +86,8 @@ impl AgentLauncher {
     /// Run until the task is aborted.
     pub async fn run(self) {
         let mut changes = crate::win::session_changes();
-        let running: Arc<Mutex<BTreeSet<u32>>> = Arc::default();
+        crate::win::set_launcher_active();
+        let running: Arc<Mutex<BTreeMap<u32, u32>>> = Arc::default();
         let mut tasks: BTreeMap<u32, JoinHandle<()>> = BTreeMap::new();
         let host = Arc::new(self.host);
         loop {
@@ -92,7 +97,7 @@ impl AgentLauncher {
                     let keep = wanted.contains(id) && !t.is_finished();
                     if !keep {
                         t.abort();
-                        set_running(&running, *id, false);
+                        set_running(&running, *id, None);
                     }
                     keep
                 });
@@ -114,18 +119,27 @@ fn wts_id(s: &SessionEntry) -> Option<u32> {
     parse_session_id(&faro_platform::SessionId(s.id.clone()))
 }
 
-fn set_running(running: &Mutex<BTreeSet<u32>>, session: u32, up: bool) {
+/// Record (`Some(pid)`) or forget (`None`) the agent the launcher spawned
+/// in `session`.
+fn set_running(running: &Mutex<BTreeMap<u32, u32>>, session: u32, pid: Option<u32>) {
     let mut r = running.lock().unwrap_or_else(PoisonError::into_inner);
-    if up {
-        r.insert(session);
-    } else {
-        r.remove(&session);
+    match pid {
+        Some(pid) => {
+            r.insert(session, pid);
+        }
+        None => {
+            r.remove(&session);
+        }
     }
     crate::win::set_launched_agents(r.clone());
 }
 
 /// Keep one session's agent running until the task is aborted.
-async fn keep_agent(host: Arc<WinServiceHost>, session: u32, running: Arc<Mutex<BTreeSet<u32>>>) {
+async fn keep_agent(
+    host: Arc<WinServiceHost>,
+    session: u32,
+    running: Arc<Mutex<BTreeMap<u32, u32>>>,
+) {
     let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
     loop {
         let started = Instant::now();
@@ -140,13 +154,8 @@ async fn keep_agent(host: Arc<WinServiceHost>, session: u32, running: Arc<Mutex<
             }
             Err(_) => return,
         };
-        tracing::info!(
-            session,
-            pid = agent.pid,
-            adopted = agent.adopted,
-            "agent running in a session"
-        );
-        set_running(&running, session, true);
+        tracing::info!(session, pid = agent.pid, "agent running in a session");
+        set_running(&running, session, Some(agent.pid));
         let pid = agent.pid;
         // Cancelled when this task is aborted, so the waiting thread ends
         // within a second instead of at the agent's exit.
@@ -155,7 +164,7 @@ async fn keep_agent(host: Arc<WinServiceHost>, session: u32, running: Arc<Mutex<
         let exited = tokio::task::spawn_blocking(move || wait_for_exit(&agent.process, &cancel))
             .await
             .unwrap_or(false);
-        set_running(&running, session, false);
+        set_running(&running, session, None);
         if !exited {
             return;
         }
@@ -195,25 +204,34 @@ fn wait_for_exit(process: &OwnedHandle, cancel: &AtomicBool) -> bool {
     false
 }
 
+/// Start this service instance own agent in `session`. A same-path agent
+/// the service did not start (the service restarted, or the user ran the
+/// installed `faro-agent.exe` themselves) is never adopted: the service
+/// cannot tell it from an impostor that has patched the genuine image in
+/// memory, so it is stopped if possible and ignored otherwise (the IPC
+/// source only admits the pid recorded for what the launcher spawned).
 fn launch_or_adopt(host: &WinServiceHost, session: u32) -> Result<Running, String> {
-    if let Some(r) = find_running(host.agent_program(), session) {
-        return Ok(r);
-    }
+    stop_foreign(host.agent_program(), session);
     let SpawnedAgent { pid, process } =
         host.spawn_in_session(session).map_err(|e| e.to_string())?;
-    Ok(Running {
-        process,
-        pid,
-        adopted: false,
-    })
+    Ok(Running { process, pid })
 }
 
-/// The agent already running in `session`: image name, session and full
-/// image path all match `program`.
-fn find_running(program: &Path, session: u32) -> Option<Running> {
-    let name = program.file_name()?.to_string_lossy().to_lowercase();
+/// Stop every process in `session` with the agent image name and full
+/// path. Each is opened once and everything after is done on that handle,
+/// so a pid reused in between cannot make us kill or trust the wrong
+/// process: an open handle keeps its pid from being recycled.
+fn stop_foreign(program: &Path, session: u32) {
+    let Some(name) = program
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+    else {
+        return;
+    };
     // SAFETY: a snapshot handle we close below.
-    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+    let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return;
+    };
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
@@ -236,33 +254,49 @@ fn find_running(program: &Path, session: u32) -> Option<Running> {
     // SAFETY: closing the snapshot we opened.
     let _ = unsafe { CloseHandle(snap) };
     for pid in pids {
+        // SAFETY: a process handle we own; the handle (not the pid) is what
+        // every later step uses.
+        let Ok(h) = (unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                pid,
+            )
+        }) else {
+            tracing::warn!(
+                pid,
+                session,
+                "cannot open a same-named process; ignoring it"
+            );
+            continue;
+        };
+        // SAFETY: a fresh handle; ownership moves to the OwnedHandle.
+        let process = unsafe { OwnedHandle::from_raw_handle(h.0 as RawHandle) };
         if crate::win::process_session_id(pid) != Some(session) {
             continue;
         }
-        let Ok(image) = faro_platform_windows::authenticode::process_image_path(pid) else {
+        let Ok(image) = faro_platform_windows::authenticode::process_image_of(&process) else {
             continue;
         };
         if !same_path(&image, program) {
             continue;
         }
-        // SAFETY: a process handle we own.
-        let Ok(h) = (unsafe {
-            OpenProcess(
-                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                false,
-                pid,
-            )
-        }) else {
-            continue;
-        };
-        return Some(Running {
-            // SAFETY: a fresh handle; ownership moves to the OwnedHandle.
-            process: unsafe { OwnedHandle::from_raw_handle(h.0 as RawHandle) },
+        tracing::warn!(
             pid,
-            adopted: true,
-        });
+            session,
+            "an agent the service did not start is running here; stopping it and starting our own"
+        );
+        // SAFETY: `process` has PROCESS_TERMINATE.
+        match unsafe { TerminateProcess(h, 1) } {
+            Ok(()) => {
+                // SAFETY: SYNCHRONIZE access.
+                let _ = unsafe { WaitForSingleObject(h, 5000) };
+            }
+            Err(e) => {
+                tracing::warn!(pid, error = %e, "cannot stop it; it will be refused on the agent pipe");
+            }
+        }
     }
-    None
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {

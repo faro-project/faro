@@ -37,10 +37,13 @@ is checked with Get-AuthenticodeSignature afterwards.
 
 Whichever provider is chosen, the service checks update packages and agents
 against the signer compiled in from FARO_WINDOWS_SIGNER (`subject="<CN>"`,
-optionally `; sha256=<leaf thumbprint>`): set it to the certificate this
-provider signs with. The SignPath Foundation signs as "SignPath Foundation"
-for every project it serves, so pin its thumbprint as well; Azure Trusted
-Signing renews its certificates every few days, so pin the subject only.
+`; sha256=<leaf thumbprint>` and/or `; issuer_sha256=<issuing CA thumbprint>`):
+set it to the certificate this provider signs with. A release build requires
+a pin, since a subject alone is met by any CA's certificate with that name.
+The SignPath Foundation signs as "SignPath Foundation" for every project it
+serves, so pin its leaf thumbprint; Azure Trusted Signing renews its leaf
+certificates every few days, so pin the issuing CA's thumbprint
+(`issuer_sha256=`). This script prints both after signing.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Sign')]
 param(
@@ -145,5 +148,12 @@ foreach ($p in $paths) {
     if ($null -eq $sig.TimeStamperCertificate) { Fail "$p has no timestamp" }
     $sha = [Security.Cryptography.SHA256]::Create()
     $thumb = (($sha.ComputeHash($sig.SignerCertificate.RawData) | ForEach-Object { $_.ToString('x2') }) -join '')
-    Write-Host "    $(Split-Path -Leaf $p): $($sig.SignerCertificate.Subject) (sha256 $thumb)"
+    $issuer = ''
+    $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = 'NoCheck'
+    if ($chain.Build($sig.SignerCertificate) -and $chain.ChainElements.Count -gt 1) {
+        $ca = (($sha.ComputeHash($chain.ChainElements[1].Certificate.RawData) | ForEach-Object { $_.ToString('x2') }) -join '')
+        $issuer = " (issuer_sha256 $ca)"
+    }
+    Write-Host "    $(Split-Path -Leaf $p): $($sig.SignerCertificate.Subject) (sha256 $thumb)$issuer"
 }

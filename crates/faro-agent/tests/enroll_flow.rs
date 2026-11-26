@@ -151,7 +151,7 @@ struct FakeAuthorizer {
 }
 
 impl Authorizer for FakeAuthorizer {
-    fn create(&self) -> Result<(Box<dyn Any>, [u8; 32]), String> {
+    fn create(&self, _: &str, _: &str) -> Result<(Box<dyn Any>, [u8; 32]), String> {
         *self.created.borrow_mut() += 1;
         *self.alive.borrow_mut() = true;
         Ok((Box::new(Hold(self.alive.clone())), [42; 32]))

@@ -79,6 +79,17 @@ const WRITE_RIGHTS: u32 = 0x0000_0002 // FILE_WRITE_DATA / FILE_ADD_FILE
     | 0x1000_0000 // GENERIC_ALL
     | 0x4000_0000; // GENERIC_WRITE
 
+/// The subset of [`WRITE_RIGHTS`] that lets a holder replace the object
+/// itself (rename or delete it, or take it over), as opposed to only adding
+/// new entries beside it: for the directories *above* a file, where
+/// creating a sibling is harmless but renaming the directory is not.
+const REPLACE_RIGHTS: u32 = 0x0000_0040 // FILE_DELETE_CHILD
+    | 0x0001_0000 // DELETE
+    | 0x0004_0000 // WRITE_DAC
+    | 0x0008_0000 // WRITE_OWNER
+    | 0x1000_0000 // GENERIC_ALL
+    | 0x4000_0000; // GENERIC_WRITE
+
 /// Give `dir` a protected (non-inherited) DACL granting full control to
 /// SYSTEM and Administrators only, applied to it and inherited by children.
 ///
@@ -323,6 +334,18 @@ fn sid_string(sid: PSID) -> std::io::Result<String> {
 /// that renaming needs `DELETE` here or `FILE_DELETE_CHILD` on the parent:
 /// check the parent too when that matters, as `verify_process` does).
 pub fn writable_by_others(path: &Path) -> std::io::Result<bool> {
+    others_hold(path, WRITE_RIGHTS)
+}
+
+/// Like [`writable_by_others`], for a directory *above* the one that holds
+/// a file: only rights that let someone rename, delete or take over the
+/// directory count (so the stock `Users: add subdirectories` on a volume
+/// root does not), since swapping any ancestor swaps the file's path.
+pub fn replaceable_by_others(path: &Path) -> std::io::Result<bool> {
+    others_hold(path, REPLACE_RIGHTS)
+}
+
+fn others_hold(path: &Path, rights: u32) -> std::io::Result<bool> {
     let sd = get_named(path, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)?;
     match sd.owner()? {
         Some(owner) if TRUSTED_SIDS.contains(&sid_string(owner)?.as_str()) => {}
@@ -364,7 +387,7 @@ pub fn writable_by_others(path: &Path) -> std::io::Result<bool> {
             let p = ace.cast::<u8>().add(size_of::<ACE_HEADER>());
             (p.cast::<u32>().read_unaligned(), PSID(p.add(4).cast()))
         };
-        if mask & WRITE_RIGHTS == 0 {
+        if mask & rights == 0 {
             continue;
         }
         let sid = sid_string(sid)?;

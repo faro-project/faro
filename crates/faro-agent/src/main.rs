@@ -413,19 +413,32 @@ impl faro_agent::enroll::EnrollUi for MacEnrollUi {
 struct EnrollAuthorizer;
 
 /// Windows: an elevated administrator approves through UAC *before*
-/// `Enroll`: the helper (`faro-service approve-enroll --request <hex>`)
-/// makes the service record the approval, and the request id is sent as
+/// `Enroll`: the helper (`faro-service approve-enroll --request <hex>
+/// --name <name> --url <url>`) shows the person the instance, and makes the
+/// service record the approval bound to it, and the request id is sent as
 /// the `authorization`. Blocks through the UAC prompt, so it runs on the
 /// enrollment thread, never the UI thread.
 #[cfg(windows)]
 impl faro_agent::enroll::Authorizer for EnrollAuthorizer {
     fn create(
         &self,
+        instance_name: &str,
+        instance_url: &str,
     ) -> Result<(Box<dyn std::any::Any>, [u8; faro_ipc::AUTHORIZATION_LEN]), String> {
         use faro_platform_windows::layout;
-        use platform_ui::approval::{request_admin_approval, ApprovalError, ApprovalRequest};
+        use platform_ui::approval::{
+            request_admin_approval, ApprovalError, ApprovalRequest, ApprovalSubject,
+        };
         let req = ApprovalRequest::generate().map_err(|e| e.to_string())?;
-        match request_admin_approval(std::path::Path::new(layout::SERVICE_PROGRAM), &req) {
+        let subject = ApprovalSubject {
+            name: instance_name.to_owned(),
+            url: instance_url.to_owned(),
+        };
+        match request_admin_approval(
+            std::path::Path::new(layout::SERVICE_PROGRAM),
+            &req,
+            &subject,
+        ) {
             Ok(()) => Ok((Box::new(()), *req.bytes())),
             Err(ApprovalError::Declined) => {
                 Err("The administrator approval was cancelled.".to_owned())
@@ -441,6 +454,8 @@ impl faro_agent::enroll::Authorizer for EnrollAuthorizer {
 impl faro_agent::enroll::Authorizer for EnrollAuthorizer {
     fn create(
         &self,
+        _instance_name: &str,
+        _instance_url: &str,
     ) -> Result<(Box<dyn std::any::Any>, [u8; faro_ipc::AUTHORIZATION_LEN]), String> {
         use faro_platform_macos::authorization::Authorization;
         let auth = Authorization::new_empty().map_err(|e| e.to_string())?;

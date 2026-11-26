@@ -85,7 +85,7 @@ pub use messages::{
     WireSessionChange,
 };
 #[cfg(windows)]
-pub use named_pipe::{BindOptions, IpcClient, IpcServer};
+pub use named_pipe::{BindOptions, IpcClient, IpcServer, PendingConnection};
 #[cfg(unix)]
 pub use peer::AllowSameUid;
 pub use peer::{AllowSameUser, AllowSids, AllowSystemService, AllowUids, PeerInfo, PeerVerifier};

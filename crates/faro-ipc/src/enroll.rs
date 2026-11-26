@@ -141,7 +141,17 @@ pub enum EnrollRequest {
     /// approved the enrollment the agent will request with `request` as its
     /// `authorization`. The service checks the helper's own token. Appended
     /// last, so the encodings of the other variants are unchanged.
-    ApproveEnroll { request: [u8; AUTHORIZATION_LEN] },
+    ///
+    /// `binding` is SHA-256 over a domain-separated encoding of the
+    /// instance URL and name the administrator was shown and the `request`
+    /// (see `faro_service::enroll_approval::approval_binding`). The service
+    /// keeps it with the approval and on `Enroll` recomputes it from the
+    /// instance it discovered, so an approval is good only for the target
+    /// the approver saw.
+    ApproveEnroll {
+        request: [u8; AUTHORIZATION_LEN],
+        binding: [u8; 32],
+    },
 }
 
 impl fmt::Debug for EnrollRequest {
@@ -415,6 +425,7 @@ mod tests {
             },
             EnrollRequest::ApproveEnroll {
                 request: [9; AUTHORIZATION_LEN],
+                binding: [5; 32],
             },
         ]
     }

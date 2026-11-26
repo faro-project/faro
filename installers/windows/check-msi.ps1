@@ -39,7 +39,9 @@ directory, which needs no elevation for this package):
     signatures, update-root.json is a signed root, and faro-service.exe has
     the default config's signer requirement compiled in.
 
-Install checks (elevated; skipped otherwise unless -RequireInstall): install
+Install checks (elevated, and only where the environment variable
+FARO_CHECK_MSI_INSTALL=1 is set or -RequireInstall is given, since they install
+and remove a service as an administrator; skipped otherwise): install
 quietly, then check the files, the service's configuration, recovery actions
 and DACL (sc.exe), that it runs, the URL handler, the ProgramData ACLs and the
 Apps & features entry; uninstall quietly, check the log shows the goodbye
@@ -60,7 +62,9 @@ $UpgradeCode = '{07FB4D24-3048-4FE8-AFCF-2C9549BC9982}'
 $ServiceName = 'FaroService'
 $ProgramDir = 'C:\Program Files\Faro'
 $DataDir = Join-Path $env:ProgramData 'Faro'
-$ServiceSddl = 'D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;AU)'
+# Equal to faro_platform_windows::scm::SERVICE_SDDL and the PermissionEx in
+# Faro.wxs (a test in scm.rs checks all three agree).
+$ServiceSddl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)'
 $UrlCommand = '"C:\Program Files\Faro\faro-agent.exe" open-url "%1"'
 # p(nsfw) of Yahoo's Caffe model for solid black, white and grey (128), as
 # check-pkg.sh has them (crates/faro-detect/models/opennsfw/parity.py).
@@ -354,6 +358,8 @@ try {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($NoInstall) {
         Say 'install checks skipped (-NoInstall)'
+    } elseif (-not $RequireInstall -and $env:FARO_CHECK_MSI_INSTALL -ne '1') {
+        Say 'install checks skipped: the install half runs only when FARO_CHECK_MSI_INSTALL=1 is set on this machine (or with -RequireInstall)'
     } elseif (-not $elevated) {
         if ($RequireInstall) { Fail 'the install checks need an elevated shell' }
         Say 'install checks skipped: not elevated (run from an administrator shell, or pass -RequireInstall to make this an error)'

@@ -222,7 +222,13 @@ jobs:
   # -NoOnnx: CI has no copy of the image model (it is built on macOS), so
   # the MSI here is the one without the classifier. The release job ships
   # the model (-ModelDir) and the classifier.
+  #
+  # Not for pull requests from forks: the job runs the PR's own code, and
+  # `check-msi.ps1` installs and uninstalls a service as SYSTEM on a shared,
+  # unsandboxed runner. The install half also runs only where the runner sets
+  # FARO_CHECK_MSI_INSTALL=1 (docs/DEVELOPMENT.md "CI runners").
   windows-msi:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 90
     steps:
