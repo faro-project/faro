@@ -661,6 +661,13 @@ impl Run {
             };
             if let Some((expected, reason)) = self.decide(&id, d, force) {
                 let d = self.departed.remove(&id).expect("present");
+                // The core stops capturing from a session whose agent is
+                // reported gone. Forget the target here too, so that an
+                // agent reconnecting in the same session (a restart) is
+                // announced as the target again. Otherwise the target
+                // looks unchanged, nothing is announced, and captures stop
+                // without a word.
+                let was_target = self.target.as_ref().is_some_and(|t| t.session == id);
                 self.emit(SourceEvent::AgentDisconnected {
                     session: id,
                     account: d.account,
@@ -668,6 +675,10 @@ impl Run {
                     expected,
                 })
                 .await?;
+                if was_target {
+                    self.target = None;
+                    self.emit(SourceEvent::CaptureTarget(None)).await?;
+                }
             }
         }
         Ok(())
@@ -1648,6 +1659,33 @@ mod tests {
             h.until(|e| matches!(e, SourceEvent::Sessions(s) if s.is_empty()))
                 .await;
         }
+        h.stop().await;
+    }
+
+    /// An agent that restarts within the grace period (it said goodbye, or
+    /// crashed, and the same session's agent connects again) is the capture
+    /// target again. Before, the source kept the old target through the
+    /// departure, saw nothing change on reconnect and never told the core,
+    /// which had dropped its target: captures stopped silently.
+    #[tokio::test]
+    async fn a_restarted_agent_is_the_capture_target_again() {
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+
+        for crash in [false, true] {
+            if !crash {
+                agent.send(&AgentMsg::Goodbye).await.unwrap();
+            }
+            drop(agent);
+            // Reconnect at once, well within the grace period.
+            agent = h.connect("s1").await;
+            // The departure was reported (the core drops its target then)...
+            // and the restarted agent is announced as the target again.
+            h.until(|e| target_is(e, Some("s1"))).await;
+        }
+        drop(agent);
         h.stop().await;
     }
 
