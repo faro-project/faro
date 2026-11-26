@@ -7,10 +7,13 @@
 //! what `--json` prints; [`StatusView::text`] is the plain output. Both
 //! leave out anything a capture could reveal (`faro_ipc::status`).
 
+use crate::config::Config;
 use crate::enroll;
 use crate::runtime::status::read_status_file;
 use crate::state::{self, StateDir, StateError};
-use faro_ipc::status::{ArtifactReport, ArtifactSource, CaptureState, ServicePhase, StatusReport};
+use faro_ipc::status::{
+    ArtifactReport, ArtifactSource, CaptureState, ServicePhase, StatusReport, ThresholdsReport,
+};
 use faro_ipc::WirePermissionState;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
@@ -30,6 +33,10 @@ pub struct StatusView {
     pub service: Option<StatusReport>,
     /// The status file exists but could not be read.
     pub service_error: Option<String>,
+    /// What this build does with `[dev_thresholds]` in the config file now
+    /// (the running service's choice at its start is in
+    /// `service.detection.thresholds`).
+    pub thresholds: ThresholdsReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,9 +64,9 @@ pub struct OutboxView {
     pub next_seq: u64,
 }
 
-/// Read the state directory at `path` and the service's report.
-pub fn gather(path: &std::path::Path, now_ms: i64) -> Result<StatusView, GatherError> {
-    let dir = StateDir::open(path)?;
+/// Read `config`'s state directory and the service's report.
+pub fn gather(config: &Config, now_ms: i64) -> Result<StatusView, GatherError> {
+    let dir = StateDir::open(&config.state_dir)?;
     let mut view = StatusView {
         state_dir: dir.path().display().to_string(),
         enrollment: None,
@@ -67,6 +74,7 @@ pub fn gather(path: &std::path::Path, now_ms: i64) -> Result<StatusView, GatherE
         service_running: false,
         service: None,
         service_error: None,
+        thresholds: crate::thresholds::build_use(config.dev_thresholds.as_ref()).report(),
     };
     let e = match dir.enrollment() {
         Ok(e) => e,
@@ -189,6 +197,7 @@ impl StatusView {
         let mut o = String::new();
         let Some(e) = &self.enrollment else {
             let _ = writeln!(o, "Not enrolled. State directory: {}", self.state_dir);
+            self.thresholds_text(&mut o);
             return o;
         };
         let _ = writeln!(o, "Instance:     {} ({})", e.instance_name, e.instance_url);
@@ -225,9 +234,16 @@ impl StatusView {
                 b.events, b.event_bytes, b.reports, b.next_seq
             );
         }
+        self.thresholds_text(&mut o);
         o.push('\n');
         self.service_text(&mut o, now_ms);
         o
+    }
+
+    fn thresholds_text(&self, o: &mut String) {
+        if let Some(line) = crate::thresholds::status_line(&self.thresholds) {
+            let _ = writeln!(o, "{line}");
+        }
     }
 
     fn service_text(&self, o: &mut String, now: i64) {
@@ -474,6 +490,7 @@ mod tests {
             service_running: running,
             service: Some(report),
             service_error: None,
+            thresholds: ThresholdsReport::default(),
         }
     }
 
@@ -558,6 +575,7 @@ mod tests {
             assert!(t.contains(want), "missing {want:?} in\n{t}");
         }
         assert!(!t.contains("Warnings"), "{t}");
+        assert!(!t.contains("Thresholds"), "{t}");
     }
 
     #[test]
@@ -586,6 +604,10 @@ mod tests {
         assert!(v.text(0).contains("no status yet"));
         v.enrollment = None;
         assert!(v.text(0).starts_with("Not enrolled."));
+        v.thresholds.state = faro_ipc::status::ThresholdsState::Ignored;
+        assert!(v
+            .text(0)
+            .contains("\nThresholds:   default ([dev_thresholds] ignored"));
     }
 
     #[test]

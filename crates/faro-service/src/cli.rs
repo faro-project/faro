@@ -609,7 +609,7 @@ async fn shutdown_signal() {
 
 fn cmd_status(config: &Config, json: bool) -> Result<(), CliError> {
     let now = SystemClock::new().wall_ms();
-    let view = crate::status_view::gather(&config.state_dir, now)?;
+    let view = crate::status_view::gather(config, now)?;
     if json {
         let text = serde_json::to_string_pretty(&view)
             .map_err(|e| CliError::Usage(format!("cannot print the status: {e}")))?;
@@ -620,6 +620,8 @@ fn cmd_status(config: &Config, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+/// A note when `[dev_thresholds]` is set: lowered (a development build) or
+/// ignored. `installers/macos/check-pkg.sh` reads it.
 #[cfg(test)]
 mod tests {
 

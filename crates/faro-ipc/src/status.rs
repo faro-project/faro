@@ -241,6 +241,33 @@ pub struct DetectionReport {
     pub domains: Option<ArtifactReport>,
     /// Why there is no domain list, when `domains` is `None`.
     pub domains_missing: Option<String>,
+    /// The detection thresholds in use (`[dev_thresholds]`).
+    pub thresholds: ThresholdsReport,
+}
+
+/// What the service does with `[dev_thresholds]` in `service.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThresholdsState {
+    /// No section: the default thresholds.
+    #[default]
+    Default,
+    /// A development build lowered them (flags are made with lower
+    /// thresholds; never a build to monitor anyone with).
+    Lowered,
+    /// A release build found the section and ignored it: the defaults
+    /// apply.
+    Ignored,
+}
+
+/// The detection thresholds in use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThresholdsReport {
+    pub state: ThresholdsState,
+    /// With `lowered`: the thresholds in effect (`explicit_high 0.5,
+    /// explicit_medium 0.05, any_low 0.03`).
+    pub values: Option<String>,
 }
 
 /// Client updates.
@@ -333,6 +360,10 @@ mod tests {
                 model_missing: None,
                 domains: None,
                 domains_missing: Some("no domain list installed".into()),
+                thresholds: ThresholdsReport {
+                    state: ThresholdsState::Lowered,
+                    values: Some("explicit_high 0.5, explicit_medium 0.05, any_low 0.03".into()),
+                },
             },
             updates: UpdatesReport {
                 enabled: true,

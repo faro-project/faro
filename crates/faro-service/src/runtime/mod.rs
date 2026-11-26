@@ -53,7 +53,7 @@ use faro_core::{
     SchedulerError,
 };
 use faro_crypto::SigningKey;
-use faro_detect::{Classifier, DetectError, Detector, DetectorConfig, DomainCategorizer};
+use faro_detect::{Classifier, DetectError, Detector, DomainCategorizer};
 use faro_proto::api::DeviceState;
 use faro_proto::body::TamperSignal;
 use net::{
@@ -349,10 +349,17 @@ impl ServiceBuilder {
             packaged_model,
             packaged_domains,
         );
-        let detection = start_detection(&start, domains_tamper.as_ref());
+        let mut detection = start_detection(&start, domains_tamper.as_ref());
         let mut model_tamper = start.tamper;
         model_tamper.extend(domains_tamper);
-        let detector = Detector::new(&DetectorConfig::default(), start.classifier, start.domains)?;
+        let thresholds = crate::thresholds::build_use(self.config.dev_thresholds.as_ref());
+        thresholds.log();
+        detection.thresholds = thresholds.report();
+        let detector = Detector::new(
+            &crate::thresholds::detector_config(&thresholds),
+            start.classifier,
+            start.domains,
+        )?;
         let artifacts = start.artifacts;
         let settings = state::settings_in_effect(&dir, self.config.member_settings.as_ref());
         let rng = match self.seed {
@@ -463,6 +470,7 @@ fn start_detection(
         model_missing,
         domains,
         domains_missing,
+        thresholds: Default::default(),
     }
 }
 

@@ -628,11 +628,19 @@ async fn full_lifecycle_against_mock_instance() {
     assert_eq!(m.reports.len(), 2, "partial report at shutdown");
     assert!(m.auth_failures.is_empty(), "{:?}", m.auth_failures);
     // The last status says it stopped.
-    let view = faro_service::status_view::gather(&state_dir, clock.wall_ms()).unwrap();
+    let view =
+        faro_service::status_view::gather(&status_config(&state_dir), clock.wall_ms()).unwrap();
     assert!(!view.service_running);
     let report = view.service.unwrap();
     assert_eq!(report.phase, ServicePhase::Stopped);
     assert_eq!(report.capture.state, CaptureState::Stopped);
+}
+
+fn status_config(state_dir: &std::path::Path) -> Config {
+    Config {
+        state_dir: state_dir.to_owned(),
+        ..Config::default()
+    }
 }
 
 async fn wait_for_status_file(
@@ -643,7 +651,7 @@ async fn wait_for_status_file(
     loop {
         // The service's clock runs ahead of real time here, so its reports
         // always look fresh.
-        let view = faro_service::status_view::gather(state_dir, 0).unwrap();
+        let view = faro_service::status_view::gather(&status_config(state_dir), 0).unwrap();
         if pred(&view) {
             return view;
         }
