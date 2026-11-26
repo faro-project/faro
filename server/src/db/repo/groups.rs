@@ -8,7 +8,7 @@
 //! transaction (`&mut *tx`).
 //!
 //! **Nothing here touches `ally_links`.** Leaving or archiving a group
-//! never ends an alliance (principle 4); `ally_links.origin_group_id` is
+//! never ends an alliance (principle 4): it only voids open proposals; `ally_links.origin_group_id` is
 //! set NULL by the database when a group is deleted.
 
 use super::parse_col;
@@ -308,10 +308,11 @@ pub async fn update(
 }
 
 /// Archive a group: read-only until `now + ARCHIVE_TTL_MS`, then deleted by
-/// the retention worker. Unlists it and withdraws any facilitator offer.
+/// the retention worker. Unlists it, withdraws any facilitator offer and
+/// voids the open alliance proposals in it (links already started stay).
 /// False if it was already archived.
-pub async fn archive<'e>(
-    e: impl Executor<'e, Database = Any>,
+pub async fn archive(
+    conn: &mut sqlx::AnyConnection,
     id: &str,
     by: Option<&UserId>,
     now_ms: i64,
@@ -326,9 +327,13 @@ pub async fn archive<'e>(
     .bind(by.map(|u| u.as_str().to_owned()))
     .bind(now_ms.saturating_add(ARCHIVE_TTL_MS))
     .bind(id)
-    .execute(e)
+    .execute(&mut *conn)
     .await?;
-    Ok(r.rows_affected() == 1)
+    if r.rows_affected() != 1 {
+        return Ok(false);
+    }
+    super::proposals::void(conn, super::proposals::VoidScope::Group(id)).await?;
+    Ok(true)
 }
 
 // ---- Participants -----------------------------------------------------------
@@ -416,8 +421,9 @@ pub async fn add_participant<'e>(
 
 /// End `user`'s participation (left or removed). Their open invitations to
 /// others are voided with it (an invitation is only as good as its
-/// sender's standing). Alliances are not touched. False if they were not
-/// an active participant.
+/// sender's standing), and so are the open alliance proposals to or from
+/// them in this group. Alliances, and links already started, are not
+/// touched. False if they were not an active participant.
 pub async fn end_participation(
     conn: &mut sqlx::AnyConnection,
     group: &str,
@@ -447,6 +453,7 @@ pub async fn end_participation(
     .bind(user.as_str())
     .execute(&mut *conn)
     .await?;
+    super::proposals::void(conn, super::proposals::VoidScope::InGroup(group, user)).await?;
     Ok(true)
 }
 

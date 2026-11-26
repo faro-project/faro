@@ -573,6 +573,10 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
         let g = crate::db::repo::groups::sweep(&mut conn, now).await?;
         s.other += g.groups_deleted;
         s.expired_secrets += g.invites_deleted;
+        // Alliance proposals: mark the expired ones, forget them 90 days
+        // after they expired.
+        let p = crate::db::repo::proposals::sweep(&mut conn, now).await?;
+        s.other += p.pruned;
     }
 
     s.orphan_files = sweep_orphans(state, now).await?;

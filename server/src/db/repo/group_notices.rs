@@ -25,15 +25,27 @@ pub enum NoticeKind {
     /// The last facilitator's account was deleted and the person was
     /// offered the role.
     GroupFacilitatorOffered,
+    /// Someone asked the person to be their ally (a request).
+    AllianceRequested,
+    /// Someone offered to be the person's ally.
+    AllianceOffered,
+    /// Someone asked the person to partner up.
+    AlliancePartnership,
+    /// The person's proposal was accepted: compare safety codes to finish.
+    AllianceAccepted,
 }
 
 impl NoticeKind {
-    pub const ALL: [NoticeKind; 5] = [
+    pub const ALL: [NoticeKind; 9] = [
         NoticeKind::GroupJoined,
         NoticeKind::GroupLeft,
         NoticeKind::GroupRemoved,
         NoticeKind::GroupArchived,
         NoticeKind::GroupFacilitatorOffered,
+        NoticeKind::AllianceRequested,
+        NoticeKind::AllianceOffered,
+        NoticeKind::AlliancePartnership,
+        NoticeKind::AllianceAccepted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -43,6 +55,10 @@ impl NoticeKind {
             NoticeKind::GroupRemoved => "group_removed",
             NoticeKind::GroupArchived => "group_archived",
             NoticeKind::GroupFacilitatorOffered => "group_facilitator_offered",
+            NoticeKind::AllianceRequested => "alliance_requested",
+            NoticeKind::AllianceOffered => "alliance_offered",
+            NoticeKind::AlliancePartnership => "alliance_partnership",
+            NoticeKind::AllianceAccepted => "alliance_accepted",
         }
     }
 

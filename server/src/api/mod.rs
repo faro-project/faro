@@ -15,6 +15,7 @@ pub mod keys;
 pub mod manifests;
 pub mod prefs;
 pub mod privacy;
+pub mod proposals;
 pub mod reports;
 pub mod setup;
 pub mod well_known;

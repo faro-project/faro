@@ -69,6 +69,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "groups",
                     include_str!("../../migrations/0010_groups.sql"),
                 ),
+                (
+                    11,
+                    "alliance_proposals",
+                    include_str!("../../migrations/0011_alliance_proposals.sql"),
+                ),
             ]
         }
     }

@@ -89,7 +89,7 @@ fn require_facilitator(me: &Participant) -> AppResult<()> {
 }
 
 /// Changes are refused on an archived group and while groups are off.
-fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
+pub(super) fn require_writable(state: &AppState, group: &Group) -> AppResult<()> {
     if group.is_archived() {
         return Err(AppError::conflict(
             "group_archived",
@@ -476,7 +476,7 @@ pub async fn patch(
 }
 
 /// [`load`] inside a write transaction.
-async fn load_in_tx(
+pub(super) async fn load_in_tx(
     tx: &mut sqlx::AnyConnection,
     user: &UserId,
     id: &str,

@@ -59,6 +59,10 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("group_invites", "used_by", Clears::SetNull),
     ("group_notices", "recipient_id", Clears::Rows),
     ("group_notices", "actor_id", Clears::SetNull),
+    ("alliance_proposals", "from_id", Clears::Rows),
+    ("alliance_proposals", "to_id", Clears::Rows),
+    ("proposal_blocks", "user_id", Clears::Rows),
+    ("proposal_blocks", "blocked_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -130,6 +134,10 @@ pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM group_invites WHERE user_id = $1",
     "UPDATE group_notices SET actor_id = NULL WHERE actor_id = $1",
     "DELETE FROM group_notices WHERE recipient_id = $1",
+    // Their proposals, sent and received, and blocks either way (§18).
+    // Links started from a proposal are ally links, removed above.
+    "DELETE FROM alliance_proposals WHERE from_id = $1 OR to_id = $1",
+    "DELETE FROM proposal_blocks WHERE user_id = $1 OR blocked_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

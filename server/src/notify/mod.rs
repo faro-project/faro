@@ -953,6 +953,7 @@ pub(crate) fn group_notice_text(
     g: &crate::db::repo::notifications::GroupNoticeInfo,
 ) -> (String, String) {
     use crate::db::repo::group_notices::NoticeKind;
+    let who = g.actor_name.as_deref().unwrap_or("Someone");
     let (subject, line) = match (NoticeKind::parse(&g.kind), g.summary) {
         (Some(NoticeKind::GroupJoined | NoticeKind::GroupLeft), true) => (
             format!("People joined or left a group you facilitate on {instance}"),
@@ -980,6 +981,24 @@ pub(crate) fn group_notice_text(
             format!("You were offered to facilitate a group on {instance}"),
             "A group you're in has no facilitator. Open Faro to take it on, within 14 days."
                 .to_owned(),
+        ),
+        // Proposals name the person (never the group): "Sam asked you to
+        // be their ally."
+        (Some(NoticeKind::AllianceRequested), _) => (
+            format!("{who} asked you to be their ally on {instance}"),
+            format!("{who} asked you to be their ally. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AllianceOffered), _) => (
+            format!("{who} offered to be your ally on {instance}"),
+            format!("{who} offered to be your ally. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AlliancePartnership), _) => (
+            format!("{who} asked to partner up on {instance}"),
+            format!("{who} asked to partner up: to be each other's allies. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AllianceAccepted), _) => (
+            format!("{who} accepted on {instance}"),
+            format!("{who} accepted. Compare safety codes with them in Faro to finish."),
         ),
         (None, _) => (
             format!("News about a group on {instance}"),

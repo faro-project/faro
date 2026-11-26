@@ -21,6 +21,7 @@ pub mod liveness;
 pub mod manifests;
 pub mod member_keys;
 pub mod notifications;
+pub mod proposals;
 pub mod reports;
 pub mod sessions;
 pub mod stats;
