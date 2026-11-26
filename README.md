@@ -40,3 +40,10 @@ assets/   brand assets (logo, colours)
 ## License
 
 [Apache-2.0](LICENSE). The "Faro" name and logo are reserved for official, project-signed builds (see ARCHITECTURE.md §11 and [assets/brand](assets/brand/README.md)). Forks are welcome under their own name.
+
+Faro is built on open-source software by others. The licences and copyright notices of everything it ships with are generated at build time and travel with it ([how](docs/DEVELOPMENT.md#third-party-notices)):
+
+- **On a Mac:** `/Library/Faro/notices/`, `third-party.txt` for the Rust crates, next to the image model's and ONNX Runtime's notices.
+- **The server image:** `/usr/share/faro/notices/`, `third-party.txt` for the Rust crates in `faro-server` and `third-party-web.txt` for the web app's npm packages.
+- **The server binaries:** `faro-server-<version>-linux-<arch>-third-party.txt`, next to each binary in the release.
+- **The web app:** the **Licences** page (`/licenses`, linked from every page's footer) of any instance.

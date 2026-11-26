@@ -10,6 +10,7 @@
 //! | captures failing past the threshold | one `capture_failing`, or `permission_revoked` (`never_granted` if it never was) when Screen Recording is off |
 //! | agent drop / reconnect (any session) | `agent_restarted`, `agent_killed_repeatedly` past the threshold |
 //! | a session (any account) without an agent | `unmonitored_user_session` tamper after [`AGENT_ABSENT_MS`] |
+//! | the session at the screen has its agent, but nothing captures from it | `capture_failing` tamper after [`capture_stall_ms`] |
 //! | an agent connects | the login notice in its session (§12) |
 //! | member pause / resume | `paused` / `resumed` events |
 //! | settings change | `settings_change` event |
@@ -26,6 +27,17 @@
 //! `unmonitored_user_session` for that account (urgent). Stopping the agent
 //! (`launchctl bootout`, `pkill`, turning off its login item), or switching
 //! to or creating an account without one, must not quietly end monitoring.
+//!
+//! **A connected agent must be captured from.** A session at the screen
+//! whose agent is connected, with nothing pausing capture (a member pause,
+//! a locked screen, sleep, idle), should see a capture attempt every
+//! regular interval. If the core has had no capture target for it, or made
+//! no attempt, for [`capture_stall_ms`] of awake time, that is a bug or
+//! tamper that would otherwise stop monitoring without a word (an agent
+//! restart once left the core without a target): it raises
+//! `capture_failing` for that account (urgent), once until the next
+//! attempt. Allies read "Faro couldn't see the screen N times in a row",
+//! N being the captures missed at the mean interval.
 //!
 //! **Capture follows the screen.** Captures go to the *capture target*, the
 //! agent of the session at the screen. Heartbeats stop saying `active`
@@ -46,6 +58,7 @@ use crate::source::{CaptureTarget, SessionStatus, SourceCommand, SourceEvent};
 use crate::state::{Enrollment, StateDir, PERMISSIONS_FILE, SETTINGS_FILE};
 use crate::update::artifacts::Swaps;
 use faro_core::clock::{Clock, ClockGuard, SystemClock};
+use faro_core::scheduler::interval_bounds_ms;
 use faro_core::{
     route_signal, seal_report, CaptureCause, CaptureInfo, Decision, EventWriter, MemberSettings,
     OutboxError, RecipientSet, Scheduler, SessionSnapshot, SignalRoute, Transition, Trigger,
@@ -82,6 +95,16 @@ const IDLE_SECS: u64 = 300;
 /// the slowest allowed ping interval plus launchd's relaunch throttle, with
 /// margin. A real agent restart reconnects within seconds.
 pub const AGENT_ABSENT_MS: u64 = 90_000;
+/// Awake time the session at the screen may go without a capture attempt,
+/// while its agent is connected and nothing pauses capture, before the
+/// service raises `capture_failing` (§3.7): the longest regular interval
+/// plus two mean intervals. 5 minutes at the default 60 s mean, 25 at the
+/// 300 s maximum (changing the mean is announced to allies). Always longer
+/// than any interval the scheduler draws and than [`CAPTURE_TIMEOUT_MS`].
+pub fn capture_stall_ms(mean_secs: u32) -> u64 {
+    let (_, longest) = interval_bounds_ms(mean_secs);
+    longest.saturating_add(u64::from(mean_secs).saturating_mul(2_000))
+}
 /// The session key used when the source does not list sessions (the
 /// in-process platform): one implicit session, monitored while the source
 /// has a capture target.
@@ -132,6 +155,18 @@ impl SeenPermissions {
 /// How long one session has been without an agent.
 #[derive(Debug, Default)]
 struct Absence {
+    ms: u64,
+    reported: bool,
+}
+
+/// How long the session at the screen has had a connected agent that
+/// nothing was captured from.
+#[derive(Debug, Default)]
+struct Stall {
+    /// The session counted; the count restarts when another one is at the
+    /// screen.
+    session: Option<String>,
+    /// Awake, unpaused time since the last capture attempt.
     ms: u64,
     reported: bool,
 }
@@ -247,6 +282,8 @@ pub struct Core {
     sessions: Option<Vec<SessionStatus>>,
     /// Sessions currently without an agent.
     absence: BTreeMap<String, Absence>,
+    /// The session at the screen has its agent but is not captured from.
+    stall: Stall,
     /// Sessions shown the login notice since they began.
     noticed: BTreeSet<String>,
     capture_in_flight: Option<(u64, CaptureInfo)>,
@@ -343,6 +380,7 @@ impl Core {
             agents: BTreeMap::new(),
             sessions: None,
             absence: BTreeMap::new(),
+            stall: Stall::default(),
             noticed: BTreeSet::new(),
             capture_in_flight: None,
             last_answered: None,
@@ -881,6 +919,7 @@ impl Core {
             self.signal(sig).await;
         }
         self.check_agent_absence(awake).await;
+        self.check_capture_stall(awake).await;
         if self.sleeping {
             self.asleep_awake_ms = self.asleep_awake_ms.saturating_add(awake);
             if self.asleep_awake_ms > SLEEP_CLAIM_MAX_AWAKE_MS {
@@ -936,6 +975,10 @@ impl Core {
             if self.capture_in_flight.is_some() {
                 return;
             }
+            // An attempt, answered or not: a failure is counted by
+            // `capture_failed`, not as a stall.
+            self.stall.ms = 0;
+            self.stall.reported = false;
             match self
                 .source_tx
                 .try_send(SourceCommand::CaptureNow(capture_reason(info.cause)))
@@ -1004,6 +1047,79 @@ impl Core {
                 self.set_activity(ActivityState::Unmonitored);
             }
         }
+    }
+
+    /// The session at the screen, if its agent is connected: `(id,
+    /// account)`. With a source that does not list sessions, the connected
+    /// agent's.
+    fn monitored_session(&self) -> Option<(String, String)> {
+        match &self.sessions {
+            Some(list) => list
+                .iter()
+                .find(|s| s.active && s.agent && self.agents.contains_key(&s.id))
+                .map(|s| (s.id.clone(), s.account.clone())),
+            None => self
+                .agents
+                .iter()
+                .next()
+                .map(|(id, account)| (id.clone(), account.clone())),
+        }
+    }
+
+    /// Capture is legitimately paused: by the member (allies were told),
+    /// or because the session is locked, idle or asleep (the scheduler's
+    /// pause reasons, plus system sleep).
+    fn capture_paused(&self) -> bool {
+        let s = self.snapshot();
+        s.member_paused
+            || s.display_asleep
+            || s.locked
+            || s.idle_secs >= self.scheduler.config().idle_threshold_secs
+    }
+
+    /// Count awake time the session at the screen has had its agent
+    /// connected while the core made no capture attempt (it has no capture
+    /// target, or the schedule produced nothing), and raise
+    /// `capture_failing` for its account once that passes
+    /// [`capture_stall_ms`]. Pauses stop the count without resetting it;
+    /// an attempt resets it.
+    async fn check_capture_stall(&mut self, awake_ms: u64) {
+        let Some((session, account)) = self.monitored_session() else {
+            // The login window, or no agent (`unmonitored_user_session`
+            // covers that).
+            self.stall = Stall::default();
+            return;
+        };
+        if self.stall.session.as_deref() != Some(session.as_str()) {
+            self.stall = Stall {
+                session: Some(session),
+                ..Stall::default()
+            };
+        }
+        if self.capture_in_flight.is_some() || self.capture_paused() {
+            return;
+        }
+        self.stall.ms = self.stall.ms.saturating_add(awake_ms);
+        let mean_secs = self.scheduler.mean_secs();
+        if self.stall.ms < capture_stall_ms(mean_secs) || self.stall.reported {
+            return;
+        }
+        self.stall.reported = true;
+        let missed = self.stall.ms / u64::from(mean_secs.max(1)).saturating_mul(1000);
+        let missed = u32::try_from(missed).unwrap_or(u32::MAX).max(1);
+        tracing::warn!(
+            %account,
+            stalled_ms = self.stall.ms,
+            has_target = self.capturing(),
+            "the session at the screen has its agent connected but nothing is captured from it"
+        );
+        self.signal_for(
+            TamperSignal::CaptureFailing {
+                consecutive_failures: missed,
+            },
+            label(&account),
+        )
+        .await;
     }
 
     async fn capture_failed(&mut self, reason: &str) {
@@ -1447,6 +1563,17 @@ mod tests {
             ..BrowserContext::default()
         };
         assert_eq!(browser_context(private.clone()), Some(private));
+    }
+
+    #[test]
+    fn a_stall_outlasts_every_interval_and_a_lost_answer() {
+        assert_eq!(capture_stall_ms(60), 300_000);
+        assert_eq!(capture_stall_ms(300), 1_500_000);
+        for mean in faro_core::scheduler::MEAN_MIN_SECS..=faro_core::scheduler::MEAN_MAX_SECS {
+            let (_, longest) = interval_bounds_ms(mean);
+            let stall = capture_stall_ms(mean);
+            assert!(stall > longest && stall > CAPTURE_TIMEOUT_MS, "{mean}");
+        }
     }
 
     #[test]

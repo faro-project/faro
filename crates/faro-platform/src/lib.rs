@@ -10,6 +10,7 @@
 //! privileged **service**.
 
 pub mod frame;
+pub mod logfile;
 pub mod synthetic;
 
 pub use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};

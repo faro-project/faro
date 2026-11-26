@@ -42,10 +42,11 @@
 //!
 //! **Admin log entries** are told the same way, in words: role changes to
 //! the person and every other admin ([`crate::roles`]), deletions an admin
-//! asked for and their cancellation to every admin. They are not alerts: no
-//! member's feed shows them and no ally hears of them. [`crate::roles::tell`]
-//! writes their notification rows itself, always immediate, so there is
-//! nothing to fan out.
+//! asked for and their cancellation to every admin, and disabling or
+//! re-enabling an account to every admin but the one who did it. They are
+//! not alerts: no member's feed shows them and no ally hears of them.
+//! [`crate::roles::tell`] writes their notification rows itself, always
+//! immediate, so there is nothing to fan out.
 //!
 //! **Delivery.** A failure about one recipient (an unknown mailbox, a full
 //! one) is charged to that notification: retried with exponential backoff
@@ -663,6 +664,34 @@ fn admin_log_text(
                 people,
             );
         }
+        // Disabling and re-enabling: only the other admins get these; the
+        // person and their partners have their own notices (invariant 6).
+        Action::AccountDisabled => {
+            return (
+                format!("{person}'s account on {instance} was disabled"),
+                format!(
+                    "{who} disabled the Faro account of {person} ({email}) on {instance}. \
+                     {person} can't sign in, but their computers keep reporting. {person} and \
+                     everyone in an accountability partnership with them have been told. Every \
+                     admin is told when an account is disabled or re-enabled. If you didn't \
+                     expect this, check the People page:"
+                ),
+                people,
+            );
+        }
+        Action::AccountEnabled => {
+            return (
+                format!("{person}'s account on {instance} was re-enabled"),
+                format!(
+                    "{who} re-enabled the Faro account of {person} ({email}) on {instance}. \
+                     {person} can sign in again. {person} and everyone in an accountability \
+                     partnership with them have been told. Every admin is told when an account \
+                     is disabled or re-enabled. If you didn't expect this, check the People \
+                     page:"
+                ),
+                people,
+            );
+        }
         Action::AdminGranted | Action::AdminRevoked => {}
     }
     if n.recipient_id == n.member_id {
@@ -676,11 +705,13 @@ fn admin_log_text(
                      {instance}."
                 ),
             ),
-            // Deletions and new accounts were worded above.
+            // Deletions, new accounts and account status were worded above.
             Action::AdminRevoked
             | Action::DeletionRequested
             | Action::DeletionCancelled
-            | Action::AccountCreated => (
+            | Action::AccountCreated
+            | Action::AccountDisabled
+            | Action::AccountEnabled => (
                 format!("You are no longer an admin of {instance}"),
                 format!(
                     "{who} removed your admin role on {instance}{how}. You can still sign in, and \
@@ -700,11 +731,13 @@ fn admin_log_text(
                  expect this, check who is an admin on the People page:"
             ),
         ),
-        // Deletions and new accounts were worded above.
+        // Deletions, new accounts and account status were worded above.
         Action::AdminRevoked
         | Action::DeletionRequested
         | Action::DeletionCancelled
-        | Action::AccountCreated => (
+        | Action::AccountCreated
+        | Action::AccountDisabled
+        | Action::AccountEnabled => (
             format!("{person} is no longer an admin of {instance}"),
             format!(
                 "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \

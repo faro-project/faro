@@ -1,8 +1,9 @@
 //! `admin_log`: what admins did to accounts (§4.3): granting and revoking
 //! the admin role ([`crate::roles`]), and account deletions an admin asked
-//! for, with their cancellation ([`crate::api::admin`]), and accounts
-//! created from the command line. Shown in the admin console and emailed to
-//! every admin (and, for a role change, the person). Entries are kept: no
+//! for, with their cancellation ([`crate::api::admin`]), accounts disabled
+//! and re-enabled, and accounts created from the command line. Shown in the
+//! admin console and emailed to the admins (and, for a role change, the
+//! person). Entries are kept: no
 //! retention window applies to them, and the account-deletion purge only
 //! NULLs the ids in them.
 
@@ -25,6 +26,11 @@ pub enum Action {
     /// `faro-server admin grant --create` created the account (followed
     /// by `admin_granted`).
     AccountCreated,
+    /// An admin disabled the account. The person and their partners have
+    /// their own notices (invariant 6); this entry is for the admins.
+    AccountDisabled,
+    /// An admin re-enabled a disabled account.
+    AccountEnabled,
 }
 
 impl Action {
@@ -35,6 +41,8 @@ impl Action {
             Action::DeletionRequested => "deletion_requested",
             Action::DeletionCancelled => "deletion_cancelled",
             Action::AccountCreated => "account_created",
+            Action::AccountDisabled => "account_disabled",
+            Action::AccountEnabled => "account_enabled",
         }
     }
 
@@ -45,6 +53,8 @@ impl Action {
             "deletion_requested" => Some(Action::DeletionRequested),
             "deletion_cancelled" => Some(Action::DeletionCancelled),
             "account_created" => Some(Action::AccountCreated),
+            "account_disabled" => Some(Action::AccountDisabled),
+            "account_enabled" => Some(Action::AccountEnabled),
             _ => None,
         }
     }
