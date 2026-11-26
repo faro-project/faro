@@ -177,12 +177,19 @@ pub enum Command {
     /// Windows: the elevated helper of an administrator's approval of
     /// enrolling from the agent (the agent starts it through UAC). Records
     /// the approval with the service and exits 0 (approved), 10 (refused),
-    /// 11 (no service) or 12 (bad arguments).
+    /// 11 (no service) or 12 (bad arguments). Shows the instance named by
+    /// `--name` and `--url` and asks first; No exits 10.
     #[cfg(windows)]
     ApproveEnroll {
         /// The request id, 64 hex digits.
         #[arg(long)]
         request: String,
+        /// The instance name the person confirmed.
+        #[arg(long)]
+        name: String,
+        /// The instance URL the person confirmed.
+        #[arg(long)]
+        url: String,
     },
     /// Load the image model as `run` does (licence, attribution and
     /// digest checks), classify a few synthetic frames and time it. Reads
@@ -780,7 +787,7 @@ mod windows {
     use super::*;
     use faro_platform_windows::layout;
     use faro_platform_windows::scm::{self, ServiceContext, ServiceControl};
-    use faro_platform_windows::ui::approval::{exit, ApprovalRequest};
+    use faro_platform_windows::ui::approval::{confirm_approval, exit, ApprovalRequest};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
     use tokio::sync::mpsc;
@@ -818,10 +825,24 @@ mod windows {
         match &cli.command {
             Command::InstallService => Ok(registration(true)),
             Command::UninstallService => Ok(registration(false)),
-            Command::ApproveEnroll { request } => {
-                let args = ["approve-enroll", "--request", request.as_str()];
+            Command::ApproveEnroll { request, name, url } => {
+                let args = [
+                    "approve-enroll",
+                    "--request",
+                    request.as_str(),
+                    "--name",
+                    name.as_str(),
+                    "--url",
+                    url.as_str(),
+                ];
                 let code = match ApprovalRequest::parse_helper_arguments(&args) {
-                    Some(r) => approve_enroll(&cli, &r),
+                    Some((r, subject)) => {
+                        if confirm_approval(&subject) {
+                            approve_enroll(&cli, &r, &subject)
+                        } else {
+                            exit::REFUSED
+                        }
+                    }
                     None => exit::BAD_ARGUMENTS,
                 };
                 Ok(ExitCode::from(code as u8))
@@ -869,7 +890,11 @@ mod windows {
 
     /// The approval helper: tell the service an elevated administrator
     /// approved `request`. Returns the exit code.
-    fn approve_enroll(cli: &Cli, request: &ApprovalRequest) -> u32 {
+    fn approve_enroll(
+        cli: &Cli,
+        request: &ApprovalRequest,
+        subject: &faro_platform_windows::ui::approval::ApprovalSubject,
+    ) -> u32 {
         use faro_ipc::{
             AllowSameUser, AllowSystemService, EnrollRequest, EnrollResponse, IpcClient, Sid,
         };
@@ -906,6 +931,11 @@ mod windows {
             let sent = conn
                 .send(&EnrollRequest::ApproveEnroll {
                     request: *request.bytes(),
+                    binding: crate::enroll_approval::approval_binding(
+                        &subject.url,
+                        &subject.name,
+                        request.bytes(),
+                    ),
                 })
                 .await;
             if sent.is_err() {

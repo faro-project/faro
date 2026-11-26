@@ -61,7 +61,12 @@ The package assumes these exist in the programs it installs (the integration ste
 - `trusted-signing` (Azure Trusted Signing): `FARO_TRUSTED_SIGNING_ENDPOINT`, `FARO_TRUSTED_SIGNING_ACCOUNT`, `FARO_TRUSTED_SIGNING_PROFILE`, and Azure credentials (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` secrets).
 - empty: nothing is signed, with a loud "UNSIGNED BUILD" warning. A release MSI can't be built then (`build-msi.ps1` refuses), and the release workflow builds no Windows package.
 
-A release MSI also needs `FARO_WINDOWS_SIGNER` (`subject="<certificate CN>"`, optionally `; sha256=<leaf thumbprint>[,...]`): the signer requirement compiled into `faro-service`, which it checks update packages and agents against. Pin the thumbprint with the SignPath Foundation, whose certificate names the foundation for every project it serves; with Azure Trusted Signing's short-lived certificates, pin the subject only. And `FARO_UPDATE_ROOT` (`release/update-root.json`).
+A release MSI also needs `FARO_WINDOWS_SIGNER` (`subject="<certificate CN>"` plus a pin: `; sha256=<leaf thumbprint>[,...]` and/or `; issuer_sha256=<issuing CA thumbprint>[,...]`): the signer requirement compiled into `faro-service`, which it checks update packages and agents against. `build-msi.ps1` refuses a release whose requirement has no pin, because a subject alone is satisfied by any CA that will issue a certificate with that name. `sign.ps1` prints both thumbprints after signing. Examples:
+
+- SignPath Foundation (its certificate names the foundation for every project it serves, so the leaf pin is what makes it yours): `subject="SignPath Foundation"; sha256=<64 hex digits>`.
+- Azure Trusted Signing (leaf certificates are renewed every few days, so pin the issuing CA, whose thumbprint is stable): `subject="<your validated name>"; issuer_sha256=<64 hex digits>`.
+
+Also `FARO_UPDATE_ROOT` (`release/update-root.json`).
 
 A `-Dev` MSI is unsigned, and its service accepts any program in a signed-in account as the agent and skips the update signature check. Never use one on anyone.
 

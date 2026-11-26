@@ -119,8 +119,14 @@ if ($Dev) {
     # The SignerRequirement syntax (faro_platform_windows::authenticode).
     # faro-service compiles it in (option_env!) and the default config's
     # agent requirement is the same text, in single quotes.
-    if ($env:FARO_WINDOWS_SIGNER -notmatch '^subject="[^"'']+"(; sha256=[0-9a-f]{64}(,[0-9a-f]{64})*)?$') {
-        Fail 'FARO_WINDOWS_SIGNER must be subject="<CN>" optionally followed by "; sha256=<hex>[,<hex>...]"'
+    $hexList = '[0-9a-f]{64}(,[0-9a-f]{64})*'
+    if ($env:FARO_WINDOWS_SIGNER -notmatch "^subject=""[^""']+""(; sha256=$hexList)?(; issuer_sha256=$hexList)?$") {
+        Fail 'FARO_WINDOWS_SIGNER must be subject="<CN>" followed by "; sha256=<leaf thumbprint>[,...]" and/or "; issuer_sha256=<issuing CA thumbprint>[,...]"'
+    }
+    # A subject name alone is satisfied by any CA that will issue a certificate
+    # with that CN, so a release must pin the leaf or its issuing CA.
+    if ($env:FARO_WINDOWS_SIGNER -notmatch '; (issuer_)?sha256=') {
+        Fail 'FARO_WINDOWS_SIGNER must pin a certificate: add "; sha256=<leaf thumbprint>" (SignPath) or "; issuer_sha256=<issuing CA thumbprint>" (Azure Trusted Signing, which rotates leaf certificates). A subject-only requirement is for -Dev builds. sign.ps1 prints both thumbprints after signing.'
     }
 }
 if (-not $NoOnnx) {

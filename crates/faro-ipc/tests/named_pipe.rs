@@ -490,3 +490,43 @@ async fn enroll_request_and_response_round_trip() {
     let r = IpcClient::connect_verified_typed::<EnrollRequest, EnrollResponse>(&name, &other).await;
     assert!(matches!(r, Err(IpcError::PeerRejected(_))));
 }
+
+/// A peer whose verification is slow (a signature check waiting on the
+/// network) must not hold up the accept loop: the next client connects and
+/// is verified while the first is still being checked.
+#[tokio::test]
+async fn a_slow_verification_does_not_block_the_next_accept() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let verifier = move |_: &PeerInfo| {
+        if c.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+        Ok(())
+    };
+    let server = IpcServer::bind(unique("slow-verify"), verifier).unwrap();
+    let name = server.path().to_path_buf();
+
+    let _first = IpcClient::connect(&name).await.unwrap();
+    let slow = server.accept_pending().await.unwrap();
+    let slow = tokio::spawn(slow.verify());
+    // Let it start (and take the slow path) before the next client arrives.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut second = IpcClient::connect(&name).await.unwrap();
+    let started = std::time::Instant::now();
+    let mut conn = server
+        .accept_pending()
+        .await
+        .unwrap()
+        .verify()
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "the second peer waited for the first's verification"
+    );
+    second.send(&AgentMsg::Goodbye).await.unwrap();
+    assert_eq!(conn.recv().await.unwrap(), AgentMsg::Goodbye);
+    assert!(slow.await.unwrap().is_ok());
+}

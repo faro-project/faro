@@ -304,7 +304,17 @@ mod flow {
         /// The authorization's external form, and a value that keeps it
         /// alive: dropping it frees the authorization and destroys its
         /// rights.
-        fn create(&self) -> Result<(Box<dyn Any>, [u8; AUTHORIZATION_LEN]), String>;
+        ///
+        /// `instance_name` and `instance_url` are what the service showed
+        /// the person in the preview they just confirmed. Windows passes
+        /// them to the elevated approver, which shows them and binds the
+        /// approval to them; macOS ignores them (its service shows the
+        /// prompt itself).
+        fn create(
+            &self,
+            instance_name: &str,
+            instance_url: &str,
+        ) -> Result<(Box<dyn Any>, [u8; AUTHORIZATION_LEN]), String>;
     }
 
     async fn ask(
@@ -423,7 +433,8 @@ mod flow {
             return;
         }
 
-        let (hold, authorization) = match auth.create() {
+        let (hold, authorization) = match auth.create(&preview.instance_name, &preview.instance_url)
+        {
             Ok(a) => a,
             Err(e) => {
                 ui.show(&failure_screen(FailureKind::Unavailable, &e), true);

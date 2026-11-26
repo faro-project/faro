@@ -18,10 +18,15 @@
 //! 2. **The signer** (`WTHelperProvDataFromStateData` and friends): the leaf
 //!    certificate of the primary signer, whose subject Common Name must equal
 //!    [`SignerRequirement::subject`] exactly and whose SHA-256 thumbprint, if
-//!    the requirement pins any, must be one of them. A trusted chain alone
-//!    proves only that *somebody* with a code-signing certificate signed the
-//!    file; the subject (and optionally the thumbprint) is what makes it
-//!    Faro's.
+//!    the requirement pins any, must be one of them; the requirement can
+//!    instead (or also) pin the thumbprint of the certificate that issued the
+//!    leaf (`issuer_sha256`, for services such as Azure Trusted Signing that
+//!    rotate leaf certificates under a stable issuing CA). A trusted chain
+//!    alone proves only that *somebody* with a code-signing certificate
+//!    signed the file, and a subject name alone is satisfied by any CA that
+//!    will issue a certificate with that Common Name: the pin is what makes
+//!    it Faro's. Release builds must carry one (`build-msi.ps1` refuses
+//!    otherwise); the subject-only form exists for development.
 //!
 //! Only **embedded** signatures count (`WTD_CHOICE_FILE`). A catalog-signed
 //! file (most of `System32`) reports [`AuthenticodeError::Unsigned`]: Faro's
@@ -72,8 +77,9 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::Security::WinTrust::{
     WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData,
     WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
-    WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_NONE,
-    WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_FILE,
+    WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN,
+    WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
@@ -83,23 +89,29 @@ use windows::Win32::System::Threading::{
 /// What a signature must satisfy. `subject` is matched against the leaf
 /// signing certificate's subject Common Name exactly (for example
 /// `"Faro Project"`); `thumbprints`, when non-empty, pins the leaf
-/// certificate's SHA-256 thumbprint (lowercase hex), any one of which matches.
+/// certificate's SHA-256 thumbprint (lowercase hex), any one of which
+/// matches; `issuer_thumbprints`, when non-empty, pins the SHA-256
+/// thumbprint of the certificate that issued the leaf (the next one in its
+/// chain). When both are given, both must match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignerRequirement {
     pub subject: String,
     pub thumbprints: Vec<String>,
+    pub issuer_thumbprints: Vec<String>,
 }
 
 impl SignerRequirement {
     /// Parse the `ipc.agent_requirement` text on Windows:
     /// `subject="Faro Project"` optionally followed by
-    /// `; sha256=<hex>[,<hex>...]`.
+    /// `; sha256=<hex>[,<hex>...]` and/or `; issuer_sha256=<hex>[,<hex>...]`.
     ///
     /// The grammar, precisely (whitespace around tokens is ignored):
     ///
     /// ```text
     /// requirement := clause ( ";" clause )*
-    /// clause      := "subject" "=" quoted | "sha256" "=" hex64 ( "," hex64 )*
+    /// clause      := "subject" "=" quoted
+    ///              | "sha256" "=" hex64 ( "," hex64 )*
+    ///              | "issuer_sha256" "=" hex64 ( "," hex64 )*
     /// quoted      := '"' ( any char but '"' and '\' | '\"' | '\\' )* '"'
     /// hex64       := 64 hex digits (any case; stored lowercase)
     /// ```
@@ -112,6 +124,7 @@ impl SignerRequirement {
         let bad = |m: &str| AuthenticodeError::Requirement(m.to_owned());
         let mut subject: Option<String> = None;
         let mut thumbprints: Option<Vec<String>> = None;
+        let mut issuers: Option<Vec<String>> = None;
         let mut rest = text;
         loop {
             rest = rest.trim_start();
@@ -130,20 +143,27 @@ impl SignerRequirement {
                     subject = Some(value);
                     rest = after;
                 }
-                "sha256" => {
-                    if thumbprints.is_some() {
-                        return Err(bad("`sha256` given twice"));
+                "sha256" | "issuer_sha256" => {
+                    let slot = if key == "sha256" {
+                        &mut thumbprints
+                    } else {
+                        &mut issuers
+                    };
+                    if slot.is_some() {
+                        return Err(bad(&format!("`{key}` given twice")));
                     }
                     let end = rest.find(';').unwrap_or(rest.len());
                     let mut list = Vec::new();
                     for item in rest[..end].split(',') {
                         let item = item.trim();
                         if item.len() != 64 || !item.bytes().all(|b| b.is_ascii_hexdigit()) {
-                            return Err(bad("`sha256` needs 64 hex digits per thumbprint"));
+                            return Err(bad(&format!(
+                                "`{key}` needs 64 hex digits per thumbprint"
+                            )));
                         }
                         list.push(item.to_ascii_lowercase());
                     }
-                    thumbprints = Some(list);
+                    *slot = Some(list);
                     rest = &rest[end..];
                 }
                 "" => return Err(bad("missing key before `=`")),
@@ -160,11 +180,19 @@ impl SignerRequirement {
         Ok(SignerRequirement {
             subject: subject.ok_or_else(|| bad("`subject` is required"))?,
             thumbprints: thumbprints.unwrap_or_default(),
+            issuer_thumbprints: issuers.unwrap_or_default(),
         })
     }
 
-    /// Whether `signer` satisfies this requirement (exact subject CN, and
-    /// one of the pinned thumbprints when any are pinned).
+    /// Whether the requirement pins a certificate (leaf or issuer) and so
+    /// is not satisfied by just any CA-issued certificate with the subject.
+    pub fn is_pinned(&self) -> bool {
+        !self.thumbprints.is_empty() || !self.issuer_thumbprints.is_empty()
+    }
+
+    /// Whether `signer` satisfies this requirement (exact subject CN, one of
+    /// the pinned leaf thumbprints and one of the pinned issuer thumbprints
+    /// when any are pinned).
     pub fn check(&self, signer: &SignerInfo) -> Result<(), AuthenticodeError> {
         if signer.subject != self.subject {
             return Err(AuthenticodeError::WrongSigner(format!(
@@ -183,6 +211,19 @@ impl SignerRequirement {
                 signer.thumbprint_sha256
             )));
         }
+        if !self.issuer_thumbprints.is_empty() {
+            let issuer = signer.issuer_thumbprint_sha256.as_deref();
+            if !issuer.is_some_and(|i| {
+                self.issuer_thumbprints
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(i))
+            }) {
+                return Err(AuthenticodeError::WrongSigner(format!(
+                    "issuing certificate {} is not pinned",
+                    issuer.unwrap_or("(none)")
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -199,6 +240,9 @@ impl fmt::Display for SignerRequirement {
         f.write_str("\"")?;
         if !self.thumbprints.is_empty() {
             write!(f, "; sha256={}", self.thumbprints.join(","))?;
+        }
+        if !self.issuer_thumbprints.is_empty() {
+            write!(f, "; issuer_sha256={}", self.issuer_thumbprints.join(","))?;
         }
         Ok(())
     }
@@ -231,6 +275,9 @@ fn parse_quoted(s: &str) -> Result<(String, &str), AuthenticodeError> {
 pub struct SignerInfo {
     pub subject: String,
     pub thumbprint_sha256: String,
+    /// SHA-256 thumbprint of the certificate that issued the leaf (the next
+    /// in the signer's chain), if the chain has one.
+    pub issuer_thumbprint_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -257,8 +304,29 @@ pub enum AuthenticodeError {
 /// should install from a location only SYSTEM can write, or keep its own
 /// handle open from verification to installation.
 pub fn verify_file(path: &Path, req: &SignerRequirement) -> Result<SignerInfo, AuthenticodeError> {
+    verify_file_with(path, req, Fetch::Network)
+}
+
+/// Where revocation data may come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fetch {
+    /// CRLs and OCSP responses are fetched from the network when the cache
+    /// has nothing (an update package, a one-off check).
+    Network,
+    /// Only what CryptoAPI has cached (`WTD_CACHE_ONLY_URL_RETRIEVAL`): no
+    /// network wait, for checks on a hot path such as every agent
+    /// connection. Revocation data that is not cached counts as
+    /// undeterminable, which is accepted as off-line below.
+    CacheOnly,
+}
+
+fn verify_file_with(
+    path: &Path,
+    req: &SignerRequirement,
+    fetch: Fetch,
+) -> Result<SignerInfo, AuthenticodeError> {
     let file = open_locked(path).map_err(|e| AuthenticodeError::Os(format!("open: {e}")))?;
-    let signer = verify_handle(path, HANDLE(file.as_raw_handle()))?;
+    let signer = verify_handle(path, HANDLE(file.as_raw_handle()), fetch)?;
     req.check(&signer)?;
     Ok(signer)
 }
@@ -268,7 +336,7 @@ pub fn verify_file(path: &Path, req: &SignerRequirement) -> Result<SignerInfo, A
 /// learning the thumbprint to pin.
 pub fn signer_of(path: &Path) -> Result<SignerInfo, AuthenticodeError> {
     let file = open_locked(path).map_err(|e| AuthenticodeError::Os(format!("open: {e}")))?;
-    verify_handle(path, HANDLE(file.as_raw_handle()))
+    verify_handle(path, HANDLE(file.as_raw_handle()), Fetch::Network)
 }
 
 /// Open `path` for reading, sharing read access only, so nobody can write,
@@ -297,16 +365,16 @@ enum Pass {
     NoSigner(String),
 }
 
-fn verify_handle(path: &Path, file: HANDLE) -> Result<SignerInfo, AuthenticodeError> {
+fn verify_handle(path: &Path, file: HANDLE, fetch: Fetch) -> Result<SignerInfo, AuthenticodeError> {
     let path_w = wide(path);
     let finish = |pass: Pass| match pass {
         Pass::Ok(s) => Ok(s),
         Pass::NoSigner(m) => Err(AuthenticodeError::Os(m)),
         Pass::Failed { status, last_error } => Err(classify(status, last_error)),
     };
-    match verify_pass(&path_w, file, true) {
+    match verify_pass(&path_w, file, true, fetch) {
         Pass::Failed { status, .. } if revocation_unknown(status) => {
-            let second = verify_pass(&path_w, file, false);
+            let second = verify_pass(&path_w, file, false, fetch);
             if matches!(second, Pass::Ok(_)) {
                 tracing::warn!(
                     status = format_args!("{:#010x}", status.0),
@@ -355,7 +423,7 @@ fn classify(status: HRESULT, last_error: u32) -> AuthenticodeError {
 }
 
 /// One `WinVerifyTrust` verify + read signer + close cycle.
-fn verify_pass(path_w: &[u16], file: HANDLE, check_revocation: bool) -> Pass {
+fn verify_pass(path_w: &[u16], file: HANDLE, check_revocation: bool, fetch: Fetch) -> Pass {
     let mut file_info = WINTRUST_FILE_INFO {
         cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
         pcwszFilePath: PCWSTR(path_w.as_ptr()),
@@ -375,10 +443,16 @@ fn verify_pass(path_w: &[u16], file: HANDLE, check_revocation: bool) -> Pass {
             pFile: &mut file_info,
         },
         dwStateAction: WTD_STATEACTION_VERIFY,
-        dwProvFlags: if check_revocation {
-            WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
-        } else {
-            Default::default()
+        dwProvFlags: {
+            let mut flags = if check_revocation {
+                WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
+            } else {
+                Default::default()
+            };
+            if fetch == Fetch::CacheOnly {
+                flags |= WTD_CACHE_ONLY_URL_RETRIEVAL;
+            }
+            flags
         },
         ..Default::default()
     };
@@ -430,7 +504,38 @@ unsafe fn leaf_signer(state: HANDLE) -> Result<SignerInfo, String> {
         if cert.is_null() || (*cert).pCert.is_null() {
             return Err("no signer certificate".into());
         }
-        cert_signer((*cert).pCert)
+        let mut info = cert_signer((*cert).pCert)?;
+        if (*sgnr).csCertChain > 1 {
+            let issuer = WTHelperGetProvCertFromChain(sgnr, 1);
+            if !issuer.is_null() && !(*issuer).pCert.is_null() {
+                info.issuer_thumbprint_sha256 = Some(cert_thumbprint((*issuer).pCert)?);
+            }
+        }
+        Ok(info)
+    }
+}
+
+/// SHA-256 thumbprint of a certificate, lowercase hex.
+///
+/// # Safety
+/// `cert` must be a valid certificate context.
+unsafe fn cert_thumbprint(cert: *const CERT_CONTEXT) -> Result<String, String> {
+    // SAFETY: `cert` is valid per the contract; the buffer is sized from the
+    // length the first call reports.
+    unsafe {
+        let mut len = 0u32;
+        CertGetCertificateContextProperty(cert, CERT_SHA256_HASH_PROP_ID, None, &mut len)
+            .map_err(|e| format!("thumbprint size: {e}"))?;
+        let mut hash = vec![0u8; len as usize];
+        CertGetCertificateContextProperty(
+            cert,
+            CERT_SHA256_HASH_PROP_ID,
+            Some(hash.as_mut_ptr().cast()),
+            &mut len,
+        )
+        .map_err(|e| format!("thumbprint: {e}"))?;
+        hash.truncate(len as usize);
+        Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
     }
 }
 
@@ -450,22 +555,11 @@ unsafe fn cert_signer(cert: *const CERT_CONTEXT) -> Result<SignerInfo, String> {
         // which no requirement can match since parse rejects blank ones).
         let subject = String::from_utf16_lossy(&buf[..(n as usize).saturating_sub(1)]);
 
-        let mut len = 0u32;
-        CertGetCertificateContextProperty(cert, CERT_SHA256_HASH_PROP_ID, None, &mut len)
-            .map_err(|e| format!("thumbprint size: {e}"))?;
-        let mut hash = vec![0u8; len as usize];
-        CertGetCertificateContextProperty(
-            cert,
-            CERT_SHA256_HASH_PROP_ID,
-            Some(hash.as_mut_ptr().cast()),
-            &mut len,
-        )
-        .map_err(|e| format!("thumbprint: {e}"))?;
-        hash.truncate(len as usize);
-        let thumbprint_sha256 = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let thumbprint_sha256 = cert_thumbprint(cert)?;
         Ok(SignerInfo {
             subject,
             thumbprint_sha256,
+            issuer_thumbprint_sha256: None,
         })
     }
 }
@@ -478,6 +572,13 @@ unsafe fn cert_signer(cert: *const CERT_CONTEXT) -> Result<SignerInfo, String> {
 pub fn process_image_path(pid: u32) -> std::io::Result<PathBuf> {
     let process = open_process(pid)?;
     image_path_of(&process)
+}
+
+/// The image path of the process behind an already-open handle (opened with
+/// `PROCESS_QUERY_LIMITED_INFORMATION`), so the answer cannot be about a
+/// different process that reused the pid.
+pub fn process_image_of(process: &OwnedHandle) -> std::io::Result<PathBuf> {
+    image_path_of(process)
 }
 
 fn open_process(pid: u32) -> std::io::Result<OwnedHandle> {
@@ -544,15 +645,36 @@ fn image_path_of(process: &OwnedHandle) -> std::io::Result<PathBuf> {
 /// with the session's: a signed image only proves *which program* is on the
 /// other end, not on whose behalf it runs.
 pub fn verify_process(pid: u32, req: &SignerRequirement) -> Result<SignerInfo, AuthenticodeError> {
+    verify_process_with(pid, req, Fetch::Network)
+}
+
+/// [`verify_process`] with a choice of where revocation data may come from.
+/// The service's agent-pipe check uses [`Fetch::CacheOnly`], so a slow
+/// responder cannot stall every agent connection.
+pub fn verify_process_with(
+    pid: u32,
+    req: &SignerRequirement,
+    fetch: Fetch,
+) -> Result<SignerInfo, AuthenticodeError> {
     let os = |what: &str, e: std::io::Error| AuthenticodeError::Os(format!("{what}: {e}"));
     let process = open_process(pid).map_err(|e| os("open process", e))?;
     let path = image_path_of(&process).map_err(|e| os("image path", e))?;
-    let signer = verify_file(&path, req)?;
+    let signer = verify_file_with(&path, req, fetch)?;
+    // The image, its directory and every directory above it up to the
+    // volume root: anyone who can write (or rename, or replace) any of them
+    // can put another file under the verified path.
     let dir = path
         .parent()
         .ok_or_else(|| AuthenticodeError::Os("image path has no directory".into()))?;
-    for p in [path.as_path(), dir] {
-        match crate::acl::writable_by_others(p) {
+    let mut checked: Vec<(&Path, bool)> = vec![(path.as_path(), false), (dir, false)];
+    checked.extend(dir.ancestors().skip(1).map(|a| (a, true)));
+    for (p, above) in checked {
+        let writable = if above {
+            crate::acl::replaceable_by_others(p)
+        } else {
+            crate::acl::writable_by_others(p)
+        };
+        match writable {
             Ok(false) => {}
             Ok(true) => {
                 return Err(AuthenticodeError::Untrusted(format!(
@@ -581,6 +703,7 @@ mod tests {
         SignerRequirement {
             subject: subject.into(),
             thumbprints: vec![],
+            issuer_thumbprints: vec![],
         }
     }
 
@@ -642,6 +765,7 @@ mod tests {
         let s = SignerInfo {
             subject: "Faro Project".into(),
             thumbprint_sha256: "aa".repeat(32),
+            issuer_thumbprint_sha256: Some("cc".repeat(32)),
         };
         req("Faro Project").check(&s).unwrap();
         assert!(matches!(
@@ -656,6 +780,61 @@ mod tests {
         ));
         pinned.thumbprints.push("aa".repeat(32));
         pinned.check(&s).unwrap();
+    }
+
+    #[test]
+    fn issuer_pins_parse_and_check() {
+        let leaf = "aa".repeat(32);
+        let ca = "CC".repeat(32);
+        let r = SignerRequirement::parse(&format!(r#"subject="Faro Project"; issuer_sha256={ca}"#))
+            .unwrap();
+        assert_eq!(r.issuer_thumbprints, vec!["cc".repeat(32)]);
+        assert!(r.thumbprints.is_empty());
+        assert!(r.is_pinned());
+        assert!(!req("Faro Project").is_pinned());
+        assert_eq!(SignerRequirement::parse(&r.to_string()).unwrap(), r);
+        let both = SignerRequirement::parse(&format!(
+            r#"issuer_sha256={ca}; subject="X"; sha256={leaf}"#
+        ))
+        .unwrap();
+        assert_eq!(SignerRequirement::parse(&both.to_string()).unwrap(), both);
+        assert!(SignerRequirement::parse(&format!(
+            r#"subject="X"; issuer_sha256={ca}; issuer_sha256={ca}"#
+        ))
+        .is_err());
+        assert!(SignerRequirement::parse(r#"subject="X"; issuer_sha256=00"#).is_err());
+
+        let signer = |issuer: Option<&str>| SignerInfo {
+            subject: "Faro Project".into(),
+            thumbprint_sha256: leaf.clone(),
+            issuer_thumbprint_sha256: issuer.map(str::to_owned),
+        };
+        // A rotated leaf under the pinned issuer passes.
+        r.check(&signer(Some(&"cc".repeat(32)))).unwrap();
+        // Another CA that issues the same subject, or no issuer, does not.
+        for s in [signer(Some(&"dd".repeat(32))), signer(None)] {
+            assert!(matches!(
+                r.check(&s),
+                Err(AuthenticodeError::WrongSigner(_))
+            ));
+        }
+        // Both pins must hold.
+        both.check(&signer(Some(&"cc".repeat(32)))).unwrap_err(); // subject X
+        let mut both = r.clone();
+        both.thumbprints = vec!["bb".repeat(32)];
+        assert!(both.check(&signer(Some(&"cc".repeat(32)))).is_err());
+        both.thumbprints.push(leaf.clone());
+        both.check(&signer(Some(&"cc".repeat(32)))).unwrap();
+    }
+
+    #[test]
+    fn ancestors_above_the_image_are_checked_for_replacement_only() {
+        // The stock volume root lets Users add subdirectories; that must
+        // not count, or no install could ever verify.
+        let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
+        let root = sys.ancestors().last().unwrap().to_path_buf();
+        assert!(!crate::acl::replaceable_by_others(&root).unwrap());
+        assert!(!crate::acl::replaceable_by_others(&sys).unwrap());
     }
 
     #[test]

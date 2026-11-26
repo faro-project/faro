@@ -122,6 +122,10 @@ pub struct IpcFrameSource {
     capture_window: Duration,
     session_end_grace: Duration,
     recheck: Duration,
+    /// Windows: require the connection to come from the Windows session its
+    /// hello names. On unless [`IpcFrameSource::with_sessions`] replaced the
+    /// lister with a model.
+    check_windows_session: bool,
 }
 
 impl fmt::Debug for IpcFrameSource {
@@ -152,6 +156,7 @@ impl IpcFrameSource {
             capture_window: CAPTURE_ANSWER_WINDOW,
             session_end_grace: SESSION_END_GRACE,
             recheck: SESSION_RECHECK,
+            check_windows_session: true,
         }
     }
 
@@ -169,9 +174,13 @@ impl IpcFrameSource {
     }
 
     /// Replace the session list (default: [`sessions::default_lister`]).
-    /// Tests use this to model logins, logouts and user switches.
+    /// Tests use this to model logins, logouts and user switches. The
+    /// modelled session ids are not real Windows sessions, so this also
+    /// turns off the check (Windows) that a connection comes from the
+    /// session it names; production never calls it.
     pub fn with_sessions(mut self, lister: SessionLister) -> Self {
         self.sessions = lister;
+        self.check_windows_session = false;
         self
     }
 
@@ -347,6 +356,37 @@ impl Drop for Listener {
 /// slow or silent client cannot hold up the source.
 async fn listen(server: IpcServer, arrivals: mpsc::Sender<Arrival>) {
     loop {
+        // Windows verifies an agent's Authenticode signature, which can wait
+        // on the network: do it on a task of its own, not in this loop.
+        #[cfg(windows)]
+        {
+            match server.accept_pending().await {
+                Ok(pending) => {
+                    let tx = arrivals.clone();
+                    tokio::spawn(async move {
+                        let mut conn = match pending.verify().await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "agent connection refused");
+                                return;
+                            }
+                        };
+                        match read_agent_hello(&mut conn, HELLO_TIMEOUT).await {
+                            Ok(hello) => {
+                                let _ = tx.send(Arrival { conn, hello }).await;
+                            }
+                            Err(e) => tracing::warn!(error = %e, "agent handshake failed"),
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "agent connection refused");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            continue;
+        }
+        #[cfg(not(windows))]
         match server.accept().await {
             Ok(mut conn) => {
                 let tx = arrivals.clone();
@@ -489,6 +529,33 @@ struct Agent {
     status_sent: Option<MemberStatus>,
 }
 
+/// Windows: the connection must come from the session it names, and, where
+/// the service launches the agents, from the very process it launched there.
+/// The account check alone admits any process the user runs (their own
+/// `faro-agent.exe` copy that passes Authenticode is not enough: only the
+/// service-spawned process has the protected descriptor).
+#[cfg(windows)]
+fn windows_peer_ok(
+    peer: Option<&PeerInfo>,
+    session: &str,
+    check_session: bool,
+) -> Result<(), &'static str> {
+    let peer = peer.ok_or("no peer credentials")?;
+    let claimed = faro_platform_windows::service::parse_session_id(&faro_platform::SessionId(
+        session.to_owned(),
+    ));
+    if check_session {
+        let claimed = claimed.ok_or("not a Windows session id")?;
+        if peer.windows_session_id != Some(claimed) {
+            return Err("the connection is from a different Windows session than it names");
+        }
+    }
+    if !claimed.is_none_or(|c| crate::win::agent_pid_allowed(c, peer.pid)) {
+        return Err("the connecting process is not the agent the service launched in this session");
+    }
+    Ok(())
+}
+
 /// An agent that closed its connection; whether that was expected is
 /// decided once the service has seen whether its session ended.
 struct Departure {
@@ -514,6 +581,9 @@ struct Run {
     sessions: Vec<SessionEntry>,
     snapshot: SessionSnapshot,
     listeners: BTreeMap<Option<AccountId>, Listener>,
+    /// Consecutive `AddrInUse` failures binding each account pipe: someone
+    /// else holds the name.
+    bind_squatted: BTreeMap<Option<AccountId>, u32>,
     agents: BTreeMap<String, Agent>,
     departed: BTreeMap<String, Departure>,
     /// The last `Sessions` sent to the core.
@@ -601,14 +671,45 @@ impl Run {
             };
             match bound {
                 Ok(server) => {
+                    self.bind_squatted.remove(&key);
                     tracing::info!(path = %server.path().display(), uid = ?key, "listening for session agents");
                     let task = tokio::spawn(listen(server, self.arrivals_tx.clone()));
                     self.listeners.insert(key, Listener(task));
                 }
+                Err(IpcError::AddrInUse(path)) => self.pipe_squatted(key, &path),
                 Err(e) => {
                     tracing::warn!(error = %e, uid = ?key, "cannot bind agent socket; will retry")
                 }
             }
+        }
+    }
+
+    /// Binding an account pipe keeps failing because the name is taken
+    /// (`ERROR_ACCESS_DENIED` / `ERROR_PIPE_BUSY` on creation). Nothing
+    /// legitimate holds the name, so after a few tries this is someone
+    /// squatting it to keep the real agent out: log it and raise the
+    /// no-agent tamper path now instead of after the usual silent period.
+    fn pipe_squatted(&mut self, key: Option<AccountId>, path: &Path) {
+        const SQUAT_AFTER: u32 = 3;
+        let n = self.bind_squatted.entry(key).or_insert(0);
+        *n += 1;
+        let n = *n;
+        if n < SQUAT_AFTER {
+            tracing::warn!(path = %path.display(), uid = ?key, attempt = n, "agent pipe name is in use; will retry");
+            return;
+        }
+        let account = self
+            .sessions
+            .iter()
+            .find(|s| Some(s.uid) == key)
+            .map(|s| s.account.clone());
+        if n == SQUAT_AFTER {
+            tracing::error!(path = %path.display(), uid = ?key, account = ?account, attempts = n, "the agent pipe name is held by another process: possible squatting to keep the agent out; raising tamper");
+            let user = account.clone().unwrap_or_else(|| "unknown".to_owned());
+            let _ = self.events.try_send(SourceEvent::Tamper {
+                signal: faro_proto::body::TamperSignal::UnmonitoredUserSession { user },
+                account,
+            });
         }
     }
 
@@ -846,6 +947,15 @@ impl Run {
         };
         if !owner_ok {
             tracing::warn!(session = %hello.session, uid = ?peer_uid.map(|a| a.to_string()), "refusing an agent for a session that is not listed or not its own");
+            return Ok(());
+        }
+        #[cfg(windows)]
+        if let Err(why) = windows_peer_ok(
+            arrival.conn.peer(),
+            &hello.session,
+            self.cfg.check_windows_session,
+        ) {
+            tracing::warn!(session = %hello.session, why, "refusing an agent connection");
             return Ok(());
         }
         if self.agents.contains_key(&hello.session) {
@@ -1142,6 +1252,7 @@ impl IpcFrameSource {
             sessions: Vec::new(),
             snapshot: Arc::default(),
             listeners: BTreeMap::new(),
+            bind_squatted: BTreeMap::new(),
             agents: BTreeMap::new(),
             departed: BTreeMap::new(),
             reported: None,
@@ -1345,6 +1456,25 @@ impl FrameSource for IpcFrameSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_peer_must_come_from_the_session_it_names() {
+        let peer = |session: Option<u32>| PeerInfo {
+            uid: PeerInfo::NO_ID,
+            gid: PeerInfo::NO_ID,
+            pid: Some(4242),
+            macos_audit_token: None,
+            windows_sid: None,
+            windows_session_id: session,
+        };
+        assert!(windows_peer_ok(Some(&peer(Some(3))), "wts:3", true).is_ok());
+        assert!(windows_peer_ok(Some(&peer(Some(4))), "wts:3", true).is_err());
+        assert!(windows_peer_ok(Some(&peer(None)), "wts:3", true).is_err());
+        assert!(windows_peer_ok(Some(&peer(Some(3))), "uid:501", true).is_err());
+        assert!(windows_peer_ok(None, "wts:3", true).is_err());
+    }
+
     use faro_ipc::{hello, AgentConnection, IpcClient, WireFrame, WirePixelFormat};
 
     fn own_account() -> AccountId {
@@ -1432,6 +1562,8 @@ mod tests {
                 );
             // Even when the tests run as root: one socket for everyone.
             src.per_account_sockets = false;
+            // The made-up session ids are not Windows sessions.
+            src.check_windows_session = false;
             let (cmd, cmd_rx) = mpsc::channel(4);
             let (ev_tx, mut ev) = mpsc::channel(64);
             let (status, status_rx) = watch::channel(None);

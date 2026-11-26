@@ -7,7 +7,7 @@
 //! Windows meaning of the Unix code's "euid is 0".
 
 use faro_ipc::AccountId;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -92,8 +92,13 @@ pub fn session_changes() -> watch::Receiver<u64> {
 
 #[derive(Default)]
 struct Presence {
-    /// Sessions where the service started or found a running agent process.
-    launched: BTreeSet<u32>,
+    /// Sessions where the service started an agent process, with its pid.
+    /// Only processes the launcher spawned itself are listed: one it merely
+    /// found running is not trusted (ARCHITECTURE.md §3.1).
+    launched: BTreeMap<u32, u32>,
+    /// The launcher is running, so an agent connection must come from the
+    /// pid it spawned ([`agent_pid_allowed`]).
+    launcher_active: bool,
     /// Sessions whose agent is connected to the agent pipe.
     connected: BTreeSet<u32>,
 }
@@ -108,8 +113,34 @@ fn lock() -> std::sync::MutexGuard<'static, Presence> {
 }
 
 /// The launcher's view: these sessions have a live agent process.
-pub fn set_launched_agents(sessions: BTreeSet<u32>) {
-    lock().launched = sessions;
+pub fn set_launched_agents(sessions: BTreeMap<u32, u32>) {
+    let mut p = lock();
+    p.launched = sessions;
+    p.launcher_active = true;
+}
+
+/// The launcher started: from now on agent connections must come from
+/// processes it spawned.
+pub fn set_launcher_active() {
+    lock().launcher_active = true;
+}
+
+/// Whether a connection claiming to be the agent of `session` may come
+/// from process `pid`. Where the service launches agents it must be the
+/// process it spawned there; where it does not (a developer running
+/// `faro-service run` by hand, tests) any pid is accepted.
+pub fn agent_pid_allowed(session: u32, pid: Option<u32>) -> bool {
+    let p = lock();
+    pid_allowed(p.launcher_active, &p.launched, session, pid)
+}
+
+fn pid_allowed(
+    active: bool,
+    launched: &BTreeMap<u32, u32>,
+    session: u32,
+    pid: Option<u32>,
+) -> bool {
+    !active || (pid.is_some() && launched.get(&session).copied() == pid)
 }
 
 /// The agent source's view: these sessions have a connected agent.
@@ -121,7 +152,7 @@ pub fn set_connected_agents(sessions: BTreeSet<u32>) {
 /// service launched it there or because it is connected.
 pub fn agent_in_session(session: u32) -> bool {
     let p = lock();
-    p.launched.contains(&session) || p.connected.contains(&session)
+    p.launched.contains_key(&session) || p.connected.contains(&session)
 }
 
 // ---- pipe clients ----------------------------------------------------------
@@ -171,4 +202,33 @@ pub fn pipe_client_token(pipe: &impl AsRawHandle) -> io::Result<Token> {
     Ok(Token(unsafe {
         OwnedHandle::from_raw_handle(token.0 as RawHandle)
     }))
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_launched_pid_may_be_the_agent_when_the_service_launches() {
+        let launched: BTreeMap<u32, u32> = [(1, 100), (2, 200)].into();
+        // No launcher (a developer's service, tests): anyone.
+        assert!(pid_allowed(false, &BTreeMap::new(), 1, Some(5)));
+        assert!(pid_allowed(false, &BTreeMap::new(), 1, None));
+        // A launcher: the pid it spawned for that very session.
+        assert!(pid_allowed(true, &launched, 1, Some(100)));
+        assert!(
+            !pid_allowed(true, &launched, 1, Some(200)),
+            "another session's agent"
+        );
+        assert!(
+            !pid_allowed(true, &launched, 1, Some(999)),
+            "an adopted or foreign process"
+        );
+        assert!(!pid_allowed(true, &launched, 1, None));
+        assert!(
+            !pid_allowed(true, &launched, 3, Some(100)),
+            "no agent launched there yet"
+        );
+        assert!(!pid_allowed(true, &BTreeMap::new(), 1, Some(100)));
+    }
 }

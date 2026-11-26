@@ -14,10 +14,12 @@
 //! agent (user)              helper (elevated admin)          service (SYSTEM)
 //!   │ request = 32 random bytes
 //!   │ ShellExecuteExW("runas", faro-service.exe,
-//!   │   "approve-enroll --request <64 hex>")
+//!   │   "approve-enroll --request <64 hex> --name <..> --url <..>")
 //!   │    ── UAC: consent (admin) or credentials (standard user) ──
+//!   │                        │ MessageBox: "Allow <name> (<url>)…" Yes/No
 //!   │                        │ connect to the service's pipe ─▶ │ check the client:
-//!   │                        │ ApproveEnroll { request }        │  token, session, image
+//!   │                        │ ApproveEnroll { request,         │  token, session, image
+//!   │                        │   binding = H(url, name, req) }
 //!   │                        │ ◀──────────── Approved | Refused │ record (request, session,
 //!   │ ◀── exit code ──────── │                                  │   approver) for 5 min
 //!   │ Enroll { …, authorization: request } ──────────────────▶ │ consume the record
@@ -32,16 +34,35 @@
 //! terms, `create()` does both and returns the bytes. Declining the UAC
 //! prompt is [`ApprovalError::Declined`].
 //!
-//! **Helper** (`faro-service.exe approve-enroll --request <hex>`; to be
-//! written in `faro-service`): parse the arguments with
+//! **Helper** (`faro-service.exe approve-enroll --request <hex> --name
+//! <name> --url <url>`): parse the arguments with
 //! [`ApprovalRequest::parse_helper_arguments`] (exit
-//! [`exit::BAD_ARGUMENTS`] if they don't parse), connect to the service's
-//! enroll pipe, send the request id, and exit with [`exit::APPROVED`],
-//! [`exit::REFUSED`] or [`exit::NO_SERVICE`]. It shows nothing and holds
-//! no secret: it only *is* an elevated administrator process, which is
-//! what the service checks. It is the service binary (not the agent) so
-//! that the agent is never run elevated and the UAC prompt names the
-//! program that makes the change.
+//! [`exit::BAD_ARGUMENTS`] if they don't parse), **show the approver what
+//! they are approving** ([`confirm_approval`]: a Yes/No box, default No,
+//! worded like macOS's administrator prompt; No exits [`exit::REFUSED`]),
+//! connect to the service's enroll pipe, send the request id with a
+//! *binding* to the shown target, and exit with [`exit::APPROVED`],
+//! [`exit::REFUSED`] or [`exit::NO_SERVICE`]. The helper itself is what the
+//! service checks: an elevated administrator process. It is the service
+//! binary (not the agent) so that the agent is never run elevated and the
+//! UAC prompt names the program that makes the change.
+//!
+//! **Binding.** UAC consent alone says "Faro wants to run as administrator",
+//! not what for, and the request id only says *that* someone approved. The
+//! helper therefore sends `binding = SHA-256(domain, url, name, request)`
+//! and the service stores it with the approval. On `Enroll` the service
+//! recomputes it from the instance it discovered itself (the URL and name
+//! the preview showed) and refuses unless it matches, in constant time. An
+//! approval is thus good for one request id, one session, five minutes
+//! **and the target the approver was shown**: the agent (or anything else
+//! in the user's session) cannot get a consent for one instance and use it
+//! to enroll another. This mirrors macOS, where the root service shows the
+//! prompt itself, naming the instance it discovered.
+//!
+//! Remaining limit: the request id is visible on the helper's command line
+//! to other processes of the same user. Learning it lets them *use* the
+//! approval, but only to enroll the very target the administrator approved,
+//! which they could have asked for anyway, so it is harmless.
 //!
 //! **Service** (the trust decision): on the approval request, using the
 //! *pipe client's* token (`ImpersonateNamedPipeClient` +
@@ -96,7 +117,10 @@ use windows::Win32::UI::Shell::{
     ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
     SHELLEXECUTEINFOW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    SW_HIDE,
+};
 
 /// The helper's program: the service binary.
 pub const HELPER_PROGRAM: &str = crate::layout::SERVICE_PROGRAM;
@@ -104,6 +128,10 @@ pub const HELPER_PROGRAM: &str = crate::layout::SERVICE_PROGRAM;
 pub const APPROVE_ENROLL_COMMAND: &str = "approve-enroll";
 /// The flag before the request id.
 pub const REQUEST_FLAG: &str = "--request";
+/// The flag before the instance name the approver is shown.
+pub const NAME_FLAG: &str = "--name";
+/// The flag before the instance URL the approver is shown.
+pub const URL_FLAG: &str = "--url";
 /// Bytes in a request id (`faro_ipc::AUTHORIZATION_LEN`).
 pub const REQUEST_LEN: usize = 32;
 /// How long the service keeps an approval for `Enroll` to use.
@@ -133,6 +161,43 @@ impl std::fmt::Debug for ApprovalRequest {
     }
 }
 
+/// What the approver is asked to allow: the instance as the preview showed
+/// it. The service checks the approval against what it discovers itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalSubject {
+    pub name: String,
+    pub url: String,
+}
+
+/// The text of the approver's question, in the words of macOS's
+/// administrator prompt (`faro_service::enroll_server::approval_prompt`).
+pub fn approval_message(subject: &ApprovalSubject) -> String {
+    let clean = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
+    format!(
+        "Allow \u{201c}{}\u{201d} ({}) to monitor this PC?\n\nFaro wants to enroll this \
+         computer with this instance. Faro will then monitor every account on this computer. \
+         Choose Yes only if you expect this.",
+        clean(&subject.name),
+        clean(&subject.url)
+    )
+}
+
+/// Ask the (elevated) approver. `true` only for Yes; the default button is
+/// No. Blocks until answered.
+pub fn confirm_approval(subject: &ApprovalSubject) -> bool {
+    let text = HSTRING::from(approval_message(subject));
+    // SAFETY: both strings outlive the call; no owner window.
+    let r = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            w!("Faro: allow enrollment?"),
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    };
+    r == IDYES
+}
+
 impl ApprovalRequest {
     /// A new random request id (the system RNG).
     pub fn generate() -> windows::core::Result<Self> {
@@ -152,22 +217,21 @@ impl ApprovalRequest {
     }
 
     /// The helper's command line after the program:
-    /// `approve-enroll --request <64 lowercase hex digits>`.
-    pub fn helper_arguments(&self) -> String {
+    /// `approve-enroll --request <64 lowercase hex digits> --name <name>
+    /// --url <url>`, the last two quoted for the MSVC command-line parser
+    /// ([`crate::service::quote_arg`]).
+    pub fn helper_arguments(&self, subject: &ApprovalSubject) -> String {
+        use crate::service::quote_arg;
         let hex: String = self.0.iter().map(|b| format!("{b:02x}")).collect();
-        format!("{APPROVE_ENROLL_COMMAND} {REQUEST_FLAG} {hex}")
+        format!(
+            "{APPROVE_ENROLL_COMMAND} {REQUEST_FLAG} {hex} {NAME_FLAG} {} {URL_FLAG} {}",
+            quote_arg(&subject.name),
+            quote_arg(&subject.url)
+        )
     }
 
-    /// Parse the helper's arguments after the program name, exactly as
-    /// [`helper_arguments`](Self::helper_arguments) writes them.
-    pub fn parse_helper_arguments<S: AsRef<str>>(args: &[S]) -> Option<Self> {
-        let [cmd, flag, hex] = args else {
-            return None;
-        };
-        if cmd.as_ref() != APPROVE_ENROLL_COMMAND || flag.as_ref() != REQUEST_FLAG {
-            return None;
-        }
-        let hex = hex.as_ref();
+    /// Parse the request id from its 64 hex digits.
+    pub fn from_hex(hex: &str) -> Option<Self> {
         if hex.len() != REQUEST_LEN * 2 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
@@ -176,6 +240,29 @@ impl ApprovalRequest {
             *out = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
         }
         Some(ApprovalRequest(b))
+    }
+
+    /// Parse the helper's arguments after the program name, exactly as
+    /// [`helper_arguments`](Self::helper_arguments) writes them (already
+    /// split into arguments).
+    pub fn parse_helper_arguments<S: AsRef<str>>(args: &[S]) -> Option<(Self, ApprovalSubject)> {
+        let [cmd, rf, hex, nf, name, uf, url] = args else {
+            return None;
+        };
+        if cmd.as_ref() != APPROVE_ENROLL_COMMAND
+            || rf.as_ref() != REQUEST_FLAG
+            || nf.as_ref() != NAME_FLAG
+            || uf.as_ref() != URL_FLAG
+        {
+            return None;
+        }
+        Some((
+            Self::from_hex(hex.as_ref())?,
+            ApprovalSubject {
+                name: name.as_ref().to_owned(),
+                url: url.as_ref().to_owned(),
+            },
+        ))
     }
 }
 
@@ -205,9 +292,10 @@ pub enum ApprovalError {
 pub fn request_admin_approval(
     program: &Path,
     request: &ApprovalRequest,
+    subject: &ApprovalSubject,
 ) -> Result<(), ApprovalError> {
     let file = HSTRING::from(program.as_os_str());
-    let params = HSTRING::from(request.helper_arguments());
+    let params = HSTRING::from(request.helper_arguments(subject));
     // ShellExecuteEx may hand the work to shell extensions, which want COM.
     // SAFETY: balanced with CoUninitialize below when it succeeded.
     let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
@@ -419,23 +507,69 @@ mod tests {
     use windows::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    /// What the MSVC runtime makes of a command line (what clap sees).
+    fn split(line: &str) -> Vec<String> {
+        // Windows' own splitter, through the shell32 export.
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::CommandLineToArgvW;
+        let w: Vec<u16> = std::iter::once("x.exe ")
+            .chain(std::iter::once(line))
+            .collect::<String>()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut n = 0;
+        // SAFETY: NUL-terminated input; the result is freed below.
+        unsafe {
+            let argv = CommandLineToArgvW(PCWSTR(w.as_ptr()), &mut n);
+            let out = (0..n as usize)
+                .skip(1)
+                .map(|i| (*argv.add(i)).to_string().unwrap())
+                .collect();
+            let _ = LocalFree(Some(HLOCAL(argv.cast())));
+            out
+        }
+    }
+
     #[test]
     fn arguments_round_trip_and_nothing_else_parses() {
         let r = ApprovalRequest::from_bytes(core::array::from_fn(|i| i as u8 * 7));
-        let line = r.helper_arguments();
+        let subject = ApprovalSubject {
+            name: "Sam \"The\" Faro \\".into(),
+            url: "https://faro.example/a b".into(),
+        };
+        let line = r.helper_arguments(&subject);
         assert!(line.starts_with("approve-enroll --request 00070e15"));
-        let args: Vec<&str> = line.split(' ').collect();
+        let args = split(&line);
         assert_eq!(
             ApprovalRequest::parse_helper_arguments(&args),
-            Some(r.clone())
+            Some((r.clone(), subject.clone()))
         );
-        let hex = args[2];
+        let hex = args[2].clone();
         for bad in [
             vec!["approve-enroll", "--request"],
-            vec!["enroll", "--request", hex],
-            vec!["approve-enroll", "--req", hex],
-            vec!["approve-enroll", "--request", &hex[1..]],
-            vec!["approve-enroll", "--request", hex, "extra"],
+            vec!["enroll", "--request", &hex, "--name", "n", "--url", "u"],
+            vec!["approve-enroll", "--req", &hex, "--name", "n", "--url", "u"],
+            vec![
+                "approve-enroll",
+                "--request",
+                &hex[1..],
+                "--name",
+                "n",
+                "--url",
+                "u",
+            ],
+            vec!["approve-enroll", "--request", &hex],
+            vec![
+                "approve-enroll",
+                "--request",
+                &hex,
+                "--name",
+                "n",
+                "--url",
+                "u",
+                "x",
+            ],
         ] {
             assert_eq!(
                 ApprovalRequest::parse_helper_arguments(&bad),
@@ -443,13 +577,33 @@ mod tests {
                 "{bad:?}"
             );
         }
-        let mut nonhex = hex.to_owned();
+        let mut nonhex = hex.clone();
         nonhex.replace_range(0..1, "g");
         assert_eq!(
-            ApprovalRequest::parse_helper_arguments(&["approve-enroll", "--request", &nonhex]),
+            ApprovalRequest::parse_helper_arguments(&[
+                "approve-enroll",
+                "--request",
+                &nonhex,
+                "--name",
+                "n",
+                "--url",
+                "u"
+            ]),
             None
         );
         assert_eq!(format!("{r:?}"), "ApprovalRequest(..)");
+    }
+
+    #[test]
+    fn the_question_names_the_target_without_control_characters() {
+        let m = approval_message(&ApprovalSubject {
+            name: "Sam\u{7}'s Faro".into(),
+            url: "https://f.example/".into(),
+        });
+        assert!(m.starts_with(
+            "Allow \u{201c}Sam's Faro\u{201d} (https://f.example/) to monitor this PC?"
+        ));
+        assert!(!m.contains('\u{7}'));
     }
 
     #[test]

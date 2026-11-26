@@ -41,11 +41,24 @@
 //! `run`, and can be replaced ([`WinServiceHost::with_agent`]) for tests
 //! and spike tools.
 //!
-//! The user owns the process it starts (its token's default DACL grants
-//! them full access), so a user can always kill their agent. That is
-//! expected: the service notices (the returned process handle is
-//! signalled, and the agent's pipe closes), relaunches it and reports
-//! `agent_restarted` (§3.7).
+//! The agent process is **not** the user's to control. It runs with the
+//! user's token (so it sees their desktop) but is created with explicit
+//! process and thread security descriptors (`agent_sddl`): owned by
+//! SYSTEM, with an `OWNER RIGHTS` ACE that grants only `READ_CONTROL` (so
+//! an owner gets no implicit `WRITE_DAC`), SYSTEM full access, and the
+//! session user only `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`
+//! (threads: `THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`). Without
+//! `VM_WRITE`, `VM_OPERATION`, `CREATE_THREAD`, `SET_INFORMATION`,
+//! `DUP_HANDLE` or `TERMINATE` the user cannot inject code into the agent,
+//! duplicate its pipe handle or rewrite its DACL.
+//!
+//! The denied `PROCESS_TERMINATE` means Task Manager's "End task" fails with
+//! access denied for the user. That is deliberate: a killed agent is
+//! detected either way (the process handle is signalled and the agent's pipe
+//! closes), relaunched and reported as `agent_restarted` / tamper (§3.7), so
+//! the right to kill buys nothing but a gap in the screen record.
+//! Administrators can still stop it; that is an admin-level act the service
+//! also sees.
 //!
 //! # Session changes
 //!
@@ -60,11 +73,16 @@ use faro_platform::{AgentPid, PlatformError, Result as PlatformResult, ServiceHo
 use faro_platform::{SessionId, SessionInfo};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_NO_TOKEN, ERROR_PRIVILEGE_NOT_HELD, HANDLE, WIN32_ERROR,
+    CloseHandle, LocalFree, ERROR_INVALID_OWNER, ERROR_NO_TOKEN, ERROR_PRIVILEGE_NOT_HELD, HANDLE,
+    HLOCAL, WIN32_ERROR,
+};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    DuplicateTokenEx, SecurityIdentification, TokenPrimary, TOKEN_ADJUST_DEFAULT,
-    TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
+    DuplicateTokenEx, SecurityIdentification, TokenPrimary, PSECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_QUERY,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
@@ -489,9 +507,12 @@ fn session_user_token(session: u32) -> PlatformResult<Handle> {
 /// DACLs and for checking that a pipe client runs as that user. Needs
 /// LocalSystem, like spawning.
 pub fn session_user_sid(session: u32) -> PlatformResult<String> {
+    token_sid_string(&session_user_token(session)?)
+}
+
+fn token_sid_string(token: &Handle) -> PlatformResult<String> {
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
-    let token = session_user_token(session)?;
     let mut len = 0u32;
     // SAFETY: a size query.
     let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut len) };
@@ -566,6 +587,65 @@ fn wide_str(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Which object an agent descriptor is for.
+#[derive(Clone, Copy)]
+enum AgentObject {
+    Process,
+    Thread,
+}
+
+/// The SDDL for the agent's process or thread object (see the module docs).
+/// `0x101000` is `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`,
+/// `0x100800` is `THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`. `OW` is
+/// OWNER RIGHTS (S-1-3-4); `RC` is `READ_CONTROL`.
+fn agent_sddl(user_sid: &str, object: AgentObject, with_owner: bool) -> String {
+    let user_mask = match object {
+        AgentObject::Process => "0x101000",
+        AgentObject::Thread => "0x100800",
+    };
+    format!(
+        "{}D:P(A;;GA;;;SY)(A;;RC;;;OW)(A;;{user_mask};;;{user_sid})",
+        if with_owner { "O:SY" } else { "" }
+    )
+}
+
+/// A self-relative security descriptor from SDDL, freed on drop.
+struct SdBuf(PSECURITY_DESCRIPTOR);
+
+impl SdBuf {
+    fn from_sddl(sddl: &str) -> PlatformResult<Self> {
+        let w = wide_str(sddl);
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `w` is NUL-terminated; `sd` is a valid out pointer.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(w.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+        }
+        .map_err(|e| PlatformError::Os(format!("agent security descriptor {sddl:?}: {e}")))?;
+        Ok(SdBuf(sd))
+    }
+
+    /// Non-inheritable attributes pointing at this descriptor.
+    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: self.0 .0,
+            bInheritHandle: false.into(),
+        }
+    }
+}
+
+impl Drop for SdBuf {
+    fn drop(&mut self) {
+        // SAFETY: allocated by LocalAlloc in the SDDL conversion, freed once.
+        unsafe { LocalFree(Some(HLOCAL(self.0 .0))) };
+    }
+}
+
 fn spawn_as_session_user(
     session: u32,
     program: &Path,
@@ -607,26 +687,45 @@ fn spawn_as_session_user(
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
         ..Default::default()
     };
+    let user_sid = token_sid_string(&token)?;
     let mut pi = PROCESS_INFORMATION::default();
-    // SAFETY: every pointer is to a NUL-terminated buffer that outlives the
-    // call; `env` is a Unicode environment block (flagged as such); no
-    // handles are inherited.
-    unsafe {
-        CreateProcessAsUserW(
-            Some(token.0),
-            PCWSTR(app.as_ptr()),
-            Some(PWSTR(cmd.as_mut_ptr())),
-            None,
-            None,
-            false,
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-            Some(env.0.cast_const()),
-            dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
-            &si,
-            &mut pi,
-        )
+    // The owner of the new process is SYSTEM when the system lets us say so;
+    // the OWNER RIGHTS ACE does the protecting either way.
+    let mut result = Err(windows::core::Error::empty());
+    for with_owner in [true, false] {
+        let proc_sd = SdBuf::from_sddl(&agent_sddl(&user_sid, AgentObject::Process, with_owner))?;
+        let thread_sd = SdBuf::from_sddl(&agent_sddl(&user_sid, AgentObject::Thread, with_owner))?;
+        let proc_sa = proc_sd.attributes();
+        let thread_sa = thread_sd.attributes();
+        // SAFETY: every pointer is to a NUL-terminated buffer that outlives
+        // the call; `env` is a Unicode environment block (flagged as such);
+        // the security attributes point into descriptors that outlive the
+        // call; no handles are inherited.
+        result = unsafe {
+            CreateProcessAsUserW(
+                Some(token.0),
+                PCWSTR(app.as_ptr()),
+                Some(PWSTR(cmd.as_mut_ptr())),
+                Some(&proc_sa),
+                Some(&thread_sa),
+                false,
+                CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                Some(env.0.cast_const()),
+                dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+                &si,
+                &mut pi,
+            )
+        };
+        match &result {
+            Err(e) if with_owner && WIN32_ERROR::from_error(e) == Some(ERROR_INVALID_OWNER) => {
+                tracing::warn!(
+                    "the system refused a SYSTEM-owned agent process; using the OWNER RIGHTS ACE alone"
+                );
+            }
+            _ => break,
+        }
     }
-    .map_err(|e| {
+    result.map_err(|e| {
         PlatformError::Os(format!(
             "CreateProcessAsUserW({}) in session {session}: {e}",
             program.display()
@@ -645,6 +744,24 @@ fn spawn_as_session_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_descriptors_deny_the_user_everything_but_query_and_wait() {
+        let user = "S-1-5-21-1-2-3-1001";
+        for obj in [AgentObject::Process, AgentObject::Thread] {
+            for owner in [true, false] {
+                let sddl = agent_sddl(user, obj, owner);
+                SdBuf::from_sddl(&sddl).expect("valid SDDL");
+                assert_eq!(sddl.starts_with("O:SY"), owner);
+                assert!(sddl.contains("(A;;GA;;;SY)"));
+                assert!(sddl.contains("(A;;RC;;;OW)"));
+            }
+        }
+        let p = agent_sddl(user, AgentObject::Process, true);
+        assert!(p.ends_with(&format!("(A;;0x101000;;;{user})")));
+        let t = agent_sddl(user, AgentObject::Thread, true);
+        assert!(t.ends_with(&format!("(A;;0x100800;;;{user})")));
+    }
 
     #[test]
     fn session_ids_round_trip() {

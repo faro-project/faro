@@ -3,10 +3,12 @@
 //! contract; this is the "Service" column).
 //!
 //! 1. The agent asks UAC to run `faro-service approve-enroll --request
-//!    <hex>` elevated. That helper connects to the **admin pipe**
-//!    (`enroll.S-1-5-32-544` next to the agent pipes, whose DACL admits only
-//!    an elevated Administrators token) or, for a development service, the
-//!    ordinary enroll pipe, and sends `ApproveEnroll { request }`.
+//!    <hex> --name <name> --url <url>` elevated. That helper shows the
+//!    approver a Yes/No question naming the instance, connects to the
+//!    **admin pipe** (`enroll.S-1-5-32-544` next to the agent pipes, whose
+//!    DACL admits only an elevated Administrators token) or, for a
+//!    development service, the ordinary enroll pipe, and sends
+//!    `ApproveEnroll { request, binding }` (see [`approval_binding`]).
 //! 2. [`approve`] reads the helper's **own token** from the connection
 //!    (`ImpersonateNamedPipeClient`, never a pid lookup) and requires an
 //!    elevated administrator at High or System integrity
@@ -14,7 +16,7 @@
 //!    connection's; and, in the real (SYSTEM) service, that session must
 //!    have an agent ([`crate::win::agent_in_session`]), so an approval in
 //!    one session cannot serve another. It records `(request, session,
-//!    approver SID, time)` for [`APPROVAL_TTL`] in an [`ApprovalTable`],
+//!    approver SID, binding, time)` for [`APPROVAL_TTL`] in an [`ApprovalTable`],
 //!    holding at most [`MAX_RECORDS`].
 //! 3. On `Enroll` the agent sends the same bytes as `authorization`.
 //!    [`answer`] compares them in constant time with the live records,
@@ -23,7 +25,13 @@
 //!    `Enroll`, and logs the approver's SID. No record: `Failed {
 //!    NotApproved }`. Only then does the shared enrollment code run
 //!    ([`EnrollService::handle_with`], which still checks the instance's
-//!    identity against what the person confirmed).
+//!    identity against what the person confirmed) and, once it has
+//!    discovered the instance, [`BoundApproval`] recomputes the binding from
+//!    the instance URL and name (what the preview showed) and refuses
+//!    unless it equals the recorded one, in constant time. The approval is
+//!    therefore for the target the approver was shown, not just for "an
+//!    enrollment". The request id is visible on the helper's command line;
+//!    that is harmless because using it can only enroll that target.
 //!
 //! Who may send what: `Status`, `Preview` and `Enroll` only from the pipe's
 //! own account (the SID read from the connection) and, when
@@ -33,7 +41,7 @@
 //! A `dev` build's missing requirement changes none of this: the approval
 //! still needs the elevated token.
 
-use crate::enroll_server::{ApprovalError, Approver, EnrollService};
+use crate::enroll_server::{ApprovalError, ApprovalSubject, Approver, EnrollService};
 use crate::source::ipc::{check_policy, PeerPolicy};
 use faro_ipc::{
     AccountId, Connection, EnrollRequest, EnrollResponse, EnrollServerConnection, FailureKind,
@@ -49,8 +57,31 @@ pub const ADMIN_PIPE_ACCOUNT: AccountId = Sid::BUILTIN_ADMINISTRATORS;
 /// Approvals kept at once; the oldest is dropped for a new one.
 pub const MAX_RECORDS: usize = 8;
 
+/// Length of an approval binding (SHA-256).
+pub const BINDING_LEN: usize = 32;
+
+/// The binding of an approval to its target: SHA-256 over a
+/// domain-separated, length-prefixed encoding of the instance `url`, the
+/// instance `name` and the `request` id. The helper computes it from what it
+/// showed the approver; the service computes it from what it discovered.
+pub fn approval_binding(
+    url: &str,
+    name: &str,
+    request: &[u8; AUTHORIZATION_LEN],
+) -> [u8; BINDING_LEN] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"faro-enroll-approval-v1\0");
+    for part in [url.as_bytes(), name.as_bytes(), request.as_slice()] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part);
+    }
+    h.finalize().into()
+}
+
 struct Record {
     request: [u8; AUTHORIZATION_LEN],
+    binding: [u8; BINDING_LEN],
     session: u32,
     approver: String,
     at: Instant,
@@ -64,6 +95,7 @@ impl ApprovalTable {
     pub fn record(
         &self,
         request: [u8; AUTHORIZATION_LEN],
+        binding: [u8; BINDING_LEN],
         session: u32,
         approver: String,
         now: Instant,
@@ -75,6 +107,7 @@ impl ApprovalTable {
         }
         t.push_back(Record {
             request,
+            binding,
             session,
             approver,
             at: now,
@@ -82,14 +115,14 @@ impl ApprovalTable {
     }
 
     /// Use the approval for `request`, if one is live: removed whatever
-    /// the session, valid (returning the approver's SID) only for the
-    /// session it was recorded for.
+    /// the session, valid (returning the approver's SID and the binding to
+    /// the target) only for the session it was recorded for.
     pub fn consume(
         &self,
         request: &[u8; AUTHORIZATION_LEN],
         session: u32,
         now: Instant,
-    ) -> Option<String> {
+    ) -> Option<(String, [u8; BINDING_LEN])> {
         let mut t = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         t.retain(|r| now.saturating_duration_since(r.at) < APPROVAL_TTL);
         // Compare against every record, without stopping at the first hit.
@@ -100,11 +133,11 @@ impl ApprovalTable {
             }
         }
         let r = t.remove(found?)?;
-        (r.session == session).then_some(r.approver)
+        (r.session == session).then_some((r.approver, r.binding))
     }
 }
 
-fn ct_eq(a: &[u8; AUTHORIZATION_LEN], b: &[u8; AUTHORIZATION_LEN]) -> bool {
+fn ct_eq<const N: usize>(a: &[u8; N], b: &[u8; N]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -127,6 +160,7 @@ fn approve(
     peer: &PeerInfo,
     pipe: &ServerStream,
     request: [u8; AUTHORIZATION_LEN],
+    binding: [u8; BINDING_LEN],
 ) -> EnrollResponse {
     let Some(session) = peer.windows_session_id else {
         return refused("the client's session is unknown");
@@ -161,17 +195,34 @@ fn approve(
         return refused("no Faro agent is running in the approver's session");
     }
     tracing::info!(session, approver = %approver.user_sid, "recorded an enrollment approval");
-    table.record(request, session, approver.user_sid, Instant::now());
+    table.record(request, binding, session, approver.user_sid, Instant::now());
     EnrollResponse::Approved
 }
 
-/// An approver that says yes: used only after [`ApprovalTable::consume`]
-/// found the administrator's recorded approval.
-struct AlreadyApproved;
+/// An approver that says yes only for the target the administrator was
+/// shown: used after [`ApprovalTable::consume`] found the recorded approval,
+/// whose binding it checks against the instance the service discovered.
+struct BoundApproval {
+    binding: [u8; BINDING_LEN],
+}
 
-impl Approver for AlreadyApproved {
-    fn approve(&self, _: &[u8; AUTHORIZATION_LEN], _: &str) -> Result<(), ApprovalError> {
-        Ok(())
+impl Approver for BoundApproval {
+    fn approve(
+        &self,
+        authorization: &[u8; AUTHORIZATION_LEN],
+        _: &str,
+        subject: &ApprovalSubject<'_>,
+    ) -> Result<(), ApprovalError> {
+        let want = approval_binding(subject.url, subject.name, authorization);
+        if ct_eq(&want, &self.binding) {
+            Ok(())
+        } else {
+            tracing::warn!(
+                instance = subject.url,
+                "refused an enrollment: the administrator approved a different target"
+            );
+            Err(ApprovalError::NotApproved)
+        }
     }
 }
 
@@ -204,9 +255,9 @@ pub async fn answer(
             EnrollResponse::failed(FailureKind::Unavailable, "not allowed"),
         );
     }
-    if let EnrollRequest::ApproveEnroll { request } = req {
+    if let EnrollRequest::ApproveEnroll { request, binding } = req {
         let stream = conn.into_inner();
-        let resp = approve(table, &peer, &stream, request);
+        let resp = approve(table, &peer, &stream, request, binding);
         return (Connection::with_peer(stream, Some(peer)), resp);
     }
     let resp = if rules.admin_pipe || peer.windows_sid != Some(rules.account) {
@@ -219,9 +270,11 @@ pub async fn answer(
     } else if let EnrollRequest::Enroll { authorization, .. } = &req {
         let session = peer.windows_session_id.unwrap_or(u32::MAX);
         match table.consume(authorization, session, Instant::now()) {
-            Some(approver) => {
+            Some((approver, binding)) => {
                 tracing::info!(%approver, session, "enrolling with an administrator's approval");
-                service.handle_with(req, Arc::new(AlreadyApproved)).await
+                service
+                    .handle_with(req, Arc::new(BoundApproval { binding }))
+                    .await
             }
             None => refused("no administrator has approved this enrollment"),
         }
@@ -235,17 +288,22 @@ pub async fn answer(
 mod tests {
     use super::*;
 
+    const B: [u8; BINDING_LEN] = [7; BINDING_LEN];
+
     #[test]
     fn an_approval_is_used_once_by_its_own_session() {
         let t = ApprovalTable::default();
         let now = Instant::now();
-        t.record([1; 32], 3, "S-1-5-21-1".into(), now);
-        t.record([2; 32], 4, "S-1-5-21-2".into(), now);
+        t.record([1; 32], B, 3, "S-1-5-21-1".into(), now);
+        t.record([2; 32], B, 4, "S-1-5-21-2".into(), now);
         assert_eq!(t.consume(&[9; 32], 3, now), None);
         // Another session's attempt uses the approval up.
         assert_eq!(t.consume(&[1; 32], 4, now), None);
         assert_eq!(t.consume(&[1; 32], 3, now), None);
-        assert_eq!(t.consume(&[2; 32], 4, now).as_deref(), Some("S-1-5-21-2"));
+        assert_eq!(
+            t.consume(&[2; 32], 4, now),
+            Some(("S-1-5-21-2".to_owned(), B))
+        );
         assert_eq!(t.consume(&[2; 32], 4, now), None);
     }
 
@@ -253,12 +311,54 @@ mod tests {
     fn approvals_expire_and_the_table_is_bounded() {
         let t = ApprovalTable::default();
         let now = Instant::now();
-        t.record([1; 32], 3, "a".into(), now);
+        t.record([1; 32], B, 3, "a".into(), now);
         assert_eq!(t.consume(&[1; 32], 3, now + APPROVAL_TTL), None);
         for i in 0..(MAX_RECORDS as u8 + 3) {
-            t.record([i; 32], 3, "a".into(), now);
+            t.record([i; 32], B, 3, "a".into(), now);
         }
         assert_eq!(t.consume(&[0; 32], 3, now), None, "the oldest was dropped");
         assert!(t.consume(&[MAX_RECORDS as u8 + 2; 32], 3, now).is_some());
+    }
+
+    #[test]
+    fn the_binding_depends_on_every_part_and_has_no_ambiguity() {
+        let r = [5u8; 32];
+        let base = approval_binding("https://a.example/", "Sam", &r);
+        assert_ne!(base, approval_binding("https://b.example/", "Sam", &r));
+        assert_ne!(base, approval_binding("https://a.example/", "Sue", &r));
+        assert_ne!(
+            base,
+            approval_binding("https://a.example/", "Sam", &[6; 32])
+        );
+        // Moving a byte between url and name changes it.
+        assert_ne!(
+            approval_binding("ab", "c", &r),
+            approval_binding("a", "bc", &r)
+        );
+    }
+
+    #[test]
+    fn an_approval_is_good_only_for_the_target_that_was_shown() {
+        let r = [5u8; 32];
+        let approved = BoundApproval {
+            binding: approval_binding("https://a.example/", "Sam", &r),
+        };
+        let subject = |name, url| ApprovalSubject { name, url };
+        assert!(approved
+            .approve(&r, "", &subject("Sam", "https://a.example/"))
+            .is_ok());
+        for (n, u) in [
+            ("Sam", "https://evil.example/"),
+            ("Evil", "https://a.example/"),
+        ] {
+            assert_eq!(
+                approved.approve(&r, "", &subject(n, u)),
+                Err(ApprovalError::NotApproved)
+            );
+        }
+        assert_eq!(
+            approved.approve(&[6; 32], "", &subject("Sam", "https://a.example/")),
+            Err(ApprovalError::NotApproved)
+        );
     }
 }

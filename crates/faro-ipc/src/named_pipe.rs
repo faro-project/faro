@@ -243,6 +243,65 @@ pub struct IpcServer {
     /// empty) each time a client connects; see [`IpcServer::accept`].
     listening: tokio::sync::Mutex<NamedPipeServer>,
     verifier: Arc<dyn PeerVerifier>,
+    /// Verifications in flight (see [`PendingConnection::verify`]).
+    verifying: Arc<tokio::sync::Semaphore>,
+}
+
+/// The longest a peer's verification may take before the peer is refused.
+/// Verifying an agent's Authenticode signature can wait on the network
+/// (revocation), so it is bounded.
+pub const VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How many peers may be in verification at once; more are refused.
+pub const MAX_VERIFYING: usize = 8;
+
+/// A client that has connected, with its kernel-reported credentials, but
+/// has not passed the server's [`PeerVerifier`] yet. Nothing has been read
+/// from or written to it. [`verify`](Self::verify) it on its own task, so a
+/// slow verification (a signature check that waits on the network) does not
+/// hold up the accept loop.
+pub struct PendingConnection<Out: WireMessage, In: WireMessage> {
+    connected: NamedPipeServer,
+    peer: PeerInfo,
+    verifier: Arc<dyn PeerVerifier>,
+    verifying: Arc<tokio::sync::Semaphore>,
+    _types: std::marker::PhantomData<fn(Out, In)>,
+}
+
+impl<Out: WireMessage, In: WireMessage> PendingConnection<Out, In> {
+    /// The peer's credentials as the kernel reports them.
+    pub fn peer(&self) -> &PeerInfo {
+        &self.peer
+    }
+
+    /// Run the server's verifier on the blocking pool, bounded by
+    /// [`VERIFY_TIMEOUT`] and by [`MAX_VERIFYING`] concurrent checks. On
+    /// refusal, timeout or overload the connection is dropped (closed)
+    /// without a byte exchanged.
+    pub async fn verify(self) -> Result<Connection<NamedPipeServer, Out, In>> {
+        let PendingConnection {
+            connected,
+            peer,
+            verifier,
+            verifying,
+            ..
+        } = self;
+        let permit = verifying
+            .try_acquire_owned()
+            .map_err(|_| IpcError::peer_rejected("too many peers are being verified"))?;
+        // The permit goes with the blocking task, so a check that outlives
+        // its timeout still counts against the limit until it ends.
+        let check = tokio::task::spawn_blocking(move || {
+            let r = verifier.verify(&peer);
+            drop(permit);
+            (r, peer)
+        });
+        match tokio::time::timeout(VERIFY_TIMEOUT, check).await {
+            Ok(Ok((Ok(()), peer))) => Ok(Connection::with_peer(connected, Some(peer))),
+            Ok(Ok((Err(e), _))) => Err(e),
+            Ok(Err(_)) => Err(IpcError::peer_rejected("the peer check failed")),
+            Err(_) => Err(IpcError::peer_rejected("verifying the peer took too long")),
+        }
+    }
 }
 
 impl std::fmt::Debug for IpcServer {
@@ -291,6 +350,7 @@ impl IpcServer {
             sd,
             listening: tokio::sync::Mutex::new(first),
             verifier: Arc::new(verifier),
+            verifying: Arc::new(tokio::sync::Semaphore::new(MAX_VERIFYING)),
         })
     }
 
@@ -315,6 +375,19 @@ impl IpcServer {
     pub async fn accept_typed<Out: WireMessage, In: WireMessage>(
         &self,
     ) -> Result<Connection<NamedPipeServer, Out, In>> {
+        self.accept_pending_typed().await?.verify().await
+    }
+
+    /// Accept the next connection and read its credentials, but leave
+    /// verifying it to the caller ([`PendingConnection::verify`]), who
+    /// should do that on a task of its own. The listening instance is
+    /// replaced before this returns, so the next client can connect while
+    /// this one is still being checked. This is what a service's accept loop
+    /// should use when verification can be slow; [`accept`](Self::accept)
+    /// verifies inline, so one slow peer holds up everyone behind it.
+    pub async fn accept_pending_typed<Out: WireMessage, In: WireMessage>(
+        &self,
+    ) -> Result<PendingConnection<Out, In>> {
         let connected = {
             let mut listening = self.listening.lock().await;
             loop {
@@ -335,10 +408,23 @@ impl IpcServer {
             }
         };
         let peer = client_credentials(&connected).map_err(IpcError::PeerCredentials)?;
-        // On rejection `connected` is dropped here, closing the instance
-        // without a byte exchanged.
-        self.verifier.verify(&peer)?;
-        Ok(Connection::with_peer(connected, Some(peer)))
+        // On rejection `connected` is dropped by `verify`, closing the
+        // instance without a byte exchanged.
+        Ok(PendingConnection {
+            connected,
+            peer,
+            verifier: self.verifier.clone(),
+            verifying: self.verifying.clone(),
+            _types: std::marker::PhantomData,
+        })
+    }
+
+    /// [`accept_pending_typed`](Self::accept_pending_typed) for the agent
+    /// protocol.
+    pub async fn accept_pending(
+        &self,
+    ) -> Result<PendingConnection<crate::messages::ServiceMsg, crate::messages::AgentMsg>> {
+        self.accept_pending_typed().await
     }
 }
 

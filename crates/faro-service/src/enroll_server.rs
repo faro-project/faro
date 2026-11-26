@@ -67,14 +67,25 @@ pub enum ApprovalError {
     Failed(String),
 }
 
+/// The instance as the service discovered it, exactly as `Preview` showed
+/// it: what an approval must have been for.
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalSubject<'a> {
+    pub name: &'a str,
+    pub url: &'a str,
+}
+
 /// Asks an administrator to approve enrolling. Blocks until they answer.
 pub trait Approver: Send + Sync + 'static {
     /// `authorization` is the agent's `AuthorizationExternalForm`; `prompt`
-    /// is the service's own explanation, naming the instance it discovered.
+    /// is the service's own explanation, naming the instance it discovered;
+    /// `subject` is that instance in structured form, for approvers that
+    /// were asked earlier and must check what they were asked about.
     fn approve(
         &self,
         authorization: &[u8; AUTHORIZATION_LEN],
         prompt: &str,
+        subject: &ApprovalSubject<'_>,
     ) -> Result<(), ApprovalError>;
 }
 
@@ -89,6 +100,7 @@ impl Approver for SystemApprover {
         &self,
         authorization: &[u8; AUTHORIZATION_LEN],
         prompt: &str,
+        _subject: &ApprovalSubject<'_>,
     ) -> Result<(), ApprovalError> {
         use faro_platform_macos::authorization::{approve_enrollment, AuthError, RuleCheck};
         // Only root may (and must) fix the rule; a development service
@@ -124,6 +136,7 @@ impl Approver for SystemApprover {
         &self,
         _authorization: &[u8; AUTHORIZATION_LEN],
         _prompt: &str,
+        _subject: &ApprovalSubject<'_>,
     ) -> Result<(), ApprovalError> {
         Err(ApprovalError::Unavailable(
             "enrolling from the agent needs macOS; use `faro-service enroll`".into(),
@@ -426,8 +439,13 @@ impl EnrollService {
         // keeps a second enrollment out until it closes.
         let prompt = approval_prompt(&info.name, &info.url);
         let auth = *authorization;
+        let (subject_name, subject_url) = (info.name.clone(), info.url.to_string());
         let asked = tokio::task::spawn_blocking(move || {
-            let r = approver.approve(&auth, &prompt);
+            let subject = ApprovalSubject {
+                name: &subject_name,
+                url: &subject_url,
+            };
+            let r = approver.approve(&auth, &prompt, &subject);
             (guard, r)
         });
         let _guard = match tokio::time::timeout(self.approval_timeout, asked).await {

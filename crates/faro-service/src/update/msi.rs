@@ -421,6 +421,7 @@ mod tests {
         SignerInfo {
             subject: "Faro Project".into(),
             thumbprint_sha256: "ab".repeat(32),
+            issuer_thumbprint_sha256: None,
         }
     }
 

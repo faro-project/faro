@@ -109,7 +109,10 @@
                               ThirdFailureActionType="restart"
                               RestartServiceDelayInSeconds="10"
                               ResetPeriodInDays="1" />
-          <PermissionEx Sddl="D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;AU)" />
+          <!-- Must equal faro_platform_windows::scm::SERVICE_SDDL, the source of
+               truth (the service re-applies it at startup); a test in scm.rs
+               and check-msi.ps1 compare them. -->
+          <PermissionEx Sddl="D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;IU)(A;;CCLCSWLORC;;;SU)" />
         </ServiceInstall>
         <!-- Wait="yes": an install whose new service doesn't start fails and
              rolls back to the old one, which is started again. The updater
