@@ -8,8 +8,11 @@
 //! **What is deliberately not configurable here.** Anything that would let
 //! whoever can edit this file quietly weaken monitoring without allies being
 //! told: the detector thresholds, the idle threshold that pauses capture, and
-//! the urgency floors. The tamper-detection knobs in `[capture]` exist but
-//! can only be made stricter than their defaults. Member-facing settings (capture interval, urgency
+//! the urgency floors. (The one exception is `[dev_thresholds]`, which only a
+//! service built with the `dev` feature acts on, and which can only lower
+//! thresholds: [`crate::thresholds`]. A release build ignores it.) The
+//! tamper-detection knobs in `[capture]` exist but can only be made stricter
+//! than their defaults. Member-facing settings (capture interval, urgency
 //! mapping, report sharing) *are* read from `[member_settings]`, but every
 //! change to them is announced to allies as a `settings_change` event when
 //! the service starts ([`crate::runtime`]).
@@ -22,6 +25,7 @@
 //! ([`crate::state::settings_in_effect`]). Removing the section therefore
 //! keeps the current settings; to go back to the defaults, write them out.
 
+use crate::thresholds::{DevThresholds, BUILD_ALLOWS_DEV_THRESHOLDS};
 use faro_core::MemberSettings;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -77,6 +81,10 @@ pub struct Config {
     /// that has announced none ([`crate::state::settings_in_effect`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_settings: Option<MemberSettings>,
+    /// Development builds only: lower detection thresholds, for testing
+    /// the flag path ([`crate::thresholds`]). A release build ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev_thresholds: Option<DevThresholds>,
 }
 
 impl Default for Config {
@@ -91,6 +99,7 @@ impl Default for Config {
             report: ReportConfig::default(),
             updates: UpdatesConfig::default(),
             member_settings: None,
+            dev_thresholds: None,
         }
     }
 }
@@ -385,6 +394,10 @@ impl Config {
                 "report.utc_offset_minutes",
                 "must be within ±14 hours",
             ));
+        }
+        // A release build ignores the section, so its values can't stop it.
+        if let (Some(t), true) = (&self.dev_thresholds, BUILD_ALLOWS_DEV_THRESHOLDS) {
+            t.validate().map_err(|e| invalid("dev_thresholds", e))?;
         }
         Ok(())
     }

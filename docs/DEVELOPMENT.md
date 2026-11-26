@@ -320,6 +320,35 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 - **Updates:** `FARO_UPDATE_ROOT` (a signed root document, for example from `cargo run -p faro-update --example faro-release -- sign-root …`) is installed as `/Library/Faro/update-root.json`. A release package requires it; a `--dev` one may have it. With it, the service checks its instance's mirror about every 6 hours (`[updates] check_secs`) and installs newer client packages through the one-shot launchd job `org.faro.update` (`faro_platform_macos::update_job`). It runs as its own job because the package's preinstall stops the service, which would kill an `installer` running as its child. Only the packaged service, run as root from `/Library/Faro/bin/faro-service`, installs anything. A development build checks and logs, nothing more. Before installing, the service checks the package's own signature (PROTOCOL.md §8.2, step 5): Faro's Developer ID Installer certificate and notarization, with the Team ID compiled in from `FARO_TEAM_ID` (`build-pkg.sh` passes it to `cargo`). A `--dev` package's service has the `dev` feature and no Team ID, so it skips that check and dev packages can update each other. A service built without either refuses every package. Then it reads the full semver version inside the package (`PackageInfo` and the Distribution, step 6), and refuses the package unless it is the version the metadata names and above the running one. Development builds do this too, so keep `pkgbuild --version` and the Distribution's `@VERSION@` the full version. To run both checks by hand: `FARO_TEAM_ID=<team> cargo run -p faro-service --example check_package -- <pkg>` (it prints the version). The job's output goes to `update-install.log` in the state directory, and `update-attempts.json` there records the pending install and failed packages. Models and blocklists come through the same check ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)); their notices go to `/Library/Faro/notices/update-model.txt` and `update-blocklist.txt`.
 - **Not there yet:** the tray app.
 
+## Testing the whole flag path
+
+To see a flag go all the way through (the service flags a frame, the encrypted event reaches the instance, the ally's feed shows it with a blurred thumbnail, the email arrives), the model has to rate a screen at least `medium`. OpenNSFW rates an ordinary swimwear photo about 0.06–0.15, and the default `explicit_medium` is 0.60. So a development build can lower the thresholds in `service.toml`:
+
+```toml
+[dev_thresholds]
+explicit_high = 0.5     # default 0.85
+explicit_medium = 0.05  # default 0.60
+any_low = 0.03          # default 0.40
+```
+
+- **Development builds only.** Only a `faro-service` built with the `dev` feature (a `--dev` package, or `cargo run -p faro-service --features dev`) acts on it. At start it logs a `DEVELOPMENT THRESHOLDS` warning with the values, and `faro-service status` prints `Thresholds: LOWERED FOR TESTING (…)`. Flags themselves aren't marked: the event format has no field for it, so check `status` before trusting a flag on a test machine.
+- **A release build ignores it.** It still parses the section, so a leftover one doesn't stop the service, but it lowers nothing, logs that it ignores it and says so in `status`. The decision is fixed at compile time (`thresholds::BUILD_ALLOWS_DEV_THRESHOLDS`), and the code that applies the values checks the `dev` feature again. `a_release_build_never_lowers_the_thresholds` tests this in every workspace run, `a_dev_build_lowers_the_thresholds` in CI's macOS job with `--features dev`, and `check-pkg.sh` runs the packaged service's `status` with the section: a release package must ignore it, a `--dev` one must apply it.
+- **Lower only.** Each value must be above 0 and at most its default, and the result must keep `any_low <= explicit_medium <= explicit_high`, or a dev service refuses the file. Unset values keep their defaults. Other thresholds (`suggestive_medium`, the domain rules) aren't settable; OpenNSFW has no suggestive label.
+- **Expect noise.** At these values ordinary screens flag too: Yahoo's model gives solid grey 0.20 and solid black 0.07. Leave the section in only for the test, then remove it and restart the service.
+
+**A recipe,** on a test Mac (never one you monitor anyone on):
+
+1. Run a test instance, for example `cargo run -p faro-server -- serve --dev` on the same Mac (the service accepts `http://` for localhost only). Without SMTP settings, `--dev` prints every email in its terminal.
+2. Install a `--dev` package (CI's `faro-dev-pkg-universal-<sha>` artifact, or `installers/macos/build-pkg.sh --dev`).
+3. In the web app: set up a member key, invite a test ally (a second email address; with `--dev` the invitation is printed), accept it in another browser profile and approve the ally on **Allies**. Then enroll the Mac (**Computers**, **Open in Faro**) and approve it.
+4. Add the section above to `/Library/Application Support/Faro/service.toml` (root-owned, not group- or world-writable), restart the service with `sudo launchctl kickstart -k system/org.faro.service`, and check `sudo /Library/Faro/bin/faro-service status` shows `LOWERED FOR TESTING`.
+5. Open an ordinary swimwear photo full screen (Preview, View → Enter Full Screen) and leave it up for a few capture intervals.
+6. Check:
+   - the service log (`/Library/Logs/Faro/faro-service.log`) has the `DEVELOPMENT THRESHOLDS` warning and then a `medium` flag, with no classification errors;
+   - the member's **Activity** and the ally's **Supporting** feed show the flag, with an `image:explicit` reason and a blurred thumbnail that shows no detail;
+   - the ally's alert email arrived (`medium` is `urgent` by default), with no image in it;
+   - after removing the section and restarting, the same photo is no longer flagged.
+
 ## Third-party notices
 
 Most licences of the software Faro is built from (MIT, Apache-2.0, BSD, ISC, Zlib…) ask for their copyright and licence text to travel with copies. The notices are generated from the lockfiles when a component is built, never checked in, one file per component:
