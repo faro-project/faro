@@ -43,6 +43,18 @@ keys=(--targets-key "$t/keys/targets.key.json" --timestamp-key "$t/keys/timestam
 mkdir -p "$t/dist"
 printf 'pkg one' > "$t/dist/Faro-0.1.0-beta.1.pkg"
 printf 'server one' > "$t/dist/faro-server-0.1.0-beta.1-linux-aarch64"
+b3hex() { "$FARO_RELEASE" describe-target --file "$1" | jq -r .blake3 | sed 's/^b3://'; }
+# A model and a domain list: only the fields the scripts read.
+mkdir -p "$t/dist/model" "$t/dist/blocklist"
+printf 'weights one' > "$t/dist/model/test.onnx"
+jq -n --arg b "$(b3hex "$t/dist/model/test.onnx")" \
+    '{name: "test", version: "1.0.0+int8", file: "test.onnx", blake3: $b}' > "$t/dist/model/manifest.json"
+printf 'list one' > "$t/dist/blocklist/domains.bin"
+jq -n --arg b "$(b3hex "$t/dist/blocklist/domains.bin")" \
+    '{version: "1.0.0", bundle: {file: "domains.bin", blake3: $b}, unapproved_included: false}' \
+    > "$t/dist/blocklist/domains.manifest.json"
+data=(--data "model=$t/dist/model/manifest.json"
+      --data "blocklist:0.1.0=$t/dist/blocklist/domains.manifest.json")
 
 step "first release: nothing published yet"
 "$here/publish-layout.sh" pull "$t/pub1"
@@ -50,11 +62,25 @@ step "first release: nothing published yet"
 "$here/build-layout.sh" --version 0.1.0-beta.1 \
     --artifact "client:macos:any:13=$t/dist/Faro-0.1.0-beta.1.pkg" \
     --artifact "server:linux:aarch64=$t/dist/faro-server-0.1.0-beta.1-linux-aarch64" \
+    "${data[@]}" \
     --roots "$t/keys" --published "$t/pub1" "${keys[@]}" --out "$t/layout1"
 [[ ! -e "$t/layout1/roots" ]] || die "root 1 must not be published"
 "$here/publish-layout.sh" push "$t/layout1" "Faro 0.1.0-beta.1"
 listed client/macos/Faro-0.1.0-beta.1.pkg
 listed server/linux/faro-server-0.1.0-beta.1-linux-aarch64
+listed model/any/test-1.0.0_int8-beta.data
+listed blocklist/any/domains-1.0.0-beta.data
+targets_payload |
+    jq -e '.targets["model/any/test-1.0.0_int8-beta.data"].custom
+            | .kind == "model" and .platform == "any" and .arch == "any"
+              and .version == "1.0.0+int8" and .channels == ["beta"] and (has("min_client") | not)' \
+        > /dev/null || die "wrong model entry"
+targets_payload |
+    jq -e '.targets["blocklist/any/domains-1.0.0-beta.data"].custom
+            | .kind == "blocklist" and .version == "1.0.0" and .min_client == "0.1.0"' \
+        > /dev/null || die "wrong blocklist entry"
+[[ "$(published targets/model/any/test-1.0.0_int8-beta.data | head -c 8)" == FARODATA ]] ||
+    die "the model is not a data bundle"
 [[ "$(published targets/client/macos/Faro-0.1.0-beta.1.pkg)" == "pkg one" ]] || die "artifact not published"
 [[ "$(published CNAME)" == updates.faro-project.org ]] || die "no CNAME"
 
@@ -102,11 +128,16 @@ tick
 printf 'pkg two' > "$t/dist/Faro-0.1.0.pkg"
 "$here/publish-layout.sh" pull "$t/pub4"
 "$here/build-layout.sh" --version 0.1.0 \
-    --artifact "client:macos:any:13=$t/dist/Faro-0.1.0.pkg" \
+    --artifact "client:macos:any:13=$t/dist/Faro-0.1.0.pkg" "${data[@]}" \
     --roots "$t/keys" --published "$t/pub4" "${keys[@]}" --out "$t/layout4"
 "$here/publish-layout.sh" push "$t/layout4" "Faro 0.1.0"
 listed client/macos/Faro-0.1.0-beta.1.pkg
 listed client/macos/Faro-0.1.0.pkg
+# The same model, now for stable too: a second entry, the same bytes.
+listed model/any/test-1.0.0_int8-beta.data
+listed model/any/test-1.0.0_int8-stable.data
+cmp -s <(published targets/model/any/test-1.0.0_int8-beta.data) \
+    <(published targets/model/any/test-1.0.0_int8-stable.data) || die "the bundle is not reproducible"
 cmp -s <(published roots/2.json) "$t/keys/roots/2.json" || die "root 2 not published"
 targets_payload |
     jq -e '.targets["client/macos/Faro-0.1.0.pkg"].custom.channels == ["stable", "beta"]
@@ -179,6 +210,25 @@ cp "$t/layout4/timestamp.json" "$t/evil/"
 printf 'other bytes' > "$t/evil/targets/client/macos/Faro-0.1.0.pkg"
 fails "$here/publish-layout.sh" push "$t/evil" "replace an artifact"
 grep -q "never replaced" "$t/out.txt" || { cat "$t/out.txt"; die "wrong error"; }
+
+step "models and blocklists are checked before anything is signed"
+printf 'weights changed' > "$t/dist/model/test.onnx"
+fails "$here/build-layout.sh" --version 0.1.2 --data "model=$t/dist/model/manifest.json" \
+    --roots "$t/keys" --published "$t/pub5" "${keys[@]}" --out "$t/layout-m1"
+grep -q "pins" "$t/out.txt" || { cat "$t/out.txt"; die "wrong error"; }
+# The manifest updated, but the version kept: refused, the name is taken.
+jq --arg b "$(b3hex "$t/dist/model/test.onnx")" '.blake3 = $b' "$t/dist/model/manifest.json" \
+    > "$t/m.json" && mv "$t/m.json" "$t/dist/model/manifest.json"
+fails "$here/build-layout.sh" --version 0.1.0 --data "model=$t/dist/model/manifest.json" \
+    --roots "$t/keys" --published "$t/pub5" "${keys[@]}" --out "$t/layout-m2"
+grep -q "never reused" "$t/out.txt" || { cat "$t/out.txt"; die "wrong error"; }
+jq '.unapproved_included = true' "$t/dist/blocklist/domains.manifest.json" > "$t/unapproved.json"
+cp "$t/dist/blocklist/domains.bin" "$t/domains.bin"
+fails "$here/build-layout.sh" --version 0.1.2 --data "blocklist=$t/unapproved.json" \
+    --roots "$t/keys" --published "$t/pub5" "${keys[@]}" --out "$t/layout-m3"
+grep -q "unapproved" "$t/out.txt" || { cat "$t/out.txt"; die "wrong error"; }
+fails "$here/build-layout.sh" --version 0.1.2 --data "font=$t/dist/model/manifest.json" \
+    --roots "$t/keys" --published "$t/pub5" "${keys[@]}" --out "$t/layout-m4"
 
 step "metadata from other keys is refused"
 "$here/throwaway-keys.sh" "$t/other"

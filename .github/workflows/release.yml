@@ -8,10 +8,13 @@
 #   prepare        the version, channels and checks: the tag matches the
 #                  workspace version and is on main
 #   macos-pkg      the universal .pkg: signed and notarized for a release,
-#                  an unsigned development package for a dry run
+#                  an unsigned development package for a dry run; and the
+#                  image model it ships, for the update channel
+#   blocklist      the domain list (domains-compile) for the update channel
 #   server         the container image and the faro-server binary, natively
 #                  on each architecture (images are pushed by digest only)
-#   layout         targets.json with every artifact, signed with the targets
+#   layout         targets.json with every artifact (the model and the
+#                  domain list as data bundles, PROTOCOL.md §8.1), signed with the targets
 #                  key, and a timestamp signed with the timestamp key, then
 #                  `faro-release verify` of the whole set. A dry run signs
 #                  with throwaway keys made in the job
@@ -217,8 +220,50 @@ jobs:
           path: dist/Faro-*.pkg
           if-no-files-found: error
           retention-days: 7
+      # The model the package ships, for the update channel: the same pinned
+      # bytes (build.sh refuses others), from its cache. `layout` lists it
+      # under its own version, so a release that doesn't change it lists
+      # nothing new.
+      - name: The image model for the update channel
+        run: |
+          rm -rf data "$RUNNER_TEMP/models" && mkdir -p data/model
+          crates/faro-detect/models/opennsfw/build.sh "$RUNNER_TEMP/models"
+          cp "$RUNNER_TEMP/models/manifest.json" "$RUNNER_TEMP/models/opennsfw-int8.onnx" data/model/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-model
+          path: data
+          if-no-files-found: error
+          retention-days: 7
       - if: always()
-        run: rm -rf dist target/pkg
+        run: rm -rf dist data target/pkg "$RUNNER_TEMP/models"
+
+  # The domain list for the update channel, from the approved, pinned
+  # sources in crates/faro-detect/domains/sources.toml. The same sources
+  # always give the same bytes; `bundle_version` there names them.
+  blocklist:
+    needs: prepare
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the domain list
+        run: |
+          rm -rf data target/domains
+          c=crates/faro-detect/domains/sources.toml
+          cargo run --locked -p faro-detect --example domains-compile -- fetch --config "$c"
+          cargo run --locked -p faro-detect --example domains-compile -- build --config "$c" \
+            --out data/blocklist/domains.bin
+          ls -l data/blocklist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-blocklist
+          path: data
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        run: rm -rf data target/domains
 
   server:
     name: server (${{ matrix.arch }})
@@ -319,13 +364,14 @@ jobs:
           if [[ "$DRY_RUN" == true ]]; then docker image rm -f "$IMG" || true; fi
 
   layout:
-    needs: [prepare, macos-pkg, server]
+    needs: [prepare, macos-pkg, blocklist, server]
     # always(): run when only a dry run's amd64 build failed (that job is
     # continue-on-error, so `server` still succeeds); never otherwise.
     if: >-
       always()
       && needs.prepare.result == 'success'
       && needs.macos-pkg.result == 'success'
+      && needs.blocklist.result == 'success'
       && needs.server.result == 'success'
     runs-on: ${{ fromJSON(needs.prepare.outputs.signing_runner) }}
     environment: ${{ needs.prepare.outputs.environment }}
@@ -350,11 +396,19 @@ jobs:
           pattern: release-*
           path: ${{ runner.temp }}/dist
           merge-multiple: true
+      # Not release-*: they go into the update channel, not the GitHub
+      # Release's downloads.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: data-*
+          path: ${{ runner.temp }}/data
+          merge-multiple: true
       - name: Artifacts
         id: artifacts
         run: |
           dist="$RUNNER_TEMP/dist"
-          ls -l "$dist"
+          data="$RUNNER_TEMP/data"
+          ls -l "$dist" "$data"/*
           min_os="$(sed -n 's/.*<os-version min="\([0-9.]*\)".*/\1/p' installers/macos/Distribution.xml.in)"
           args=()
           pkg="$(ls "$dist"/Faro-*.pkg)"
@@ -370,6 +424,11 @@ jobs:
               exit 1
             fi
           done
+          # Models and blocklists, under their own versions. To hold one
+          # back from older clients, give it a minimum client version:
+          # --data model:<version>=... (release/build-layout.sh).
+          args+=(--data "model=$data/model/manifest.json")
+          args+=(--data "blocklist=$data/blocklist/domains.manifest.json")
           printf '%s\n' "${args[@]}" > "$RUNNER_TEMP/artifact-args"
       - name: Keys
         env:
@@ -433,7 +492,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - if: always()
-        run: rm -rf "$RUNNER_TEMP/dist" "$RUNNER_TEMP/layout" "$RUNNER_TEMP/published"
+        run: rm -rf "$RUNNER_TEMP/dist" "$RUNNER_TEMP/data" "$RUNNER_TEMP/layout" "$RUNNER_TEMP/published"
 
   publish-layout:
     needs: [prepare, layout]
