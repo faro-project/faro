@@ -144,6 +144,16 @@
         <File Id="service.toml.default" Source="$(var.Payload)\service.toml.default" KeyPath="yes" />
       </Component>
 
+<?if $(var.HasModel) = 1 ?>
+      <!-- ONNX Runtime, which faro-service (built with `onnx`) loads from
+           its own directory. Microsoft's signed DLL, as fetched and checked
+           by fetch-onnxruntime.ps1; it sits in Program Files, which only
+           administrators can write, so it can't be swapped by a user. -->
+      <Component Id="OnnxRuntime">
+        <File Id="onnxruntime.dll" Source="$(var.Payload)\onnxruntime.dll" KeyPath="yes" />
+      </Component>
+<?endif?>
+
 <?if $(var.HasUpdateRoot) = 1 ?>
       <Component Id="UpdateRoot">
         <File Id="update_root.json" Source="$(var.Payload)\update-root.json" KeyPath="yes" />

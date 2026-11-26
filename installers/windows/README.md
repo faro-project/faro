@@ -42,7 +42,7 @@ The paths are `faro_platform_windows::layout`'s.
 
 ## ONNX Runtime
 
-`faro-service` is built with the image classifier (`--features onnx`) against Microsoft's `onnxruntime.dll`, which the MSI installs next to it (`fetch-onnxruntime.ps1`). The macOS package links pyke's static library instead; on Windows that library needs MSVC 14.40 or newer, so the DLL is the portable choice. The model is the macOS build's (`crates/faro-detect/models/opennsfw/build.sh` uses macOS-only Python wheels): pass its output with `-ModelDir`. `-NoOnnx` builds a service that rates frames from context signals only, with no model and no ONNX Runtime; CI's per-PR MSI is built that way.
+`faro-service` is built with the image classifier (`--features onnx`) against Microsoft's `onnxruntime.dll`, which the MSI installs next to it (`fetch-onnxruntime.ps1`). The macOS package links pyke's static library instead; on Windows that library needs MSVC 14.40 or newer, so the DLL is the portable choice. The model is the macOS build's (`crates/faro-detect/models/opennsfw/build.sh` uses macOS-only Python wheels): pass its output with `-ModelDir`. Release MSIs always include the model. `-NoOnnx` builds a service that rates frames from context signals only, with no model and no ONNX Runtime; it is for development, and CI's per-PR MSI is built that way because CI has no model build. CI still lints and tests the classifier on Windows (`test-onnx.ps1`), and the release job's `check-msi.ps1` checks the packaged model's scores and `onnxruntime.dll`. Windows ships its own older `onnxruntime.dll` in `System32`; Faro's copy next to `faro-service.exe` is the one loaded, because the application's directory is searched first.
 
 ## Subcommands this package relies on
 

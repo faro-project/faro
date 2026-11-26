@@ -93,6 +93,14 @@ jobs:
           cargo test -p faro-detect --features onnx
           cargo clippy -p faro-service --features onnx --all-targets -- -D warnings
           cargo test -p faro-service --features onnx --lib model
+      # The same on Windows, which ships the model too. ONNX Runtime comes
+      # from Microsoft's NuGet package (checked like the MSI's copy), and
+      # the script puts onnxruntime.dll next to each test binary, because
+      # Windows' own older copy in System32 would otherwise load first.
+      - name: faro-detect and faro-service with ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installers\windows\test-onnx.ps1
 
   # The SvelteKit web app (web/): format, types and the static build (which
   # fails if a bundled npm package's licence is missing or not on
