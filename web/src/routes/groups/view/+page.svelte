@@ -9,6 +9,10 @@
 	// Alliance proposals, meetings and the roster's person actions are
 	// #122 (WaitingForYou, MeetingCard, RosterPersonActions); "What this group
 	// can see about me" is #124 (SharingSettings).
+	//
+	// GroupKeys (#125) is the group's signed member list and epoch keys: it
+	// warns when the list doesn't check out, and facilitators' browsers sign
+	// pending changes from it.
 
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -22,6 +26,7 @@
 	import type { GroupAlly, GroupView } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
 	import GroupHistory from '#lib/ui/groups/GroupHistory.svelte';
+	import GroupKeys from '#lib/ui/groups/GroupKeys.svelte';
 	import InvitePeople from '#lib/ui/groups/InvitePeople.svelte';
 	import ManageGroup from '#lib/ui/groups/ManageGroup.svelte';
 	import MeetingCard from '#lib/ui/groups/MeetingCard.svelte';
@@ -311,6 +316,8 @@
 					</p>
 					<GroupHistory groupId={group.id} version={historyVersion} />
 				</section>
+
+				<GroupKeys {group} {user} />
 
 				<SharingSettings
 					groupId={group.id}

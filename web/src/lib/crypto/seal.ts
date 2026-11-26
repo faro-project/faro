@@ -1,8 +1,8 @@
 // Opening what devices encrypt (docs/PROTOCOL.md §4.1), a port of
 // `faro_crypto::seal::open_item`.
 //
-// The web app only ever opens: devices seal, members and allies read. A
-// sealed box is libsodium's `crypto_box_seal`:
+// The web app opens what devices seal; the only thing it seals itself is a
+// group's epoch key (`sealTo`). A sealed box is libsodium's `crypto_box_seal`:
 //
 //   epk ‖ crypto_box(m, nonce = BLAKE2b-192(epk ‖ pk), pk, esk)
 //
@@ -12,7 +12,7 @@ import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hsalsa, xsalsa20poly1305 } from '@noble/ciphers/salsa.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake2b } from '@noble/hashes/blake2.js';
-import { concat, unb64, unb64Fixed, wipe, type Bytes } from './bytes.ts';
+import { concat, randomBytes, unb64, unb64Fixed, wipe, type Bytes } from './bytes.ts';
 import { encPublicKey, isWeakX25519, keyId } from './keys.ts';
 
 /** `faro_proto::EncryptedItem` as JSON. */
@@ -72,6 +72,23 @@ export function sealOpen(sealed: Uint8Array, secret: Uint8Array): Bytes {
 		throw new DecryptError('decrypt');
 	} finally {
 		wipe(key);
+	}
+}
+
+/**
+ * libsodium `crypto_box_seal`: what the web app seals is an epoch key to
+ * each participant of a group (PROTOCOL.md §10.3). Refuses small-order keys.
+ */
+export function sealTo(pub: Uint8Array, msg: Uint8Array): Bytes {
+	if (pub.length !== 32 || isWeakX25519(pub)) throw new Error('unusable encryption key');
+	const esk = randomBytes(32);
+	const epk = encPublicKey(esk);
+	const nonce = blake2b(concat(epk, pub), { dkLen: 24 });
+	const key = boxKey(esk, pub);
+	try {
+		return concat(epk, xsalsa20poly1305(key, nonce).encrypt(msg));
+	} finally {
+		wipe(key, esk);
 	}
 }
 
