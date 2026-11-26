@@ -8,6 +8,7 @@
 |---|---|
 | `faro-wordmark.svg` | Full logo. Headers, the README, the web app's sign-in page, installers |
 | `faro-icon.svg` | The lighthouse mark alone. App and tray icons, favicons, small spaces |
+| `faro-icon.icns` | The macOS app icon (16–1024 px). `installers/macos/build-pkg.sh` puts it in `Faro Agent.app` |
 
 Both are vector files exported from the original artwork, with the path data unchanged. The web app imports them from here (`$brand/…` in `web/`) rather than keeping copies, so there is one set of logo files. The lighthouse is cut out of the circle rather than drawn in white, so it takes the colour of whatever is behind it. That works on both light and dark backgrounds.
 
