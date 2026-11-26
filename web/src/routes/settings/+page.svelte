@@ -17,6 +17,7 @@
 	import DisplayName from '#lib/ui/DisplayName.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
+	import ProposalBlocks from '#lib/ui/groups/ProposalBlocks.svelte';
 
 	let memberKeys = $state<MemberKeysBlob | null | undefined>(undefined);
 	let allyKey = $state<AllyKeyBlob | null | undefined>(undefined);
@@ -216,6 +217,15 @@
 				<NotificationPrefs memberId={user.id} about="yourself" />
 			</section>
 		{/if}
+
+		<section class="card">
+			<h2>Group proposals</h2>
+			<p class="muted">
+				People in your groups can ask you to be allies. If someone's proposals aren't welcome, you
+				can stop them from sending any, in any group. They aren't told.
+			</p>
+			<ProposalBlocks />
+		</section>
 
 		<DeleteAccount {user} />
 	{/snippet}

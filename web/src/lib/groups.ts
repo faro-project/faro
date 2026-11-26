@@ -1,7 +1,7 @@
 // Groups: wording and logic shared by the pages (docs/GROUPS.md), kept free
 // of the DOM and Svelte so `npm test` can cover it.
 
-import type { GroupPerson, HistoryEntry, HistoryKind, RosterEntry } from './types.ts';
+import type { GroupPerson, HistoryEntry, HistoryKind, RosterRelationship } from './types.ts';
 
 /** Limits the server enforces (server/src/api/groups.rs). */
 export const GROUP_LIMITS = { name: 100, description: 1000, invitesPerRequest: 50 } as const;
@@ -28,7 +28,7 @@ export function leaveConfirmation(allies: string[]): string {
 
 // ---- Relationships ---------------------------------------------------------
 
-export type Relationship = 'partners' | 'your_ally' | 'their_ally' | 'waiting';
+export type Relationship = RosterRelationship;
 
 export const RELATIONSHIP_LABEL: Record<Relationship, string> = {
 	partners: 'Partners',
@@ -37,7 +37,11 @@ export const RELATIONSHIP_LABEL: Record<Relationship, string> = {
 	waiting: 'Waiting for safety codes'
 };
 
-/** What `GET /v1/me/allies` and `GET /v1/ally/members` say, reduced to user ids. */
+/**
+ * What `GET /v1/me/allies` and `GET /v1/ally/members` say, reduced to user
+ * ids. The roster gets each person's relationship from the server; this is
+ * for what only your own alliances can say (who can still be proposed to).
+ */
 export interface Links {
 	/** People who are your ally (you are their member). */
 	myAllies: { id: string; state: string }[];
@@ -55,28 +59,6 @@ export function relationshipOf(userId: string, links: Links): Relationship | nul
 	if (theirsActive) return 'their_ally';
 	if (mine || theirs) return 'waiting';
 	return null;
-}
-
-const RELATIONSHIP_ORDER: Record<Relationship, number> = {
-	partners: 0,
-	your_ally: 1,
-	their_ally: 2,
-	waiting: 3
-};
-
-/**
- * People you have a relationship with first, otherwise in the order the
- * server sent (oldest participant first). Stable.
- */
-export function roster(entries: RosterEntry[], links: Links): RosterEntry[] {
-	const rank = (e: RosterEntry) => {
-		const r = relationshipOf(e.user_id, links);
-		return r === null ? 99 : RELATIONSHIP_ORDER[r];
-	};
-	return entries
-		.map((e, i) => ({ e, i, r: rank(e) }))
-		.sort((a, b) => a.r - b.r || a.i - b.i)
-		.map((x) => x.e);
 }
 
 // ---- History ---------------------------------------------------------------
@@ -226,7 +208,15 @@ const MESSAGES: Record<string, string> = {
 	too_many_invitees: 'Invite at most 50 people at a time.',
 	invalid_email: 'One of those addresses could not be read.',
 	already_participant: 'You are already in this group.',
-	not_a_facilitator: 'Only a facilitator can do that.'
+	not_a_facilitator: 'Only a facilitator can do that.',
+	already_requested: "You've already asked to join this group.",
+	request_cooldown: 'You asked this group not long ago. You can ask again in a few weeks.',
+	too_many_join_requests:
+		'You have 5 requests waiting. Wait for answers, or take one back, before asking another group.',
+	cannot_accept: "This person can't join right now. You can try again later, or say no.",
+	listing_needs_admin: 'On this instance only an admin can list a group.',
+	listing_disabled: 'Listing groups is switched off on this instance.',
+	invalid_meeting: "That meeting time doesn't look right. Check the day, time and place."
 };
 
 /** A sentence for a groups API error code, or null when there is no special wording. */

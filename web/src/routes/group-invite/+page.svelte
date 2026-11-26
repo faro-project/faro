@@ -19,11 +19,13 @@
 	import {
 		clearPendingGroupInvite,
 		isInviteToken,
+		joinNames,
 		pendingGroupInvite,
 		savePendingGroupInvite,
 		tokenFromHash
 	} from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
+	import { describeSchedule } from '#lib/meetings.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { GroupInviteInfo, GroupView } from '#lib/types.ts';
 	import SharingSettings from '#lib/ui/groups/SharingSettings.svelte';
@@ -176,6 +178,18 @@
 			</p>
 			{#if info.group_description}
 				<blockquote class="description">{info.group_description}</blockquote>
+			{/if}
+			{#if info.facilitators.length}
+				<p>
+					<strong>Facilitated by</strong>
+					{joinNames(info.facilitators)}
+				</p>
+			{/if}
+			{#if info.meeting}
+				<p>
+					<strong>Meets</strong>
+					{describeSchedule(info.meeting)}{#if info.meeting.place}, {info.meeting.place}{/if}
+				</p>
 			{/if}
 
 			<div class="notice info">

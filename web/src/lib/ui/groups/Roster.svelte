@@ -1,29 +1,28 @@
 <script lang="ts">
 	// A group's roster: search, paging, the Facilitator badge, and your
-	// relationship to each person (GROUPS.md §8.1). People you have a
-	// relationship with come first among the people loaded so far; the server
-	// sends the rest oldest first. Never an email address.
+	// relationship to each person (GROUPS.md §8.1). The server says how each
+	// person is linked to you and sends people you have a relationship with
+	// first, on every page; the rest come oldest first. Never an email
+	// address.
 	//
 	// `actions` renders at the end of a row (the Manage tab's facilitator
-	// buttons); the group page puts RosterPersonActions (#122) there.
+	// buttons, or the group page's RosterPersonActions).
 	import type { Snippet } from 'svelte';
 	import { api, seg } from '#lib/api.ts';
 	import { date } from '#lib/format.ts';
-	import { RELATIONSHIP_LABEL, relationshipOf, roster, type Links } from '#lib/groups.ts';
+	import { RELATIONSHIP_LABEL } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import type { Page, RosterEntry } from '#lib/types.ts';
 
 	let {
 		groupId,
 		myId,
-		links,
 		actions,
 		version = 0,
 		onloaded
 	}: {
 		groupId: string;
 		myId: string;
-		links: Links;
 		actions?: Snippet<[RosterEntry]>;
 		/** Change to reload the first page (after a role change or removal). */
 		version?: number;
@@ -75,8 +74,6 @@
 		const t = setTimeout(() => void load(false), first ? 0 : 250);
 		return () => clearTimeout(t);
 	});
-
-	let shown = $derived(roster(entries, links));
 </script>
 
 <div class="field">
@@ -95,10 +92,10 @@
 	<button class="secondary small" type="button" onclick={() => load(false)}>Try again</button>
 {/if}
 
-{#if shown.length}
+{#if entries.length}
 	<ul class="rows">
-		{#each shown as p (p.user_id)}
-			{@const rel = relationshipOf(p.user_id, links)}
+		{#each entries as p (p.user_id)}
+			{@const rel = p.relationship}
 			<li>
 				<div class="row-main">
 					<div>
