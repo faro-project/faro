@@ -9,6 +9,7 @@ pub mod devices;
 pub mod events;
 pub mod feed;
 pub mod group_listing;
+pub mod group_roster;
 pub mod groups;
 pub mod heartbeat;
 pub mod invites;
@@ -66,6 +67,28 @@ impl<T: DeserializeOwned> FromRequest<AppState> for ApiJson<T> {
             .await
             .map_err(|_| AppError::PayloadTooLarge)?;
         parse_json(&bytes).map(ApiJson)
+    }
+}
+
+/// Body limit for group roster uploads: an entry with an epoch key sealed to
+/// each participant, or a snapshot (clients refuse snapshots above 8 MiB).
+pub const ROSTER_JSON_MAX_BYTES: usize = faro_proto::roster::MAX_ROSTER_SNAPSHOT_BYTES;
+
+/// [`ApiJson`] with the larger [`ROSTER_JSON_MAX_BYTES`] limit.
+#[derive(Debug)]
+pub struct RosterJson<T>(pub T);
+
+impl<T: DeserializeOwned> FromRequest<AppState> for RosterJson<T> {
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, _state: &AppState) -> Result<Self, AppError> {
+        if !is_json(&req) {
+            return Err(expected_json());
+        }
+        let bytes = axum::body::to_bytes(req.into_body(), ROSTER_JSON_MAX_BYTES)
+            .await
+            .map_err(|_| AppError::PayloadTooLarge)?;
+        parse_json(&bytes).map(RosterJson)
     }
 }
 

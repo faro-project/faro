@@ -28,8 +28,9 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, branding, devices, events, feed, group_listing, groups,
-    heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, group_listing, group_roster,
+    groups, heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup,
+    well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -120,7 +121,10 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             "/v1/invites/{token}/accept",
             post(invites::accept.layer(limited.clone())),
         )
-        .route("/v1/me/ally-key", get(invites::get_my_ally_key))
+        .route(
+            "/v1/me/ally-key",
+            get(invites::get_my_ally_key).put(group_roster::put_my_enc_key),
+        )
         .route(
             "/v1/me/ally-key/challenge",
             post(invites::ally_key_challenge),
@@ -215,6 +219,27 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route(
             "/v1/group-invites/{token}/decline",
             post(groups::decline_invite.layer(limited)),
+        )
+        // Group roster log and epoch keys (GROUPS.md §10.3, Phase C).
+        .route(
+            "/v1/groups/{id}/roster",
+            get(group_roster::get_roster).post(group_roster::post_entry),
+        )
+        .route(
+            "/v1/groups/{id}/roster/snapshot",
+            get(group_roster::get_snapshot).post(group_roster::post_snapshot),
+        )
+        .route(
+            "/v1/groups/{id}/roster/pending",
+            get(group_roster::get_pending),
+        )
+        .route(
+            "/v1/groups/{id}/epoch-key",
+            get(group_roster::get_epoch_key),
+        )
+        .route(
+            "/v1/me/group-sign-key",
+            get(group_roster::get_my_sign_key).put(group_roster::put_my_sign_key),
         )
         // Preferences.
         .route(

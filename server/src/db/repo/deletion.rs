@@ -66,6 +66,8 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("alliance_proposals", "to_id", Clears::Rows),
     ("proposal_blocks", "user_id", Clears::Rows),
     ("proposal_blocks", "blocked_id", Clears::Rows),
+    ("participant_sign_keys", "user_id", Clears::Rows),
+    ("group_epoch_keys", "user_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -144,6 +146,11 @@ pub const PURGE_BY_ID: &[&str] = &[
     // Links started from a proposal are ally links, removed above.
     "DELETE FROM alliance_proposals WHERE from_id = $1 OR to_id = $1",
     "DELETE FROM proposal_blocks WHERE user_id = $1 OR blocked_id = $1",
+    // Phase C: their sealed copies of group epoch keys and their group
+    // signing key. Signed roster entries keep their opaque id and public
+    // keys until a facilitator signs their removal.
+    "DELETE FROM group_epoch_keys WHERE user_id = $1",
+    "DELETE FROM participant_sign_keys WHERE user_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

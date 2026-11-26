@@ -7,6 +7,7 @@ use faro_proto::keys::{
     AllyEndorsement, DeviceEndorsement, KeyRewrap, MemberEncKeyBinding, RecipientManifest, Signed,
 };
 use faro_proto::report::ReportHeader;
+use faro_proto::roster::{RosterEntry, RosterSnapshot};
 use faro_proto::{EventHeader, SignPublicKey, Signature};
 use zeroize::Zeroizing;
 
@@ -30,7 +31,9 @@ impl_signed_bytes!(
     MemberEncKeyBinding,
     RecipientManifest,
     ReportHeader,
-    Heartbeat
+    Heartbeat,
+    RosterEntry,
+    RosterSnapshot
 );
 
 /// An Ed25519 signing key. Zeroized on drop (via `ed25519-dalek`'s `zeroize` feature).

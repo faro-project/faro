@@ -16,6 +16,7 @@
 //! and wrapped secrets are randomized, so blessing changes them; everything
 //! else is deterministic.
 
+use faro_crypto::roster::{apply_entry, open_epoch_key, verify_snapshot, SignedRosterEntry};
 use faro_crypto::{
     open_item, seal_item, seal_to, unwrap_secret, verify, verify_signed, wrap_secret,
     EncryptionKeypair, KdfParams, Recipient, SigningKey, WrappedSecret,
@@ -24,6 +25,10 @@ use faro_proto::encoding::{b64_decode, b64_encode};
 use faro_proto::keys::{
     key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
     ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
+};
+use faro_proto::roster::{
+    epoch_key_check, genesis_prev_hash, group_safety_code, EpochRotation, GroupRole, RosterChange,
+    RosterEntry, RosterSnapshot, RosterState,
 };
 use faro_proto::{event, DeviceId, EncryptedItem, InstanceId, Signature, UserId};
 use serde_json::{json, Value};
@@ -139,6 +144,97 @@ fn ally_key_rewrap() -> AllyKeyRewrap {
 /// The challenge the ally key re-wrap vector is proven with.
 const REWRAP_CHALLENGE: [u8; 32] = [0x55; 32];
 
+const GROUP: &str = "0123456789abcdef0123456789abcdef";
+
+/// The epoch key of roster epoch `n` in the vectors (deterministic, so the
+/// entries that commit to them are too).
+fn epoch_key(n: u64) -> [u8; 32] {
+    [0x80 + n as u8; 32]
+}
+
+fn rotation(n: u64) -> Option<EpochRotation> {
+    Some(EpochRotation {
+        epoch: n,
+        key_check: epoch_key_check(&InstanceId::new(INSTANCE), GROUP, n, &epoch_key(n)),
+    })
+}
+
+/// A three-entry roster log signed by the member (the group's creator):
+/// the member and ally A join; ally A becomes a facilitator and ally B
+/// joins; ally B is removed. Every entry rotates the epoch.
+fn roster_log() -> Vec<SignedRosterEntry> {
+    let ms = member_sign();
+    let inst = InstanceId::new(INSTANCE);
+    let mut state = RosterState::new(inst.clone(), GROUP.into());
+    let mut out = Vec::new();
+    let steps: Vec<(Vec<RosterChange>, Option<EpochRotation>)> = vec![
+        (
+            vec![
+                RosterChange::Join {
+                    user_id: UserId::new(ALLY_A),
+                    role: GroupRole::Participant,
+                    enc_pubkey: ally_a().public(),
+                    sign_pubkey: None,
+                },
+                RosterChange::Join {
+                    user_id: UserId::new(MEMBER),
+                    role: GroupRole::Facilitator,
+                    enc_pubkey: member_enc().public(),
+                    sign_pubkey: Some(ms.public()),
+                },
+            ],
+            rotation(1),
+        ),
+        (
+            vec![
+                RosterChange::Role {
+                    user_id: UserId::new(ALLY_A),
+                    role: GroupRole::Facilitator,
+                },
+                RosterChange::Join {
+                    user_id: UserId::new(ALLY_B),
+                    role: GroupRole::Participant,
+                    enc_pubkey: ally_b().public(),
+                    sign_pubkey: None,
+                },
+            ],
+            rotation(2),
+        ),
+        (
+            vec![RosterChange::Remove {
+                user_id: UserId::new(ALLY_B),
+            }],
+            rotation(3),
+        ),
+    ];
+    for (i, (changes, epoch)) in steps.into_iter().enumerate() {
+        let e = RosterEntry {
+            instance_id: inst.clone(),
+            group_id: GROUP.into(),
+            seq: state.next_seq,
+            prev_hash: state.head,
+            at_ms: 1_790_000_500_000 + i as i64,
+            signer: UserId::new(MEMBER),
+            changes,
+            epoch,
+        };
+        let signed = ms.endorse(e);
+        apply_entry(&mut state, &signed).unwrap();
+        out.push(signed);
+    }
+    out
+}
+
+fn roster_snapshot(log: &[SignedRosterEntry]) -> RosterSnapshot {
+    let mut state = RosterState::new(InstanceId::new(INSTANCE), GROUP.into());
+    for e in log {
+        apply_entry(&mut state, e).unwrap();
+    }
+    state
+        .snapshot(1_790_000_600_000, UserId::new(MEMBER))
+        .unwrap()
+}
+
 const EVENT_PLAINTEXT: &str = r#"{"type":"flag","rating":"high","reasons":[{"source":"image","label":"explicit","score":0.93}],"app":{"id":"com.apple.Safari","name":"Safari"},"burst":false,"account":"sam"}"#;
 const REPORT_PLAINTEXT: &str = r#"{"v":1,"device_id":"dev_laptop01","device_name":"Sam's MacBook","period_start_ms":1790000000000,"period_end_ms":1790086400000,"first_seq":10,"last_seq":42,"timeline":[{"start_ms":1790000000000,"end_ms":1790003600000,"state":"active"}],"counts":{"clean":30,"low":1,"medium":1,"high":0},"flagged":[],"health":{"tamper":[],"context":[],"agent_restarts":0,"capture_failures":0,"unmonitored_secs":0}}"#;
 
@@ -187,6 +283,9 @@ fn generate() -> Value {
     let wrapped_unicode = wrap_secret(&[0x99; 32], "pässwörd ✓".as_bytes(), cheap()).unwrap();
     let a = ally_a().public();
     let msg = b"faro test message";
+    let log = roster_log();
+    let snap = roster_snapshot(&log);
+    let inst = InstanceId::new(INSTANCE);
     json!({
         "comment": "Generated by crates/faro-crypto/tests/web_vectors.rs; checked by that test and by web/src/lib/crypto/vectors.test.ts. Do not edit by hand.",
         "ids": { "instance": INSTANCE, "member": MEMBER, "ally_a": ALLY_A, "ally_b": ALLY_B, "device": DEVICE },
@@ -237,6 +336,11 @@ fn generate() -> Value {
             "item": report_item,
             "plaintext": REPORT_PLAINTEXT,
         },
+        "roster_sealed_epoch_key": {
+            "epoch": 3,
+            "recipient": ALLY_A,
+            "sealed": b64_encode(&faro_crypto::roster::seal_epoch_key(&epoch_key(3), &a).unwrap()),
+        },
         "wrapped": [
             { "passphrase": "correct horse battery", "plaintext_hex": hex::encode(ck), "wrapped": wrapped_cheap },
             { "passphrase": "pässwörd ✓", "plaintext_hex": hex::encode([0x99u8; 32]), "wrapped": wrapped_unicode },
@@ -266,6 +370,25 @@ fn generate() -> Value {
             "challenge_hex": hex::encode(REWRAP_CHALLENGE),
             "proven": ProvenAllyKeyRewrap { proof: akr.proof(&REWRAP_CHALLENGE), body: akr.clone() },
             "proof_bytes_hex": hex::encode(akr.proof_bytes()),
+        },
+        "roster": {
+            "group_id": GROUP,
+            "genesis_prev_hash": genesis_prev_hash(&inst, GROUP),
+            "entries": log.iter().map(|e| json!({
+                "signed": e,
+                "signing_bytes_hex": hex::encode(e.body.signing_bytes()),
+                "hash": e.body.hash(),
+            })).collect::<Vec<_>>(),
+            "epoch_keys": (1..=3u64).map(|n| json!({
+                "epoch": n,
+                "key_hex": hex::encode(epoch_key(n)),
+                "key_check": epoch_key_check(&inst, GROUP, n, &epoch_key(n)),
+            })).collect::<Vec<_>>(),
+            "snapshot": {
+                "signed": Signed { sig: ms.sign(&snap), body: snap.clone() },
+                "signing_bytes_hex": hex::encode(snap.signing_bytes()),
+            },
+            "safety_code": group_safety_code(&inst, GROUP, &snap.head()),
         },
     })
 }
@@ -327,6 +450,7 @@ fn web_vectors() {
         "/member_binding",
         "/key_rewrap",
         "/ally_key_rewrap",
+        "/roster",
     ] {
         assert_eq!(v.pointer(ptr), fresh.pointer(ptr), "{ptr} is stale");
     }
@@ -352,6 +476,28 @@ fn web_vectors() {
         let pt = unwrap_secret(&ws, s(w, "/passphrase").as_bytes()).unwrap();
         assert_eq!(&**pt, h(w, "/plaintext_hex").as_slice());
     }
+
+    // The roster log verifies, and the sealed epoch key opens against the
+    // commitment in the last entry.
+    let inst = InstanceId::new(INSTANCE);
+    let mut state = RosterState::new(inst.clone(), GROUP.into());
+    for e in v["roster"]["entries"].as_array().unwrap() {
+        let signed: SignedRosterEntry = serde_json::from_value(e["signed"].clone()).unwrap();
+        apply_entry(&mut state, &signed).unwrap();
+    }
+    let snap: Signed<RosterSnapshot> =
+        serde_json::from_value(v["roster"]["snapshot"]["signed"].clone()).unwrap();
+    assert_eq!(verify_snapshot(&snap).unwrap(), state);
+    let k = open_epoch_key(
+        &ally_a(),
+        &b(&v, "/roster_sealed_epoch_key/sealed"),
+        &inst,
+        GROUP,
+        3,
+        &state.epoch_key_check,
+    )
+    .unwrap();
+    assert_eq!(*k, epoch_key(3));
 
     // What the web app produced opens and verifies here.
     let Some(web) = v.get("from_web").filter(|w| !w.is_null()) else {
@@ -393,4 +539,30 @@ fn web_vectors() {
         serde_json::from_value(web["ally_key_rewrap"]["proven"].clone()).unwrap();
     let challenge: [u8; 32] = h(web, "/ally_key_rewrap/challenge_hex").try_into().unwrap();
     assert_eq!(akr.proof, akr.body.proof(&challenge));
+
+    // The web app's roster log: entries it signed, its snapshot, and an
+    // epoch key it sealed to ally A.
+    let web_group = s(web, "/roster/group_id");
+    let mut state = RosterState::new(inst.clone(), web_group.into());
+    for e in web["roster"]["entries"].as_array().unwrap() {
+        let signed: SignedRosterEntry = serde_json::from_value(e.clone()).unwrap();
+        apply_entry(&mut state, &signed).unwrap();
+    }
+    let snap: Signed<RosterSnapshot> =
+        serde_json::from_value(web["roster"]["snapshot"].clone()).unwrap();
+    assert_eq!(verify_snapshot(&snap).unwrap(), state);
+    let k = open_epoch_key(
+        &ally_a(),
+        &b(web, "/roster/sealed_epoch_key"),
+        &inst,
+        web_group,
+        state.epoch,
+        &state.epoch_key_check,
+    )
+    .unwrap();
+    assert_eq!(hex::encode(*k), s(web, "/roster/epoch_key_hex"));
+    assert_eq!(
+        group_safety_code(&inst, web_group, &state.checkpoint().unwrap()),
+        s(web, "/roster/safety_code")
+    );
 }

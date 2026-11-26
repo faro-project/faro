@@ -341,6 +341,8 @@ Sending check-ins to "the whole group" means sealing to keys the server hands ou
 5. **Pinning and the group safety code.** A joiner pins the signing key of the facilitator who invited or accepted them. The **group safety code** is a fingerprint of the current roster head. In a large group, comparing it with any one facilitator is enough, since every entry is facilitator-signed.
 6. **Content** is sealed only to keys in the accepted roster and signed by the author's signing key.
 
+The wire format, client rules and routes are specified in [PROTOCOL.md §10](PROTOCOL.md). As built, a facilitator's browser signs leaves, removals and role changes on its own, but asks the facilitator before signing a join or someone else's new key, since those add a reader with a key the server supplied (PROTOCOL.md §10.7).
+
 Under this model, the server can't add a reader. A facilitator can, but every addition is visible in the group history and needs the new person's own keys. That is the honest limit of a group whose facilitators choose its members.
 
 ### 10.4 What doesn't change
@@ -503,10 +505,13 @@ notification_prefs + quiet_hours_bypass(user_id, sender_id)   -- "let Sam's reac
 
 ALTER TABLE ally_links ADD COLUMN origin_group_id TEXT NULL;  -- label only, never for authorization
 
--- Phase C
-group_keys(group_id, user_id, sign_pubkey NULL, enc_pubkey, created_at)
-group_roster_log(group_id, seq, prev_hash, hash, signer_id, entry_json, sig, created_at)
-group_roster_snapshots(group_id, seq, hash, signer_id, snapshot_blob_ref, sig, created_at)
+-- Phase C (as built in migration 0013: participants' encryption keys are
+-- their member or ally keys, so there is no per-group key table)
+participant_sign_keys(user_id, sign_pubkey, enc_pubkey, sealed_seed, created_at)
+group_roster_log(group_id, seq, prev_hash, hash, signer_id, epoch, entry_json, created_at)
+group_roster_members(group_id, user_id, role, enc_pubkey, sign_pubkey NULL)  -- roster at the head
+group_roster_snapshots(group_id, seq, hash, signer_id, snapshot_json, created_at)
+group_epochs(group_id, epoch, seq, key_check, created_at)
 group_epoch_keys(group_id, epoch, user_id, sealed_key, created_at)
 group_posts(id, group_id, author_id, kind[check_in|reply], parent_id, epoch NULL,
         created_at, sig, blob_ref)
@@ -559,9 +564,14 @@ POST   /v1/reach-outs/{id}/answer                  {answer}
 PUT|DELETE /v1/me/quiet-hours-bypass/{user_id}
 
 -- Phase C
-GET    /v1/groups/{id}/roster?after_seq=           latest snapshot if needed, then log entries, paged
+GET    /v1/groups/{id}/roster?after_seq=           log entries, paged, with the head and latest snapshot seq
+GET    /v1/groups/{id}/roster/snapshot?max_seq=    latest signed snapshot (clients cap it at 8 MiB)
+GET    /v1/groups/{id}/roster/pending              changes a facilitator's browser should sign next
 POST   /v1/groups/{id}/roster                      facilitators: signed entry (+ sealed epoch keys on rotation)
-GET    /v1/groups/{id}/epoch-key                   my sealed key for the current epoch
+POST   /v1/groups/{id}/roster/snapshot             facilitators: signed snapshot at the head
+GET    /v1/groups/{id}/epoch-key?epoch=            my sealed key for the current (or a given) epoch
+PUT    /v1/me/ally-key                             an encryption key for someone with none
+GET|PUT /v1/me/group-sign-key                      an ally-only facilitator's signing key
 POST   /v1/groups/{id}/posts                       check-ins and replies
 
 GET    /admin/api/groups                           metadata only: name, size, facilitators, listed, dates, flags
