@@ -231,7 +231,9 @@ export interface AdminLogEntry {
 		| 'admin_revoked'
 		| 'deletion_requested'
 		| 'deletion_cancelled'
-		| 'account_created';
+		| 'account_created'
+		| 'account_disabled'
+		| 'account_enabled';
 	/** The account it was about; null once that account is deleted. */
 	user: AdminLogAccount | null;
 	/**
