@@ -19,7 +19,7 @@
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
 //! | [`model`] | the image classifier: the packaged model, its checks, `model-check` |
 //! | [`runtime`] | `run`: scheduler, detection, events, reports, uploads, heartbeats; `goodbye` |
-//! | [`update`] | client self-update: verify against the project root, download, install |
+//! | [`update`] | client self-update: verify against the project root, download, install; models and blocklists from the same channel ([`update::artifacts`]) |
 //! | [`cli`] | the command line |
 //!
 //! ## Invariants kept here (docs/DEVELOPMENT.md)
@@ -28,7 +28,9 @@
 //!    the source by value, are moved into `faro_detect::Detector::process`
 //!    (which zeroizes them), and only a `BlurredThumbnail` can reach an
 //!    event. Frames are never logged (`SourceEvent`'s `Debug` prints a
-//!    count). Unsolicited frames from the agent are dropped unread.
+//!    count). Unsolicited frames from the agent are dropped unread. A model
+//!    from the update channel is built from its files and swapped in
+//!    between captures ([`update::artifacts`]): no frame is involved.
 //! 2. **The device encrypts only to its verified recipient manifest.** Every
 //!    event and report is sealed to `Outbox::current_recipients`, the
 //!    checkpoint verified against the member key pinned at enrollment; the

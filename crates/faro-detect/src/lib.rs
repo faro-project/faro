@@ -34,14 +34,16 @@
 //! Faro's code is Apache-2.0. **No model weights and no blocklists are
 //! bundled in this crate.** Models and domain bundles are shipped separately
 //! (the beta's model in the macOS package, built by
-//! `models/opennsfw/build.sh`; later ones through the signed update channel,
-//! §3.8), and every one of them must be Apache-2.0 compatible: permissive
-//! licences such as Apache-2.0, MIT, BSD or CC0 are fine; AGPL or
-//! non-commercial weights (and blocklists that forbid redistribution) are
-//! not. [`load_model`] enforces this against the SPDX identifier in the
-//! model manifest (see [`ALLOWED_MODEL_LICENSES`]), requires the
-//! attribution and licence text that licence asks for ([`attribution`]),
-//! and verifies the weights' BLAKE3 hash.
+//! `models/opennsfw/build.sh`; newer ones, and domain bundles, through the
+//! signed update channel, §3.8), and every one of them must be Apache-2.0
+//! compatible: permissive licences such as Apache-2.0, MIT, BSD or CC0 are
+//! fine; AGPL or non-commercial weights (and blocklists that forbid
+//! redistribution) are not. [`load_model`] enforces this against the SPDX
+//! identifier in the model manifest (see [`ALLOWED_MODEL_LICENSES`]),
+//! requires the attribution and licence text that licence asks for
+//! ([`attribution`]), and verifies the weights' BLAKE3 hash.
+//! [`load_domains`] does the same for a domain bundle and every source in
+//! its manifest.
 //!
 //! ## Features
 //!

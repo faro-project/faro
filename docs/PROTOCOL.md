@@ -303,8 +303,22 @@ The project's publishing location, a release directory for an air-gapped import,
 |---|---|
 | `roots/<n>.json` | Root version `n`, for `n >= 2`. Root 1 ships with every client and server. |
 | `timestamp.json` | The current timestamp: commits to the exact length and BLAKE3 of `targets.json`. |
-| `targets.json` | The artifact list: target name → length, BLAKE3, `{kind, platform, arch, version, channels, min_os?}`. |
+| `targets.json` | The artifact list: target name → length, BLAKE3, `{kind, platform, arch, version, channels, min_os?, min_client?}`. |
 | `targets/<name>` | An artifact, under its target name. |
+
+`kind` is `client`, `model`, `blocklist` or `server`. `min_client` (semver, optional) is the oldest client that may install the target. Clients skip targets above their own version and take the newest one they can use; it is meant for models and blocklists that need a newer client than the oldest one that fetches them.
+
+**Models and blocklists.** A model or a domain list is two files: a JSON manifest (a model's `faro_detect::ModelInfo`, or the `faro-domains-manifest/1` that `domains-compile` writes) and the file it names. One target carries both, as a *data bundle* (`faro_update::bundle`):
+
+| Offset | Size | Content |
+|---|---|---|
+| 0 | 8 | `FARODATA` |
+| 8 | 1 | format version, `1` |
+| 9 | 4 | manifest length `m`, big-endian, 1 to 1 MiB |
+| 13 | `m` | the manifest, byte for byte |
+| 13 + `m` | rest | the file the manifest names (the model, or the domain bundle) |
+
+The target's BLAKE3 covers the whole bundle, and the manifest pins the file's BLAKE3. Such targets have platform and arch `any`, and their `version` is the manifest's `version` (semver), not a client release's. The release workflow names them `<kind>/any/<name>-<version>-<first channel>.data` (`+` in the version becomes `_`), for example `model/any/opennsfw-1.0.0_int8-stable.data`: a version listed for `beta` and later for `stable` is two entries with the same bytes.
 
 `GET /v1/updates` returns `{"available": bool, "channel": "<channel>"}`: whether the instance has verified metadata to serve, and the channel its admin chose (`stable`, `beta`, … or the pin `stable-1`). Every path under `/v1/updates` is public: the content is project-signed, and a member's browser may download the installer from it.
 
@@ -320,6 +334,17 @@ A client trusts the root it shipped with, never the instance. On each check it:
 6. on macOS, reads the version inside the package and installs it only if that version equals the target's `version` and is above the installed version (semver precedence, so `0.1.0-beta.1 < 0.1.0`).
 
 It persists its trust state after every step, including failed ones. The instance chooses the channel, so it can hold clients back or move them between channels, but it can't make them install anything the project didn't sign or go back to an older release.
+
+**Models and blocklists** use the same steps 1 to 4, the same trust state and the same channel, after the client package (not while a client install has just started). A client checks for models only if it can run them (ONNX Runtime), and for blocklists always. It selects kind `model` or `blocklist` with `min_client` against its own version, and installs the target only if its version is above the copy its package ships, above the one it installed before, and not below the highest it ever installed: a model or a blocklist never goes back. Then, instead of steps 5 and 6:
+
+1. it unpacks the bundle into a new directory in its state directory (`artifacts/<kind>/`), taking the file name from the manifest (a plain file name only);
+2. it checks it exactly as the packaged copy is checked: a model with `load_model` (the licence allowlist, the attribution and licence text the licence asks for, the weights' BLAKE3), a manifest `version` equal to the target's, at least one label the client's policy reads as explicit, and ONNX Runtime loading it; a blocklist with `load_domains` (approved sources only, allowlisted licences, their attribution and texts, the bundle's length, BLAKE3 and domain count) and the same version check;
+3. only then it moves the directory into place, writes the notice next to the packaged ones, and records it (`update-artifacts.json`, with the manifest's BLAKE3);
+4. it hands the model or list to the detector, which switches between two captures without a restart. No frame is involved.
+
+A bundle that fails step 2 was signed but can't be used: it is not installed, it is recorded by BLAKE3 and never downloaded again, and nothing else changes. It is not tamper (nothing on the computer changed), so it is logged, not reported. At each start the service uses the installed copy if it is newer than the packaged one and its manifest still has the recorded BLAKE3 and passes step 2 again; otherwise it uses the packaged copy. An installed copy that no longer matches is reported as an urgent `integrity_failure` (`image model update (changed)`, `domain list update (changed)`) and removed, and the next check installs it again. One that is no newer than the packaged copy (the client was updated since) is removed quietly.
+
+There is no second layer like steps 5 and 6 for models: the metadata alone decides. ONNX Runtime parses the model, so a model signed with leaked targets and timestamp keys reaches a parser that is not built for hostile input (KEY-CEREMONY.md §4.2).
 
 **Steps 5 and 6 are a second layer.** The metadata (steps 1 to 4) decides what to install. The package signature only stops a package the metadata approved but Faro's Apple identity didn't sign, for example if the targets and timestamp keys leak (KEY-CEREMONY.md §4.2). The Team ID is compiled into the client (`FARO_TEAM_ID`, the value `ipc.agent_requirement` is built from), never read from the update, its metadata or the mirror. The checks are `pkgutil --check-signature` and `spctl --assess --type install` (`crates/faro-service/src/update/signature.rs`):
 
@@ -338,7 +363,7 @@ It persists its trust state after every step, including failed ones. The instanc
 
 ### 8.3 What the mirror does
 
-The mirror is configured with the same root of trust (`updates.root`) and runs the same verification before it stores anything. It serves exactly the bytes it verified. Artifacts are cached by BLAKE3. For each kind, platform and arch, an online mirror prefetches what its channel selects and fetches other listed artifacts on first request. `kind = server` artifacts are never fetched or served. A root older than the mirror's own (when the mirror started from a newer root file than a client) is passed through from upstream unverified, because the client verifies it.
+The mirror is configured with the same root of trust (`updates.root`) and runs the same verification before it stores anything. It serves exactly the bytes it verified. Artifacts are cached by BLAKE3. For each kind, platform and arch, an online mirror prefetches what its channel selects (models and blocklists included, the newest whatever its `min_client`) and fetches other listed artifacts on first request. `kind = server` artifacts are never fetched or served. A root older than the mirror's own (when the mirror started from a newer root file than a client) is passed through from upstream unverified, because the client verifies it.
 
 ## 9. Deviations from ARCHITECTURE.md v0.2
 
