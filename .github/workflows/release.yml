@@ -158,7 +158,7 @@ jobs:
       # No build cache: a release builds from clean sources.
       # For the package's third-party notices (release/notices/third-party.sh).
       - name: cargo-about
-        run: cargo install --locked cargo-about --features cli --version "$(release/notices/third-party.sh --cargo-about-version)"
+        run: release/notices/third-party.sh --install-cargo-about
       - name: Signing configuration
         id: sign
         env:

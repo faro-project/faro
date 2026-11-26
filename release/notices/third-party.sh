@@ -9,10 +9,14 @@
 #   release/notices/third-party.sh macos OUT    faro-service and faro-agent
 #                                                 (the macOS package)
 #   release/notices/third-party.sh --cargo-about-version
+#   release/notices/third-party.sh --install-cargo-about
 #
-# It runs cargo-about, pinned to CARGO_ABOUT_VERSION below:
+# It runs cargo-about, pinned to CARGO_ABOUT_VERSION below.
+# --install-cargo-about installs that version unless it is already the one
+# on PATH, replacing any other (self-hosted runners keep ~/.cargo/bin
+# between runs, where a plain `cargo install` refuses an existing binary):
 #
-#   cargo install --locked cargo-about --version 0.9.3 --features cli
+#   cargo install --locked --force cargo-about --version 0.9.3 --features cli
 #
 # The accepted licences are deny.toml's `[licenses] allow` list, the one
 # `cargo deny check` enforces, and a crate whose licence can't be read or
@@ -29,6 +33,14 @@ usage="usage: third-party.sh server|macos OUT"
 
 if [[ "${1:-}" == --cargo-about-version ]]; then
     echo "$CARGO_ABOUT_VERSION"
+    exit 0
+fi
+if [[ "${1:-}" == --install-cargo-about ]]; then
+    if [[ "$(cargo about --version 2>/dev/null || true)" == "cargo-about $CARGO_ABOUT_VERSION" ]]; then
+        echo "cargo-about $CARGO_ABOUT_VERSION is already installed"
+    else
+        cargo install --locked --force cargo-about --features cli --version "$CARGO_ABOUT_VERSION"
+    fi
     exit 0
 fi
 component="${1:?$usage}"

@@ -140,7 +140,7 @@ jobs:
       # be read or isn't on deny.toml's allowlist.
       - name: Third-party notices
         run: |
-          cargo install --locked cargo-about --features cli --version "$(release/notices/third-party.sh --cargo-about-version)"
+          release/notices/third-party.sh --install-cargo-about
           release/notices/third-party.sh server "$RUNNER_TEMP/notices/server.txt"
           release/notices/third-party.sh macos "$RUNNER_TEMP/notices/macos.txt"
           rm -rf "$RUNNER_TEMP/notices"
@@ -169,7 +169,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install --locked cargo-about --features cli --version "$(release/notices/third-party.sh --cargo-about-version)"
+      - run: release/notices/third-party.sh --install-cargo-about
       - run: installers/macos/build-pkg.sh --dev
       - run: installers/macos/check-pkg.sh target/pkg/Faro-*-dev.pkg
       - run: installers/macos/test-uninstall.sh

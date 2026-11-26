@@ -7,7 +7,7 @@
 - Rust stable, 1.94 or newer (`rust-version` in the root `Cargo.toml`; set by `sqlx` 0.9, which the server needs so it can share the patched SQLite that `rusqlite` 0.41 bundles). CI uses the latest stable.
 - No nightly is needed, except for the optional `cargo fuzz` targets (see [Fuzzing](#fuzzing)).
 - `cargo-deny` is used for license, ban and advisory checks: `cargo deny check`.
-- `cargo-about` 0.9.3, only to make the third-party notices (`build-pkg.sh` and the container image need it): `cargo install --locked cargo-about --version 0.9.3 --features cli`. See [Third-party notices](#third-party-notices).
+- `cargo-about` 0.9.3, only to make the third-party notices (`build-pkg.sh` and the container image need it): `cargo install --locked cargo-about --version 0.9.3 --features cli`, or `release/notices/third-party.sh --install-cargo-about`, which CI uses and which skips the install when 0.9.3 is already there. See [Third-party notices](#third-party-notices).
 - Node.js 22.17 or newer (SvelteKit 3 needs it), only for the web app in `web/` (CI and the container image use Node 24). The Rust build never runs npm.
 
 ## Everyday commands
