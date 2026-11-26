@@ -326,6 +326,20 @@ installers/macos/test-uninstall.sh                          # the uninstaller's 
 - **Updates:** `FARO_UPDATE_ROOT` (a signed root document, for example from `cargo run -p faro-update --example faro-release -- sign-root …`) is installed as `/Library/Faro/update-root.json`. A release package requires it; a `--dev` one may have it. With it, the service checks its instance's mirror about every 6 hours (`[updates] check_secs`) and installs newer client packages through the one-shot launchd job `org.faro.update` (`faro_platform_macos::update_job`). It runs as its own job because the package's preinstall stops the service, which would kill an `installer` running as its child. Only the packaged service, run as root from `/Library/Faro/bin/faro-service`, installs anything. A development build checks and logs, nothing more. Before installing, the service checks the package's own signature (PROTOCOL.md §8.2, step 5): Faro's Developer ID Installer certificate and notarization, with the Team ID compiled in from `FARO_TEAM_ID` (`build-pkg.sh` passes it to `cargo`). A `--dev` package's service has the `dev` feature and no Team ID, so it skips that check and dev packages can update each other. A service built without either refuses every package. Then it reads the full semver version inside the package (`PackageInfo` and the Distribution, step 6), and refuses the package unless it is the version the metadata names and above the running one. Development builds do this too, so keep `pkgbuild --version` and the Distribution's `@VERSION@` the full version. To run both checks by hand: `FARO_TEAM_ID=<team> cargo run -p faro-service --example check_package -- <pkg>` (it prints the version). The job's output goes to `update-install.log` in the state directory, and `update-attempts.json` there records the pending install and failed packages. Models and blocklists come through the same check ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)); their notices go to `/Library/Faro/notices/update-model.txt` and `update-blocklist.txt`.
 - **The status menu** (issue #89) is in the agent's menu-bar icon, not a separate tray app: see [The status menu](#the-status-menu). There is no tray app beyond it.
 
+## The Windows installer
+
+`installers/windows/build-msi.ps1` builds a per-machine x64 MSI (WiX 5.0.2: `dotnet tool install --global wix --version 5.0.2`) and `installers/windows/check-msi.ps1` checks one. CI's `windows-msi` job builds the unsigned development MSI on every pull request, checks it, and keeps it for 14 days as `faro-dev-msi-<sha>`; in an elevated session `check-msi.ps1` also installs it, checks the service, its DACL, the `faro://` handler and the state directory's ACL, uninstalls it and checks nothing is left (the runner's account must be an administrator for that part; otherwise the static checks run and the install is skipped with a message). Everything about the package, including what it assumes of `faro-service` and `faro-agent`, is in [installers/windows/README.md](../installers/windows/README.md).
+
+```powershell
+installers\windows\build-msi.ps1 -Dev -NoOnnx           # unsigned, without the image classifier
+installers\windows\build-msi.ps1 -Dev -ModelDir <dir>   # with it; <dir> is the macOS build's model output
+installers\windows\check-msi.ps1 target\msi\Faro-*-dev-x64.msi
+```
+
+- **Signing** is behind `installers/windows/sign.ps1`, chosen by the Actions variable `FARO_WINDOWS_SIGNING`: `signpath` (SignPath Foundation) or `trusted-signing` (Azure Trusted Signing); the variables each needs are in the script's help. A release also needs `FARO_WINDOWS_SIGNER` (the signer requirement compiled into the service; see the README) and `release/update-root.json`. With no provider, `release.yml`'s `windows-msi` job warns "UNSIGNED BUILD" and a real release has no Windows package; a dry run builds the unsigned `-Dev` MSI.
+- **Updates.** The service installs the MSI with `msiexec`, started detached so it outlives the service the MSI stops. Before installing, `crates/faro-service/src/update/msi.rs` checks the Authenticode signer, Faro's UpgradeCode and the version inside the MSI. `release/build-layout.sh` lists the MSI as the target `client/windows/Faro-<version>-x64.msi` (`client:windows:x86_64:10.0.19045`).
+- **Runner.** The `self-hosted, Windows, X64` runner needs the .NET SDK (for WiX), Git for Windows, the MSVC build tools and network access for the first build (ONNX Runtime from NuGet, WiX extensions, the domain sources).
+
 ## Testing the whole flag path
 
 To see a flag go all the way through (the service flags a frame, the encrypted event reaches the instance, the ally's feed shows it with a blurred thumbnail, the email arrives), the model has to rate a screen at least `medium`. OpenNSFW rates an ordinary swimwear photo about 0.06–0.15, and the default `explicit_medium` is 0.60. So a development build can lower the thresholds in `service.toml`:
@@ -513,6 +527,7 @@ Pages caches files for about 10 minutes. That is fine: the timestamp is re-signe
 | Variable | Default |
 |---|---|
 | `FARO_SIGN_IDENTITY`, `FARO_INSTALLER_IDENTITY`, `FARO_TEAM_ID`, `FARO_NOTARY_PROFILE` | none: a real release fails without them |
+| `FARO_WINDOWS_SIGNING`, `FARO_WINDOWS_SIGNER` | none: a real release builds no Windows package without them ([The Windows installer](#the-windows-installer)) |
 | `FARO_MACOS_KEYCHAIN` | none (use the default keychains) |
 | `FARO_SIGNING_RUNNER` | `"ubuntu-24.04"` |
 | `FARO_LINUX_X64_RUNNER` | `"ubuntu-24.04"` in `release.yml`; `["self-hosted", "macOS", "X64"]` in `container.yml` ([CI runners](#ci-runners)) |
@@ -635,7 +650,7 @@ CI runs on the project's self-hosted runners, registered to the `faro-project` o
 | `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
 | `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel`, the amd64 container build (in colima's x86_64 Linux VM) |
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the arm64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` the arm64 server build, a dry run's signing, and the image tags and GitHub Release; the `check` and `alert` jobs of `update-timestamp.yml` |
-| `self-hosted, Windows, X64` | Windows PC | `test (windows)` |
+| `self-hosted, Windows, X64` | Windows PC | `test (windows)`, `windows-msi`, the release MSI (`release.yml`) |
 
 `container.yml` uses no GitHub-hosted runner. There is no x86_64 Linux runner, so its amd64 build runs on the Intel Mac, inside colima's Linux VM: that VM is x86_64 and hardware-virtualised, so the build is native, not emulated. The repository variable `FARO_LINUX_X64_RUNNER` (JSON, for example `["self-hosted", "Linux", "X64"]`, or `"ubuntu-24.04"` once GitHub's runners can start again) moves it; `release.yml`'s amd64 build reads the same variable, but there it defaults to `ubuntu-24.04`. The jobs that read the update signing keys still run on GitHub's `ubuntu-24.04` by default ([Releasing](#releasing)).
 

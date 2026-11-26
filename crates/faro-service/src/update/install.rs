@@ -14,9 +14,12 @@
 //! On macOS ([`LaunchdInstaller`]) the install runs as the one-shot launchd
 //! job `org.faro.update` (`faro_platform_macos::update_job`), because the
 //! package's preinstall stops this service and would kill an `installer`
-//! running as its child. Other platforms don't self-update yet: Linux
-//! packages will come from the project's apt/dnf repository (§3.3), and
-//! Windows has no client yet.
+//! running as its child. On Windows ([`MsiInstaller`]) the service starts
+//! `msiexec` as a detached process outside its own job: the MSI stops this
+//! service, replaces it and starts the new one, and a failed install rolls
+//! back to the old service, which Windows Installer starts again. Linux
+//! doesn't self-update: its packages will come from the project's apt/dnf
+//! repository (§3.3).
 
 use super::signature::PackageCheckError;
 use faro_update::{TargetInfo, Version};
@@ -77,10 +80,152 @@ pub fn platform_installer(state_dir: &Path) -> Option<std::sync::Arc<dyn Install
         }
         None
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use faro_platform_windows::layout::SERVICE_PROGRAM;
+        // Both sides canonical: canonicalize gives a `\\?\` path.
+        let packaged = match (
+            std::env::current_exe().and_then(|p| p.canonicalize()),
+            Path::new(SERVICE_PROGRAM).canonicalize(),
+        ) {
+            (Ok(running), Ok(packaged)) => running == packaged,
+            _ => false,
+        };
+        if packaged && faro_platform_windows::acl::running_as_system() {
+            if super::msi::BUILD_POLICY == super::msi::SignerPolicy::RefuseAll {
+                tracing::warn!(
+                    "this build has no signer requirement (FARO_WINDOWS_SIGNER): it will refuse every update package"
+                );
+            }
+            return Some(std::sync::Arc::new(MsiInstaller::new(state_dir)));
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = state_dir;
         None
+    }
+}
+
+/// Windows: install the MSI with `msiexec`, started as a process of its
+/// own.
+///
+/// **Why a detached process, not a scheduled task.** The MSI's
+/// `StopServices` stops this service, so the install must not depend on
+/// it. Windows doesn't end a process's children when the process exits,
+/// and the SCM doesn't put a service in a job, so `msiexec` started by the
+/// service outlives it. It is started detached, in a new process group,
+/// and with `CREATE_BREAKAWAY_FROM_JOB` in case the service ever runs in a
+/// job (one that doesn't allow breaking away makes that fail, and then it
+/// is started without). The install itself runs in the Windows Installer
+/// service; `msiexec` only drives it. If the install fails, Windows
+/// Installer rolls it back, which puts the old service back and starts it
+/// again (the rollback of `StopServices`), so nothing like macOS's
+/// recovery job is needed. A one-shot scheduled task would add a task to
+/// create, run as SYSTEM and clean up (Task Scheduler COM or `schtasks`
+/// with an XML definition) for no gain.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct MsiInstaller {
+    log: std::path::PathBuf,
+}
+
+#[cfg(windows)]
+impl MsiInstaller {
+    pub fn new(state_dir: &Path) -> Self {
+        MsiInstaller {
+            log: state_dir.join(super::INSTALL_LOG),
+        }
+    }
+
+    /// `%SystemRoot%\System32\msiexec.exe`.
+    fn msiexec() -> std::path::PathBuf {
+        std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+            .join("System32")
+            .join("msiexec.exe")
+    }
+}
+
+/// `msiexec`'s arguments: install `package` with no UI, never restart the
+/// computer, and log everything to `log`.
+#[cfg(any(windows, test))]
+fn msiexec_args(package: &Path, log: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "/i".into(),
+        package.as_os_str().to_owned(),
+        "/qn".into(),
+        "/norestart".into(),
+        "/l*v".into(),
+        log.as_os_str().to_owned(),
+        "REBOOT=ReallySuppress".into(),
+    ]
+}
+
+#[cfg(windows)]
+impl Installer for MsiInstaller {
+    fn check_package(
+        &self,
+        package: &Path,
+        target: &TargetInfo,
+        installed: &Version,
+    ) -> Result<(), PackageCheckError> {
+        use super::msi::{self, SignerAccepted};
+        match msi::check_signature(package)? {
+            SignerAccepted::Verified(signer) => tracing::info!(
+                version = %target.custom.version,
+                signer = %signer.subject,
+                thumbprint = %signer.thumbprint_sha256,
+                "the update package is signed by Faro's publisher"
+            ),
+            SignerAccepted::Unchecked => tracing::warn!(
+                version = %target.custom.version,
+                "development build: installing the update package without checking its signature"
+            ),
+        }
+        // Only once it is known to be Faro's: the package says which
+        // product and version it is, and that must be what the metadata
+        // says.
+        let version = msi::check_version(package, &target.custom.version, installed)?;
+        tracing::info!(%version, %installed, "the update package is the version the metadata says");
+        Ok(())
+    }
+
+    fn install(&self, package: &Path, target: &TargetInfo) -> Result<(), InstallError> {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+
+        let spawn = |flags: u32| {
+            std::process::Command::new(Self::msiexec())
+                .args(msiexec_args(package, &self.log))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(flags)
+                .spawn()
+        };
+        tracing::info!(
+            version = %target.custom.version,
+            log = %self.log.display(),
+            "starting the update install (msiexec)"
+        );
+        let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+        let child = match spawn(base | CREATE_BREAKAWAY_FROM_JOB) {
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => spawn(base),
+            r => r,
+        }
+        .map_err(|e| InstallError::Start(format!("msiexec: {e}")))?;
+        // Not waited for: it outlives this service. Dropping the handle
+        // leaves the process running.
+        tracing::debug!(pid = child.id(), "msiexec started");
+        drop(child);
+        Ok(())
     }
 }
 
@@ -214,6 +359,30 @@ fn job_is_running(print: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msiexec_installs_quietly_and_logs() {
+        let args = msiexec_args(
+            Path::new(r"C:\ProgramData\Faro\updates\ab.msi"),
+            Path::new(r"C:\ProgramData\Faro\update-install.log"),
+        );
+        let args: Vec<_> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "/i",
+                r"C:\ProgramData\Faro\updates\ab.msi",
+                "/qn",
+                "/norestart",
+                "/l*v",
+                r"C:\ProgramData\Faro\update-install.log",
+                "REBOOT=ReallySuppress",
+            ]
+        );
+    }
 
     #[test]
     fn launchctl_print_state() {

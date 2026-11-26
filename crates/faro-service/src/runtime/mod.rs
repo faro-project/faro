@@ -131,7 +131,11 @@ fn packaged_update_root() -> Option<Vec<u8>> {
     let path = Some(std::path::Path::new(
         faro_platform_macos::pkg_layout::UPDATE_ROOT,
     ));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let path = Some(std::path::Path::new(
+        faro_platform_windows::layout::UPDATE_ROOT,
+    ));
+    #[cfg(not(any(target_os = "macos", windows)))]
     let path: Option<&std::path::Path> = None;
     let path = path?;
     match std::fs::read(path) {
