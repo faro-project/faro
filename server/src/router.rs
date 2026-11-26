@@ -29,8 +29,8 @@
 
 use crate::api::{
     account, admin, allies, auth, branding, devices, events, feed, group_listing, group_roster,
-    groups, heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports, setup,
-    well_known,
+    group_sharing, groups, heartbeat, invites, keys, manifests, prefs, privacy, proposals, reports,
+    setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -152,6 +152,31 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/v1/groups/{id}/history", get(groups::history))
         .route("/v1/groups/{id}/me/allies", get(groups::my_allies_here))
         .route("/v1/groups/{id}/user-search", get(groups::user_search))
+        // Opt-in sharing and pairing suggestions (GROUPS.md §8.2, §8.5).
+        .route(
+            "/v1/groups/{id}/me/sharing",
+            put(group_sharing::set_sharing),
+        )
+        .route(
+            "/v1/groups/{id}/participants/{user_id}/allies",
+            get(group_sharing::shared_allies),
+        )
+        .route(
+            "/v1/groups/{id}/suggestions",
+            get(group_sharing::posted).post(group_sharing::suggest),
+        )
+        .route(
+            "/v1/groups/{id}/suggestions/{suggestion_id}",
+            delete(group_sharing::withdraw),
+        )
+        .route(
+            "/v1/groups/{id}/me/suggestions",
+            get(group_sharing::my_cards),
+        )
+        .route(
+            "/v1/groups/{id}/me/suggestions/{suggestion_id}/dismiss",
+            post(group_sharing::dismiss),
+        )
         .route(
             "/v1/groups/{id}/invites",
             get(groups::list_invites).post(groups::create_invites),

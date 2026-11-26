@@ -12,6 +12,7 @@
 	import JoinRequests from './JoinRequests.svelte';
 	import ListingSettings from './ListingSettings.svelte';
 	import MeetingSettings from './MeetingSettings.svelte';
+	import PairingSuggestions from './PairingSuggestions.svelte';
 	import Roster from './Roster.svelte';
 
 	let {
@@ -203,6 +204,8 @@
 {#if group.listed}<JoinRequests {group} {onchanged} />{/if}
 
 <InvitePeople {group} {people} />
+
+<PairingSuggestions groupId={group.id} readOnly={!!group.archived_at_ms || group.groups_disabled} />
 
 <section class="card section" aria-labelledby="people-h">
 	<h2 id="people-h">Facilitators and people</h2>

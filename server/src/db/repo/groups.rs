@@ -668,6 +668,11 @@ pub struct RosterEntry {
     /// How this person and the viewer are linked as allies, if they are.
     /// The viewer's own line, and people they have no link with, say `null`.
     pub relationship: Option<Relationship>,
+    /// The status dot this person shows the group (§8.2). The repository
+    /// leaves it `null`; the route fills it in, `not_shared` unless they
+    /// chose to show it.
+    #[serde(default)]
+    pub status: Option<super::group_sharing::StatusDot>,
 }
 
 /// The alliance between the viewer and another person in the group, from
@@ -804,6 +809,7 @@ pub async fn roster<'e>(
                 || r.try_get::<Option<i64>, _>("deletion_requested_at")?
                     .is_some(),
             relationship: Relationship::from_rank(rank),
+            status: None,
         });
     }
     let next_cursor = if rows.len() as i64 > PAGE_SIZE {
