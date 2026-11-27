@@ -1,7 +1,7 @@
 # Faro: Architecture
 
-**Status:** Draft v0.2 (2026-11-23)
-**Scope:** A free, open-source, **self-hosted** screen-accountability service, comparable to Covenant Eyes. The first release covers desktop only: macOS, Windows and Linux.
+**Status:** Draft v0.2 (2026-11-23). This is the design. What is built today, what is partly built and what is only planned is in [STATUS.md](STATUS.md) (dated 2026-11-27); items marked *planned* below are not built.
+**Scope:** A free, open-source, **self-hosted** screen-accountability service, comparable to Covenant Eyes. The first release covers desktop: macOS and Windows built, Linux planned (see [STATUS.md](STATUS.md)).
 **License:** Apache-2.0 (client, server, web app and tooling).
 
 ---
@@ -44,9 +44,9 @@ There is **no central Faro service.** A church, a college, a ministry, a small g
  │  │ URL, idle     │            │  encrypted outbox · uploader     │   │
  │  └──────┬────────┘            │  watchdog · updater              │   │
  │  ┌──────▼────────┐            └───────────────┬──────────────────┘   │
- │  │ Tray / Settings│                            │                     │
+ │  │ Tray (planned) │                            │                     │
  │  └───────────────┘   ┌──────────────┐          │                     │
- │                      │ Browser ext. │──▶ Agent │                     │
+ │                      │ Browser ext. │──▶ Agent │  (planned)          │
  │                      └──────────────┘          │ HTTPS               │
  └────────────────────────────────────────────────┼─────────────────────┘
                                                   │ ciphertext + signed headers
@@ -55,10 +55,10 @@ There is **no central Faro service.** A church, a college, a ministry, a small g
  ┌────────── Faro Instance (self-hosted: church / college / person) ──────┐
  │  faro-server (single binary or container)                               │
  │   ├─ API + ally web app (static, embedded) + admin console              │
- │   ├─ DB: SQLite (default) or Postgres                                   │
- │   ├─ Blob store: local disk (default) or any S3-compatible bucket       │
+ │   ├─ DB: SQLite (default); Postgres is planned                          │
+ │   ├─ Blob store: local disk; S3-compatible storage is planned           │
  │   ├─ Liveness monitor → missed check-in alerts                          │
- │   ├─ Notifier → SMTP email / Web Push, timed by urgency                 │
+ │   ├─ Notifier → SMTP email (Web Push planned), timed by urgency         │
  │   ├─ Built-in HTTPS (ACME / Let's Encrypt) or behind a reverse proxy    │
  │   └─ Update mirror (caches signed releases, models, blocklists)         │
  └───────────────────────────────┬────────────────────────────────────────┘
@@ -86,8 +86,8 @@ Every OS runs the same three processes.
 | Process | Privilege | Lifetime | Responsibilities |
 |---|---|---|---|
 | **Faro Service** | root / SYSTEM | Boot to shutdown | Owns state, keys, the classifier, the event log, the outbox, uploads and updates. Watches over the agent. Sends heartbeats. |
-| **Session Agent** | Logged-in user | One per interactive session, for **every** OS account | Screen capture, active window and app info, idle and lock state, browser-extension bridge. Shows the tray icon and the login notice (§12). Holds as little state as possible. |
-| **Tray UI** (Tauri) | Logged-in user | Optional | Status, pausing (which allies are told about), ally management, viewing your own reports. *Status ([#89](https://github.com/faro-project/faro/issues/89)): on macOS the status part lives in the session agent's menu-bar menu, not a separate app: what Faro is doing ("Monitoring", "Paused until …", "Not enrolled", "Waiting for approval in the web app", or a problem such as "Screen Recording is off" or "Can't reach *instance*") and what to do, with an item that opens the fix, plus "Open Faro" and "About Faro…". On Windows, the same menu is in the agent's tray icon (the notification area). It only shows state: nothing on it stops, pauses or hides monitoring. Pausing, ally management and reports stay in the web app.* |
+| **Session Agent** | Logged-in user | One per interactive session, for **every** OS account | Screen capture, active window and app info, idle and lock state, browser-extension bridge (*planned*). Shows the tray icon and the login notice (§12). Holds as little state as possible. |
+| **Tray UI** (Tauri, *planned*) | Logged-in user | Optional | Status, pausing (which allies are told about), ally management, viewing your own reports. *Status ([#89](https://github.com/faro-project/faro/issues/89)): on macOS the status part lives in the session agent's menu-bar menu, not a separate app: what Faro is doing ("Monitoring", "Paused until …", "Not enrolled", "Waiting for approval in the web app", or a problem such as "Screen Recording is off" or "Can't reach *instance*") and what to do, with an item that opens the fix, plus "Open Faro" and "About Faro…". On Windows, the same menu is in the agent's tray icon (the notification area). It only shows state: nothing on it stops, pauses or hides monitoring. Pausing, ally management and reports stay in the web app. Nothing can start a pause yet: the service handles a pause request and sends the `paused` and `resumed` events, but no control sends one ([STATUS.md](STATUS.md)).* |
 
 **Why split it:** screen capture *has* to happen inside the user's graphical session. Keys, the queue of unsent events and the classifier live in the privileged service, which a standard user cannot touch. If the agent is killed, the service relaunches it and logs `agent_restarted`. If the service is killed, the instance sees heartbeats stop.
 
@@ -117,23 +117,25 @@ faro/
 │   ├── faro-platform/      # trait definitions (Capture, ActiveWindow, Idle, ...)
 │   ├── faro-platform-macos/
 │   ├── faro-platform-windows/
-│   ├── faro-platform-linux/
+│   ├── faro-platform-linux/ # session parsing only; no capture yet (planned)
 │   ├── faro-service/       # bin: privileged service
 │   ├── faro-agent/         # bin: session agent
 │   ├── faro-update/        # TUF-style signed update verification (shared w/ server mirror)
-│   └── faro-proto/         # wire types shared with server + web (serde + typeshare → TS)
+│   └── faro-proto/         # wire types shared with server + web (serde; the web app's TS types are
+│   │                       # hand-written, generating them is planned)
 ├── apps/
-│   ├── tray/               # Tauri v2 app
-│   └── extension/          # WebExtension MV3 (Chrome, Edge, Firefox, Brave)
+│   ├── tray/               # Tauri v2 app (planned, not in the tree)
+│   ├── extension/          # WebExtension MV3 (planned, not in the tree)
+│   └── android/, ios/      # the phone clients (ANDROID.md, IOS.md)
 ├── server/                 # faro-server: axum API, workers, admin console, embedded web app
 ├── web/                    # Ally + member web app (SvelteKit, adapter-static)
-├── deploy/                 # Dockerfile, docker-compose.yml, systemd unit, Helm chart (later)
+├── deploy/                 # Dockerfile, docker-compose.yml, systemd unit; a Helm chart is planned
 ├── models/                 # model cards, export scripts, eval harness
-├── installers/             # pkg/notarization, MSI/WiX, deb/rpm
+├── installers/             # pkg/notarization, MSI/WiX; deb/rpm are planned
 └── docs/
 ```
 
-**Why Rust:** one language across the service, the agent, Tauri and the server. Memory safety matters in a privileged process. It produces small static binaries, which also matters for self-hosters on small hardware.
+**Why Rust:** one language across the service, the agent, Tauri and the server. Memory safety matters in a privileged process. It produces small binaries, which also matters for self-hosters on small hardware.
 
 **Platform traits** that every OS crate implements:
 
@@ -156,8 +158,8 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | ⚠ Risk | Recent macOS versions periodically ask users to re-confirm screen-capture access. A Phase 0 spike needs to confirm the current behavior. Worst case: the re-prompt is a normal step, and declining it reports as tamper. |
 | Service | A **LaunchDaemon** (`SMAppService.daemon`) plus a **global LaunchAgent** in `/Library/LaunchAgents`, so the agent starts in every account's session, including accounts created after install. `KeepAlive` on both. |
 | Active window | `NSWorkspace` for the frontmost app. Window titles go through `AXUIElement` (Accessibility permission, optional; revoking it is reported). |
-| Browser URL | Extension first. Fallback: Accessibility for Safari, Chrome, Edge, Brave and Arc (the page's `AXURL`, else the address field), with the same permission as window titles. Not AppleScript, which needs an Automation permission for each browser. Only `scheme://host/` leaves the agent, since domain categorization and the report use only the host. Private windows can't be told apart this way, so `incognito` is false until the extension reports it. |
-| Network signals (Phase 2) | A Network Extension DNS proxy as a System Extension. |
+| Browser URL | The browser extension is planned and isn't built; today the URL comes from Accessibility for Safari, Chrome, Edge, Brave and Arc (the page's `AXURL`, else the address field), with the same permission as window titles. Not AppleScript, which needs an Automation permission for each browser. Only `scheme://host/` leaves the agent, since domain categorization and the report use only the host. Private windows can't be told apart this way, so `incognito` is false until the extension reports it. |
+| Network signals (planned, Phase 2) | A Network Extension DNS proxy as a System Extension. Not built on desktop. |
 | Distribution | A Developer ID signed + notarized `.pkg`, built and signed **once by the Faro project**. The installer is the same for every instance (§3.8). It installs `/Library/Faro/bin/faro-uninstall`, which sends the `goodbye` (§3.7) before removing anything. |
 
 #### Windows (10 22H2+, 11)
@@ -168,13 +170,15 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | Service | A **LocalSystem** service with recovery actions. It launches the agent into every interactive session of every account, console and remote (`WTSQueryUserToken` + `CreateProcessAsUser`), and follows session changes. |
 | Self-protection | The service DACL denies stop and delete to non-admins. State lives in `%ProgramData%\Faro` with a SYSTEM-only ACL. |
 | Active window | `GetForegroundWindow`, `GetWindowText` and `QueryFullProcessImageName`. |
-| Browser URL | Extension first. Fallback: UI Automation. |
-| Network signals (Phase 2) | **ETW** `Microsoft-Windows-DNS-Client`, which needs no kernel driver. |
+| Browser URL | UI Automation today. The browser extension is planned and isn't built. |
+| Network signals (planned, Phase 2) | **ETW** `Microsoft-Windows-DNS-Client`, which needs no kernel driver. |
 | Distribution | MSI (WiX 5), signed by the project through the **SignPath Foundation** (free for OSS) or Azure Trusted Signing. |
 
 *Status (Windows, `0.1.0-beta.1`): implemented for x64 only (arm64 later), on Windows 10 22H2 (build 19045) and Windows 11. Capture is DXGI Desktop Duplication, with GDI as the fallback (for example in some Remote Desktop sessions and VMs). Browser addresses come from UI Automation in Edge, Chrome, Brave, Firefox, LibreWolf, Waterfox, Zen and Floorp, since the browser extension isn't built yet. The service is a LocalSystem service (`FaroService`) that starts automatically and restarts after a failure (after 5 s, 10 s and 30 s). Standard users can't stop, change or delete it. State lives in `%ProgramData%\Faro`, which only SYSTEM and Administrators can access. The MSI is per-machine and built with WiX 5.0.2. No Windows release is published yet, because the signing provider (SignPath Foundation or Azure Trusted Signing) isn't chosen.*
 
-#### Linux (Ubuntu 22.04+, Fedora 39+; X11 and Wayland)
+#### Linux (Ubuntu 22.04+, Fedora 39+; X11 and Wayland): planned
+
+*Status: not built. `faro-platform-linux` parses sessions only, and the agent refuses to run on Linux ([STATUS.md](STATUS.md)). The table is the design.*
 
 | Concern | Approach |
 |---|---|
@@ -183,15 +187,15 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 | ⚠ Risk | Wayland differs between GNOME, KDE and wlroots, so Linux ships in Phase 2, after a spike. |
 | Service | A systemd system unit (the service) and a **global** user unit (`systemctl --global enable`) bound to `graphical-session.target` (the agent), so it starts for every account. Sessions are found through `logind`. |
 | Active window | X11 `_NET_ACTIVE_WINDOW`. On Wayland: the extension plus desktop-specific D-Bus where available. |
-| Distribution | `.deb` and `.rpm` from a project-signed apt/dnf repo. |
+| Distribution | `.deb` and `.rpm` from a project-signed apt/dnf repo (planned; none exist). |
 
 ### 3.4 Capture scheduling
 
-- **Randomized interval**: exponential distribution with a mean of about 60 s, bounded to 15–180 s. The mean is configurable per member (30–300 s), and changing it notifies allies.
+- **Randomized interval**: exponential distribution with a mean of about 60 s, bounded to 15–180 s. The mean is configurable per member (30–300 s), and changing it notifies allies. *Status: today it is set in the service's `service.toml`; no web or menu control exists yet.*
 - **Burst mode**: after a borderline or flagged result, sample every 5–10 s for 2 minutes.
 - **Skip unchanged frames**: if the perceptual hash (dHash) matches the last frame, reuse the previous result.
 - **Pause** while the screen is locked, the session is idle or the display is asleep, and record these states so gaps in the timeline are explained.
-- **Event triggers**: a foreground-app change, a new URL or a watch-listed DNS domain causes a capture 1–3 s later.
+- **Event triggers**: a foreground-app change, a new URL or a watch-listed DNS domain causes a capture 1–3 s later. *Status: the DNS trigger is mapped in the scheduler and never raised on desktop (the DNS and network signals are planned).*
 - **Budget**: under 1% average CPU, under 150 MB RSS including the model.
 
 ### 3.5 Detection pipeline (on-device)
@@ -216,13 +220,13 @@ frame ─▶ dHash dedupe ─▶ preprocess
 - **Training data:** no model trained on a dataset with documented child sexual abuse material. Today that means NudeNet's dataset and LAION-5B, and the list grows with any later finding. A model's training data must be disclosed well enough to check this.
 - Baseline for the beta: **OpenNSFW** (Yahoo, BSD-2-Clause), converted by the project from Yahoo's original weights to ONNX and quantized to int8. It is ImageNet-pretrained, which is allowed for this baseline only. NudeNet is excluded: it is GPL or AGPL, and its dataset contained CSAM.
 - Long term: **a permissively licensed OpenCLIP image encoder that isn't ImageNet-based, with Faro's own linear heads** for each category (explicit, suggestive, gambling, violence). Adding a category only means shipping a new head. MobileCLIP no longer qualifies: Apple relicensed its weights as research-only in 2025.
-- Runtime: `ort` with CoreML, DirectML and CPU execution providers. Target under 80 ms per frame on CPU.
+- Runtime: `ort`, with CPU execution only today; CoreML and DirectML providers are planned. Target under 80 ms per frame on CPU.
 - **Screenshot domain gap**: a screenshot-specific eval set, curated by the maintainer and kept outside the repository because it contains explicit imagery. `models/eval-baseline.json` holds its metrics (never images), and CI fails on regressions (DEVELOPMENT.md "Model benchmark").
 - Later: on-device OCR (Apple Vision, `Windows.Media.Ocr`) combined with keyword lists.
 
-**Context signals.** Domain categorization uses open blocklists (check licenses: StevenBlack/hosts is MIT; review OISD and UT1 terms) compiled into an FST or Bloom filter and shipped as a signed bundle. The browser extension reports `{url, title, incognito}` over native messaging. A browser in use without the extension is reported as context.
+**Context signals.** Domain categorization uses open blocklists (check licenses: StevenBlack/hosts is MIT; review OISD and UT1 terms) compiled into an FST or Bloom filter and shipped as a signed bundle. The browser extension (*planned*) will report `{url, title, incognito}` over native messaging; today the agent reads the URL from Accessibility or UI Automation. A browser in use without the extension is reported as context.
 
-**Fusion and policy.** An explainable rules engine. Every event carries its **reasons** (`image:explicit 0.93`, `domain:adult`). Members can mark a flag as a false positive in their own view, and allies see that note.
+**Fusion and policy.** An explainable rules engine. Every event carries its **reasons** (`image:explicit 0.93`, `domain:adult`). Members can mark a flag as a false positive in their own view, and allies see that note. *Status: partly built. The report has the field and allies' view shows it, but nothing sets it: the report builder always writes none, and no control marks a flag.*
 
 ### 3.6 Event model and the tamper-evident log
 
@@ -244,7 +248,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 ```
 
 - **Hash chain**: if events are deleted or reordered locally, the chain breaks. The instance checks continuity on headers only and raises an urgent `chain_gap` alert.
-- **Device signing**: Ed25519 over every header (so `urgency` can't be forged or downgraded in transit). Keys live in the Keychain / Secure Enclave on macOS, TPM via CNG on Windows, and a root-only file or TPM2 on Linux. *Status: the TPM and CNG keys are not done. On Windows the keys are files in the SYSTEM-only state directory, the same as on macOS today.*
+- **Device signing**: Ed25519 over every header (so `urgency` can't be forged or downgraded in transit). Keys live in the Keychain / Secure Enclave on macOS, TPM via CNG on Windows, and a root-only file or TPM2 on Linux. *Status: Keychain, Secure Enclave, TPM and CNG keys are planned for desktop and Android. On macOS and Windows the key is a file in the protected state directory (`device.key`). Only the iOS app uses the Keychain.*
 - **Outbox**: SQLite in the service's protected directory. It only holds encrypted bodies, keeps about 30 days of data while offline and prunes oldest-clean-first.
 - **Clock tampering**: wall-clock and monotonic deltas are compared with each other and with the server's `Date` header.
 - **Which OS account**: flag and tamper bodies record the OS account the event came from, as a short local label (the account's short name). It lives inside the encrypted body only, so the instance never sees it, while allies and the member can tell accounts apart. Reports group the timeline by account.
@@ -265,9 +269,9 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Heartbeats claim events the instance never received, for longer than the grace period | Instance (`upload_stalled`) | urgent | "Laptop-X isn't sending what it records" |
 | An active computer removed by its member | Instance (`device_removed`) | urgent | "Laptop-X was removed" |
 | Uninstall (`goodbye`) | Uninstaller | urgent | "Faro was uninstalled from Laptop-X" |
-| Binary or model integrity failure | Service | urgent | Alert |
+| Binary or model integrity failure (*partly built*: Windows checks program-file ACLs; macOS doesn't check the binaries) | Service | urgent | Alert |
 | Clock manipulation | Service | urgent | Alert |
-| Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
+| Settings change, ally removed, pause (a pause can't be started yet) | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
 | Screen Time access revoked, web filter off or Screen Time settings cleared (iPhone: `screen_time_revoked`, `filter_off`, `settings_cleared`; docs/IOS.md §10.2) | iPhone app and tunnel | urgent | "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed" |
 | Accessibility service turned off, a `FLAG_SECURE` window kept in front, or Device Admin deactivation requested (Android: `permission_revoked` for `accessibility_service` and `device_admin`, `window_hidden_from_capture`; docs/ANDROID.md §8) | Android app | urgent | "Accessibility is off on Phone-X", "A window was hidden from Faro on Phone-X", "Faro's uninstall protection is being turned off on Phone-X" |
@@ -303,7 +307,7 @@ Every urgent signal in this table, and removing an ally, reaches people as a tam
 2. The public-key directory: device signing keys and ally encryption keys, both counter-signed by members.
 3. **Encrypted mailbox**: accept signed and encrypted events and reports, and store the blobs.
 4. **Liveness monitor**: heartbeats → missed-check-in alerts.
-5. **Notifier**: email or Web Push, timed by urgency. Notifications carry no content.
+5. **Notifier**: email (Web Push is planned), timed by urgency. Notifications carry no content.
 6. Invites, relationships and instance administration.
 7. Update mirror.
 
@@ -311,23 +315,23 @@ It does **not** run ML, decrypt anything, build reports or hold any unblurred im
 
 ### 4.2 Packaging: optimized for non-expert admins
 
-| Concern | Default | Scales to |
-|---|---|---|
-| Delivery | **Single static binary** (`faro-server`) and an official **container image** (multi-arch: amd64, arm64) | Helm chart (later) |
-| Database | **SQLite** (WAL, `sqlx`), a single file | **Postgres** for colleges or large ministries (same code via `sqlx`, chosen by `DATABASE_URL`) |
-| Blob storage | **Local disk** directory | Any S3-compatible store (MinIO, R2, B2, AWS) |
-| HTTPS | **Built-in ACME** (`rustls-acme`) when given a domain | Behind an existing reverse proxy (Caddy, nginx, Traefik) with `--behind-proxy` |
-| Email | Any **SMTP** server (church Google Workspace / Microsoft 365, Mailgun, SES) | n/a |
-| Push | **Web Push (VAPID)**, keys generated on first run | n/a |
-| Web app | Ally, member and admin UIs **embedded in the binary** and served from the same origin | n/a |
-| Jobs | In-process workers (liveness, notifier, retention, update mirror) | Separate `faro-server worker` processes on Postgres |
-| Backups | `faro-server backup` writes a consistent snapshot (DB + blobs) to a tarball or S3 | n/a |
-| Config | A single `faro.toml` plus env-var overrides. A first-run web setup wizard creates the admin account and tests SMTP | n/a |
+| Concern | Default | Scales to | Status |
+|---|---|---|---|
+| Delivery | A `faro-server` binary and an official **container image** (multi-arch: amd64, arm64) | Helm chart | Binary and image built. The binary is glibc-linked, not static (`deploy/Dockerfile`). Helm chart planned. |
+| Database | **SQLite** (WAL, `sqlx`), a single file | **Postgres** for colleges or large ministries (same code via `sqlx`, chosen by `FARO_DATABASE_URL`) | SQLite built. Postgres is experimental and unsupported in the beta. |
+| Blob storage | **Local disk** directory | Any S3-compatible store (MinIO, R2, B2, AWS) | Local disk built. S3 planned (`server/src/blob.rs`). |
+| HTTPS | **Built-in ACME** (`rustls-acme`) when given a domain | Behind an existing reverse proxy (Caddy, nginx, Traefik) with `--behind-proxy` | Built. |
+| Email | Any **SMTP** server (church Google Workspace / Microsoft 365, Mailgun, SES) | n/a | Built. |
+| Push | **Web Push (VAPID)**, keys generated on first run | n/a | Planned. Only a CHECK constraint in `0001_init.sql` mentions it. |
+| Web app | Ally, member and admin UIs **embedded in the binary** and served from the same origin | n/a | Built. The bundle isn't signed and has no Subresource Integrity (§5.3). |
+| Jobs | In-process workers (liveness, notifier, retention, update mirror) | Separate `faro-server worker` processes on Postgres | In-process built. The `worker` subcommand is planned. |
+| Backups | `faro-server backup` writes a consistent snapshot (DB + blobs) to a tarball or S3 | n/a | Tarball built. S3 planned. |
+| Config | A single `faro.toml` plus env-var overrides. A first-run web setup wizard creates the admin account and tests SMTP | n/a | Built. |
 
 **Hosting options, documented for each kind of host:**
 - **Individual / small group**: a $5 VPS, a Raspberry Pi 4/5 at home, or a home server. For a home server without a public IP, use **Cloudflare Tunnel or Tailscale Funnel**. Devices need to reach the instance from anywhere, so a LAN-only instance isn't supported.
 - **Church / ministry**: a VPS or existing church IT server via `docker compose up -d`.
-- **College**: their own infrastructure, with Postgres, S3, an internal SMTP relay and optional SSO (§4.5).
+- **College**: their own infrastructure, with Postgres and S3 (both planned), an internal SMTP relay and optional SSO (§4.5).
 
 **Resource guide** (estimated; confirm in Phase 1):
 
@@ -389,7 +393,7 @@ proposal_blocks(user_id, blocked_id, created_at)
 
 ```
 GET  /.well-known/faro            instance id, name, identity pubkey, server version, min client version
-POST /v1/auth/...                 passkeys (WebAuthn) primary, email magic link fallback
+POST /v1/auth/...                 email sign-in link today; passkeys (WebAuthn) are planned
                                   (Phase 2: OIDC/SAML SSO for colleges, for login only; keys stay user-held)
 POST /v1/devices/enroll           {enroll_code, sign_pubkey, platform}
 GET  /v1/members/{id}/allies/keys member-signed ally pubkeys
@@ -397,7 +401,7 @@ POST /v1/events:batch             signed headers (incl. urgency) + ciphertext
 POST /v1/heartbeat                signed {seq, ts, state}
 POST /v1/reports                  encrypted report blob + envelopes
 GET  /v1/ally/feed                metadata list of reports and alerts, and each device's platform
-GET  /v1/blobs/{id}               ciphertext (served directly or via presigned S3 URL)
+GET  /v1/blobs/{id}               ciphertext (served directly; presigned S3 URLs are planned)
 GET  /v1/updates/...              mirrored, project-signed update metadata + artifacts
 POST /v1/invites, /accept         ally invitations
 POST|GET /v1/groups               create a group; list your groups (GROUPS.md §16)
@@ -468,7 +472,7 @@ Self-hosting means many operators with varying security skills. The design assum
 | Insert their own ally key | Ally keys must be member-signed |
 | Forge or suppress urgent events | Headers are device-signed, and suppression shows up as a gap in the member's own view and the hash chain |
 | Push a malicious client update | Clients verify **project** signatures, not instance signatures |
-| **Serve malicious web-app JavaScript to steal ally keys** | The hardest risk, common to all web E2EE. Mitigations: (a) the embedded web app is a **project-signed, versioned bundle**, and the server refuses to start with an unsigned bundle unless run in `--dev`; (b) a **Faro Ally desktop app** (Tauri, project-signed, Phase 2) gives security-sensitive allies a client that doesn't load code from the instance; (c) Subresource Integrity plus a strict CSP; (d) document honestly that an ally using the web app trusts the instance operator not to modify the code |
+| **Serve malicious web-app JavaScript to steal ally keys** | The hardest risk, common to all web E2EE. Mitigations: (a) *planned, not built:* the embedded web app is a **project-signed, versioned bundle**, and the server refuses to start with an unsigned bundle unless run in `--dev` (today the server serves whatever bundle it was built with); (b) *planned:* a **Faro Ally desktop app** (Tauri, project-signed, Phase 2) gives security-sensitive allies a client that doesn't load code from the instance; (c) a strict CSP (built), plus Subresource Integrity (*planned*, not built); (d) document honestly that an ally using the web app trusts the instance operator not to modify the code |
 | Make a page look like a Faro security message (instance branding) | Branding is plain text, one short line, labelled as the instance admins', and shown only in page chrome (header, footer, sign-in and setup pages), never in alerts, feeds, reports, safety codes, fingerprints, tamper warnings, enrollment or emails. The logo is decoded and re-encoded to PNG by the server (SVG refused) and always sits next to Faro's, never in place of it |
 | See metadata | Accepted: who is linked to whom, device counts, timing, event kinds and **urgency levels** (§5.4). Documented in the operator privacy notice |
 
@@ -478,7 +482,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 | Urgency | Produced by | Default delivery |
 |---|---|---|
-| `urgent` | `high` rating flag, `medium` rating flag (by default), every tamper event, uninstall, chain gap, invalid signature, missed check-in past grace, upload stall, a computer removed by its member, an account disabled by an admin, a member asking for their account to be deleted | **Immediate** email + Web Push |
+| `urgent` | `high` rating flag, `medium` rating flag (by default), every tamper event, uninstall, chain gap, invalid signature, missed check-in past grace, upload stall, a computer removed by its member, an account disabled by an admin, a member asking for their account to be deleted | **Immediate** email (Web Push is planned) |
 | `normal` | `medium` flag (if the member chooses), settings change, ally added or removed, pause or resume, an account re-enabled, an ally deleting their account, a deletion cancelled | Bundled into the **next hourly digest** |
 | `none` | Clean captures, heartbeats, low-rated flags, context signals | Only in the daily report |
 
@@ -521,9 +525,9 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 ## 6. Reports and the ally experience
 
-- **Daily reports are built on the device** (weekly is optional). Each contains an activity timeline, counts by rating, flagged moments with reasons and blurred thumbnails, optional top domains and apps (off by default), and a tamper and health summary.
+- **Daily reports are built on the device** (daily only today; weekly reports are planned). Each contains an activity timeline, counts by rating, flagged moments with reasons and blurred thumbnails, optional top domains and apps (off by default; turned on in `service.toml` today, with no web or menu control), and a tamper and health summary.
 - **Urgent and normal items** go out as small encrypted events and trigger notifications according to §5.4.
-- **Ally web app** (served by the instance; desktop app in Phase 2): unlock with a passphrase or a passkey PRF, decrypt locally. Feed per member, urgency badges, device health, and conversation prompts. The product's real goal is honest conversation, not policing. *Status: the web app has the member and ally pages. Keys unlock with a passphrase or recovery code (passkey PRF not yet); the crypto is a pure-JS TypeScript port of `faro-crypto`, since the page CSP rules out WebAssembly, checked against shared test vectors.*
+- **Ally web app** (served by the instance; desktop app in Phase 2): unlock with a passphrase or a passkey PRF (*planned*), decrypt locally. Feed per member, urgency badges, device health, and conversation prompts. The product's real goal is honest conversation, not policing. *Status: the web app has the member and ally pages. Keys unlock with a passphrase or recovery code (passkey PRF not yet); the crypto is a pure-JS TypeScript port of `faro-crypto`, since the page CSP rules out WebAssembly, checked against shared test vectors.*
 - **Member view**: exactly what allies see, plus the false-positive note.
 - **An ally of members on several instances** has one account per instance in v1. The ally desktop app (Phase 2) can hold several instance accounts in one place.
 
@@ -533,15 +537,15 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 **Instance admin**
 1. `docker compose up -d` (or run the binary), point DNS at it, open `https://faro.example.org/setup`.
-2. The setup wizard asks for the instance name, the admin account (passkey), SMTP settings (with a test email), the registration mode and the retention period.
+2. The setup wizard asks for the instance name, the admin account (signed in by an emailed link; passkeys are planned), SMTP settings (with a test email), the registration mode and the retention period.
 3. The admin invites members, or shares the signup link.
 
 **Member**
 1. Accepts the invite, creates an account and a member key (passphrase + recovery code).
-2. Downloads the official installer (linked from the instance), installs it and grants OS permissions with guided screens. The installer says plainly that **every account on this computer will be monitored** and suggests disabling the guest account. Enrolling the device (step 3) lists the existing accounts and warns if the guest account is on, before monitoring starts.
+2. Downloads the official installer (the web app's computers page doesn't link to it yet), installs it and grants OS permissions with guided screens. The installer says plainly that **every account on this computer will be monitored** and suggests disabling the guest account. Enrolling the device (step 3) lists the existing accounts and warns if the guest account is on, before monitoring starts.
 3. Enrolls the device using the instance link or QR code, confirms the instance name, and the member key signs the device key.
 4. Invites allies, who might be on the same instance or people who only ever use that instance's ally login.
-5. Optional: browser extension, a standard user account, and an ally who holds the admin password.
+5. Optional: browser extension (*planned*), a standard user account, and an ally who holds the admin password.
 
 ---
 
@@ -564,8 +568,9 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
   4. A malicious update. Project-signed, TUF-style updates verified on the client.
 - The service never decodes image formats from the network or from the agent; it gets raw pixels only.
 - `cargo fuzz` covers the IPC, wire and update-metadata parsers.
-- Reproducible builds for the client and server.
-- **Secure defaults for operators**: invite-only registration, admin passkey, automatic HTTPS, security headers, rate limiting, and a `faro-server doctor` command that checks the configuration (TLS, SMTP, backups, disk space, update freshness).
+- Reproducible builds for the client and server (*planned*, not built).
+- **Secure defaults for operators**: invite-only registration, automatic HTTPS (an admin passkey is planned), security headers, rate limiting, and a `faro-server doctor` command that checks the configuration (TLS, SMTP, backups, disk space, update freshness).
+- **Every account is as strong as its mailbox.** Sign-in is by an emailed link only, because passkeys aren't built. Anyone who controls an account's mailbox can sign in as that person, whether member, ally or admin, so operators and users should protect mailboxes with two-factor sign-in. Report contents stay protected by the passphrase and recovery code, which the server never sees.
 - A third-party audit of the crypto and update design before 1.0.
 
 ---
@@ -573,9 +578,9 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 ## 10. Testing strategy
 
 - Unit and property tests for `faro-core`, `faro-crypto` and `faro-update`. The detection eval suite runs in CI.
-- Platform CI matrix: macOS (Apple Silicon and Intel), Windows (x64) and Linux (x64) on GitHub's hosted runners (DEVELOPMENT.md, CI runners). Linux display tests use Xvfb plus headless Weston.
+- Platform CI matrix: macOS (Apple Silicon and Intel), Windows (x64) and Linux (x64) on GitHub's hosted runners (DEVELOPMENT.md, CI runners). Linux display tests with Xvfb plus headless Weston are planned: there is no Linux client yet.
 - **A test that no unblurred frames are kept**: run the pipeline under an instrumented allocator or file-system watcher and assert that no frame-sized buffer is written to disk or IPC beyond the classifier, and that every persisted image is a blurred thumbnail.
-- E2E: the server in both SQLite and Postgres modes, plus a headless client in synthetic-capture mode, with Playwright driving the ally app to check decryption, urgency routing and digest timing.
+- E2E: the server plus a headless client in synthetic-capture mode. Today the suite runs on SQLite only and plays the ally's browser with `faro-crypto`; the Postgres mode and Playwright driving the ally app, to check decryption, urgency routing and digest timing, are planned.
 - Tamper tests: kill the agent, revoke permissions, delete outbox rows, take the instance down → expect the right alerts, with no false alarms from instance downtime.
 - Self-host tests: the container image boots on arm64 (a Raspberry Pi in QEMU), the setup wizard completes, and backup → restore works.
 
@@ -593,7 +598,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 Institutions running instances (churches, colleges) make consent even more important. The architecture enforces it:
 
-- **Never invisible**: a persistent tray icon that can't be hidden, plus a monthly on-device notice listing the current allies (by the names the member signed, PROTOCOL.md §5.1) and the instance name and operator. The icon and the notices belong to the session agent, not the optional tray app, because the agent is the process that is always running in every session (§3.1): if it is killed, launchd restarts it and the service raises tamper. *Status (macOS): a menu-bar icon with no Quit item that can't be dragged out of the menu bar. macOS 26 and later let the user turn menu-bar items off in System Settings, and the agent doesn't detect that yet.* *Status (Windows): a tray icon with no Exit item. The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications. Hiding the icon in the notification area's overflow isn't detected: it is a display preference, and the agent and monitoring keep running.*
+- **Never invisible**: a persistent tray icon that can't be hidden, plus a monthly on-device notice (*planned*: today the agent shows only the notice at sign-in, which names no allies) listing the current allies (by the names the member signed, PROTOCOL.md §5.1) and the instance name and operator. The icon and the notices belong to the session agent, not the optional tray app, because the agent is the process that is always running in every session (§3.1): if it is killed, launchd restarts it and the service raises tamper. *Status (macOS): a menu-bar icon with no Quit item that can't be dragged out of the menu bar. macOS 26 and later let the user turn menu-bar items off in System Settings, and the agent doesn't detect that yet.* *Status (Windows): a tray icon with no Exit item. The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications. Hiding the icon in the notification area's overflow isn't detected: it is a display preference, and the agent and monitoring keep running.*
 - **Everyone who uses the computer is told.** Monitoring covers every OS account (§3.1), so the tray icon and a login notice appear in every account's session: "This computer is monitored by Faro for *member*. Screenshots are blurred and shared with *allies*." Faro is meant for a computer the member controls. On a shared computer, everyone is monitored and everyone is told; the installer warns about this up front.
 - **The monitored person holds the account and keys.** Instance admins **cannot** enroll devices for someone else, become someone's ally on their own, or read content. A college or church can host the service but can't use it to monitor people who haven't opted in themselves.
 - **Full transparency**: the member sees everything allies see.
@@ -605,7 +610,7 @@ Institutions running instances (churches, colleges) make consent even more impor
   - **An admin can ask too**, under Admin → People (`DELETE /admin/api/users/{id}`): for an erasure request from someone who can no longer sign in, or to remove a disabled account. It is the same request, hold, notices and purge, with the same confirmation (a sign-in within 10 minutes, the account's address typed out). The notices say the account is "being deleted by the instance administrator", without naming the admin, and a disabled person is emailed too. The person keeps their sessions and the banner says who asked. During the hold the person or any admin can cancel, and a cancel tells the same people. A deletion the person asked for is theirs alone to cancel. The request and any cancel are written to the admin log and emailed to every admin. Admins can't delete their own account this way (they use Settings), and nobody can delete the last enabled admin. A disabled account stays disabled during the hold: re-enabling it means cancelling the deletion first.
   - **What remains** after a purge: the person's opaque user id and public keys inside *other* members' signed event headers and recipient-manifest history (signed data can't be edited), alert detail codes on other members' alerts that name the id (for example `ally=usr_…`), the keyed hashes of their computers' tokens for 365 days (so the computers get a clear refusal), server log lines with the id, and older backups until they are rotated out.
 - **No unblurred images anywhere**, which limits harm if devices, outboxes or instances are compromised.
-- **Operator privacy notice**: the setup wizard generates a plain-language notice of what the operator can and cannot see, and members are shown it at signup.
+- **Operator privacy notice**: the setup wizard generates a plain-language notice of what the operator can and cannot see, and members are shown it at signup. *Status: partly built. The dashboard links to the notice and `/privacy` shows it; nothing shows it at signup.*
 - **Minors**: out of scope for v1, and the docs say colleges should not enroll minors without a separate design and legal review.
 - **Legal**: each operator is the data controller for their instance. The project ships template privacy text (GDPR/FERPA considerations for colleges) but gives no legal advice. Because images are always blurred and E2EE, operators can't see content, but the docs should still cover what to do if an ally reports seeing apparently illegal material.
 
@@ -622,7 +627,7 @@ Institutions running instances (churches, colleges) make consent even more impor
 6. `faro-server` skeleton on SQLite with built-in ACME, running on a Raspberry Pi.
 
 **Phase 1: MVP (macOS + Windows clients, self-hostable server)**
-Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college). *Status of the tray UI: on macOS, the agent's menu-bar status menu ([#89](https://github.com/faro-project/faro/issues/89), §3.1); no separate tray app. On Windows the agent's tray icon has the same menu.*
+Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college). *Not all of Phase 1 as listed is built: Postgres, S3 storage and backup, Web Push, the tray app and reproducible builds are planned ([STATUS.md](STATUS.md)). Status of the tray UI: on macOS, the agent's menu-bar status menu ([#89](https://github.com/faro-project/faro/issues/89), §3.1); no separate tray app. On Windows the agent's tray icon has the same menu.*
 
 **Phase 2: Hardening, Linux, institutions**
 Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups ([GROUPS.md §20](GROUPS.md#20-rollout) for the phases), `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
