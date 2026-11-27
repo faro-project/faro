@@ -819,6 +819,10 @@ async fn repeated_short_absences_add_up() {
     // e2e_support); that is the test's doing, not the agent's.
     let mut signals = tamper_signals(&w, &dev).await;
     signals.retain(|s| !matches!(s, TamperSignal::ClockManipulation { .. }));
+    // Scheduled captures fail while the agent is stopped; how many fall in
+    // each absence depends on the runner's speed (a slow Intel runner gets
+    // five in a row). That is its own signal, not what this test is about.
+    signals.retain(|s| !matches!(s, TamperSignal::CaptureFailing { .. }));
     assert!(
         matches!(signals.as_slice(), [TamperSignal::UnmonitoredUserSession { user }] if user == "alex"),
         "only the unmonitored session, not a kill loop: {signals:?}"
