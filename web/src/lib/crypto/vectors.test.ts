@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { fromUtf8, hex, unb64, unhex } from './bytes.ts';
+import { fromUtf8, hex, unb64, unhex, utf8 } from './bytes.ts';
 import { Canonical, hashToString } from './canonical.ts';
 import { encPublicKey, isWeakX25519, keyId, safetyCode, signPublicKey, verify } from './keys.ts';
 import {
@@ -23,12 +23,16 @@ import {
 	deviceEndorsementSigningBytes,
 	eventBodyAad,
 	keyRewrapSigningBytes,
+	MANIFEST_FORMAT_V1,
+	MANIFEST_FORMAT_V2,
 	manifestRef,
 	manifestSigningBytes,
 	memberBindingSigningBytes,
 	nextManifest,
 	proveAllyKeyRewrap,
+	MAX_ALLY_NAME_BYTES,
 	reportBodyAad,
+	sanitizeAllyName,
 	signWith,
 	validateManifest,
 	verifySigned,
@@ -232,6 +236,77 @@ test('manifest validation and the next version', () => {
 	assert.equal(next.issued_at_ms, m.issued_at_ms + 1);
 	assert.equal(validateManifest(next), null);
 	assert.ok(!('sig' in next));
+	// Every re-sign is format 2, unnamed allies signed with an empty name.
+	assert.equal(next.format, MANIFEST_FORMAT_V2);
+	assert.deepEqual(
+		next.allies.map((a) => a.name),
+		['', '']
+	);
+});
+
+test('format 2 manifests match Rust', () => {
+	const pk = unb64(K.member_sign_pubkey);
+	const seed = unb64(K.member_sign_seed);
+	const m = V.manifest_v2.signed as Signed<RecipientManifest>;
+	assert.equal(m.format, MANIFEST_FORMAT_V2);
+	assert.equal(validateManifest(m), null);
+	assert.equal(hex(manifestSigningBytes(m)), V.manifest_v2.signing_bytes_hex);
+	assert.deepEqual(manifestRef(m), { version: m.version, hash: V.manifest_v2.hash });
+	assert.equal(checkManifest(m, pk, V.ids.instance, V.ids.member), null);
+	const { sig, ...body } = m;
+	assert.equal(signWith(seed, body, manifestSigningBytes).sig, sig);
+
+	// The name is signed: a false name next to a real key fails, and so
+	// does relabelling the document as format 1 without its names.
+	const forged = { ...m, allies: m.allies.map((a, i) => (i ? a : { ...a, name: 'Mallory' })) };
+	assert.match(checkManifest(forged, pk, V.ids.instance, V.ids.member) ?? '', /signature/);
+	const downgraded = {
+		...m,
+		format: MANIFEST_FORMAT_V1,
+		allies: m.allies.map(({ ally_id, enc_pubkey }) => ({ ally_id, enc_pubkey }))
+	};
+	assert.match(checkManifest(downgraded, pk, V.ids.instance, V.ids.member) ?? '', /signature/);
+
+	// Names must fit the format.
+	const v1 = V.manifest.signed as Signed<RecipientManifest>;
+	const named = { ...v1, allies: v1.allies.map((a) => ({ ...a, name: 'x' })) };
+	assert.match(validateManifest(named) ?? '', /unsigned names/);
+	const unnamed = {
+		...m,
+		allies: m.allies.map(({ ally_id, enc_pubkey }) => ({ ally_id, enc_pubkey }))
+	};
+	assert.match(validateManifest(unnamed) ?? '', /no name/);
+	const long = { ...m, allies: m.allies.map((a) => ({ ...a, name: 'é'.repeat(129) })) };
+	assert.match(validateManifest(long) ?? '', /too long/);
+	assert.match(validateManifest({ ...m, format: 3 }) ?? '', /unknown format/);
+	// The next version keeps format 2 and signs the names it is given,
+	// sanitized.
+	const next = nextManifest(
+		m,
+		m.allies.map((a, i) => ({ ...a, name: i ? ' Pat\u202e\n Lee ' : a.name })),
+		0
+	);
+	assert.deepEqual(
+		next.allies.map((a) => a.name),
+		[m.allies[0].name, 'Pat Lee']
+	);
+	assert.equal(validateManifest(next), null);
+});
+
+test('ally names are sanitized exactly as in Rust', () => {
+	assert.ok(V.ally_names.length > 10);
+	// Inputs are UTF-8 hex: they hold bidi controls.
+	for (const v of V.ally_names as { input_hex: string; output: string }[]) {
+		const { output } = v;
+		const input = fromUtf8(unhex(v.input_hex));
+		assert.equal(sanitizeAllyName(input), output, JSON.stringify(input));
+		// Stable: sanitizing again changes nothing.
+		assert.equal(sanitizeAllyName(output), output);
+		assert.ok(utf8(output).length <= MAX_ALLY_NAME_BYTES);
+	}
+	// A lone surrogate (impossible in Rust strings) becomes U+FFFD, which is
+	// what UTF-8 encoding would have signed anyway.
+	assert.equal(sanitizeAllyName('a\ud800b'), 'a\ufffdb');
 });
 
 test('recovery codes', () => {

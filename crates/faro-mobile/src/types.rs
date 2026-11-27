@@ -102,6 +102,11 @@ pub enum GoodbyeOutcome {
 pub struct AllyRecord {
     /// The ally's account id on the instance.
     pub ally_id: String,
+    /// The ally's display name as the member signed it (a format 2
+    /// manifest), sanitized for display: no control or bidi characters, at
+    /// most 64 characters. `None` for a format 1 manifest, which names no
+    /// one, or an ally whose name was empty. Never from the instance.
+    pub name: Option<String>,
     /// The safety code of the member's key and this ally's key: the code
     /// the member and the ally compared when the ally was approved, which
     /// the member's web app shows next to the ally's name.
@@ -110,8 +115,9 @@ pub struct AllyRecord {
 
 /// Who this phone reports to, from the recipient manifest the member
 /// signed (docs/IOS.md §12): the monthly notice and "Who Faro reports to".
-/// The manifest carries keys, not names, so the allies are listed by
-/// safety code; the instance is named as enrollment recorded it.
+/// Each ally is listed by the name the member signed, when the manifest
+/// carries names (format 2), and always by safety code; the instance is
+/// named as enrollment recorded it.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RecipientsInfo {
     pub instance_name: String,

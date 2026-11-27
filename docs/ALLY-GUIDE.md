@@ -36,7 +36,7 @@ You'll get an email with the subject **"*Name* invited you to be their ally on *
 1. **Open the link** in the email. The page says **"You're invited to *instance*"**.
 2. **Sign in.** Click **Sign in with *your email***, then **Email me a sign-in link**. There is no password: Faro emails you a link instead. Open that link within 15 minutes, on the same computer and browser. It brings you back to the invitation. (If it doesn't, open the invitation link from the first email again.)
 3. **Set up your ally key.** Under **"Set up your ally key"**:
-   - Type **Your name** as the member knows you. They see it when they approve you.
+   - Type **Your name** as the member knows you. They see it when they approve you, and the member signs it into the list of people their devices report to, so their iPhone shows it too. If you change your name later, their phone shows the new one after the member next changes their allies.
    - Choose a **Passphrase** and type it again under **Type it again**. It must be at least 10 characters. Read [section 3](#3-your-passphrase-and-recovery-code) first.
    - Click **Create my key and accept**. It takes a few seconds.
 4. **Save your recovery code.** The page **"Save your recovery code"** shows it once and never again. Write it down, print it (**Print**) or copy it into a password manager (**Copy**). Then tick **I have saved my recovery code somewhere safe** and click **Show my safety code**.

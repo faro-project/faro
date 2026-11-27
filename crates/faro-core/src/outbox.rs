@@ -1769,6 +1769,20 @@ mod tests {
     }
 
     #[test]
+    fn format_2_names_persist_across_reopen() {
+        let mut e = env();
+        let v2 = e.f.sign(e.f.named_body(2));
+        let (set, _) = e.accept(&v2).unwrap();
+        e.reopen();
+        let back =
+            e.ob.current_recipients(&e.pinned(), &e.f.member)
+                .unwrap()
+                .unwrap();
+        assert_eq!(back, set);
+        assert_eq!(back.allies()[0].display_name().as_deref(), Some("Ally 0"));
+    }
+
+    #[test]
     fn checkpoint_cannot_regress() {
         let mut e = env();
         let v2 = e.f.manifest(2);

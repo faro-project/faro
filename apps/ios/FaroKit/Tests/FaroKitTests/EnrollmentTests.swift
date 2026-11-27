@@ -183,4 +183,20 @@ final class MonthlyNoticeTests: XCTestCase {
         XCTAssertEqual(MonthlyNotice.nextFire(enrolledAt: enrolled, after: date(2026, 12, 1), calendar: calendar),
                        date(2026, 12, 14, 15, 30))
     }
+
+    func testAlliesAreTitledByTheirSignedName() {
+        XCTAssertEqual(MonthlyNotice.allyTitle(name: "Alex Smith", position: 1), "Alex Smith")
+        // An older list names no one, and an empty name is no name.
+        XCTAssertEqual(MonthlyNotice.allyTitle(name: nil, position: 2), "Ally 2")
+        XCTAssertEqual(MonthlyNotice.allyTitle(name: "", position: 3), "Ally 3")
+        // Shown as typed, not as Markdown.
+        XCTAssertEqual(MonthlyNotice.allyTitle(name: "**Pat**", position: 1), "**Pat**")
+    }
+
+    func testNamesEveryAlly() {
+        XCTAssertTrue(MonthlyNotice.namesEveryAlly(["Alex", "Pat"]))
+        XCTAssertFalse(MonthlyNotice.namesEveryAlly(["Alex", nil]))
+        XCTAssertFalse(MonthlyNotice.namesEveryAlly(["Alex", ""]))
+        XCTAssertFalse(MonthlyNotice.namesEveryAlly([]))
+    }
 }

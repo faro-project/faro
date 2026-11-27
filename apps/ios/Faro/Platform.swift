@@ -199,7 +199,8 @@ enum NoticeScheduler {
     }
 
     /// The notification's text: who Faro reports to, as far as the signed
-    /// recipient list says (allies by count; the list names no one).
+    /// recipient list says. Allies by count only: the notification can show
+    /// on the lock screen, so the names are on the screen it opens.
     static func body(_ r: RecipientsInfo?) -> String {
         guard let r else {
             return "Tap to see who it reports to and which Faro instance holds the reports."

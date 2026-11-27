@@ -309,6 +309,7 @@ fn manifest_doc(
     allies: &[(&UserId, &EncryptionKeypair)],
 ) -> SignedRecipientManifest {
     member.endorse(RecipientManifest {
+        format: faro_proto::keys::MANIFEST_FORMAT_V2,
         instance_id: inst.clone(),
         member_id: mid.clone(),
         version,
@@ -319,6 +320,7 @@ fn manifest_doc(
             .map(|(id, k)| ManifestAlly {
                 ally_id: (*id).clone(),
                 enc_pubkey: k.public(),
+                name: Some(format!("Ally {id}")),
             })
             .collect(),
     })

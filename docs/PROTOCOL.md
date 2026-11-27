@@ -41,7 +41,8 @@ Tags in use:
 | `faro/ally-endorsement/v1` | Member-signed ally key |
 | `faro/device-endorsement/v2` | Member-signed device key, with the `min_manifest` anchor |
 | `faro/member-enc-key/v1` | Member's own encryption key binding |
-| `faro/recipient-manifest/v1` | Member-signed, versioned recipient list (§5.1) |
+| `faro/recipient-manifest/v1` | Member-signed, versioned recipient list, format 1 (§5.1) |
+| `faro/recipient-manifest/v2` | The same list in format 2, with the allies' names (§5.1) |
 | `faro/key-id/v1` | Key identifier |
 | `faro/safety-code/v1` | Safety code |
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
@@ -256,16 +257,34 @@ A device **pins the member's signing key at enrollment**, and everything it trus
 
 | Field | Type | Notes |
 |---|---|---|
+| `format` | u16 | `1` or `2`. Left out of format 1 JSON, and a missing `format` reads as `1` |
 | `instance_id` | string | |
 | `member_id` | string | |
-| `version` | u64 | Starts at 1 and goes up by exactly 1 with every change |
+| `version` | u64 | Starts at 1 and goes up by exactly 1 with every change, whatever the format |
 | `issued_at_ms` | i64 | |
 | `member_enc_pubkey` | 32 bytes | The member's own X25519 key |
-| `allies` | list | `{ally_id, enc_pubkey}` entries, at most 32, sorted strictly ascending by `ally_id` |
+| `allies` | list | `{ally_id, enc_pubkey}` entries in format 1, `{ally_id, enc_pubkey, name}` in format 2. At most 32, sorted strictly ascending by `ally_id` |
 
-- **Encoding:** `signing_bytes = Canonical("faro/recipient-manifest/v1").str(instance_id).str(member_id).u64(version).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, followed by `.str(ally_id).fixed(enc_pubkey)` for each ally in order.
+- **Encoding, format 1:** `signing_bytes = Canonical("faro/recipient-manifest/v1").str(instance_id).str(member_id).u64(version).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, followed by `.str(ally_id).fixed(enc_pubkey)` for each ally in order.
+- **Encoding, format 2:** the same fields under the tag `faro/recipient-manifest/v2`, followed by `.str(ally_id).fixed(enc_pubkey).str(name)` for each ally in order. `format` itself isn't encoded: the tag carries it.
 - **Identity:** a manifest's identity is `hash = BLAKE3(signing_bytes)`. A `ManifestRef` is `{version, hash}`.
 - **Uploads:** the member signs a new version whenever they approve or remove an ally, an ally's key rotates, or their own encryption key rotates. The instance stores the latest version and serves it at `GET /v1/members/{id}/recipient-manifest`.
+
+**Ally names (format 2).** Devices show the allies by name (the monthly notice, ARCHITECTURE.md §12), and the only ally list a device trusts is this one. So the names are inside the member's signature: an instance can't put a false name next to a real key, swap two names, or name anyone the member didn't sign.
+
+- **Where they come from.** The member's web app signs each ally's display name as the instance gives it to that page, which shows the same names (the member approves "*name*", and sees them on the **Allies** page). The web app signs every new version in format 2.
+- **Renames** don't force a new version: the instance never compares the names with its own. The next version the member signs, for any reason, carries the current names.
+- **Sanitizing.** Names are text people typed, so `sanitize_ally_name` (Rust, `faro_proto::keys`) and `sanitizeAllyName` (the web app) make them safe, the same way byte for byte. The web app applies it before signing, and devices apply it again before showing a name. In order:
+  1. remove C0 controls (other than the ones in the next item), `DEL`, C1 controls (other than `NEL`), `U+061C`, `U+200E`, `U+200F`, `U+202A` to `U+202E`, `U+2066` to `U+2069`, `U+FEFF` and `U+FFF9` to `U+FFFB`; turn tab, line feed, vertical tab, form feed, carriage return, `NEL` (`U+0085`), `U+2028` and `U+2029` into a space;
+  2. normalize to NFC;
+  3. collapse runs of spaces (`U+0020`) into one, and trim them from both ends;
+  4. keep at most 64 code points, then trim a trailing space again.
+
+  The removed characters are an explicit list, not a Unicode property, so implementations agree whatever their Unicode version. The joiners (`U+200C`, `U+200D`) stay, because emoji and some scripts need them. The test vectors' `ally_names` section has inputs and outputs, and `from_web.manifest_v2` is a manifest the web app signed from raw names.
+- **Verifying.** `validate()` refuses a format 1 manifest whose allies carry a `name` (it isn't signed), a format 2 manifest with an ally without one, a name longer than 256 bytes, and any other `format`. It doesn't refuse a name that isn't in sanitized form: a device sanitizes it before showing it. Refusing would make every recipient change, removals included, depend on two Unicode implementations agreeing. An empty name (after sanitizing) is no name: the device shows that ally by safety code only.
+- **The instance** stores and serves format 2 like format 1. It checks names for length only (`validate()`), and compares ally sets by id and key, never by name.
+
+**Compatibility.** Format 1 manifests keep their exact JSON, bytes and hashes, and still verify everywhere, so a `min_manifest` anchor or a checkpoint that names one stays valid. A device holding a format 1 manifest shows its allies by count and safety code, as before. A version may change format either way; a format 2 document and a format 1 document at the same version are different documents (equivocation). A client built before format 2 can't verify a format 2 manifest: it rejects it as a bad signature and keeps its last accepted list (the device rules below), so clients must understand format 2 before the member's web app signs it.
 
 **Device rules.** The device keeps a persisted checkpoint: the highest `ManifestRef` it has accepted, **together with that signed manifest itself**. Both are stored atomically in the outbox database. Storing the document, not just its ref, is what lets a device that restarts while offline, or whose instance withholds manifests, keep using its last accepted manifest.
 
@@ -273,7 +292,7 @@ A device **pins the member's signing key at enrollment**, and everything it trus
 
 A fetched manifest is accepted only if all of the following hold:
 
-1. It passes `validate()`: version ≥ 1, at most 32 allies, ids well formed, sorted and unique, and the member not listed as their own ally. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
+1. It passes `validate()`: a known format, version ≥ 1, at most 32 allies, ids well formed, sorted and unique, the member not listed as their own ally, and names only in format 2, at most 256 bytes each. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
 2. Its signature verifies against the **pinned** member signing key.
 3. `instance_id` and `member_id` match the enrollment.
 4. No key in it is a small-order X25519 point.
@@ -287,7 +306,7 @@ On any rejection the device keeps using its last accepted manifest and surfaces 
 
 **Recipients:** for every new item, the recipients are the member plus exactly the allies in the accepted manifest. The device refuses to queue anything sealed to a manifest other than its current checkpoint, so a stale recipient set held in memory can't keep encrypting to a removed ally.
 
-**Fetch limits:** clients cap the response body of `GET /v1/members/{id}/recipient-manifest` at 64 KiB before JSON parsing. A maximal manifest (32 allies, bounded ids) is a few KiB.
+**Fetch limits:** clients cap the response body of `GET /v1/members/{id}/recipient-manifest` at 64 KiB before JSON parsing. A maximal manifest (32 allies, bounded ids and names) is under 20 KiB.
 
 **Limits** (documented, not solved by v1):
 
@@ -419,3 +438,11 @@ The mirror is configured with the same root of trust (`updates.root`) and runs t
 | Hash chain input | header + ciphertext | header only, which commits to `body_hash` | Chain stays verifiable after body blobs expire |
 | `heartbeat` kind | An event kind | A separate signed message | Keeps the chain small, and liveness doesn't depend on upload order |
 | Context signals | Listed in the tamper table | Daily report only | The `tamper` kind is floored to `urgent` |
+
+## 10. Format changes
+
+Signed structures change by getting a new format and a new domain-separation tag, never by changing an existing encoding.
+
+| Structure | Change | Old format |
+|---|---|---|
+| Recipient manifest (§5.1) | Format 2 (`faro/recipient-manifest/v2`) adds each ally's display name inside the signed bytes, so devices can name allies without trusting the instance | Format 1 (`faro/recipient-manifest/v1`) still verifies and is still accepted everywhere |

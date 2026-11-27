@@ -24,6 +24,23 @@ public enum MonthlyNotice {
         return out
     }
 
+    /// How the notice screen titles the ally at `position` (from 1): the
+    /// name the member signed into the recipient list, or "Ally 2" when
+    /// the list names no one (one signed before names were added) or this
+    /// ally has no name. `name` comes from the Rust core, which has checked
+    /// the member's signature and sanitized it; it is shown verbatim, never
+    /// as Markdown.
+    public static func allyTitle(name: String?, position: Int) -> String {
+        if let name, !name.isEmpty { return name }
+        return "Ally \(position)"
+    }
+
+    /// Whether the list names every ally, so the screen can say the names
+    /// are the member's own and not the instance's.
+    public static func namesEveryAlly(_ names: [String?]) -> Bool {
+        !names.isEmpty && names.allSatisfy { !($0 ?? "").isEmpty }
+    }
+
     /// The first time it fires after `now`.
     public static func nextFire(enrolledAt: Date, after now: Date, calendar: Calendar = .current) -> Date? {
         calendar.nextDate(

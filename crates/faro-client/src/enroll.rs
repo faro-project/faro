@@ -428,7 +428,9 @@ pub fn device_client(
 mod tests {
     use super::*;
     use faro_crypto::{EncryptionKeypair, SigningKey};
-    use faro_proto::keys::{ManifestRef, RecipientManifest};
+    use faro_proto::keys::{
+        ManifestRef, RecipientManifest, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2,
+    };
 
     struct Fixture {
         member: SigningKey,
@@ -458,8 +460,10 @@ mod tests {
         }
     }
 
+    /// A format 2 manifest, each ally named "Ally <id>".
     fn manifest(f: &Fixture, version: u64, allies: &[&str]) -> SignedRecipientManifest {
         f.member.endorse(RecipientManifest {
+            format: MANIFEST_FORMAT_V2,
             instance_id: f.enrollment.instance_id.clone(),
             member_id: f.enrollment.member_id.clone(),
             version,
@@ -470,9 +474,20 @@ mod tests {
                 .map(|a| faro_proto::keys::ManifestAlly {
                     ally_id: UserId::new(*a),
                     enc_pubkey: EncryptionKeypair::generate().public(),
+                    name: Some(format!("Ally {a}")),
                 })
                 .collect(),
         })
+    }
+
+    /// `manifest` in format 1: no names.
+    fn unnamed(f: &Fixture, version: u64, allies: &[&str]) -> SignedRecipientManifest {
+        let mut body = manifest(f, version, allies).body;
+        body.format = MANIFEST_FORMAT_V1;
+        for a in &mut body.allies {
+            a.name = None;
+        }
+        f.member.endorse(body)
     }
 
     fn endorsement(f: &Fixture, anchor: ManifestRef) -> DeviceEndorsement {
@@ -619,5 +634,46 @@ mod tests {
             bootstrap_from_endorsement(&mut o, &v3, &f.enrollment, &e),
             Err(OutboxError::AlreadyBootstrapped { .. })
         ));
+    }
+
+    #[test]
+    fn bootstrap_keeps_signed_names_and_refuses_changed_ones() {
+        let f = fixture();
+        let v1 = manifest(&f, 1, &["usr_a", "usr_b"]);
+        let e = endorsement(&f, v1.body.reference());
+        let (_d, mut o) = outbox(&f);
+        // The instance swaps a name: the signature no longer covers it.
+        let mut renamed = v1.clone();
+        renamed.body.allies[1].name = Some("Ally usr_a".into());
+        assert!(matches!(
+            bootstrap_from_endorsement(&mut o, &renamed, &f.enrollment, &e),
+            Err(OutboxError::Manifest(
+                faro_core::RecipientError::BadSignature
+            ))
+        ));
+        let set = bootstrap_from_endorsement(&mut o, &v1, &f.enrollment, &e).unwrap();
+        let names: Vec<_> = set.allies().iter().map(|a| a.display_name()).collect();
+        assert_eq!(
+            names,
+            [Some("Ally usr_a".to_owned()), Some("Ally usr_b".to_owned())]
+        );
+    }
+
+    #[test]
+    fn bootstrap_accepts_format_1_without_names() {
+        let f = fixture();
+        let v1 = unnamed(&f, 1, &["usr_a"]);
+        let e = endorsement(&f, v1.body.reference());
+        let (_d, mut o) = outbox(&f);
+        // A name added to a format 1 document isn't signed: refused.
+        let mut named = v1.clone();
+        named.body.allies[0].name = Some("Mallory".into());
+        assert!(matches!(
+            bootstrap_from_endorsement(&mut o, &named, &f.enrollment, &e),
+            Err(OutboxError::Manifest(faro_core::RecipientError::Invalid(_)))
+        ));
+        let set = bootstrap_from_endorsement(&mut o, &v1, &f.enrollment, &e).unwrap();
+        assert_eq!(set.allies().len(), 1);
+        assert_eq!(set.allies()[0].display_name(), None);
     }
 }

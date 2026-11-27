@@ -268,11 +268,13 @@ impl FaroCore {
     }
 
     /// Who this phone reports to: the recipient manifest the member signed,
-    /// as the device verified and stored it (no network). The allies are
-    /// listed by the safety code of the member's key and theirs, which the
-    /// member's web app shows next to each ally's name; the manifest names
-    /// no one. Call [`FaroCore::upload_pending`] first to pick up a newer
-    /// manifest.
+    /// as the device verified and stored it (no network). Each ally comes
+    /// with the safety code of the member's key and theirs, which the
+    /// member's web app shows next to each ally's name, and, from a format 2
+    /// manifest, the name the member signed (sanitized again here), so the
+    /// instance can't put a false name next to a real key. A format 1
+    /// manifest names no one. Call [`FaroCore::upload_pending`] first to
+    /// pick up a newer manifest.
     pub fn allies(&self) -> Result<RecipientsInfo, FaroError> {
         let e = self.enrollment_record()?;
         let set = self
@@ -292,6 +294,7 @@ impl FaroCore {
                 .iter()
                 .map(|a| AllyRecord {
                     ally_id: a.ally_id.to_string(),
+                    name: a.display_name(),
                     safety_code: safety_code(member, a.enc_pubkey.as_bytes()),
                 })
                 .collect(),

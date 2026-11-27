@@ -12,12 +12,20 @@
 	// * Removing an approved ally signs the next list without them; the
 	//   server tells them and the other allies. When an ally leaves on their
 	//   own, the list still names them until the member signs a new one.
+	// * Every list is signed in format 2, with each ally's current display
+	//   name as this page shows it (`withNames`), so phones can name allies
+	//   without trusting the server (PROTOCOL.md §5.1).
 
 	import { resolve } from '$app/paths';
 	import { api, ApiError, describeError, seg } from '#lib/api.ts';
 	import { unb64 } from '#lib/crypto/bytes.ts';
 	import { safetyCode } from '#lib/crypto/keys.ts';
-	import { allyEndorsementSigningBytes, nextManifest, signWith } from '#lib/crypto/proto.ts';
+	import {
+		allyEndorsementSigningBytes,
+		nextManifest,
+		signWith,
+		type ManifestAlly
+	} from '#lib/crypto/proto.ts';
 	import { ago, date, dateTime } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring, type MemberKeys } from '#lib/keys/keyring.svelte.ts';
@@ -137,7 +145,19 @@
 	async function activeAllyEntries() {
 		return active
 			.filter((a) => a.ally_enc_pubkey)
-			.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey! }));
+			.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey!, name: a.display_name }));
+	}
+
+	/**
+	 * The entries with each ally's current name, as this page shows it, so
+	 * every list the member signs names allies as they are called now (a
+	 * rename is picked up by the next re-sign, and never forces one).
+	 * Phones show these names (docs/PROTOCOL.md §5.1); `nextManifest`
+	 * sanitizes them.
+	 */
+	function withNames(allies: ManifestAlly[]): ManifestAlly[] {
+		const names = new Map((mine?.allies ?? []).map((l) => [l.ally_id, l.display_name]));
+		return allies.map((a) => ({ ...a, name: names.get(a.ally_id) ?? a.name ?? '' }));
 	}
 
 	async function approve(a: AllyLink) {
@@ -161,10 +181,13 @@
 			);
 			const manifest = signManifest(
 				keys,
-				nextManifest(latest, [
-					...latest.allies,
-					{ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey }
-				])
+				nextManifest(
+					latest,
+					withNames([
+						...latest.allies,
+						{ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey, name: a.display_name }
+					])
+				)
 			);
 			const body: ApproveAlly = { endorsement, manifest };
 			await api.post(`/v1/me/allies/${seg(a.ally_id)}/approve`, body);
@@ -197,10 +220,7 @@
 				const latest = await ensureManifest(keys, inst.instance_id, activeAllyEntries);
 				const manifest = signManifest(
 					keys,
-					nextManifest(
-						latest,
-						latest.allies.filter((x) => x.ally_id !== a.ally_id)
-					)
+					nextManifest(latest, withNames(latest.allies.filter((x) => x.ally_id !== a.ally_id)))
 				);
 				await api.delete(`/v1/me/allies/${seg(a.ally_id)}`, { manifest });
 				done = `${a.display_name} is no longer your ally. They and your other allies are being told.`;
@@ -229,10 +249,7 @@
 			const departed = new Set(mine.manifest.departed);
 			const m = signManifest(
 				keys,
-				nextManifest(
-					latest,
-					latest.allies.filter((x) => !departed.has(x.ally_id))
-				)
+				nextManifest(latest, withNames(latest.allies.filter((x) => !departed.has(x.ally_id))))
 			);
 			await api.put('/v1/me/recipient-manifest', m);
 			done =

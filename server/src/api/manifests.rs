@@ -33,6 +33,13 @@
 //! 6. the ally set changes only as the operation allows (below), and every
 //!    listed ally has an **active** link whose stored key is the listed key.
 //!
+//! Both formats are accepted. The ally names a format 2 manifest carries
+//! are signed by the member and checked only for length (by `validate`).
+//! The instance stores and serves them as signed, and never compares them
+//! with its own display names: a member re-signs when they choose, so an
+//! ally who renames themselves never forces an upload, and any upload picks
+//! the new name up.
+//!
 //! | Operation | Ally set must be |
 //! |---|---|
 //! | `PUT` ([`Change::Refresh`]) | the previous set, minus only allies whose link has already ended (an ally who left); every still-active ally stays listed |
@@ -114,11 +121,22 @@ async fn previous_set(
             out.push(ManifestAlly {
                 ally_id,
                 enc_pubkey: k.enc_pubkey,
+                name: None,
             });
         }
     }
     out.sort_by(|a, b| a.ally_id.cmp(&b.ally_id));
     Ok(out)
+}
+
+/// The same allies with the same keys, in the same order. Names (format 2)
+/// are not compared: they are the member's to sign, the instance doesn't
+/// read them, and a renamed ally shows up at the next upload whatever it is.
+fn same_recipients(a: &[ManifestAlly], b: &[ManifestAlly]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.ally_id == y.ally_id && x.enc_pubkey == y.enc_pubkey)
 }
 
 fn set_mismatch(msg: &str) -> AppError {
@@ -238,9 +256,10 @@ pub async fn check_upload(
             want.push(ManifestAlly {
                 ally_id: ally.clone(),
                 enc_pubkey: key,
+                name: None,
             });
             want.sort_by(|a, b| a.ally_id.cmp(&b.ally_id));
-            if body.allies != want {
+            if !same_recipients(&body.allies, &want) {
                 return Err(set_mismatch(
                     "the recipient manifest must list exactly your current allies plus this \
                      ally with their key",
@@ -259,7 +278,7 @@ pub async fn check_upload(
                 .filter(|p| &p.ally_id != ally)
                 .cloned()
                 .collect();
-            if body.allies != want {
+            if !same_recipients(&body.allies, &want) {
                 return Err(set_mismatch(
                     "the recipient manifest must list exactly your current allies minus this \
                      ally",

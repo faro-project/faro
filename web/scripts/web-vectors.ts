@@ -15,6 +15,7 @@ import {
 	manifestRef,
 	manifestSigningBytes,
 	memberBindingSigningBytes,
+	nextManifest,
 	proveAllyKeyRewrap,
 	signWith
 } from '../src/lib/crypto/proto.ts';
@@ -39,6 +40,23 @@ const manifest = signWith(
 		member_enc_pubkey: memberEnc,
 		allies: [{ ally_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey }]
 	},
+	manifestSigningBytes
+);
+
+// A format 2 manifest as the allies page signs it: the next version, with
+// display names as the instance stores them, sanitized by `nextManifest`.
+// Rust checks it verifies and that its own sanitizer makes the same names.
+const rawNames = [' Zoe\u0308\u202e  Smith\n', '\u200f\u{1F64F} Lee\u0000'];
+const manifestV2 = signWith(
+	seed,
+	nextManifest(
+		manifest,
+		[
+			{ ally_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey, name: rawNames[0] },
+			{ ally_id: ids.ally_b, enc_pubkey: v.keys.ally_b_pubkey, name: rawNames[1] }
+		],
+		1_790_000_000_500
+	),
 	manifestSigningBytes
 );
 
@@ -73,6 +91,8 @@ v.from_web = {
 		{ passphrase: 'member passphrase', plaintext_hex: hex(s2), wrapped: wrapWithKey(s2, k) }
 	],
 	manifest,
+	manifest_v2: manifestV2,
+	manifest_v2_raw_names_hex: rawNames.map((n) => hex(utf8(n))),
 	device_endorsement: signWith(
 		seed,
 		{
