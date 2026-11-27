@@ -217,15 +217,15 @@ async fn a_clock_off_the_instance_is_reported_once_per_skew() {
             .unwrap()
             .iter()
             .filter(|e| e.header.kind == EventKind::Tamper)
-            .map(|e| {
-                match faro_core::open_event_body(e, &w.member, &w.member_keys.enc).unwrap() {
+            .map(
+                |e| match faro_core::open_event_body(e, &w.member, &w.member_keys.enc).unwrap() {
                     EventBody::Tamper {
                         signal: TamperSignal::ClockManipulation { wall_delta_ms, .. },
                         ..
                     } => wall_delta_ms,
                     other => panic!("{other:?}"),
-                }
-            })
+                },
+            )
             .collect()
     };
 

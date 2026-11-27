@@ -11,7 +11,7 @@ import Foundation
 // queued requests into urgent `tamper` events.
 
 /// A protection layer that can be switched off.
-public enum ProtectionLayer: String, Codable, CodingKeyRepresentable, CaseIterable, Sendable {
+public enum ProtectionLayer: String, CaseIterable, Sendable {
     /// Screen Time authorization (layer 1's switch).
     case screenTime = "screen_time"
     /// The DNS filter's packet tunnel (layer 2).
@@ -21,7 +21,7 @@ public enum ProtectionLayer: String, Codable, CodingKeyRepresentable, CaseIterab
 }
 
 /// Why the DNS filter is off, as the core's `FilterCause` names it.
-public enum FilterCauseCode: String, Codable, CaseIterable, Sendable {
+public enum FilterCauseCode: String, CaseIterable, Sendable {
     case vpnDisconnected = "vpn_disconnected"
     case onDemandOff = "on_demand_off"
     case otherVpn = "other_vpn"
@@ -30,8 +30,11 @@ public enum FilterCauseCode: String, Codable, CaseIterable, Sendable {
 }
 
 /// A tamper event to record: always urgent, always tamper-class
-/// (DEVELOPMENT.md invariant 4).
-public enum TamperRequest: Codable, Equatable, Sendable {
+/// (DEVELOPMENT.md invariant 4). Kept in the file as a short code
+/// (`screen_time_revoked`, `filter_off.other_vpn`, `settings_cleared`):
+/// the monitor links this, and a hand-written string coding is a fraction
+/// of the size of a synthesized one (`check-extension-sizes.sh`).
+public enum TamperRequest: Equatable, Sendable {
     case screenTimeRevoked
     case filterOff(FilterCauseCode)
     case settingsCleared
@@ -43,10 +46,45 @@ public enum TamperRequest: Codable, Equatable, Sendable {
         case .settingsCleared: return .settings
         }
     }
+
+    public var code: String {
+        switch self {
+        case .screenTimeRevoked: return "screen_time_revoked"
+        case .settingsCleared: return "settings_cleared"
+        case .filterOff(let c): return "filter_off." + c.rawValue
+        }
+    }
+
+    public init?(code: String) {
+        switch code {
+        case "screen_time_revoked": self = .screenTimeRevoked
+        case "settings_cleared": self = .settingsCleared
+        default:
+            guard code.hasPrefix("filter_off."),
+                  let c = FilterCauseCode(rawValue: String(code.dropFirst("filter_off.".count)))
+            else { return nil }
+            self = .filterOff(c)
+        }
+    }
+}
+
+extension TamperRequest: Codable {
+    public init(from decoder: Decoder) throws {
+        let code = try decoder.singleValueContainer().decode(String.self)
+        guard let r = TamperRequest(code: code) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: code))
+        }
+        self = r
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(code)
+    }
 }
 
 /// Who read a Screen Time authorization status.
-public enum WatchSource: String, Codable, CodingKeyRepresentable, CaseIterable, Sendable {
+public enum WatchSource: String, CaseIterable, Sendable {
     case app
     case tunnel
     case monitor
@@ -75,19 +113,25 @@ public struct PendingTamper: Codable, Equatable, Sendable {
     public var id: Int64
     public var request: TamperRequest
     public var atMs: Int64
+    /// When a process took it to record it. A claim older than
+    /// `PendingState.claimLeaseMs` lapses, so a process that died mid-way
+    /// doesn't hold it forever (the settings events' pattern).
+    public var claimedAtMs: Int64?
 }
 
 /// The book itself: plain data and the rules, so the tests reach every
 /// decision. `TamperLedger` keeps it in a file.
 public struct TamperBook: Codable, Equatable, Sendable {
-    /// Layers reported off and not seen on since: the cause and when.
-    public var off: [ProtectionLayer: PendingTamper] = [:]
+    /// Layers reported off and not seen on since (by `ProtectionLayer`
+    /// raw value), and when. String keys keep the file's coding small.
+    public var off: [String: Int64] = [:]
     /// Requests waiting for the app or the tunnel to record them.
     public var pending: [PendingTamper] = []
-    /// Sources that have read Screen Time approved on this enrollment.
-    public var screenTimeSeenBy: Set<WatchSource> = []
+    /// Sources (`WatchSource` raw values) that have read Screen Time
+    /// approved on this enrollment.
+    public var screenTimeSeenBy: [String] = []
     /// A source's first unconfirmed "not approved" reading.
-    public var screenTimeDoubt: [WatchSource: Int64] = [:]
+    public var screenTimeDoubt: [String: Int64] = [:]
     /// When each context signal was last recorded.
     public var contextAt: [String: Int64] = [:]
     /// Leave Faro has delivered its goodbye: the watchers stand down.
@@ -107,10 +151,10 @@ public struct TamperBook: Codable, Equatable, Sendable {
     /// the cause now (one cause, one signal).
     @discardableResult
     public mutating func sawOff(_ request: TamperRequest, nowMs: Int64) -> Bool {
-        guard !leaving, off[request.layer] == nil else { return false }
-        let p = PendingTamper(id: nextId, request: request, atMs: nowMs)
+        guard !leaving, off[request.layer.rawValue] == nil else { return false }
+        let p = PendingTamper(id: nextId, request: request, atMs: nowMs, claimedAtMs: nil)
         nextId += 1
-        off[request.layer] = p
+        off[request.layer.rawValue] = nowMs
         pending.append(p)
         return true
     }
@@ -119,26 +163,40 @@ public struct TamperBook: Codable, Equatable, Sendable {
     /// Returns whether anything changed.
     @discardableResult
     public mutating func sawOn(_ layer: ProtectionLayer) -> Bool {
-        off.removeValue(forKey: layer) != nil
+        off.removeValue(forKey: layer.rawValue) != nil
     }
 
     /// A reading of Screen Time authorization by `source`.
     @discardableResult
     public mutating func sawScreenTime(approved: Bool, source: WatchSource, nowMs: Int64) -> ScreenTimeVerdict {
+        let key = source.rawValue
         if approved {
-            screenTimeSeenBy.insert(source)
-            screenTimeDoubt[source] = nil
+            if !screenTimeSeenBy.contains(key) { screenTimeSeenBy.append(key) }
+            screenTimeDoubt[key] = nil
             sawOn(.screenTime)
             return .approved
         }
-        guard screenTimeSeenBy.contains(source) else { return .unknown }
-        if let first = screenTimeDoubt[source], nowMs - first < TamperBook.doubtExpiresMs {
+        guard screenTimeSeenBy.contains(key) else { return .unknown }
+        if let first = screenTimeDoubt[key], nowMs - first < TamperBook.doubtExpiresMs {
             guard nowMs - first >= TamperBook.confirmAfterMs else { return .recheck }
-            screenTimeDoubt[source] = nil
+            screenTimeDoubt[key] = nil
             return sawOff(.screenTimeRevoked, nowMs: nowMs) ? .reported : .alreadyReported
         }
-        screenTimeDoubt[source] = nowMs
+        screenTimeDoubt[key] = nowMs
         return .recheck
+    }
+
+    /// Whether Screen Time protection stands, for the report's protection
+    /// timeline, as well as the book knows it. `reading` is the status the
+    /// caller (`source`) just read. A source that has read it approved before
+    /// can be believed now; one that never has (the tunnel, if spike S6 says
+    /// it can't read the status) leans on the others: off if a revocation is
+    /// reported and not yet seen undone, on if the app or the monitor (every
+    /// callback) read it approved since, else `nil`, unknown.
+    public func screenTimeState(reading: Bool, source: WatchSource) -> Bool? {
+        if screenTimeSeenBy.contains(source.rawValue) { return reading }
+        if off[ProtectionLayer.screenTime.rawValue] != nil { return false }
+        return screenTimeSeenBy.isEmpty ? nil : true
     }
 
     /// Whether the context signal `name` should be recorded now: at most
@@ -159,9 +217,27 @@ public struct TamperBook: Codable, Equatable, Sendable {
         pending = []
     }
 
-    /// Remove the requests recorded, by id.
-    public mutating func recorded(_ ids: Set<Int64>) {
+    /// Takes the requests no other process is recording, oldest first,
+    /// marking them claimed (the lease of the settings events,
+    /// `PendingState.claimLeaseMs`).
+    public mutating func claim(nowMs: Int64) -> [PendingTamper] {
+        var out: [PendingTamper] = []
+        for i in pending.indices {
+            if let at = pending[i].claimedAtMs, nowMs - at < PendingState.claimLeaseMs, nowMs >= at { continue }
+            pending[i].claimedAtMs = nowMs
+            out.append(pending[i])
+        }
+        return out
+    }
+
+    /// Removes the requests recorded, by id.
+    public mutating func complete(_ ids: Set<Int64>) {
         pending.removeAll { ids.contains($0.id) }
+    }
+
+    /// Lets go of claims that couldn't be recorded, so the next try takes them.
+    public mutating func release(_ ids: Set<Int64>) {
+        for i in pending.indices where ids.contains(pending[i].id) { pending[i].claimedAtMs = nil }
     }
 }
 
@@ -202,23 +278,32 @@ public struct TamperLedger: Sendable {
     }
 
     /// Records each pending request with `record` (outside the lock), then
-    /// removes the ones that were recorded. A request whose `record` throws
-    /// stays for the next try (keys locked before the first unlock, say).
-    /// If two processes drain at once a request can be recorded twice, which
-    /// is better than losing one. Returns how many were recorded.
+    /// removes the ones that were recorded. Each is claimed first, so two
+    /// processes draining at once don't both record it; a claim lapses
+    /// after the lease if its process dies. A request whose `record` throws
+    /// is released for the next try (keys locked before the first unlock,
+    /// say). Returns how many were recorded.
     @discardableResult
-    public func drain(_ record: (TamperRequest) throws -> Void) throws -> Int {
-        let pending = try update { $0.pending }
+    public func drain(
+        nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000), _ record: (TamperRequest) throws -> Void
+    ) throws -> Int {
+        let claimed = try update { $0.claim(nowMs: nowMs) }
         var done = Set<Int64>()
-        for p in pending {
+        var failed = Set<Int64>()
+        for p in claimed {
             do {
                 try record(p.request)
                 done.insert(p.id)
             } catch {
-                continue
+                failed.insert(p.id)
             }
         }
-        if !done.isEmpty { try update { $0.recorded(done) } }
+        if !done.isEmpty || !failed.isEmpty {
+            try update {
+                $0.complete(done)
+                $0.release(failed)
+            }
+        }
         return done.count
     }
 

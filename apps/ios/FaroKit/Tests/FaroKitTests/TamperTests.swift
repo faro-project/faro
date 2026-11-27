@@ -1,5 +1,6 @@
 import XCTest
 @testable import FaroKit
+@testable import FaroKitApp
 
 /// The watchers' decisions (docs/IOS.md §10.2): staleness, dedupe, causes,
 /// the monitor's schedule and Leave Faro's order.
@@ -99,6 +100,20 @@ final class TamperTests: XCTestCase {
         XCTAssertEqual(book.pending.count, 2)
     }
 
+    func testScreenTimeStateForTheProtectionTimeline() {
+        var book = TamperBook()
+        XCTAssertNil(book.screenTimeState(reading: false, source: .tunnel), "nobody knows yet")
+        book.sawScreenTime(approved: true, source: .monitor, nowMs: 0)
+        // A tunnel that can't read it leans on the monitor.
+        XCTAssertEqual(book.screenTimeState(reading: false, source: .tunnel), true)
+        book.sawOff(.screenTimeRevoked, nowMs: 1)
+        XCTAssertEqual(book.screenTimeState(reading: false, source: .tunnel), false)
+        // A tunnel that has read it approved is believed.
+        book.sawScreenTime(approved: true, source: .tunnel, nowMs: 2)
+        XCTAssertEqual(book.screenTimeState(reading: true, source: .tunnel), true)
+        XCTAssertEqual(book.screenTimeState(reading: false, source: .tunnel), false)
+    }
+
     // MARK: The ledger file
 
     func testTheLedgerKeepsTheBookAcrossProcesses() throws {
@@ -128,6 +143,19 @@ final class TamperTests: XCTestCase {
         XCTAssertTrue(ledger.read().pending.isEmpty)
         // Recorded is not "seen on": the layer stays reported off.
         XCTAssertFalse(try ledger.update { $0.sawOff(.screenTimeRevoked, nowMs: 3) })
+    }
+
+    func testAClaimedRequestIsLeftToItsClaimerUntilTheLeaseLapses() {
+        var book = TamperBook()
+        book.sawOff(.settingsCleared, nowMs: 0)
+        XCTAssertEqual(book.claim(nowMs: 1_000).map(\.request), [.settingsCleared])
+        XCTAssertTrue(book.claim(nowMs: 2_000).isEmpty, "another process is recording it")
+        XCTAssertEqual(book.claim(nowMs: 1_000 + PendingState.claimLeaseMs).count, 1, "the lease lapsed")
+        let id = book.pending[0].id
+        book.release([id])
+        XCTAssertEqual(book.claim(nowMs: 1_000 + PendingState.claimLeaseMs + 1).count, 1, "released")
+        book.complete([id])
+        XCTAssertTrue(book.pending.isEmpty)
     }
 
     func testConcurrentWatchersQueueOneRequest() throws {

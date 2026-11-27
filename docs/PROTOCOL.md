@@ -130,7 +130,20 @@ Three new context-only signals, `doh_dropped`, `other_vpn` and `jailbreak_suspec
 
 **Flags from DNS bursts.** A burst of blocked lookups is an ordinary `flag`. Its reason has source `dns`, and the label carries the explanation, for example `dns:adult ×6, 4 hosts, 3 min, screen on`.
 
-**Pending loosening.** A `settings_change` body gains optional `requested_at`, `takes_effect_at` and `cancelled_at` (ms since the epoch) and `delay_secs`. They are left out when not set.
+**Pending loosening.** A `settings_change` body gains optional `requested_at`, `takes_effect_at` and `cancelled_at` (ms since the epoch) and `delay_secs`. They are left out when not set. A change that blocks more carries none of them. A loosening is sent when it is asked for (`requested_at`, `takes_effect_at`, `delay_secs`), again when it takes effect (the same fields) and, if the member cancels it, with `cancelled_at`.
+
+**iPhone setting keys.** An iPhone's `settings_change` entries (`key`, `old`, `new`) use this vocabulary, which the web app renders in words ("Gambling sites will be unblocked on iPhone-X tomorrow at 21:04"). The code is `apps/ios/FaroKit/Sources/FaroKit/Choices.swift` and `web/src/lib/feed/ios-settings.ts`.
+
+| Key | Values |
+|---|---|
+| `ios.category.<name>` (`gambling`, `violence`, `proxy_vpn`) | `blocked` or `allowed` |
+| `ios.site` | `old` is the domain when it was unblocked, `new` when it was blocked |
+| `ios.apps`, `ios.app_categories`, `ios.web_domains`, `ios.web_domain_categories` | how many are blocked, as a number. Which ones is never sent: Screen Time hides them |
+| `ios.explicit_media`, `ios.app_removal_protection`, `ios.automatic_time` | `on` or `off` |
+| `ios.app_rating` | `4`, `9`, `12`, `17` or `off` |
+| `ios.delay_hours` | the loosening delay in hours, `0` to `72` |
+
+A reader that doesn't know a key shows it as `key: old → new`.
 
 **Allies see** these in the web app and reports, which render them from the decrypted body: "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed on iPhone-X". Alert emails stay content-free (the instance cannot tell which signal it was).
 

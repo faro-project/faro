@@ -24,6 +24,20 @@ struct StatusView: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
 
+            Section("What Faro blocks") {
+                NavigationLink {
+                    ChoicesView()
+                } label: {
+                    VStack(alignment: .leading) {
+                        Text("Choose what is blocked")
+                        if !model.pending.isEmpty {
+                            Text("\(model.pending.count) change\(model.pending.count == 1 ? "" : "s") waiting to take effect")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             Section("This phone") {
                 if let s = model.status {
                     LabeledContent("Instance", value: s.instanceName ?? "Unknown")

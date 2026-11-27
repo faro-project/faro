@@ -1,5 +1,6 @@
 import FamilyControls
 import FaroKit
+import FaroKitApp
 import Foundation
 import NetworkExtension
 import UserNotifications
@@ -23,13 +24,15 @@ enum ScreenTime {
     /// to the "faro" store, and the monitor schedule started. Throws the
     /// system's error if the member cancels.
     @MainActor
-    static func authorize(settingsStore: SettingsStore) async throws {
+    static func authorize(choices: ChoicesStore) async throws {
         try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
         guard isAuthorized else {
             throw SetupError("Screen Time access wasn't granted.")
         }
-        try settingsStore.save(.default)
-        ScreenTimeEnforcer.apply(.default)
+        // The defaults on a first setup; the member's own choices when this
+        // is Screen Time being turned back on, which never resets them.
+        let settings = try choices.ensureSettings()
+        ScreenTimeEnforcer.apply(settings)
         ScreenTimeEnforcer.startMonitoring()
     }
 }
@@ -43,7 +46,7 @@ enum TunnelInstaller {
     /// Demand for every interface (docs/IOS.md §7.1), which triggers iOS's
     /// "Allow Faro to add VPN configurations" prompt the first time, and
     /// starts the tunnel.
-    static func install(instanceName: String) async throws {
+    static func install(instanceName: String, settings: FaroSettings? = nil) async throws {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
         let manager = managers.first(where: { ($0.protocolConfiguration as? NETunnelProviderProtocol)?
             .providerBundleIdentifier == providerBundleID }) ?? NETunnelProviderManager()
@@ -53,6 +56,8 @@ enum TunnelInstaller {
         // Shown in Settings → VPN. The tunnel carries DNS only; there is no server.
         proto.serverAddress = "Faro"
         proto.disconnectOnSleep = false
+        // The member's choices, which the tunnel can read before the first unlock.
+        proto.providerConfiguration = TunnelConfig.providerConfiguration(for: settings ?? .default)
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Faro"
         manager.onDemandRules = [NEOnDemandRuleConnect()]
@@ -63,6 +68,29 @@ enum TunnelInstaller {
         // A second load is needed before the first start after a save.
         try await manager.loadFromPreferences()
         try manager.connection.startVPNTunnel()
+    }
+
+    /// Copies the member's choices into the VPN configuration's
+    /// `providerConfiguration` (docs/IOS.md §7, §9), which the tunnel can
+    /// read before the first unlock. Does nothing if the configuration
+    /// isn't installed yet; `install` writes it then. A running tunnel keeps
+    /// going: it reads `filter.json` for changes.
+    static func updateProviderConfiguration(_ settings: FaroSettings) async {
+        guard let managers = try? await NETunnelProviderManager.loadAllFromPreferences(),
+              let m = managers.first(where: {
+                  ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerBundleID
+              }),
+              let proto = m.protocolConfiguration as? NETunnelProviderProtocol
+        else { return }
+        let wanted = TunnelConfig.providerConfiguration(for: settings)
+        let have = proto.providerConfiguration
+        if (have?[TunnelConfig.filterKey] as? String) == (wanted[TunnelConfig.filterKey] as? String),
+           (have?[TunnelConfig.generationKey] as? Int) == (wanted[TunnelConfig.generationKey] as? Int) {
+            return
+        }
+        proto.providerConfiguration = wanted
+        m.protocolConfiguration = proto
+        try? await m.saveToPreferences()
     }
 
     /// The current state of Faro's VPN, for the status screen.

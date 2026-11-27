@@ -54,9 +54,9 @@ final class FaroMonitorExtension: DeviceActivityMonitor {
         case .stale:
             // The monitor can't see the VPN configuration: the app, when it
             // next runs, says no more (one cause, one signal).
-            try? ledger.update { $0.sawOff(.filterOff(.unknown), nowMs: now) }
+            _ = try? ledger.update { $0.sawOff(.filterOff(.unknown), nowMs: now) }
         case .alive:
-            try? ledger.update { $0.sawOn(.filter) }
+            _ = try? ledger.update { $0.sawOn(.filter) }
         case .resting, .neverSeen:
             break
         }
@@ -72,7 +72,7 @@ final class FaroMonitorExtension: DeviceActivityMonitor {
         if verdict == .recheck {
             Thread.sleep(forTimeInterval: 3)
             approved = ScreenTimeEnforcer.isAuthorized
-            try? ledger.update {
+            _ = try? ledger.update {
                 $0.sawScreenTime(approved: approved, source: .monitor, nowMs: Self.nowMs())
             }
         }

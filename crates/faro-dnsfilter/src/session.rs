@@ -250,6 +250,16 @@ impl Session {
         self.pending.len()
     }
 
+    /// Bursts seen and not yet taken or discarded, oldest first.
+    pub fn bursts(&self) -> &[BurstCandidate] {
+        &self.bursts
+    }
+
+    /// Drop the first `n` bursts, once they have been recorded.
+    pub fn discard_bursts(&mut self, n: usize) {
+        self.bursts.drain(..n.min(self.bursts.len()));
+    }
+
     /// Bursts seen since the last call, oldest first.
     pub fn take_bursts(&mut self) -> Vec<BurstCandidate> {
         std::mem::take(&mut self.bursts)

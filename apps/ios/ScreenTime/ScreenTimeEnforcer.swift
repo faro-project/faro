@@ -14,8 +14,9 @@ import ManagedSettings
 /// cover; this file only copies values in and out, and it only runs on a
 /// device.
 ///
-/// It never touches the app, category or site shields: Phase B's picker
-/// owns those, and they stay empty until then.
+/// The shields hold the member's `FamilyActivityPicker` choices as opaque
+/// tokens: the settings file keeps each token's JSON, base64 encoded, and
+/// Faro never learns which app one is (docs/IOS.md §4 principle 4).
 enum ScreenTimeEnforcer {
     static let storeName = ManagedSettingsStore.Name("faro")
 
@@ -36,9 +37,30 @@ enum ScreenTimeEnforcer {
         store.media.denyExplicitContent = plan.denyExplicitContent
         store.dateAndTime.requireAutomaticDateAndTime = plan.requireAutomaticDateAndTime
         store.appStore.maximumRating = plan.maximumAppRating
+
+        let apps = Set(tokens(plan.shieldApps, as: ApplicationToken.self))
+        store.shield.applications = apps.isEmpty ? nil : apps
+        let appCategories = Set(tokens(plan.shieldAppCategories, as: ActivityCategoryToken.self))
+        store.shield.applicationCategories = appCategories.isEmpty ? nil : .specific(appCategories)
+        let sites = Set(tokens(plan.shieldWebDomains, as: WebDomainToken.self))
+        store.shield.webDomains = sites.isEmpty ? nil : sites
+        let siteCategories = Set(tokens(plan.shieldWebDomainCategories, as: ActivityCategoryToken.self))
+        store.shield.webDomainCategories = siteCategories.isEmpty ? nil : .specific(siteCategories)
     }
 
-    /// What the store holds now.
+    /// The tokens a list of encoded ones stands for. One that no longer
+    /// decodes is skipped: it can't name an app any more.
+    private static func tokens<T: Decodable>(_ encoded: [String], as: T.Type) -> [T] {
+        encoded.compactMap { Data(base64Encoded: $0).flatMap { try? JSONDecoder().decode(T.self, from: $0) } }
+    }
+
+    /// A token as the settings file keeps it.
+    static func encode<T: Encodable>(_ token: T) -> String? {
+        try? JSONEncoder().encode(token).base64EncodedString()
+    }
+
+    /// What the store holds now (the settings `StoreCheck` judges; the
+    /// shields are the member's own picks and aren't judged).
     static func snapshot() -> StoreSnapshot {
         let store = ManagedSettingsStore(named: storeName)
         return StoreSnapshot(
@@ -56,17 +78,31 @@ enum ScreenTimeEnforcer {
         var nowIntact: Bool
     }
 
-    /// Re-applies the settings file in the app group, checking the store
-    /// first. With no file (setup hasn't run), a file from a newer Faro or
+    /// Re-applies the settings file in the app group, after applying any
+    /// loosening whose time has come (docs/IOS.md §9; the app, the monitor
+    /// and the tunnel each do this, whichever runs first), and checks the
+    /// store first. It is judged against the settings in force before a
+    /// loosening applied, so a loosening isn't mistaken for the store being
+    /// cleared. With no file (setup hasn't run), a file from a newer Faro or
     /// a damaged one, it leaves the store alone and returns nil rather than
     /// guess.
     @discardableResult
     static func reapplySavedSettings(group: AppGroup? = AppGroup.container()) -> Finding? {
-        guard let group, let settings = try? SettingsStore(group: group).load() else { return nil }
+        guard let group else { return nil }
+        let inForce = try? SettingsStore(group: group).load()
+        _ = try? ChoicesStore(group: group).applyDue(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        guard let settings = try? SettingsStore(group: group).load() else { return nil }
+        let before = StoreCheck.intact(snapshot(), plan: ScreenTimePlan(inForce ?? settings))
         let plan = ScreenTimePlan(settings)
-        let before = StoreCheck.intact(snapshot(), plan: plan)
         apply(settings)
         return Finding(wasIntact: before, nowIntact: StoreCheck.intact(snapshot(), plan: plan))
+    }
+
+    /// `reapplySavedSettings`, for callers that only want the settings in
+    /// place. Returns whether there were any.
+    @discardableResult
+    static func applySavedSettings(group: AppGroup? = AppGroup.container()) -> Bool {
+        reapplySavedSettings(group: group) != nil
     }
 
     /// The store check of docs/IOS.md §10.2, for the monitor and the app:

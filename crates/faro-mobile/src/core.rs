@@ -410,7 +410,14 @@ impl FaroCore {
         if route_signal(&signal) != SignalRoute::TamperEvent {
             return Err(FaroError::invalid("a context signal is not tamper"));
         }
-        self.append(&EventBody::tamper(signal), Urgency::Urgent)
+        let seq = self.append(&EventBody::tamper(signal.clone()), Urgency::Urgent)?;
+        self.log_tamper(TamperRecord {
+            seq: Some(seq),
+            ts_ms: self.clock.wall_ms(),
+            signal,
+            account: None,
+        });
+        Ok(seq)
     }
 
     /// Record a settings change that allies are told about, with the
@@ -437,6 +444,7 @@ impl FaroCore {
             cancelled_at_ms: None,
             delay_secs: None,
         });
+        let logged = pending.map(|_| changes.clone());
         let body = EventBody::SettingsChange {
             changes,
             requested_at: p.requested_at_ms,
@@ -444,7 +452,11 @@ impl FaroCore {
             cancelled_at: p.cancelled_at_ms,
             delay_secs: p.delay_secs,
         };
-        self.append(&body, Urgency::Normal)
+        let seq = self.append(&body, Urgency::Normal)?;
+        if let Some(changes) = logged {
+            self.log_loosening(&changes, &p);
+        }
+        Ok(seq)
     }
 
     /// Record the DNS filter's blocked lookups for one bucket
@@ -452,14 +464,18 @@ impl FaroCore {
     /// travel only inside the sealed body. Returns its `seq`.
     pub fn record_blocked_summary(&self, summary: BlockedSummaryRecord) -> Result<u64, FaroError> {
         let body = summary.into_body().map_err(FaroError::invalid)?;
-        self.append(&body, Urgency::None)
+        let seq = self.append(&body, Urgency::None)?;
+        self.log_summary(&body, seq);
+        Ok(seq)
     }
 
     /// Record the shields' counts for one bucket (`shield_summary`, a
     /// `capture`-class event). Returns its `seq`.
     pub fn record_shield_summary(&self, summary: ShieldSummaryRecord) -> Result<u64, FaroError> {
         let body = summary.into_body().map_err(FaroError::invalid)?;
-        self.append(&body, Urgency::None)
+        let seq = self.append(&body, Urgency::None)?;
+        self.log_summary(&body, seq);
+        Ok(seq)
     }
 
     /// Record a context signal for the daily report. It is never an event
@@ -741,7 +757,8 @@ impl FaroCore {
                 return Delivery::NotYet(error);
             }
             tracing::info!(%error, "goodbye not delivered yet; retrying");
-            self.rt.block_on(tokio::time::sleep(wait.min(deadline - now)));
+            self.rt
+                .block_on(tokio::time::sleep(wait.min(deadline - now)));
             wait = (wait * 2).min(Duration::from_secs(5));
         }
     }
@@ -799,7 +816,7 @@ impl FaroCore {
         Ok(e)
     }
 
-    fn device_key(&self) -> Result<SigningKey, FaroError> {
+    pub(crate) fn device_key(&self) -> Result<SigningKey, FaroError> {
         keys::device_key(self.keys.as_ref())?.ok_or_else(|| FaroError::KeyStore {
             message: "the device key is missing from the key store".into(),
         })
@@ -854,7 +871,7 @@ impl FaroCore {
         Ok(g)
     }
 
-    fn with_outbox_raw<T>(
+    pub(crate) fn with_outbox_raw<T>(
         &self,
         e: &Enrollment,
         f: impl FnOnce(&mut Outbox) -> Result<T, OutboxError>,

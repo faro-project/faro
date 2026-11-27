@@ -167,6 +167,8 @@ The bundle ships in the app and updates through the instance's update mirror as 
 
 The provider counts blocked lookups per category, and per host for adult and gambling, in 10-minute buckets in the app group. It never writes allowed lookups anywhere. Every few minutes it turns the counts into chain events (§11) through the Rust core.
 
+Each bucket becomes one `blocked_summary` event when it has ended, and only once: the core remembers which bucket starts it has reported, so a flush repeated, run from the app as well as the tunnel, or offered again after the tunnel died before saving its counters, never counts a lookup twice. The shields' two counter files (shown and closed, never which app) become a `shield_summary` the same way: the core keeps the totals it last reported and records the difference. Both are `capture`-class events with header urgency `none`, so the instance learns nothing it didn't know.
+
 ---
 
 ## 8. Later: Apple's URL filter (iOS 26+)
@@ -185,9 +187,11 @@ It would add full-URL matching (`reddit.com/r/…`, not just `reddit.com`), whic
 
 ## 9. Choosing what is blocked
 
-- **At setup**, the defaults are: adult (both layers), Faro protected from deletion, explicit media blocked, automatic time. Each optional extra is one screen: gambling, chosen apps or categories, chosen sites, App Store rating.
+- **At setup**, the defaults are: adult (both layers), Faro protected from deletion, explicit media blocked, automatic time. Setup doesn't ask about the optional extras. They are on the **Choices** screen, one tap from the status screen: gambling, chosen apps or categories, chosen sites, App Store rating.
 - **Tightening** takes effect at once and is a normal-urgency `settings_change`. Allies can switch these notifications off.
 - **Loosening** (removing a category, app or site, or switching a default off) takes effect **after a delay**, 24 hours by default. Allies are told when it is asked for and again when it takes effect, and the member can cancel in between. The delay is the member's own setting (0 to 72 hours). Changing it is itself a loosening when it gets shorter. Desktop has no equivalent, because desktop doesn't block. On a phone, a short pause between the urge and the setting is most of what makes blocking work.
+- **How it is kept.** A loosening is stored as pending with its `takes_effect_at`, in the app group. Whichever of the app, the monitor and the tunnel runs first after that time applies it. The monitor can't link the core, so it leaves a request that the app or the tunnel turns into the `settings_change` event. Waiting loosenings are applied to the settings as they are by then, and asking for something else on the same setting cancels the waiting one (with an event). A cancel that comes after the time is too late. A delay of 0 applies at once and is still an event allies see. Setting the clock back keeps a loosening waiting. Setting it forward is for the automatic date and time requirement (§6.2) and the instance's clock-skew alert to catch.
+- **The tunnel's copy.** The choices are also written into the tunnel's `providerConfiguration`, which it can read before the first unlock, so an opted-in gambling block holds from the first lookup. A copy only changes when the app runs, so each carries a generation number and the tunnel takes the newer one (the configuration when they tie).
 - **Allies can't change anything** (§4 principle 5). They can only see it.
 
 ---
@@ -248,6 +252,10 @@ An iPhone appears in the member's reports next to their computers, marked as blo
 - **Blocked lookups by category per day**, from layer 2. Adult and gambling hosts are listed (only the host, like desktop's `scheme://host/`), grouped and counted.
 - **Blocked apps opened:** a count from the shields, with no app names (§2).
 - **Flags.** One blocked lookup isn't intent: link previews, ads and prefetching make lookups the member never saw. A **burst** is, so `blocked_burst` becomes a `flag` event with explainable reasons (`dns:adult ×6, 4 hosts, 3 min, screen on`), rated `medium`, which maps to `urgent` by default (ARCHITECTURE.md §14). The thresholds go next to the desktop ones and follow the same "lower only" rule for development builds.
+  - **Screen on** comes from the tunnel's view of the device: it is true from `wake` and false from `sleep`, the only two things a packet tunnel is told. A phone that is awake counts as having its screen on, so lookups made while it sleeps (background refreshes) never count toward a burst. The label says "screen on" because of that.
+  - **Development builds** can lower the thresholds (6 lookups, 3 domains, a 10 minute cooldown) with a `dev_thresholds.json`: each value must be at least 1 and at most its default, and the window can't be touched. A release build ignores the file, and a refused file changes nothing (docs/DEVELOPMENT.md).
+  - **The reason holds counts only**, never a host. Hosts are in the blocked summaries.
+- **The daily report** has an iPhone section built on the device from the same facts: when each layer was on (Screen Time can be `unknown` when the tunnel can't read it), blocked lookups per day with the adult and gambling hosts, shield counts per day, and loosenings asked for, applied or cancelled. There is no activity timeline and no screen checks, and bursts appear as flagged moments.
 - **Limits, stated plainly in the report:** "Faro on iPhone blocks; it doesn't see the screen. It can't block sites reached through some private DNS services or apps."
 - **No thumbnails, ever.** There are none to send.
 
@@ -356,6 +364,9 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **Loosening waits 24 hours by default.** The member can set it from 0 to 72 hours, and allies see the setting.
 - **Faro doesn't set up or rely on an ally-held Screen Time passcode.**
 - **Setup can't be finished without both layers.** There is no skip for Screen Time access or the VPN configuration: a phone with only one layer would be enrolled and look protected while half of §5's design is missing. Turning a layer off later is allowed and reported (§10.2).
+- **Optional extras live on the Choices screen, not in setup** (§9), so setup stays short.
+- **The resolver-reading gap is accepted.** On each network change the tunnel turns its DNS settings off for well under a second to read the network's resolvers (§7.4). Layer 1 still covers WebKit during that moment.
+- **No resolver means `SERVFAIL`, never a public one.** Allowed names fail at once until the network's resolvers are found again. No lookup goes to a third party.
 
 ### Open
 

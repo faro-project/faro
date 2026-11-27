@@ -29,6 +29,7 @@ final class FaroKitTests: XCTestCase {
         // The DNS filter's files: its counters next to the others.
         XCTAssertEqual(group.filterConfigFile.deletingLastPathComponent().path, root.path)
         XCTAssertEqual(group.dnsCountersFile.deletingLastPathComponent().path, group.countersDirectory.path)
+        XCTAssertEqual(group.devThresholdsFile.lastPathComponent, "dev_thresholds.json")
         XCTAssertNoThrow(try Markers.check(MarkerName.tunnelAlive))
     }
 
@@ -174,5 +175,25 @@ final class FaroKitTests: XCTestCase {
             for _ in 0..<rounds { _ = try? counter.increment() }
         }
         XCTAssertEqual(counter.value(), UInt64(8 * rounds))
+    }
+}
+
+final class DomainUpdateScheduleTests: XCTestCase {
+    func testDueWhenNeverCheckedOldOrClockMovedBack() {
+        let now: Int64 = 1_800_000_000_000
+        XCTAssertTrue(DomainUpdateSchedule.isDue(lastCheckMs: nil, nowMs: now))
+        XCTAssertFalse(DomainUpdateSchedule.isDue(lastCheckMs: now - 5 * 3600 * 1000, nowMs: now))
+        XCTAssertTrue(DomainUpdateSchedule.isDue(lastCheckMs: now - 6 * 3600 * 1000, nowMs: now))
+        XCTAssertTrue(DomainUpdateSchedule.isDue(lastCheckMs: now + 1000, nowMs: now))
+    }
+
+    func testNextBeginIsSixHoursAfterTheLastCheck() {
+        let now: Int64 = 1_800_000_000_000
+        XCTAssertEqual(
+            DomainUpdateSchedule.nextBegin(lastCheckMs: now - 3_600_000, nowMs: now).timeIntervalSince1970,
+            Double(now) / 1000 - 3600 + 6 * 3600)
+        XCTAssertEqual(
+            DomainUpdateSchedule.nextBegin(lastCheckMs: nil, nowMs: now).timeIntervalSince1970,
+            Double(now) / 1000 + 6 * 3600)
     }
 }

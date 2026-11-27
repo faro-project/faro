@@ -56,12 +56,21 @@ targets:
       - path: Generated/Notices
         optional: true
         buildPhase: resources
+      # The project's update root of trust, made by build-update-root.sh:
+      # what domain list updates are verified against (docs/IOS.md §7.2).
+      # Optional so a development build works without it; it then checks
+      # no updates. A release build must have it.
+      - path: Generated/Update
+        optional: true
+        buildPhase: resources
       - path: Shared
       - path: ScreenTime
       - path: Generated/FaroCore
         optional: true
     dependencies:
       - package: FaroKit
+      - package: FaroKit
+        product: FaroKitApp
       - framework: FaroCore.xcframework
         embed: false
       - sdk: DeviceActivity.framework
@@ -102,6 +111,11 @@ targets:
             CFBundleURLSchemes:
               - faro
         NSCameraUsageDescription: Faro uses the camera only to scan the QR code that enrolls this phone.
+        # The background refresh that looks for a newer domain list (docs/IOS.md §7.2).
+        BGTaskSchedulerPermittedIdentifiers:
+          - org.faro.ios.refresh-domains
+        UIBackgroundModes:
+          - fetch
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.faro.ios
@@ -126,6 +140,8 @@ targets:
         buildPhase: resources
     dependencies:
       - package: FaroKit
+      - package: FaroKit
+        product: FaroKitApp
       - framework: FaroCore.xcframework
         embed: false
       - sdk: NetworkExtension.framework

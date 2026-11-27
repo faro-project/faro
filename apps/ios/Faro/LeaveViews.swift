@@ -1,4 +1,5 @@
 import FaroKit
+import FaroKitApp
 import SwiftUI
 
 /// Leave Faro (docs/IOS.md §12), one screen per `LeaveStep`. Leaving is

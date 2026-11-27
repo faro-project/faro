@@ -1,6 +1,7 @@
 import Darwin
 import FamilyControls
 import FaroKit
+import FaroKitApp
 import Network
 import NetworkExtension
 import os
@@ -19,14 +20,22 @@ private let log = Logger(subsystem: "org.faro.ios.tunnel", category: "tunnel")
 /// * the "tunnel alive" marker every minute, which the monitor extension
 ///   and the app watch, and the "tunnel resting" marker on sleep and when
 ///   it stops for a reason that isn't the member's;
+/// * every minute: bursts of blocked lookups recorded as `flag` events;
 /// * every minute and on wake: Screen Time authorization read (the tunnel
 ///   watches layer 1, docs/IOS.md §10.2), and the tamper ledger's queued
 ///   requests recorded and uploaded;
 /// * on stop: the reason, which says whether the member switched the
 ///   filter off and why (`FilterOff` at once);
-/// * every 10 minutes: the counters saved to the app group, the member's
-///   choices and a newer installed domain list picked up, the encrypted-DNS
-///   drops noted as context, and the memory left logged.
+/// * every 10 minutes: the ended counter buckets recorded as
+///   `blocked_summary` events and the shield counters as `shield_summary`
+///   (docs/IOS.md §7.5, once each however many processes or restarts), the
+///   counters saved to the app group, the member's choices and a newer
+///   installed domain list picked up, the encrypted-DNS drops noted as
+///   context, and the memory left logged.
+///
+/// "Screen on" for a burst is `awake`: true from `wake`, false from `sleep`.
+/// The tunnel sees the device only through those two callbacks, so a lookup
+/// made while the phone is awake counts as made with the screen on.
 ///
 /// Nothing here writes, logs or keeps a looked-up name.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -67,7 +76,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             do {
                 filter = try DnsFilter(
                     packagedManifest: Bundle.main.url(forResource: "domains.manifest", withExtension: "json")?.path,
-                    configJson: readText(group?.filterConfigFile),
+                    configJson: memberChoices(),
                     savedCountersJson: readText(group?.dnsCountersFile))
             } catch {
                 log.error("the DNS filter did not start: \(String(describing: error), privacy: .public)")
@@ -75,6 +84,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             self.filter = filter
+            applyDevThresholds(filter)
             logStatus("started")
             upstream = Upstream(
                 queue: queue,
@@ -128,26 +138,27 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // No `shutting_down` heartbeat: the tunnel stopping while the
             // phone runs is what the monitor reports as the filter being off,
             // and the instance should not read it as an expected silence.
+            // The last counts and a "filter off" sample go out first, then
+            // a switch-off is said at once, with the cause the reason
+            // gives, all within the same few seconds `sleep` allows itself.
+            let now = Self.nowMs()
             switch meaning {
             case .off(let cause):
-                // Switched off: say so now, with the cause the reason gives,
-                // and try to send it before the process goes.
-                let now = Self.nowMs()
                 _ = try? ledger?.update { $0.sawOff(.filterOff(cause), nowMs: now) }
-                let once = Once()
-                let finish = { once.run(completionHandler) }
-                queue.asyncAfter(deadline: .now() + Self.stopReportWait, execute: finish)
-                coreQueue.async {
-                    self.recordQueuedTamper()
-                    finish()
-                }
             case .resting:
                 touchResting()
-                completionHandler()
             case .unexplained:
                 // If it doesn't come back, the monitor's staleness check
                 // and the app report it.
-                completionHandler()
+                break
+            }
+            let once = Once()
+            let finish = { once.run(completionHandler) }
+            queue.asyncAfter(deadline: .now() + Self.stopReportWait, execute: finish)
+            coreQueue.async {
+                if case .off = meaning { self.recordQueuedTamper() }
+                self.flushReports(filterOn: false)
+                finish()
             }
         }
     }
@@ -162,6 +173,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             queue.asyncAfter(deadline: .now() + Self.sleepHeartbeatWait, execute: finish)
             coreQueue.async {
                 self.heartbeat(.sleeping)
+                self.flushReports(filterOn: true)
                 finish()
             }
         }
@@ -339,6 +351,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 if self.filter?.status().upstreams == 0, Date().timeIntervalSince(self.lastReread) > 300 {
                     self.rereadResolvers(reason: "retry")
                 }
+                // A burst is an alert: it waits a minute at most, not ten.
+                self.coreQueue.async { self.flushBursts() }
             },
             timer(every: Self.heartbeatInterval) { [weak self] in
                 guard let self, self.awake else { return }
@@ -351,6 +365,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 let dohDropped = self.filter?.takeDohDropped() ?? 0
                 self.coreQueue.async {
                     self.refreshFromCore()
+                    self.flushReports(filterOn: true)
                     self.noteDohDropped(dohDropped)
                 }
             },
@@ -424,6 +439,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// The member's choices for the filter: the copy in the VPN
+    /// configuration, which is readable before the first unlock, or
+    /// `filter.json` when that is newer (`TunnelConfig`).
+    private func memberChoices() -> String? {
+        let provider = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        let generation = group.flatMap { try? SettingsStore(group: $0).load() }?.generation
+        return TunnelConfig.choose(
+            provider: provider, fileJSON: readText(group?.filterConfigFile), fileGeneration: generation)
+    }
+
     private func readText(_ url: URL?) -> String? {
         guard let url, let data = try? Data(contentsOf: url) else { return nil }
         return String(data: data, encoding: .utf8)
@@ -438,7 +463,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if core == nil, let group {
             core = try? CoreLink.open(group: group)
         }
-        let config = readText(group?.filterConfigFile)
+        // A loosening whose time has come is applied here too (docs/IOS.md
+        // §9), whichever of the app, the monitor and the tunnel runs first.
+        if let group {
+            _ = try? ChoicesStore(group: group).applyDue(nowMs: Self.nowMs())
+        }
+        let config = memberChoices()
         // Unread (no core yet, or the database can't be opened yet): keep
         // what the filter has.
         let status = try? core?.status()
@@ -456,6 +486,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
         guard let core, let filter = queue.sync(execute: { self.filter }) else { return }
+        // Settings events the monitor or the app left for whoever can sign them.
+        if let group { SettingsEventSender.send(group: group, core: core) }
         do {
             if let version = try filter.refreshDomains(core: core) {
                 log.notice("switched to the installed domain list \(version, privacy: .public)")
@@ -513,6 +545,82 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: Reports (on coreQueue)
+
+    /// Record the bursts seen so far as `flag` events. A locked key store
+    /// (before the first unlock) or a device not yet approved leaves them in
+    /// the filter for the next minute.
+    private func flushBursts() {
+        if core == nil {
+            refreshFromCore()
+        }
+        guard let core, let filter = queue.sync(execute: { self.filter }) else { return }
+        do {
+            let n = try filter.flushBursts(core: core)
+            if n > 0 {
+                log.notice("recorded \(n, privacy: .public) burst(s)")
+            }
+        } catch FaroError.KeysLocked {
+            log.info("keys locked: bursts wait")
+        } catch FaroError.NotEnrolled, FaroError.NotApproved {
+            // Nothing to report to yet.
+        } catch {
+            log.error("bursts not recorded: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Everything that turns counts into events and the report: ended
+    /// buckets, the shield counters, a protection sample and, once a day,
+    /// the report. Each step is safe to repeat and to run from another
+    /// process (the core records each bucket, and each shield count, once).
+    private func flushReports(filterOn: Bool) {
+        if core == nil {
+            refreshFromCore()
+        }
+        guard let core, let filter = queue.sync(execute: { self.filter }), let group else { return }
+        let now = Self.nowMs()
+        do {
+            // Screen Time as this tunnel reads it if it can (spike S6), else
+            // as the app and the monitor last read it, else unknown.
+            let reading = AuthorizationCenter.shared.authorizationStatus == .approved
+            let screenTime = ledger?.read().screenTimeState(reading: reading, source: .tunnel)
+            try core.recordProtectionSample(screenTimeOn: screenTime, filterOn: filterOn)
+            _ = try filter.flushSummaries(core: core, nowMs: now)
+            let shown = (try? Counter(group: group, name: CounterName.shieldShown))?.value() ?? 0
+            let closed = (try? Counter(group: group, name: CounterName.shieldClosed))?.value() ?? 0
+            _ = try core.recordShieldTotals(shownTotal: shown, closedTotal: closed)
+            _ = try core.queueDailyReport(
+                nowMs: now, utcOffsetSecs: Int32(TimeZone.current.secondsFromGMT()))
+        } catch FaroError.KeysLocked {
+            log.info("keys locked: reports wait")
+        } catch FaroError.NotEnrolled, FaroError.NotApproved {
+            // Nothing to report to yet.
+        } catch {
+            log.error("reports not recorded: \(String(describing: error), privacy: .public)")
+        }
+        // The recorded buckets are gone from the counters: save that.
+        queue.async { self.flushCounters() }
+    }
+
+    /// Read `dev_thresholds.json` (development builds only; a release core
+    /// ignores it, and a file that would raise a threshold is refused).
+    private func applyDevThresholds(_ filter: DnsFilter) {
+        let json = readText(group?.devThresholdsFile)
+        do {
+            let using = try filter.setDevThresholds(json: json)
+            if using.hasPrefix("LOWERED") {
+                log.warning("""
+                    DEVELOPMENT THRESHOLDS: \(using, privacy: .public). Flags from this phone are made \
+                    with them, not with the defaults. Never use this build to monitor anyone.
+                    """)
+            } else if json != nil {
+                log.notice("dev_thresholds.json: \(using, privacy: .public)")
+            }
+        } catch {
+            log.error("dev_thresholds.json refused: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: Logging
 
     private func logStatus(_ when: String) {
@@ -521,7 +629,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             \(when, privacy: .public): domains \(s.domainsVersion ?? "none", privacy: .public) \
             (\(s.domainsSource, privacy: .public)), blocking \(s.blockedCategories.joined(separator: ","), privacy: .public), \
             \(s.upstreams, privacy: .public) resolver(s), \(s.pending, privacy: .public) in flight, \
-            \(s.counterBuckets, privacy: .public) bucket(s), \
+            \(s.counterBuckets, privacy: .public) bucket(s), thresholds \(s.thresholds, privacy: .public), \
             memory available \(os_proc_available_memory(), privacy: .public) bytes
             """)
         if let e = s.domainsError {

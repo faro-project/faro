@@ -1,4 +1,5 @@
 import FaroKit
+import FaroKitApp
 import Foundation
 
 // Compiled into Faro and FaroTunnel, the two targets that link the Rust
