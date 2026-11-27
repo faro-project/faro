@@ -571,6 +571,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 - Reproducible builds for the client and server (*planned*, not built).
 - **Secure defaults for operators**: invite-only registration, automatic HTTPS (an admin passkey is planned), security headers, rate limiting, and a `faro-server doctor` command that checks the configuration (TLS, SMTP, backups, disk space, update freshness).
 - **Every account is as strong as its mailbox.** Sign-in is by an emailed link only, because passkeys aren't built. Anyone who controls an account's mailbox can sign in as that person, whether member, ally or admin, so operators and users should protect mailboxes with two-factor sign-in. Report contents stay protected by the passphrase and recovery code, which the server never sees.
+- **Cross-site requests**: the session cookie is `HttpOnly` and `SameSite=Strict`; JSON endpoints also require `Content-Type: application/json`; and a middleware (`faro_server::csrf`) refuses any cookie-bearing request other than `GET`/`HEAD`/`OPTIONS` unless `Sec-Fetch-Site` is `same-origin` (or, when that header is absent, `Origin` is the instance's public origin). A request with neither header is a non-browser client and is allowed. Device routes use signatures, not the cookie, and are not checked.
 - A third-party audit of the crypto and update design before 1.0.
 
 ---
