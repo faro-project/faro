@@ -467,6 +467,7 @@ mod tests {
             instance_id: f.enrollment.instance_id.clone(),
             member_id: f.enrollment.member_id.clone(),
             version,
+            prev_hash: None,
             issued_at_ms: 1000 + version as i64,
             member_enc_pubkey: EncryptionKeypair::generate().public(),
             allies: allies

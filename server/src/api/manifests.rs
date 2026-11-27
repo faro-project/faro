@@ -29,11 +29,12 @@
 //!    their key binding);
 //! 5. `version` is exactly the latest stored version + 1 (1 for the first),
 //!    so rollback, replay of the current version and skipped versions are all
-//!    refused;
+//!    refused, and a format 3 manifest's `prev_hash` is the latest stored
+//!    version's hash (`manifest_prev_mismatch` otherwise);
 //! 6. the ally set changes only as the operation allows (below), and every
 //!    listed ally has an **active** link whose stored key is the listed key.
 //!
-//! Both formats are accepted. The ally names a format 2 manifest carries
+//! All three formats are accepted. The ally names a format 2 or 3 manifest carries
 //! are signed by the member and checked only for length (by `validate`).
 //! The instance stores and serves them as signed, and never compares them
 //! with its own display names: a member re-signs when they choose, so an
@@ -210,6 +211,17 @@ pub async fn check_upload(
                 body.version
             ),
         ));
+    }
+    // 5b. A format 3 manifest names the version it follows: the latest one.
+    // (`validate` already requires the link above version 1 and refuses it
+    // at version 1, so there is always a latest to compare with.)
+    if let (Some(prev), Some(l)) = (body.prev_hash, &latest) {
+        if prev != l.reference.hash {
+            return Err(AppError::conflict(
+                "manifest_prev_mismatch",
+                "the recipient manifest must follow your latest one (prev_hash)",
+            ));
+        }
     }
 
     // 6a. The set changes only as the operation allows.
