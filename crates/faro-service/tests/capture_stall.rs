@@ -363,3 +363,87 @@ async fn pauses_locks_logouts_and_user_switching_are_not_tamper() {
 
     s.dev.shutdown().await;
 }
+
+/// What the agent says about the session at the screen, resent as a real
+/// agent does.
+fn session_state(s: &Setup, idle_secs: u64, locked: bool) {
+    s.send(SourceEvent::Session {
+        idle_secs,
+        locked,
+        display_asleep: false,
+    });
+}
+
+/// #192: a screen claimed locked while input keeps arriving (it never goes
+/// idle) is someone at the computer: after a bounded stretch the claim is
+/// no longer believed and capture resumes. Idle again, a lock is believed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_locked_screen_in_use_is_not_believed_for_long() {
+    use faro_ipc::status::CaptureState;
+    let s = setup().await;
+    s.offline();
+    session_state(&s, 0, true);
+    s.dev
+        .wait("locked", |st| st.capture.state == CaptureState::Locked)
+        .await;
+    // The agent resending "locked, in use" every minute.
+    let mut st = s.dev.status();
+    for _ in 0..12 {
+        session_state(&s, 0, true);
+        st = advance(&s.dev, 60_000, |st| {
+            st.capture.state != CaptureState::Locked
+        })
+        .await;
+        if st.capture.state != CaptureState::Locked {
+            break;
+        }
+    }
+    assert_eq!(st.capture.state, CaptureState::Active, "{st:?}");
+    // Resending the claim does not restore it.
+    session_state(&s, 0, true);
+    settle().await;
+    let n = s.dev.status().captures;
+    let st = s.dev.drive_until("a capture", |st| st.captures > n).await;
+    assert_eq!(st.capture.state, CaptureState::Active, "{st:?}");
+    // Locked and idle: believed.
+    session_state(&s, 400, true);
+    s.dev
+        .wait("locked again", |st| {
+            st.capture.state == CaptureState::Locked
+        })
+        .await;
+}
+
+/// #192: the awake time a sleep claim is believed for is spent across
+/// claims; only the machine really sleeping restores it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sleep_claims_are_bounded_until_the_machine_sleeps() {
+    use faro_ipc::status::CaptureState;
+    let s = setup().await;
+    s.offline();
+    s.send(SourceEvent::SessionChanged(SessionChange::SystemSleep));
+    s.dev
+        .wait("asleep", |st| st.capture.state == CaptureState::Asleep)
+        .await;
+    let st = advance(&s.dev, 700_000, |st| {
+        st.capture.state != CaptureState::Asleep
+    })
+    .await;
+    assert_eq!(st.capture.state, CaptureState::Active, "{st:?}");
+    // Wake and sleep again, without the machine sleeping: not believed.
+    s.send(SourceEvent::SessionChanged(SessionChange::SystemWake));
+    s.send(SourceEvent::SessionChanged(SessionChange::SystemSleep));
+    settle().await;
+    let st = advance(&s.dev, 5_000, |_| false).await;
+    assert_eq!(st.capture.state, CaptureState::Active, "{st:?}");
+    // The machine really sleeps (the service does not tick for a minute):
+    // the next claim is believed.
+    s.dev.clock.advance(60_000);
+    settle().await;
+    s.send(SourceEvent::SessionChanged(SessionChange::SystemSleep));
+    s.dev
+        .wait("asleep again", |st| {
+            st.capture.state == CaptureState::Asleep
+        })
+        .await;
+}

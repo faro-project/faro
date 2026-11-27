@@ -38,6 +38,9 @@ pub const LOCK_FILE: &str = "service.lock";
 /// Permissions the service has seen granted, so a revocation made while the
 /// service was stopped is still reported (runtime/core.rs).
 pub const PERMISSIONS_FILE: &str = "permissions.json";
+/// The current report period's activity timeline, so a crash or power cut
+/// does not lose it (runtime/journal.rs `SavedTimeline`).
+pub const TIMELINE_FILE: &str = "timeline.json";
 
 /// Largest state file read back (they are all tiny).
 const MAX_STATE_FILE: u64 = 1024 * 1024;
@@ -167,6 +170,16 @@ impl StateDir {
 
     pub fn exists(&self, name: &str) -> bool {
         self.file(name).exists()
+    }
+
+    /// Remove `name`; a missing file is not an error.
+    pub fn remove(&self, name: &str) -> Result<(), StateError> {
+        let path = self.file(name);
+        match fs::remove_file(&path) {
+            Ok(()) => sync_dir(&self.path).map_err(io_err(&path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(&path)(e)),
+        }
     }
 
     pub fn write_json<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StateError> {

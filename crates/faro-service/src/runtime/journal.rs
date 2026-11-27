@@ -10,13 +10,17 @@
 //! Domain and app observations are only journaled while the member has
 //! opted in to sharing them (§6: "with the option off the builder does not
 //! even keep the counts in memory"), and are purged when the option is
-//! turned off. A crash (no orderly shutdown) loses the journal; flags and
-//! tamper were already delivered as their own events.
+//! turned off. A crash or power cut (no orderly shutdown) loses the
+//! journal's counts; flags and tamper were already delivered as their own
+//! events. Its activity timeline, which is where unmonitored time is
+//! recorded and nowhere else, is saved as it changes ([`SavedTimeline`])
+//! and recovered at the next start.
 
 use faro_core::{ReportBuilder, ReportError, ReportOptions};
 use faro_proto::body::{AppInfo, FlagBody, Rating, TamperSignal};
 use faro_proto::report::{ActivityState, DailyReport};
 use faro_proto::DeviceId;
+use serde::{Deserialize, Serialize};
 
 pub const DAY_MS: i64 = 24 * 3600 * 1000;
 
@@ -51,6 +55,31 @@ enum Op {
     CaptureFailure,
     Domain(String),
     App(AppInfo),
+}
+
+/// Timeline entries saved at most (the most recent are kept). A day has a
+/// few dozen; this bounds the file on a pathological one.
+pub const MAX_SAVED_STATES: usize = 2_000;
+
+/// A journal's period and activity timeline, as saved in the state
+/// directory (`runtime::core`, `state::TIMELINE_FILE`): states and account
+/// labels only, which the sealed report carries anyway. Nothing from the
+/// screen, no title, URL or domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTimeline {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub states: Vec<SavedState>,
+    /// When it was saved (wall clock): the service ran at least until then.
+    pub saved_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedState {
+    pub ts: i64,
+    pub state: ActivityState,
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 /// Start of the report day containing `wall_ms`, for a fixed UTC offset.
@@ -97,6 +126,44 @@ impl ReportJournal {
     ) -> Self {
         let end = day_start(now_ms, utc_offset_minutes).saturating_add(DAY_MS);
         Self::new(now_ms, end, state, opts)
+    }
+
+    /// The journal for `saved`'s period with its timeline back, and `off`
+    /// from `off_from` (the service was not running).
+    pub fn recovered(saved: &SavedTimeline, off_from: i64, opts: ReportOptions) -> Self {
+        let mut j = Self::new(saved.start_ms, saved.end_ms, ActivityState::Off, opts);
+        let mut last = saved.start_ms;
+        for st in &saved.states {
+            j.state(st.ts, st.state, st.account.clone());
+            last = last.max(st.ts);
+        }
+        j.state(off_from.max(last), ActivityState::Off, None);
+        j
+    }
+
+    /// The period and timeline to save, at `now_ms`.
+    pub fn saved_timeline(&self, now_ms: i64) -> SavedTimeline {
+        let mut states: Vec<SavedState> = self
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                Op::State { ts, state, account } => Some(SavedState {
+                    ts: *ts,
+                    state: *state,
+                    account: account.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        if states.len() > MAX_SAVED_STATES {
+            states.drain(..states.len() - MAX_SAVED_STATES);
+        }
+        SavedTimeline {
+            start_ms: self.start_ms,
+            end_ms: self.end_ms,
+            states,
+            saved_ms: now_ms,
+        }
     }
 
     pub fn start_ms(&self) -> i64 {
@@ -310,6 +377,45 @@ mod tests {
             ActivityState::Locked
         );
         assert!(j.build(0, &dev, "Laptop").is_err(), "empty period");
+    }
+
+    /// #193: the timeline, unmonitored spans included, survives a crash;
+    /// the time the service was not running is `off`.
+    #[test]
+    fn saved_timeline_round_trips_with_off_after_it() {
+        let dev = DeviceId::new("dev_a");
+        let mut j = ReportJournal::new(0, 10_000, ActivityState::Active, opts(true));
+        j.capture(10, Rating::Clean);
+        j.domain("example.org");
+        j.state(1_000, ActivityState::Unmonitored, Some("alex".into()));
+        j.state(3_000, ActivityState::Active, Some("alex".into()));
+        let saved = j.saved_timeline(4_000);
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(
+            !json.contains("example.org"),
+            "only states are saved: {json}"
+        );
+        let back: SavedTimeline = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, saved);
+        let r = ReportJournal::recovered(&back, 4_000, opts(true))
+            .build(10_000, &dev, "L")
+            .unwrap();
+        assert_eq!(r.health.unmonitored_secs, 2);
+        let spans: Vec<_> = r
+            .timeline
+            .iter()
+            .map(|s| (s.start_ms, s.end_ms, s.state))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                (0, 1_000, ActivityState::Active),
+                (1_000, 3_000, ActivityState::Unmonitored),
+                (3_000, 4_000, ActivityState::Active),
+                (4_000, 10_000, ActivityState::Off),
+            ]
+        );
+        assert_eq!(r.counts.total(), 0, "counts are not saved");
     }
 
     #[test]
