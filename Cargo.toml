@@ -48,6 +48,8 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml = "0.8"
 base64 = "0.22"
 hex = "0.4"
+# NFC for the ally names in recipient manifests (faro-proto).
+unicode-normalization = "0.1.24"
 
 # Crypto (pinned to the rand_core 0.6 generation so every primitive shares one RNG trait set;
 # see docs/DEVELOPMENT.md "Dependency notes" before upgrading)

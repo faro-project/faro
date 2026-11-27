@@ -175,14 +175,60 @@ async fn allies_come_from_the_manifest_the_member_signed() {
     assert!(!info.instance_name.is_empty());
     assert_eq!(info.allies.len(), 1);
     assert_eq!(info.allies[0].ally_id, w.ally.id.to_string());
-    // The code the member and the ally compared when the ally was approved.
+    // The name the member signed (the harness signs format 2, as the web
+    // app does).
+    assert_eq!(manifest.body.format, 2);
     assert_eq!(
-        info.allies[0].safety_code,
-        faro_proto::keys::safety_code(
-            w.member_keys.sign.public().as_bytes(),
-            w.ally.keys.enc.public().as_bytes()
-        )
+        info.allies[0].name.as_deref(),
+        Some(support::server::ally_name(&w.ally.id).as_str())
     );
+    // The code the member and the ally compared when the ally was approved.
+    let code = faro_proto::keys::safety_code(
+        w.member_keys.sign.public().as_bytes(),
+        w.ally.keys.enc.public().as_bytes(),
+    );
+    assert_eq!(info.allies[0].safety_code, code);
+
+    // The member re-signs, naming the ally differently (they renamed
+    // themselves), with characters a name must not keep.
+    let mut body = w.member_keys.next_manifest(&manifest, |_| {}).body;
+    body.allies[0].name = Some("Alex\u{202e} \u{1b}Smith".into());
+    let renamed = w.member_keys.sign.endorse(body);
+    assert_eq!(
+        w.t.put_manifest(&w.member_session, &renamed).await.status,
+        axum::http::StatusCode::CREATED
+    );
+    let c = core.clone();
+    let info = blocking(move || {
+        c.upload_pending().unwrap();
+        c.allies().unwrap()
+    })
+    .await;
+    assert_eq!(info.manifest_version, renamed.body.version);
+    assert_eq!(info.allies[0].name.as_deref(), Some("Alex Smith"));
+
+    // A format 1 manifest names no one: count and codes only, as before.
+    let v1 = w.member_keys.manifest_in(
+        1,
+        &renamed.body.instance_id,
+        &w.member,
+        renamed.body.version + 1,
+        &[(w.ally.id.clone(), w.ally.keys.enc.public())],
+        renamed.body.issued_at_ms + 1,
+    );
+    assert_eq!(
+        w.t.put_manifest(&w.member_session, &v1).await.status,
+        axum::http::StatusCode::CREATED
+    );
+    let c = core.clone();
+    let info = blocking(move || {
+        c.upload_pending().unwrap();
+        c.allies().unwrap()
+    })
+    .await;
+    assert_eq!(info.manifest_version, v1.body.version);
+    assert_eq!(info.allies[0].name, None);
+    assert_eq!(info.allies[0].safety_code, code);
 
     // The member removes the ally: the next upload adopts the new manifest.
     let v3 = w.remove_ally().await;

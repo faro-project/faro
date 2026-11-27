@@ -22,6 +22,96 @@
       "wrapped_privkey": "{\"v\":1,\"note\":\"pässwörd ✓\",\"recovery\":{}}"
     }
   },
+  "ally_names": [
+    {
+      "input_hex": "53616d",
+      "output": "Sam"
+    },
+    {
+      "input_hex": "202053616d202020536d6974682020",
+      "output": "Sam Smith"
+    },
+    {
+      "input_hex": "53616d09536d6974680d0a4a72",
+      "output": "Sam Smith Jr"
+    },
+    {
+      "input_hex": "61e280a862e280a963c285640b650c66",
+      "output": "a b c d e f"
+    },
+    {
+      "input_hex": "65cc81",
+      "output": "é"
+    },
+    {
+      "input_hex": "5a6f65cc882041cc8a6e677374726fcc886d",
+      "output": "Zoë Ångström"
+    },
+    {
+      "input_hex": "e284abe284a6",
+      "output": "ÅΩ"
+    },
+    {
+      "input_hex": "e18480e185a1e186a8",
+      "output": "각"
+    },
+    {
+      "input_hex": "53616de280ae6576696ce280ac",
+      "output": "Samevil"
+    },
+    {
+      "input_hex": "e280aae280abe280ad78e281a6e281a7e281a8e281a9e2808ee2808fd89c",
+      "output": "x"
+    },
+    {
+      "input_hex": "0001080e1f1b5b33316d7265647fc280c284c286c29bc29f",
+      "output": "[31mred"
+    },
+    {
+      "input_hex": "7a65726fefbbbf7769647468efbfb9efbfbaefbfbb",
+      "output": "zerowidth"
+    },
+    {
+      "input_hex": "f09f91a9e2808df09f91a720d985e2808cd986",
+      "output": "👩‍👧 م‌ن"
+    },
+    {
+      "input_hex": "6500cc81",
+      "output": "é"
+    },
+    {
+      "input_hex": "efac8120e291a020efbcb3efbd81efbd8d",
+      "output": "ﬁ ① Ｓａｍ"
+    },
+    {
+      "input_hex": "",
+      "output": ""
+    },
+    {
+      "input_hex": "20e280ae20",
+      "output": ""
+    },
+    {
+      "input_hex": "c2a053616dc2a0",
+      "output": " Sam "
+    },
+    {
+      "input_hex": "c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9",
+      "output": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+    },
+    {
+      "input_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161612062",
+      "output": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "input_hex": "f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880",
+      "output": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+    },
+    {
+      "input_hex": "65cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc81cc8178",
+      "output": "é́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́́"
+    }
+  ],
   "canonical": {
     "event_body_aad_hex": "6661726f2f6576656e742d626f64792f76310000000015696e73745f303132333435363738396162636465660000000c6465765f6c6170746f7030310000000000000011",
     "layout_hex": "740000010000000261620000000000000002ffffffffffffffffaabb",
@@ -86,9 +176,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "LLiBTY32EEbSE0iqUXvjgg",
-          "nonce": "MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG",
-          "ciphertext": "fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx",
+          "salt": "n1iWzLykVgZcdpqc9U8h5w",
+          "nonce": "b8gyDahx0NbhrIhFYKFxlISTCmhlFRfo",
+          "ciphertext": "A7P5LdcXi2tms0QL0v66JiPa2xK8vBrE5fGz1ryJQTwKLrlGvmsIEOjWvikBDi2i",
           "recovery": {
             "v": 1,
             "kdf": "argon2id13",
@@ -97,9 +187,9 @@
               "t_cost": 2,
               "p_cost": 1
             },
-            "salt": "4QSdWUYOsycfvMos7Ad_ug",
-            "nonce": "8kksamF4AX3g6mWek99bd2Jn55PBfWAF",
-            "ciphertext": "wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi"
+            "salt": "-RrrZm5Ktda9uzCPhG-mEg",
+            "nonce": "C6VZClQrBbYPw63fycTsPp9DZFCkaRyl",
+            "ciphertext": "TltUBKsdw0IBXSnpp7Y0ilsGBFLHPpocJI5yP92gpuzm49Y9lLUc1SEvY9yCxfz3"
           }
         }
       },
@@ -114,9 +204,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "4QSdWUYOsycfvMos7Ad_ug",
-          "nonce": "8kksamF4AX3g6mWek99bd2Jn55PBfWAF",
-          "ciphertext": "wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi"
+          "salt": "-RrrZm5Ktda9uzCPhG-mEg",
+          "nonce": "C6VZClQrBbYPw63fycTsPp9DZFCkaRyl",
+          "ciphertext": "TltUBKsdw0IBXSnpp7Y0ilsGBFLHPpocJI5yP92gpuzm49Y9lLUc1SEvY9yCxfz3"
         }
       },
       {
@@ -130,9 +220,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "_mgQvv7QP2piWDqj72gLGQ",
-          "nonce": "9iv0Akrd8YdoCau6wa8s8PugUXqLDpqI",
-          "ciphertext": "9huGlm-j-_bOGgjBhVVDxlSeiiN-Wu3WvWZ0x4VQtQPIF4-jiyTNLI55XbV-CAlZ"
+          "salt": "eqUb06oDSjv9NMnGoTY1Zw",
+          "nonce": "rsxN4djRbl1GlTYWKh6RYdzF7bvl7XlJ",
+          "ciphertext": "7lvalt1kgMUkK4Y0OEUct0xZkUDmofV22YRkXWhWPpIdXQ2-gOdTtTZcM70-kNbS"
         }
       },
       {
@@ -146,9 +236,9 @@
             "t_cost": 2,
             "p_cost": 1
           },
-          "salt": "_mgQvv7QP2piWDqj72gLGQ",
-          "nonce": "Ov7eWzrCLYa22eVTNN5tD94eHNX6G5Ue",
-          "ciphertext": "qgOpMFY8Y0t1C2sEcZuNTM1_zFxs6vy-eDJmfoGyZv9cT5X-pPDCleThXVSAespX"
+          "salt": "eqUb06oDSjv9NMnGoTY1Zw",
+          "nonce": "fqRbQ9MysWHIVgVm8KvVtXe0O6k12pYq",
+          "ciphertext": "drW5RfqJPdvRufff19Tdzb8L8eixjeFghqkIP1qncc4oHm_fOKjvjgPiOpxVjtxK"
         }
       }
     ],
@@ -166,6 +256,31 @@
       ],
       "sig": "GKagjgikkWkM3btjgML33MPKcAqeVWZWKHwwJiQhIXSOaOH2NTZchZFwcWeiSHd9QqSCq15F0PSgDQEtHa9rAQ"
     },
+    "manifest_v2": {
+      "format": 2,
+      "instance_id": "inst_0123456789abcdef",
+      "member_id": "usr_member01",
+      "version": 2,
+      "issued_at_ms": 1790000000500,
+      "member_enc_pubkey": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+      "allies": [
+        {
+          "ally_id": "usr_ally_a",
+          "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+          "name": "Zoë Smith"
+        },
+        {
+          "ally_id": "usr_ally_b",
+          "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms",
+          "name": "🙏 Lee"
+        }
+      ],
+      "sig": "YxXMBaRgWyKe_0Fom_NyFyrNHfSMGWCwsW0jn4DbGlP6Vg17oLNi36s0QMs2sEO2UKcRQaikyL-iUuWpWzRbBA"
+    },
+    "manifest_v2_raw_names_hex": [
+      "205a6f65cc88e280ae2020536d6974680a",
+      "e2808ff09f998f204c656500"
+    ],
     "device_endorsement": {
       "instance_id": "inst_0123456789abcdef",
       "member_id": "usr_member01",
@@ -198,10 +313,10 @@
       "member_id": "usr_member01",
       "sign_pubkey": "NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y",
       "issued_at_ms": 1790000300000,
-      "wrapped_sign_key": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"LLiBTY32EEbSE0iqUXvjgg\",\"nonce\":\"MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG\",\"ciphertext\":\"fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"4QSdWUYOsycfvMos7Ad_ug\",\"nonce\":\"8kksamF4AX3g6mWek99bd2Jn55PBfWAF\",\"ciphertext\":\"wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi\"}}",
+      "wrapped_sign_key": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"n1iWzLykVgZcdpqc9U8h5w\",\"nonce\":\"b8gyDahx0NbhrIhFYKFxlISTCmhlFRfo\",\"ciphertext\":\"A7P5LdcXi2tms0QL0v66JiPa2xK8vBrE5fGz1ryJQTwKLrlGvmsIEOjWvikBDi2i\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"-RrrZm5Ktda9uzCPhG-mEg\",\"nonce\":\"C6VZClQrBbYPw63fycTsPp9DZFCkaRyl\",\"ciphertext\":\"TltUBKsdw0IBXSnpp7Y0ilsGBFLHPpocJI5yP92gpuzm49Y9lLUc1SEvY9yCxfz3\"}}",
       "wrapped_enc_key": "{\"v\":1}",
       "recovery_wrapped": "{\"sign\":{},\"enc\":{}}",
-      "sig": "7WiKcXvHgpUjAYMgjyVxGoaWAelUM1U0SOUbOJAhMsobWOU3sSDf28qI48cWyktnYWbG_XGwrkUK9ADpGps9Bg"
+      "sig": "0OUfSO856GDhLcXi3s4ZMcCVjuZXQmmzV19vbHt3vCv8fMD-gjUF3OstQ_rUO0urBIpdAJSWLZd1Dl6BBrCgDg"
     },
     "ally_key_rewrap": {
       "challenge_hex": "4444444444444444444444444444444444444444444444444444444444444444",
@@ -210,8 +325,8 @@
         "ally_id": "usr_ally_a",
         "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
         "issued_at_ms": 1790000400000,
-        "wrapped_privkey": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"LLiBTY32EEbSE0iqUXvjgg\",\"nonce\":\"MX3OzhMa3lANyo5KfPczCDG0Ip9R86TG\",\"ciphertext\":\"fb4btBsV3-GJMo6ioOLRpiu1Dz0FC6vmAQMLiuDsEjgp7NDVE0Ob1u8qgZSJDuGx\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"4QSdWUYOsycfvMos7Ad_ug\",\"nonce\":\"8kksamF4AX3g6mWek99bd2Jn55PBfWAF\",\"ciphertext\":\"wXcMeQXzQibtiIdPjVmQnkIxdR4rYhHWiBtVCk5yfZh3bWZITaHimEWldR_kviJi\"}}",
-        "proof": "b3:6ef2c6b79e2d38ea3996da66f46d48e405fa08e14cb152aecf2de4415be21429"
+        "wrapped_privkey": "{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"n1iWzLykVgZcdpqc9U8h5w\",\"nonce\":\"b8gyDahx0NbhrIhFYKFxlISTCmhlFRfo\",\"ciphertext\":\"A7P5LdcXi2tms0QL0v66JiPa2xK8vBrE5fGz1ryJQTwKLrlGvmsIEOjWvikBDi2i\",\"recovery\":{\"v\":1,\"kdf\":\"argon2id13\",\"params\":{\"m_cost_kib\":256,\"t_cost\":2,\"p_cost\":1},\"salt\":\"-RrrZm5Ktda9uzCPhG-mEg\",\"nonce\":\"C6VZClQrBbYPw63fycTsPp9DZFCkaRyl\",\"ciphertext\":\"TltUBKsdw0IBXSnpp7Y0ilsGBFLHPpocJI5yP92gpuzm49Y9lLUc1SEvY9yCxfz3\"}}",
+        "proof": "b3:4c4ff27383b609d774fc087af2ca2878882bb0e3bfe76159507c958b9d0c7288"
       }
     }
   },
@@ -277,6 +392,31 @@
       "version": 3
     },
     "signing_bytes_hex": "6661726f2f726563697069656e742d6d616e69666573742f76310000000015696e73745f303132333435363738396162636465660000000c7573725f6d656d62657230310000000000000003000001a0c4506c7b0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f2000000000000000020000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b140000000a7573725f616c6c795f62ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b"
+  },
+  "manifest_v2": {
+    "hash": "b3:d92459ddc9bc8ad7103bd8cb4df4cd030320f65e65b52880a66131a47ab45a03",
+    "signed": {
+      "allies": [
+        {
+          "ally_id": "usr_ally_a",
+          "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+          "name": "Zoë Ångström 🙏"
+        },
+        {
+          "ally_id": "usr_ally_b",
+          "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms",
+          "name": ""
+        }
+      ],
+      "format": 2,
+      "instance_id": "inst_0123456789abcdef",
+      "issued_at_ms": 1790000000123,
+      "member_enc_pubkey": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+      "member_id": "usr_member01",
+      "sig": "-y4v7R75ccOU1-2nhVU1o5hY8fIPnhzin5Fadwdt94rGw-UWWGetnsAJcbDcDgj1R_inPjve4XH5qU7B_Is8Aw",
+      "version": 4
+    },
+    "signing_bytes_hex": "6661726f2f726563697069656e742d6d616e69666573742f76320000000015696e73745f303132333435363738396162636465660000000c7573725f6d656d62657230310000000000000004000001a0c4506c7b0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f2000000000000000020000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14000000145a6fc3ab20c3856e67737472c3b66d20f09f998f0000000a7573725f616c6c795f62ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b00000000"
   },
   "member_binding": {
     "signed": {

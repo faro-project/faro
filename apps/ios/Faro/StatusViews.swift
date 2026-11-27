@@ -1,4 +1,5 @@
 import FaroKit
+import FaroKitApp
 import NetworkExtension
 import SwiftUI
 
@@ -125,7 +126,9 @@ struct NoticeView: View {
                              : "Faro reports to \(r.allies.count) allies.")
                         ForEach(Array(r.allies.enumerated()), id: \.element.allyId) { i, ally in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Ally \(i + 1)").font(.headline)
+                                // Verbatim: a signed, sanitized name, never Markdown.
+                                Text(verbatim: MonthlyNotice.allyTitle(name: ally.name, position: i + 1))
+                                    .font(.headline)
                                 Text(ally.safetyCode)
                                     .font(.footnote.monospaced())
                                     .foregroundStyle(.secondary)
@@ -133,8 +136,13 @@ struct NoticeView: View {
                             }
                         }
                     }
-                    Text("This list comes from the one you signed in the web app, so the instance can't add anyone to it. It holds each ally's key, not their name: your web app shows each ally's name next to the same safety code. You can change your allies there at any time.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                    if r.allies.isEmpty || MonthlyNotice.namesEveryAlly(r.allies.map(\.name)) {
+                        Text("This list comes from the one you signed in the web app, names included, so the instance can't add anyone to it or change what they are called. Each safety code is the one your web app shows next to that ally. You can change your allies there at any time.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        Text("This list comes from the one you signed in the web app, so the instance can't add anyone to it. It was signed before Faro put names in the list, so it holds each ally's key, not their name: your web app shows each ally's name next to the same safety code. The names appear here after the next change to your allies. You can change them there at any time.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     LabeledContent(
                         "Signed",
                         value: Date(timeIntervalSince1970: Double(r.signedAtMs) / 1000)
