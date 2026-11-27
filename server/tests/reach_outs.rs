@@ -135,6 +135,8 @@ fn message(
         issued_at_ms: t.clock_ms(),
         recipients,
         body_hash: Hash32::ZERO,
+        epoch: None,
+        parent_id: None,
     }
 }
 
@@ -695,9 +697,10 @@ async fn ally_only_senders_reach_out_unverified_and_groups_bound_audiences() {
     )
     .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
-    // There's no whole-group audience.
+    // The whole group needs the group's encryption first (tests/group_posts.rs).
     let r = reach_out(&t, &bea.s, json!({ "audience": "group", "group_id": gid })).await;
-    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.error_code(), "group_key_missing");
 }
 
 #[tokio::test]

@@ -15,6 +15,12 @@
 //!   an operator who knows everyone's public keys could write a message
 //!   "from" anyone.
 //!
+//! **Whole-group mode** (reach outs and check-ins to a group of any size,
+//! GROUPS.md §10.5): `epoch` names the group's epoch (PROTOCOL.md §10.3),
+//! `recipients` is empty, and the body has a single envelope that wraps the
+//! content key with that epoch's group key ([`epoch_wrap_aad`]) instead of
+//! sealing it to each person. Whoever holds the epoch key can read it.
+//!
 //! A message may have no body (`body_hash` all zero): a signed, content-free
 //! reach out. People without a member signing key send reach outs that are
 //! not group messages at all (no signature, no body), which clients mark
@@ -28,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 const TAG_GROUP_MESSAGE: &str = "faro/group-message/v1";
 const TAG_GROUP_MESSAGE_BODY: &str = "faro/group-message-body/v1";
+const TAG_GROUP_MESSAGE_EPOCH: &str = "faro/group-message-epoch/v1";
 
 /// Recipients of one message, not counting the author's own copy. The same
 /// bound as a recipient manifest's allies ([`crate::keys::MAX_MANIFEST_ALLIES`]),
@@ -42,6 +49,19 @@ pub const MAX_MESSAGE_CHARS: usize = 500;
 /// character), its JSON and the AEAD tag fit with room to spare.
 pub const MAX_MESSAGE_CIPHERTEXT: usize = 4096;
 
+/// Bytes of ciphertext in a check-in: three texts of [`MAX_MESSAGE_CHARS`]
+/// characters in UTF-8, the scale and the JSON around them.
+pub const MAX_CHECK_IN_CIPHERTEXT: usize = 8192;
+
+/// Bytes of an epoch-wrapped content key: a 24-byte nonce, the 32-byte key
+/// and the 16-byte AEAD tag.
+pub const EPOCH_WRAPPED_KEY_LEN: usize = 24 + 32 + 16;
+
+/// The `key_id` of the one envelope of a whole-group message.
+pub fn epoch_key_id(epoch: u64) -> String {
+    format!("epoch:{epoch}")
+}
+
 /// What a message is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,13 +73,22 @@ pub enum GroupMessageKind {
     ProposalNote,
     /// A note on a request to join a listed group, to its facilitators.
     JoinRequestNote,
+    /// A check-in (GROUPS.md §8.6): a 1 to 5 scale and up to three short
+    /// texts, to the author's allies in the group, its facilitators, named
+    /// people or the whole group. Stored in the group's feed, never
+    /// notified.
+    CheckIn,
+    /// A private reply to a check-in, to its author alone.
+    CheckInReply,
 }
 
 impl GroupMessageKind {
-    pub const ALL: [GroupMessageKind; 3] = [
+    pub const ALL: [GroupMessageKind; 5] = [
         GroupMessageKind::ReachOut,
         GroupMessageKind::ProposalNote,
         GroupMessageKind::JoinRequestNote,
+        GroupMessageKind::CheckIn,
+        GroupMessageKind::CheckInReply,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +96,21 @@ impl GroupMessageKind {
             GroupMessageKind::ReachOut => "reach_out",
             GroupMessageKind::ProposalNote => "proposal_note",
             GroupMessageKind::JoinRequestNote => "join_request_note",
+            GroupMessageKind::CheckIn => "check_in",
+            GroupMessageKind::CheckInReply => "check_in_reply",
+        }
+    }
+
+    /// Whether this kind may be sealed to the whole group (epoch mode).
+    pub fn may_go_to_group(self) -> bool {
+        matches!(self, GroupMessageKind::ReachOut | GroupMessageKind::CheckIn)
+    }
+
+    /// Longest ciphertext a body of this kind may have.
+    pub fn max_ciphertext(self) -> usize {
+        match self {
+            GroupMessageKind::CheckIn => MAX_CHECK_IN_CIPHERTEXT,
+            _ => MAX_MESSAGE_CIPHERTEXT,
         }
     }
 
@@ -96,6 +140,9 @@ pub struct MessageRecipient {
 ///   always there (one more envelope).
 /// * `body_hash` is `BLAKE3(nonce ‖ ciphertext)` of the encrypted body
 ///   ([`EncryptedItem::body_hash`]), or 32 zero bytes when there is none.
+/// * `epoch` is set exactly for a whole-group message (module docs): then
+///   `recipients` is empty and the kind is a reach out or a check-in.
+/// * `parent_id` names the check-in a reply answers, and only a reply has one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupMessage {
     pub instance_id: InstanceId,
@@ -107,6 +154,10 @@ pub struct GroupMessage {
     pub issued_at_ms: i64,
     pub recipients: Vec<MessageRecipient>,
     pub body_hash: Hash32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// Structural problems with a message that need no keys to find.
@@ -124,8 +175,14 @@ pub enum GroupMessageError {
     AuthorIsRecipient,
     #[error("a {0} must name its group")]
     NoGroup(&'static str),
-    #[error("a proposal note has exactly one recipient")]
+    #[error("a proposal note or a reply has exactly one recipient")]
     ProposalNoteRecipients,
+    #[error("only a reach out or a check-in goes to the whole group")]
+    EpochKind,
+    #[error("a whole-group message names its group and has no recipients")]
+    EpochRecipients,
+    #[error("a reply names the check-in it answers, and nothing else does")]
+    Parent,
     #[error("the body does not match the signed message")]
     BodyMismatch,
     #[error("unsupported body: {0}")]
@@ -160,13 +217,36 @@ impl GroupMessage {
             }
             _ => {}
         }
+        match (&self.parent_id, self.kind) {
+            (Some(p), GroupMessageKind::CheckInReply) if is_hex_id(p) && *p != self.item_id => {}
+            (Some(p), GroupMessageKind::CheckInReply) => {
+                return Err(GroupMessageError::MalformedId(p.clone()))
+            }
+            (None, GroupMessageKind::CheckInReply) | (Some(_), _) => {
+                return Err(GroupMessageError::Parent)
+            }
+            (None, _) => {}
+        }
+        if let Some(epoch) = self.epoch {
+            if !self.kind.may_go_to_group() {
+                return Err(GroupMessageError::EpochKind);
+            }
+            if self.group_id.is_none() || !self.recipients.is_empty() || epoch == 0 {
+                return Err(GroupMessageError::EpochRecipients);
+            }
+            return Ok(());
+        }
         if self.recipients.is_empty() {
             return Err(GroupMessageError::NoRecipients);
         }
         if self.recipients.len() > MAX_MESSAGE_RECIPIENTS {
             return Err(GroupMessageError::TooManyRecipients(self.recipients.len()));
         }
-        if self.kind == GroupMessageKind::ProposalNote && self.recipients.len() != 1 {
+        if matches!(
+            self.kind,
+            GroupMessageKind::ProposalNote | GroupMessageKind::CheckInReply
+        ) && self.recipients.len() != 1
+        {
             return Err(GroupMessageError::ProposalNoteRecipients);
         }
         for (i, r) in self.recipients.iter().enumerate() {
@@ -199,7 +279,16 @@ impl GroupMessage {
         for r in &self.recipients {
             c = c.str(r.user_id.as_str()).fixed(r.enc_pubkey.as_bytes());
         }
-        c.fixed(self.body_hash.as_bytes()).finish()
+        c = c.fixed(self.body_hash.as_bytes());
+        // Appended only when present, so a message without them signs
+        // exactly the bytes it always did. The tags keep the two apart.
+        if let Some(epoch) = self.epoch {
+            c = c.str("epoch").u64(epoch);
+        }
+        if let Some(parent) = &self.parent_id {
+            c = c.str("parent").str(parent);
+        }
+        c.finish()
     }
 
     /// Whether `user` is the author or a recipient.
@@ -217,6 +306,22 @@ pub fn body_aad(instance_id: &InstanceId, item_id: &str) -> Vec<u8> {
         .finish()
 }
 
+/// The AAD under which an epoch key wraps a whole-group message's content
+/// key: it binds the wrapped key to the group, the item and the epoch.
+pub fn epoch_wrap_aad(
+    instance_id: &InstanceId,
+    group_id: &str,
+    item_id: &str,
+    epoch: u64,
+) -> Vec<u8> {
+    Canonical::new(TAG_GROUP_MESSAGE_EPOCH)
+        .str(instance_id.as_str())
+        .str(group_id)
+        .str(item_id)
+        .u64(epoch)
+        .finish()
+}
+
 /// The plaintext of a message's body, as UTF-8 JSON. Readers ignore fields
 /// they don't know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +333,32 @@ pub struct MessageText {
 impl MessageText {
     pub fn is_valid(&self) -> bool {
         !self.text.trim().is_empty() && self.text.chars().count() <= MAX_MESSAGE_CHARS
+    }
+}
+
+/// The plaintext of a check-in's body (GROUPS.md §8.6), as UTF-8 JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckInText {
+    /// "How's it going?", 1 (struggling) to 5 (going well).
+    pub scale: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub went_well: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was_hard: Option<String>,
+    /// "What I'd like from the group".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
+}
+
+impl CheckInText {
+    /// A scale of 1 to 5, and each text, when there is one, not blank and
+    /// at most [`MAX_MESSAGE_CHARS`] characters.
+    pub fn is_valid(&self) -> bool {
+        (1..=5).contains(&self.scale)
+            && [&self.went_well, &self.was_hard, &self.ask]
+                .into_iter()
+                .flatten()
+                .all(|t| !t.trim().is_empty() && t.chars().count() <= MAX_MESSAGE_CHARS)
     }
 }
 
@@ -261,8 +392,20 @@ impl SealedGroupMessage {
         if body.alg != EncryptedItem::ALG {
             return Err(GroupMessageError::BadBody(body.alg.clone()));
         }
-        if body.ciphertext.len() > MAX_MESSAGE_CIPHERTEXT {
+        if body.ciphertext.len() > m.kind.max_ciphertext() {
             return Err(GroupMessageError::BadBody("ciphertext too long".into()));
+        }
+        if let Some(epoch) = m.epoch {
+            // One envelope: the content key wrapped with the epoch key.
+            return match body.envelopes.as_slice() {
+                [e] if e.recipient == m.author_id
+                    && e.key_id == epoch_key_id(epoch)
+                    && e.wrapped_key.len() == EPOCH_WRAPPED_KEY_LEN =>
+                {
+                    Ok(())
+                }
+                _ => Err(GroupMessageError::Envelopes),
+            };
         }
         if body.envelopes.len() != m.recipients.len() + 1 {
             return Err(GroupMessageError::Envelopes);
@@ -322,6 +465,8 @@ mod tests {
                 })
                 .collect(),
             body_hash: Hash32::ZERO,
+            epoch: None,
+            parent_id: None,
         }
     }
 
@@ -414,6 +559,154 @@ mod tests {
             assert_ne!(m.signing_bytes(), b, "{m:?}");
         }
         assert!(b.starts_with(b"faro/group-message/v1\0"));
+    }
+
+    #[test]
+    fn whole_group_and_reply_rules() {
+        // Whole group: an epoch, no recipients, a group, a reach out or a check-in.
+        let mut m = msg(&[]);
+        m.epoch = Some(2);
+        assert_eq!(m.validate(), Ok(()));
+        m.kind = GroupMessageKind::CheckIn;
+        assert_eq!(m.validate(), Ok(()));
+        m.epoch = Some(0);
+        assert_eq!(m.validate(), Err(GroupMessageError::EpochRecipients));
+        m.epoch = Some(2);
+        m.group_id = None;
+        assert!(matches!(m.validate(), Err(GroupMessageError::NoGroup(_))));
+        m.group_id = Some(GROUP.into());
+        m.recipients = msg(&["usr_a"]).recipients;
+        assert_eq!(m.validate(), Err(GroupMessageError::EpochRecipients));
+        let mut m = msg(&[]);
+        m.epoch = Some(2);
+        m.kind = GroupMessageKind::ProposalNote;
+        assert_eq!(m.validate(), Err(GroupMessageError::EpochKind));
+        m.kind = GroupMessageKind::CheckInReply;
+        m.parent_id = Some(ITEM.replace('0', "1"));
+        assert_eq!(m.validate(), Err(GroupMessageError::EpochKind));
+        // A check-in to named people needs recipients, like any message.
+        let mut m = msg(&[]);
+        m.kind = GroupMessageKind::CheckIn;
+        assert_eq!(m.validate(), Err(GroupMessageError::NoRecipients));
+        // A reply has one recipient and names its parent, and nothing else has a parent.
+        let mut m = msg(&["usr_a"]);
+        m.kind = GroupMessageKind::CheckInReply;
+        assert_eq!(m.validate(), Err(GroupMessageError::Parent));
+        m.parent_id = Some(ITEM.into());
+        assert!(matches!(
+            m.validate(),
+            Err(GroupMessageError::MalformedId(_))
+        ));
+        m.parent_id = Some(GROUP.into());
+        assert_eq!(m.validate(), Ok(()));
+        m.recipients = msg(&["usr_a", "usr_b"]).recipients;
+        assert_eq!(m.validate(), Err(GroupMessageError::ProposalNoteRecipients));
+        let mut m = msg(&["usr_a"]);
+        m.parent_id = Some(GROUP.into());
+        assert_eq!(m.validate(), Err(GroupMessageError::Parent));
+        // Epoch and parent are signed, and a message without them signs as before.
+        let base = msg(&["usr_a"]);
+        let mut e = base.clone();
+        e.epoch = Some(1);
+        let mut p = base.clone();
+        p.kind = GroupMessageKind::CheckInReply;
+        let mut p2 = p.clone();
+        p.parent_id = Some(GROUP.into());
+        p2.parent_id = Some(ITEM.replace('0', "1"));
+        let all = [
+            base.signing_bytes(),
+            e.signing_bytes(),
+            p.signing_bytes(),
+            p2.signing_bytes(),
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        e.epoch = Some(2);
+        assert_ne!(e.signing_bytes(), all[1]);
+    }
+
+    #[test]
+    fn whole_group_body_has_one_epoch_envelope() {
+        let mut m = msg(&[]);
+        m.epoch = Some(3);
+        m.kind = GroupMessageKind::CheckIn;
+        let mut b = body(&[("usr_m", &[0])]);
+        b.envelopes[0].key_id = epoch_key_id(3);
+        b.envelopes[0].wrapped_key = vec![0; EPOCH_WRAPPED_KEY_LEN];
+        m.body_hash = b.body_hash();
+        let sealed = |m: &GroupMessage, b: &EncryptedItem| SealedGroupMessage {
+            message: Signed {
+                body: m.clone(),
+                sig: Signature([0; 64]),
+            },
+            body: Some(b.clone()),
+        };
+        assert_eq!(sealed(&m, &b).validate(), Ok(()));
+        for edit in [
+            (|b: &mut EncryptedItem| b.envelopes[0].key_id = epoch_key_id(4))
+                as fn(&mut EncryptedItem),
+            |b| b.envelopes[0].recipient = UserId::new("usr_x"),
+            |b| b.envelopes[0].wrapped_key = vec![0; 48],
+            |b| b.envelopes.push(b.envelopes[0].clone()),
+        ] {
+            let mut bad = b.clone();
+            edit(&mut bad);
+            m.body_hash = bad.body_hash();
+            assert_eq!(
+                sealed(&m, &bad).validate(),
+                Err(GroupMessageError::Envelopes)
+            );
+        }
+        // A check-in's ciphertext may be longer than a note's, but not unbounded.
+        let mut long = b.clone();
+        long.ciphertext = vec![1; MAX_MESSAGE_CIPHERTEXT + 1];
+        m.body_hash = long.body_hash();
+        assert_eq!(sealed(&m, &long).validate(), Ok(()));
+        long.ciphertext = vec![1; MAX_CHECK_IN_CIPHERTEXT + 1];
+        m.body_hash = long.body_hash();
+        assert!(matches!(
+            sealed(&m, &long).validate(),
+            Err(GroupMessageError::BadBody(_))
+        ));
+    }
+
+    #[test]
+    fn check_in_text_limits() {
+        let ok = CheckInText {
+            scale: 3,
+            went_well: Some("walked".into()),
+            was_hard: None,
+            ask: None,
+        };
+        assert!(ok.is_valid());
+        for scale in [0, 6] {
+            assert!(!CheckInText {
+                scale,
+                ..ok.clone()
+            }
+            .is_valid());
+        }
+        let blank = CheckInText {
+            was_hard: Some("  ".into()),
+            ..ok.clone()
+        };
+        assert!(!blank.is_valid());
+        let long = CheckInText {
+            ask: Some("x".repeat(MAX_MESSAGE_CHARS + 1)),
+            ..ok
+        };
+        assert!(!long.is_valid());
+        let v = serde_json::to_value(CheckInText {
+            scale: 2,
+            went_well: None,
+            was_hard: None,
+            ask: None,
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::json!({"scale": 2}));
     }
 
     #[test]

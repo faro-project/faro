@@ -9,6 +9,7 @@ pub mod devices;
 pub mod events;
 pub mod feed;
 pub mod group_listing;
+pub mod group_posts;
 pub mod group_roster;
 pub mod group_sharing;
 pub mod groups;

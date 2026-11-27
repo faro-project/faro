@@ -28,9 +28,9 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, branding, devices, events, feed, group_listing, group_roster,
-    group_sharing, groups, heartbeat, invites, keys, manifests, prefs, privacy, proposals,
-    reach_outs, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, group_listing, group_posts,
+    group_roster, group_sharing, groups, heartbeat, invites, keys, manifests, prefs, privacy,
+    proposals, reach_outs, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -211,6 +211,10 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             put(proposals::put_block).delete(proposals::delete_block),
         )
         // Reach out and signed, encrypted messages (GROUPS.md §8.3, §10.2).
+        .route(
+            "/v1/groups/{id}/posts",
+            get(group_posts::feed).post(group_posts::create),
+        )
         .route("/v1/me/message-recipients", get(reach_outs::recipients))
         .route(
             "/v1/me/reach-outs",

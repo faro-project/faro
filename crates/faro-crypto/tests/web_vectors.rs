@@ -18,13 +18,13 @@
 
 use faro_crypto::roster::{apply_entry, open_epoch_key, verify_snapshot, SignedRosterEntry};
 use faro_crypto::{
-    open_group_message, open_item, seal_group_message, seal_item, seal_to, unwrap_secret, verify,
-    verify_group_message, verify_signed, wrap_secret, EncryptionKeypair, KdfParams, Recipient,
-    SigningKey, WrappedSecret,
+    open_group_message, open_group_message_with_epoch, open_item, seal_group_message,
+    seal_group_message_to_epoch, seal_item, seal_to, unwrap_secret, verify, verify_group_message,
+    verify_signed, wrap_secret, EncryptionKeypair, KdfParams, Recipient, SigningKey, WrappedSecret,
 };
 use faro_proto::encoding::{b64_decode, b64_encode};
 use faro_proto::group::{
-    body_aad as message_body_aad, GroupMessage, GroupMessageKind, MessageRecipient,
+    body_aad as message_body_aad, epoch_wrap_aad, GroupMessage, GroupMessageKind, MessageRecipient,
     SealedGroupMessage,
 };
 use faro_proto::keys::{
@@ -171,7 +171,34 @@ fn group_message() -> GroupMessage {
             },
         ],
         body_hash: Hash32::ZERO,
+        epoch: None,
+        parent_id: None,
     }
+}
+
+const CHECK_IN_PLAINTEXT: &str =
+    r#"{"scale":4,"went_well":"Three good days ✓","ask":"A call on Sunday"}"#;
+const EPOCH: u64 = 3;
+const PARENT: &str = "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb";
+
+/// A check-in to the whole group, sealed with epoch 3's key: no recipients.
+fn whole_group_message() -> GroupMessage {
+    GroupMessage {
+        kind: GroupMessageKind::CheckIn,
+        recipients: vec![],
+        epoch: Some(EPOCH),
+        ..group_message()
+    }
+}
+
+/// A private reply to a check-in: one recipient, and the check-in it answers.
+fn reply_message() -> GroupMessage {
+    let mut m = group_message();
+    m.kind = GroupMessageKind::CheckInReply;
+    m.item_id = "11111111111111112222222222222222".into();
+    m.recipients.truncate(1);
+    m.parent_id = Some(PARENT.into());
+    m
 }
 
 /// The challenge the ally key re-wrap vector is proven with.
@@ -324,6 +351,15 @@ fn generate() -> Value {
         Some(MESSAGE_PLAINTEXT.as_bytes()),
     )
     .unwrap();
+    let wg = whole_group_message();
+    let wg_sealed = seal_group_message_to_epoch(
+        &ms,
+        &epoch_key(EPOCH),
+        wg.clone(),
+        Some(CHECK_IN_PLAINTEXT.as_bytes()),
+    )
+    .unwrap();
+    let rp = reply_message();
     let log = roster_log();
     let snap = roster_snapshot(&log);
     let inst = InstanceId::new(INSTANCE);
@@ -423,6 +459,20 @@ fn generate() -> Value {
             "sealed": gm_sealed,
             "plaintext": MESSAGE_PLAINTEXT,
         },
+        "group_message_epoch": {
+            "content_free": {
+                "signed": signed_json(wg.clone(), ms.sign(&wg)),
+                "signing_bytes_hex": hex::encode(wg.signing_bytes()),
+            },
+            "wrap_aad_hex": hex::encode(epoch_wrap_aad(&InstanceId::new(INSTANCE), MESSAGE_GROUP, ITEM, EPOCH)),
+            "epoch_key_hex": hex::encode(epoch_key(EPOCH)),
+            "sealed": wg_sealed,
+            "plaintext": CHECK_IN_PLAINTEXT,
+        },
+        "group_message_reply": {
+            "signed": signed_json(rp.clone(), ms.sign(&rp)),
+            "signing_bytes_hex": hex::encode(rp.signing_bytes()),
+        },
         "roster": {
             "group_id": GROUP,
             "genesis_prev_hash": genesis_prev_hash(&inst, GROUP),
@@ -503,6 +553,11 @@ fn web_vectors() {
         "/key_rewrap",
         "/ally_key_rewrap",
         "/group_message",
+        "/group_message_epoch/content_free",
+        "/group_message_epoch/wrap_aad_hex",
+        "/group_message_epoch/epoch_key_hex",
+        "/group_message_epoch/plaintext",
+        "/group_message_reply",
         "/roster",
     ] {
         assert_eq!(v.pointer(ptr), fresh.pointer(ptr), "{ptr} is stale");
@@ -542,6 +597,17 @@ fn web_vectors() {
             .unwrap();
         assert_eq!(&**pt, s(&v, "/group_message_sealed/plaintext").as_bytes());
     }
+
+    // A whole-group check-in sealed with epoch 3's key opens for anyone
+    // holding that key, and for nobody else.
+    let wg: SealedGroupMessage =
+        serde_json::from_value(v["group_message_epoch"]["sealed"].clone()).unwrap();
+    verify_group_message(&member_sign().public(), &wg).unwrap();
+    let pt = open_group_message_with_epoch(&wg, &epoch_key(EPOCH))
+        .unwrap()
+        .unwrap();
+    assert_eq!(&**pt, s(&v, "/group_message_epoch/plaintext").as_bytes());
+    assert!(open_group_message_with_epoch(&wg, &epoch_key(2)).is_err());
 
     // The roster log verifies, and the sealed epoch key opens against the
     // commitment in the last entry.
@@ -621,6 +687,26 @@ fn web_vectors() {
     let mut forged = gm.clone();
     forged.message.body.recipients.pop();
     assert!(verify_group_message(&pk, &forged).is_err());
+
+    // A check-in the web app sealed with an epoch key, and a reply it signed.
+    let wg: SealedGroupMessage =
+        serde_json::from_value(web["group_message_epoch"]["sealed"].clone()).unwrap();
+    verify_group_message(&pk, &wg).unwrap();
+    let epoch_key_bytes: [u8; 32] = h(web, "/group_message_epoch/epoch_key_hex")
+        .try_into()
+        .unwrap();
+    let pt = open_group_message_with_epoch(&wg, &epoch_key_bytes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(&**pt, s(web, "/group_message_epoch/plaintext").as_bytes());
+    let rp: SealedGroupMessage =
+        serde_json::from_value(web["group_message_reply"]["sealed"].clone()).unwrap();
+    verify_group_message(&pk, &rp).unwrap();
+    let pt = open_group_message(&rp, &UserId::new(ALLY_A), &ally_a())
+        .unwrap()
+        .unwrap();
+    assert_eq!(&**pt, s(web, "/group_message_reply/plaintext").as_bytes());
+    assert_eq!(rp.message.body.parent_id.as_deref(), Some(PARENT));
 
     // The web app's roster log: entries it signed, its snapshot, and an
     // epoch key it sealed to ally A.

@@ -242,7 +242,7 @@ A check-in is a short, structured update a participant writes for the group, usu
 - optional **"What I'd like from the group"**,
 - **audience:** my allies in this group (the default), the facilitators, up to 32 specific people, or the whole group.
 
-Check-ins are encrypted to their audience and signed by the author (§10). A check-in to the whole group uses the group's current epoch key (§10.5), so it costs the same in a group of any size. Check-ins never send notifications; they appear in the group's feed. Faro prompts for one a day before each meeting, if the participant turns that on. Recipients can reply privately with a short encrypted message.
+Check-ins are encrypted to their audience and signed by the author (§10). A check-in to the whole group uses the group's current epoch key (§10.5), so it costs the same in a group of any size. Check-ins never send notifications; they appear in the group's feed. Faro prompts for one a day before each meeting, if the participant turns that on (a per-browser setting; the prompt is shown in the group page, never sent). Recipients can reply privately with a short encrypted message, once each, to the check-in's author alone. "My allies in this group" means the author's allies who are also in the group. A person can post at most 10 check-ins and 50 replies a day, and an ally-only person without member keys can't write one yet (messages need a member signing key, §10.2).
 
 Check-ins are self-written. Faro never fills them in from reports, so a check-in never reveals monitoring data the author didn't choose to share.
 
@@ -509,16 +509,22 @@ reach_out_prefs(user_id, sender_id, mode)                      -- a person's rea
 
 ALTER TABLE ally_links ADD COLUMN origin_group_id TEXT NULL;  -- label only, never for authorization
 
--- Phase C (as built in migration 0013: participants' encryption keys are
--- their member or ally keys, so there is no per-group key table)
+-- Phase C (as built in migrations 0013 and 0016: participants' encryption keys
+-- are their member or ally keys, so there is no per-group key table)
 participant_sign_keys(user_id, sign_pubkey, enc_pubkey, sealed_seed, created_at)
 group_roster_log(group_id, seq, prev_hash, hash, signer_id, epoch, entry_json, created_at)
 group_roster_members(group_id, user_id, role, enc_pubkey, sign_pubkey NULL)  -- roster at the head
 group_roster_snapshots(group_id, seq, hash, signer_id, snapshot_json, created_at)
 group_epochs(group_id, epoch, seq, key_check, created_at)
 group_epoch_keys(group_id, epoch, user_id, sealed_key, created_at)
-group_posts(id, group_id, author_id, kind[check_in|reply], parent_id, epoch NULL,
-        created_at, sig, blob_ref)
+group_posts(id, group_id, author_id, kind[check_in|reply], parent_id NULL, epoch NULL,
+        created_at, sig, message_json, body_json)
+        -- the signed message and sealed body (PROTOCOL.md §11) are stored inline, like
+        -- group_messages, rather than behind a blob_ref: a post is at most 8 KiB.
+        -- A reply's parent_id cascades. `epoch` is set for a whole-group post.
+group_post_recipients(post_id, recipient_id, key_id)   -- who may read a post to named people
+group_messages.epoch NULL                              -- a whole-group reach out's epoch
+reach_outs.audience also allows 'group'                -- rebuilt in 0016 (SQLite can't alter a CHECK)
 ```
 
 `ally_links.origin_group_id` uses `ON DELETE SET NULL`, so deleting a group leaves its alliances intact (principle 4).
@@ -580,7 +586,8 @@ POST   /v1/groups/{id}/roster/snapshot             facilitators: signed snapshot
 GET    /v1/groups/{id}/epoch-key?epoch=            my sealed key for the current (or a given) epoch
 PUT    /v1/me/ally-key                             an encryption key for someone with none
 GET|PUT /v1/me/group-sign-key                      an ally-only facilitator's signing key
-POST   /v1/groups/{id}/posts                       check-ins and replies
+POST   /v1/groups/{id}/posts                       {audience?, user_ids?, message}: a check-in or a reply
+GET    /v1/groups/{id}/posts?before=               the feed the caller may read, 50 a page
 
 GET    /admin/api/groups                           metadata only: name, size, facilitators, listed, dates, flags
 PUT    /admin/api/groups/{id}/listed               {listed: false}   (admin log + notice to facilitators)
@@ -728,6 +735,7 @@ These protect people from being pressured or flooded. They are adopted as writte
 | Open join requests | **5** per person | Stops one account from requesting every listed group on the instance. |
 | Join-request expiry and cool-down | **14 days** and **30 days** per group | Same reasons as proposals. Facilitators never have to decline outright, and a requester can't keep asking. |
 | Reach outs | **3** per sender per hour | Allows a real crisis, where someone retries when nobody answered, but stops a reach out being used to spam people. |
+| Check-ins and replies | **10** check-ins and **50** replies per person per day, one reply per check-in | A whole-group check-in costs one envelope at any size, so the feed is limited by count instead. Keeps a feed readable and replies to "thinking of you", not a thread. |
 | Notes (proposals, join requests) | **500** characters | They are an introduction, not a conversation. It also keeps the encrypted blobs small. |
 | Groups per person | **10** (admin setting) | Real people are in a handful of groups. It limits invite and join-request spam, and the admin can raise it. |
 | Group invite links | **7 days**, one use, for the invited address | The same as ally invites today. |

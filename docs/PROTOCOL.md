@@ -52,7 +52,8 @@ Tags in use:
 | `faro/group-roster-snapshot/v1` | Facilitator-signed roster snapshot (§10.5) |
 | `faro/group-epoch-key/v1` | Commitment to a group epoch key (§10.3) |
 | `faro/group-safety-code/v1` | Group safety code (§10.8) |
-| `faro/group-message/v1` | Author-signed group message: a reach out or a note (§11) |
+| `faro/group-message/v1` | Author-signed group message: a reach out, a note, a check-in or a reply (§11) |
+| `faro/group-message-epoch/v1` | AAD under which an epoch key wraps a whole-group message's content key (§11.2) |
 | `faro/group-message-body/v1` | Group message body AAD (§11) |
 
 ## 3. Events and the hash chain
@@ -506,7 +507,7 @@ While `posting_paused` (someone who left is still in the roster, or someone's ke
 
 ### 10.8 Group safety code
 
-`h = BLAKE3(Canonical("faro/group-safety-code/v1").str(instance_id).str(group_id).u64(seq).fixed(hash))` of the roster head, printed like a safety code (§4.2): 60 bytes of BLAKE3 XOF output from `h`, each byte mod 10, in 12 groups of 5 digits. Two people whose browsers show the same code hold the same roster history.
+`h = BLAKE3(Canonical("faro/group-safety-code/v1").str(instance_id).str(group_id).u64(seq).fixed(hash))` of the roster head, printed like a safety code (§4.2): 60 bytes of BLAKE3 XOF output from `h`, each byte mod 10, in 12 groups of 5 digits. Two people whose browsers show the same code hold the same roster history. The web app shows it on the group page, computed from the head of the roster the browser itself verified (never from a head the instance reports), for comparison with any facilitator.
 
 ### 10.9 Limits
 
@@ -516,9 +517,9 @@ While `posting_paused` (someone who left is still in the roster, or someone's ke
 - **Removal is forward-only.** Someone who leaves keeps the epoch keys they already had. The instance stops serving them group items at once; the next epoch is never sealed to them.
 - **Checkpoints are per browser.** Clearing site data or using another browser starts again from §10.4's bootstrapping.
 
-## 11. Group messages: reach outs and notes
+## 11. Group messages: reach outs, notes, check-ins and replies
 
-Reach outs and the notes on alliance proposals and join requests (GROUPS.md §8.3, §10.2) are written by one person for specific people. The instance stores and routes them but can neither read nor forge them. They are made and read only by the web app (`web/src/lib/crypto/group.ts`); the Rust reference is `faro_proto::group` and `faro_crypto::{seal,verify,open}_group_message`.
+Reach outs, the notes on alliance proposals and join requests, check-ins and replies to them (GROUPS.md §8.3, §8.6, §10.2) are written by one person for specific people, or for a whole group. The instance stores and routes them but can neither read nor forge them. They are made and read only by the web app (`web/src/lib/crypto/group.ts`); the Rust reference is `faro_proto::group` and `faro_crypto::{seal,verify,open}_group_message`.
 
 **Status: new in this version, awaiting maintainer sign-off** before it reaches `main`.
 
@@ -531,13 +532,15 @@ Reach outs and the notes on alliance proposals and join requests (GROUPS.md §8.
 | `instance_id` | string | |
 | `group_id` | string or null | 32 lowercase hex. `null` only for a reach out outside any group; notes always name their group |
 | `item_id` | string | 32 lowercase hex, chosen at random by the author's browser. The instance files the message under it |
-| `kind` | string | `reach_out`, `proposal_note` or `join_request_note` |
+| `kind` | string | `reach_out`, `proposal_note`, `join_request_note`, `check_in` or `check_in_reply`. A check-in names its group like a note does |
 | `author_id` | string | |
 | `issued_at_ms` | i64 | Within 5 minutes of the instance's clock on upload |
-| `recipients` | list | `{user_id, enc_pubkey}`: 1 to 32 entries, sorted strictly ascending by `user_id`, never the author. A proposal note has exactly one |
+| `recipients` | list | `{user_id, enc_pubkey}`: 1 to 32 entries, sorted strictly ascending by `user_id`, never the author. A proposal note and a reply have exactly one. **Empty** in whole-group mode (`epoch` set) |
 | `body_hash` | 32 bytes | `BLAKE3(nonce ‖ ciphertext)` of the body, or 32 zero bytes when there is none (a signed, content-free reach out) |
+| `epoch` | u64, optional | **Whole-group mode:** the group epoch (§10.3) whose key seals the body. Only a `reach_out` or a `check_in`, with a group, no recipients, and an epoch of at least 1. Omitted from the JSON otherwise |
+| `parent_id` | string, optional | 32 lowercase hex: the check-in a `check_in_reply` answers. Required for a reply, and for nothing else; not the reply's own id. Omitted from the JSON otherwise |
 
-`signing_bytes = Canonical("faro/group-message/v1").str(instance_id).str(group_id or "").str(item_id).str(kind).str(author_id).i64(issued_at_ms).u64(len(recipients))`, then `.str(user_id).fixed(enc_pubkey)` for each recipient in order, then `.fixed(body_hash)`. The empty string is never a valid group id, so "no group" can't collide with one.
+`signing_bytes = Canonical("faro/group-message/v1").str(instance_id).str(group_id or "").str(item_id).str(kind).str(author_id).i64(issued_at_ms).u64(len(recipients))`, then `.str(user_id).fixed(enc_pubkey)` for each recipient in order, then `.fixed(body_hash)`, then, **only when present**, `.str("epoch").u64(epoch)` and then `.str("parent").str(parent_id)`. A message without them signs exactly the bytes it always did (the vectors for reach outs and notes are unchanged), and the tags keep the optional parts apart. The empty string is never a valid group id, so "no group" can't collide with one.
 
 The signature covers who it is for and the exact keys it was sealed to, so the instance can't add a reader, drop one, move a message to another group or item, or pass off one kind as another. `author_id` and `issued_at_ms` go beyond GROUPS.md §10.2's list: the first binds the message to its author independently of which key verifies it, the second lets readers show a time the instance can't change.
 
@@ -546,9 +549,11 @@ The signature covers who it is for and the exact keys it was sealed to, so the i
 The item construction of §4.1, with:
 
 - `aad = Canonical("faro/group-message-body/v1").str(instance_id).str(item_id)`;
-- plaintext: UTF-8 JSON `{"text": "…"}`, at most 500 characters (Unicode scalar values), not blank. Readers ignore other fields;
+- plaintext: UTF-8 JSON, at most 500 characters per text (Unicode scalar values), not blank. Readers ignore other fields. A reach out, a note and a reply: `{"text": "…"}`. A **check-in**: `{"scale": 1..5, "went_well"?: "…", "was_hard"?: "…", "ask"?: "…"}`, the three texts optional ("What went well", "What was hard", "What I'd like from the group"), each not blank when present;
 - envelopes: exactly one per recipient, with `key_id` of the signed `enc_pubkey`, and exactly one for the author, sealed to the author's own member encryption key so they can read what they sent. At most 33, inside the instance's 64;
-- ciphertext at most 4096 bytes.
+- ciphertext at most 4096 bytes (8192 for a check-in, which has three texts).
+
+**Whole-group mode** (`epoch` set). The content key `CK` is wrapped once with the epoch key `EK` (32 bytes, §10.3) instead of being sealed to each person, so the item costs one envelope whatever the group's size. The body has **exactly one envelope**: `recipient` is the author, `key_id` is `"epoch:<epoch>"`, and `wrapped_key = wrap_nonce(24) ‖ XChaCha20-Poly1305(EK, wrap_nonce, CK, aad = Canonical("faro/group-message-epoch/v1").str(instance_id).str(group_id).str(item_id).u64(epoch))`, 72 bytes. The author needs no copy of their own: they hold `EK` like every participant. Whoever has the epoch key can read the message; the instance serves it only to people who are active participants now and were when it arrived (GROUPS.md §10.5). A reach out in whole-group mode is offered only in groups of 32 or fewer, but the format has no such limit; a check-in has none.
 
 On the wire, upload and download alike: `{"message": Signed<GroupMessage>, "body": EncryptedItem | null}`.
 
@@ -559,12 +564,14 @@ A browser shows a message only after all of these, in order:
 1. The structure checks above (`validate`), before any signature: they bound the work a hostile document causes.
 2. The body against the header: present exactly when `body_hash` isn't zero, hashing to it, and with the envelope set above.
 3. Strict Ed25519 verification against the author's member signing key.
-4. The context: `item_id` is the message asked for, `author_id` is the author the instance names, `instance_id` is this instance, and the reader is the author or a recipient.
+4. The context: `item_id` is the message asked for, `author_id` is the author the instance names, `instance_id` is this instance, and the reader is the author or a recipient. In whole-group mode there are no recipients: the reader opens it with the epoch key (§10.3) of `epoch`, which they checked against the signed roster, and the group is the one they asked for. A reply also names the check-in it answers: the reader checks the parent the instance reports against the signed `parent_id`.
 
 A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*, as are the keys a sender seals to other than their own manifest's allies, until participants have signed keys (GROUPS.md §10.3).
 
 ### 11.4 What the instance checks
 
 On upload the instance runs steps 1 to 3 with the author's stored key, and also checks the kind and group for the route, the author's own copy (sealed to their member key), that every recipient is someone this message may go to, and that each signed key is one it knows for that person. It gains nothing by skipping these, since every reader checks again, but they keep junk out of the database.
+
+For a check-in or a reply, the instance also checks the group: the author is an active participant, the group isn't archived, and a whole-group post names the group's **current** epoch and is refused while whole-group posting is paused (`posting_paused`, §10.7). A reply goes only to the author of a check-in the replier can read, once each. A check-in to "my allies in this group" goes to the author's active allies who are also participants. Check-ins are filed in the group's feed (`POST` and `GET /v1/groups/{id}/posts`), never notify anyone, and follow blob retention (GROUPS.md §18).
 
 People without a member signing key (ally-only participants) can't write messages. They can still send a **content-free reach out**, which is not a group message at all: no signature and no body. Readers mark it *"Sent through the server. Can't be verified."* A member who hasn't unlocked their keys can send the same kind.

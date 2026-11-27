@@ -25,7 +25,10 @@ mod seal;
 mod sign;
 
 pub use chain::{verify_chain, verify_next, ChainError, ChainHead, Link};
-pub use group::{open_group_message, seal_group_message, verify_group_message};
+pub use group::{
+    open_group_message, open_group_message_with_epoch, seal_group_message,
+    seal_group_message_to_epoch, verify_group_message,
+};
 pub use keycheck::{is_weak_x25519, validate_enc_pubkey, validate_sign_pubkey};
 pub use passphrase::{
     generate_recovery_code, unwrap_secret, wrap_secret, KdfParams, WrappedSecret,

@@ -37,10 +37,15 @@ import {
 } from './proto.ts';
 import { DecryptError, openItem, sealItem, sealOpen, sealTo, type EncryptedItem } from './seal.ts';
 import {
+	checkInBytes,
 	groupMessageBodyAad,
+	groupMessageEpochAad,
 	groupMessageSigningBytes,
 	openGroupMessage,
+	openGroupMessageWithEpoch,
+	parseCheckIn,
 	sealGroupMessage,
+	sealGroupMessageToEpoch,
 	validateGroupMessage,
 	verifyGroupMessage,
 	type GroupMessage,
@@ -295,6 +300,74 @@ test('group messages match Rust', () => {
 	assert.equal(openGroupMessage(s, V.ids.ally_a, unb64(K.ally_a_secret)), text);
 	assert.equal(openGroupMessage(s, V.ids.ally_b, unb64(K.ally_b_secret)), text);
 	assert.equal(openGroupMessage(s, V.ids.member, unb64(K.member_enc_secret)), text);
+});
+
+test('whole-group check-ins and replies match Rust', () => {
+	const pk = unb64(K.member_sign_pubkey);
+	const seed = unb64(K.member_sign_seed);
+	const E = V.group_message_epoch;
+	const epochKey = unhex(E.epoch_key_hex);
+
+	// The signed header and the wrap AAD are byte for byte Rust's.
+	const cf = E.content_free.signed as Signed<GroupMessage>;
+	assert.equal(validateGroupMessage(cf), null);
+	assert.equal(cf.epoch, 3);
+	assert.equal(hex(groupMessageSigningBytes(cf)), E.content_free.signing_bytes_hex);
+	assert.equal(
+		hex(groupMessageEpochAad(V.ids.instance, 'fedcba9876543210fedcba9876543210', cf.item_id, 3)),
+		E.wrap_aad_hex
+	);
+	const { sig, ...body } = cf;
+	assert.equal(signWith(seed, body, groupMessageSigningBytes).sig, sig);
+	assert.equal(verifyGroupMessage(pk, { message: cf, body: null }), null);
+
+	// Rust sealed this check-in: it verifies and opens with the epoch key only.
+	const s = E.sealed as SealedGroupMessage;
+	assert.equal(verifyGroupMessage(pk, s), null);
+	const pt = openGroupMessageWithEpoch(s, epochKey)!;
+	assert.deepEqual(parseCheckIn(pt), JSON.parse(E.plaintext));
+	assert.throws(() => openGroupMessageWithEpoch(s, new Uint8Array(32).fill(1)), DecryptError);
+	assert.throws(() => openGroupMessage(s, V.ids.member, unb64(K.member_enc_secret)));
+
+	// Our own seal round-trips, and a moved or re-epoched copy doesn't open.
+	const mine = sealGroupMessageToEpoch(seed, epochKey, body, checkInBytes({ scale: 5 }));
+	assert.equal(verifyGroupMessage(pk, mine), null);
+	assert.deepEqual(parseCheckIn(openGroupMessageWithEpoch(mine, epochKey)!), { scale: 5 });
+	for (const edit of [{ epoch: 4 }, { item_id: 'dddddddddddddddddddddddddddddddd' }]) {
+		const moved = { ...mine, message: { ...mine.message, ...edit } };
+		assert.throws(() => openGroupMessageWithEpoch(moved, epochKey), DecryptError);
+		assert.notEqual(verifyGroupMessage(pk, moved), null);
+	}
+	// A whole-group message may not name recipients, nor be sealed to people.
+	assert.throws(() =>
+		sealGroupMessageToEpoch(
+			seed,
+			epochKey,
+			{ ...body, recipients: [{ user_id: V.ids.ally_a, enc_pubkey: K.ally_a_pubkey }] },
+			null
+		)
+	);
+	assert.throws(() => sealGroupMessage(seed, unb64(K.member_enc_pubkey), body, 'x'));
+
+	// A reply signs the check-in it answers.
+	const R = V.group_message_reply.signed as Signed<GroupMessage>;
+	assert.equal(validateGroupMessage(R), null);
+	assert.equal(hex(groupMessageSigningBytes(R)), V.group_message_reply.signing_bytes_hex);
+	assert.equal(verifyGroupMessage(pk, { message: R, body: null }), null);
+	const moved = { ...R, parent_id: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' };
+	assert.notEqual(verifyGroupMessage(pk, { message: moved, body: null }), null);
+	const { parent_id: _p, ...orphan } = R;
+	assert.notEqual(validateGroupMessage(orphan as Signed<GroupMessage>), null);
+});
+
+test('check-in answers are limited', () => {
+	assert.throws(() => checkInBytes({ scale: 0 as 1 }));
+	assert.throws(() => checkInBytes({ scale: 3, ask: '  ' }));
+	assert.throws(() => checkInBytes({ scale: 3, went_well: 'x'.repeat(501) }));
+	assert.deepEqual(parseCheckIn(checkInBytes({ scale: 3, ask: 'a call' })), {
+		scale: 3,
+		ask: 'a call'
+	});
 });
 
 test('forged and altered group messages are refused', () => {

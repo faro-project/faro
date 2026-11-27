@@ -13,8 +13,9 @@
 //! * `POST /v1/reach-outs/{id}/answer` `{answer: "call" | "here"}`.
 //! * `GET /v1/group-messages/{id}`: a message, for its author and its
 //!   recipients only (a join-request note: while they facilitate the
-//!   group), with the author's signing key for the browser to check it
-//!   against.
+//!   group; a whole-group reach out: anyone in the group now who was in it
+//!   when it was sent), with the author's signing key for the browser to
+//!   check it against.
 //! * `GET /v1/me/reach-out-settings`, `PUT|DELETE
 //!   /v1/me/quiet-hours-bypass/{user_id}` ("let *Sam*'s reach outs through
 //!   quiet hours") and `PUT /v1/me/reach-out-prefs/{user_id}` `{mode}`
@@ -25,6 +26,7 @@
 use super::ApiJson;
 use crate::auth::session::SessionUser;
 use crate::db::repo::group_messages::{self, Answer, Audience, ReachOut, SenderSetting};
+use crate::db::repo::group_roster;
 use crate::db::repo::groups::{self, Role};
 use crate::db::repo::{member_keys, users};
 use crate::error::{AppError, AppResult};
@@ -51,10 +53,12 @@ fn parse_user(id: &str) -> AppResult<UserId> {
 
 #[derive(Debug, Deserialize)]
 pub struct RecipientsQuery {
-    /// `reach_out` (default), `proposal_note` or `join_request_note`.
+    /// `reach_out` (default), `proposal_note`, `join_request_note`,
+    /// `check_in` or `check_in_reply`.
     #[serde(rename = "for")]
     pub for_kind: Option<String>,
-    /// Reach outs: `allies` (default), `facilitators` or `people`.
+    /// Reach outs and check-ins: `allies` (default), `facilitators`,
+    /// `people` or `group`.
     pub audience: Option<String>,
     pub group_id: Option<String>,
     /// Comma-separated user ids (`people`, and a proposal note's recipient).
@@ -86,7 +90,7 @@ fn parse_audience(s: Option<&str>) -> AppResult<Audience> {
         Some(a) => Audience::parse(a).ok_or_else(|| {
             AppError::bad_request(
                 "invalid_audience",
-                "audience is allies, facilitators or people",
+                "audience is allies, facilitators, people or group",
             )
         }),
     }
@@ -104,7 +108,7 @@ pub async fn recipients(
         Some(k) => GroupMessageKind::parse(k).ok_or_else(|| {
             AppError::bad_request(
                 "invalid_kind",
-                "for is reach_out, proposal_note or join_request_note",
+                "for is reach_out, proposal_note, join_request_note, check_in or check_in_reply",
             )
         })?,
     };
@@ -128,6 +132,20 @@ pub async fn recipients(
         GroupMessageKind::JoinRequestNote => {
             let gid = gid.ok_or(AppError::NotFound)?;
             super::group_listing::note_recipients(&state, &mut tx, gid).await?
+        }
+        GroupMessageKind::CheckIn => {
+            let gid = gid.ok_or(AppError::NotFound)?;
+            let audience = parse_audience(q.audience.as_deref())?;
+            messages::resolve_check_in_audience(&mut tx, &state, me, audience, gid, &named).await?
+        }
+        GroupMessageKind::CheckInReply => {
+            if named.len() != 1 || gid.is_none() {
+                return Err(AppError::bad_request(
+                    "invalid_recipients",
+                    "a reply names its group and the check-in's author",
+                ));
+            }
+            messages::resolve_audience(&mut tx, &state, me, Audience::People, gid, &named).await?
         }
     };
     let recipients = messages::recipient_keys(&mut tx, me, &people).await?;
@@ -406,7 +424,16 @@ pub async fn get_message(
         .await?
         .ok_or(AppError::NotFound)?;
     if &m.author_id != me {
-        if !group_messages::is_recipient(&mut *conn, &id, me).await? {
+        let allowed = match (m.sealed.message.body.epoch, m.group_id.as_deref()) {
+            // Sealed with a group's epoch key: whoever is in the group now
+            // and was when it was sent.
+            (Some(_), Some(g)) => {
+                group_roster::may_read_item(&mut *conn, g, me, m.created_at_ms).await?
+            }
+            (Some(_), None) => false,
+            (None, _) => group_messages::is_recipient(&mut *conn, &id, me).await?,
+        };
+        if !allowed {
             return Err(AppError::NotFound);
         }
         if m.kind == GroupMessageKind::ProposalNote

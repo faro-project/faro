@@ -7,9 +7,13 @@
 	// nor fake it. Without member keys a reach out carries no message and
 	// is marked "Sent through the server. Can't be verified."
 	import { api, seg } from '../api.ts';
+	import { epochKeyFor } from '../check-in-api.ts';
+	import type { RosterState } from '../crypto/roster.ts';
+	import { instance } from '../instance.svelte.ts';
 	import { keyring } from '../keys/keyring.svelte.ts';
 	import { loadRecipients, reachOutError, sendReachOut } from '../reach-out-api.ts';
 	import {
+		composeGroupReachOut,
 		composeMessage,
 		MAX_NAMED,
 		MAX_NOTE_CHARS,
@@ -22,16 +26,37 @@
 	import Modal from './Modal.svelte';
 	import NoteField from './NoteField.svelte';
 
+	/** Whole-group reach outs are for groups of this many people or fewer (decision 10). */
+	const WHOLE_GROUP_MAX = 32;
+
 	let {
 		user,
 		groupId = null,
+		participants = null,
+		roster = null,
+		postingPaused = false,
 		onsent
-	}: { user: User; groupId?: string | null; onsent?: () => void } = $props();
+	}: {
+		user: User;
+		groupId?: string | null;
+		/** The group's size: "the whole group" is offered only up to 32. */
+		participants?: number | null;
+		/** The roster this browser verified (for the epoch whole-group messages are sealed with). */
+		roster?: RosterState | null;
+		/** A facilitator has roster work to do: whole-group posting waits. */
+		postingPaused?: boolean;
+		onsent?: () => void;
+	} = $props();
+
+	let wholeGroupOffered = $derived(
+		!!groupId && participants !== null && participants <= WHOLE_GROUP_MAX
+	);
+	let wholeGroupBlocked = $derived(postingPaused || !roster || roster.epoch === 0);
 
 	let open = $state(false);
 	let step = $state<'who' | 'write' | 'sent'>('who');
 	let audience = $state<Audience>('allies');
-	let roster = $state<RosterEntry[] | null>(null);
+	let people = $state<RosterEntry[] | null>(null);
 	let chosen = $state<string[]>([]);
 	let recipients = $state<Recipients | null>(null);
 	let text = $state('');
@@ -50,10 +75,10 @@
 	}
 
 	async function loadRoster() {
-		if (roster || !groupId) return;
+		if (people || !groupId) return;
 		try {
 			const page = await api.get<Page<RosterEntry>>(`/v1/groups/${seg(groupId)}/participants`);
-			roster = page.items.filter((p) => p.user_id !== user.id && !p.unavailable);
+			people = page.items.filter((p) => p.user_id !== user.id && !p.unavailable);
 		} catch (e) {
 			error = reachOutError(e);
 		}
@@ -71,6 +96,11 @@
 		busy = true;
 		error = '';
 		try {
+			if (audience === 'group') {
+				recipients = null;
+				step = 'write';
+				return;
+			}
 			recipients = await loadRecipients('reach_out', {
 				audience,
 				groupId: audience === 'allies' ? null : groupId,
@@ -84,25 +114,45 @@
 		}
 	}
 
-	let canSign = $derived(!!recipients?.can_sign);
+	let canSign = $derived(audience === 'group' ? user.roles.member : !!recipients?.can_sign);
 	let memberKeys = $derived(keyring.memberFor(user.id));
-	let readers = $derived(recipients ? sealable(recipients) : []);
+	let readers = $derived(
+		audience === 'group' ? [{ user_id: '' }] : recipients ? sealable(recipients) : []
+	);
 	let noKey = $derived(recipients?.recipients.filter((r) => !r.enc_pubkey) ?? []);
-	let unverified = $derived(readers.filter((r) => !r.sender_ally));
+	let unverified = $derived(
+		audience === 'group' || !recipients ? [] : sealable(recipients).filter((r) => !r.sender_ally)
+	);
 	let tooLong = $derived(noteLength(text) > MAX_NOTE_CHARS);
 
 	/** `signed`: with your signature (and the message, if any). */
 	async function send(signed: boolean) {
-		if (!recipients) return;
+		if (!recipients && audience !== 'group') return;
 		busy = true;
 		error = '';
 		try {
 			const gid = audience === 'allies' ? null : groupId;
 			const keys = keyring.memberFor(user.id);
-			const message =
-				signed && keys && readers.length
-					? composeMessage(keys, recipients, 'reach_out', gid, text.trim() ? text : null)
-					: undefined;
+			let message;
+			if (audience === 'group') {
+				if (signed && keys && groupId && roster) {
+					const k = await epochKeyFor(groupId, user.id, roster);
+					if (!k || k.epoch !== roster.epoch) {
+						throw new Error("You don't have this group's key yet. Try again in a moment.");
+					}
+					const inst = await instance.load();
+					message = composeGroupReachOut(
+						keys,
+						inst.instance_id,
+						groupId,
+						k.epoch,
+						k.key,
+						text.trim() ? text : null
+					);
+				}
+			} else if (signed && keys && readers.length && recipients) {
+				message = composeMessage(keys, recipients, 'reach_out', gid, text.trim() ? text : null);
+			}
 			const r = await sendReachOut({
 				audience,
 				group_id: gid,
@@ -155,15 +205,27 @@
 						People I choose
 					</label>
 				{/if}
+				{#if wholeGroupOffered}
+					<label>
+						<input type="radio" bind:group={audience} value="group" disabled={wholeGroupBlocked} />
+						The whole group ({participants} people)
+					</label>
+				{/if}
 			</fieldset>
+			{#if postingPaused && wholeGroupOffered}
+				<p class="muted small" role="status">
+					Waiting for a facilitator to update the group. The whole group is paused until then; you
+					can still reach out to people by name.
+				</p>
+			{/if}
 			{#if audience === 'people'}
-				{#if !roster}
+				{#if !people}
 					<p class="muted" role="status">Loading the group…</p>
-				{:else if roster.length === 0}
+				{:else if people.length === 0}
 					<p class="muted">There's nobody else in this group yet.</p>
 				{:else}
 					<ul class="pick">
-						{#each roster as p (p.user_id)}
+						{#each people as p (p.user_id)}
 							<li>
 								<label>
 									<input
@@ -192,9 +254,11 @@
 				</button>
 				<button class="secondary" type="button" onclick={() => (open = false)}>Cancel</button>
 			</div>
-		{:else if recipients}
+		{:else if recipients || audience === 'group'}
 			<p>
-				To {recipients.recipients.map((r) => r.display_name).join(', ')}.
+				To {audience === 'group'
+					? 'everyone in the group'
+					: (recipients?.recipients ?? []).map((r) => r.display_name).join(', ')}.
 			</p>
 			{#if noKey.length}
 				<p class="muted small">

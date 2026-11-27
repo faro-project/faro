@@ -357,6 +357,7 @@ pub async fn create(
                     kind: GroupMessageKind::ProposalNote,
                     group_id: Some(&group_id),
                     allowed: std::slice::from_ref(&to),
+                    whole_group: false,
                 },
             )
             .await?;

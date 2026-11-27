@@ -11,9 +11,12 @@
 
 import { unb64Fixed } from './crypto/bytes.ts';
 import {
+	messageText,
 	newItemId,
-	openGroupMessage,
+	openGroupMessageBytes,
+	openGroupMessageWithEpoch,
 	sealGroupMessage,
+	sealGroupMessageToEpoch,
 	verifyGroupMessage,
 	type GroupMessageKind,
 	type SealedGroupMessage
@@ -24,7 +27,7 @@ import type { AllyKey, MemberKeys } from './keys/keyring.svelte.ts';
 export const MAX_NOTE_CHARS = 500;
 export const MAX_NAMED = 32;
 
-export type Audience = 'allies' | 'facilitators' | 'people';
+export type Audience = 'allies' | 'facilitators' | 'people' | 'group';
 export type Answer = 'call' | 'here';
 export type ReachOutMode = 'immediate' | 'digest' | 'off';
 
@@ -93,6 +96,9 @@ export interface MyReachOuts {
 
 /** `GET /v1/group-messages/{id}`. */
 export interface MessageView extends SealedGroupMessage {
+	/** Set for a whole-group message (check-ins, group reach outs). */
+	epoch?: number | null;
+	parent_id?: string | null;
 	id: string;
 	kind: GroupMessageKind;
 	author: { user_id: string; display_name: string; sign_pubkey: string | null };
@@ -157,6 +163,39 @@ export function composeMessage(
 	);
 }
 
+/**
+ * Seal and sign a reach out to the whole group with its current epoch key
+ * (groups of 32 or fewer). It names nobody: whoever is in the group reads it.
+ */
+export function composeGroupReachOut(
+	keys: Pick<MemberKeys, 'userId' | 'signSeed'>,
+	instanceId: string,
+	groupId: string,
+	epoch: number,
+	epochKey: Uint8Array,
+	text: string | null,
+	now = Date.now()
+): SealedGroupMessage {
+	if (text !== null && (!text.trim() || noteLength(text) > MAX_NOTE_CHARS)) {
+		throw new Error(`A message is 1 to ${MAX_NOTE_CHARS} characters.`);
+	}
+	return sealGroupMessageToEpoch(
+		keys.signSeed,
+		epochKey,
+		{
+			instance_id: instanceId,
+			group_id: groupId,
+			item_id: newItemId(),
+			kind: 'reach_out',
+			author_id: keys.userId,
+			issued_at_ms: now,
+			recipients: [],
+			epoch
+		},
+		text === null ? null : new TextEncoder().encode(JSON.stringify({ text }))
+	);
+}
+
 // ---- Reading -------------------------------------------------------------------
 
 export interface ReadResult {
@@ -173,21 +212,40 @@ export interface ReadResult {
 	reason?: string;
 }
 
+/** What is unlocked: your keys, and for a whole-group message the key of its epoch. */
+export interface ReadKeys {
+	member?: MemberKeys | null;
+	ally?: AllyKey | null;
+	/** The group key of the message's epoch (`currentEpochKey`), once opened. */
+	epochKey?: Uint8Array | null;
+}
+
+export interface ReadBytes {
+	status: ReadResult['status'];
+	bytes: Uint8Array | null;
+	verified: Verification;
+	reason?: string;
+}
+
 /**
- * Check a served message and open it as `me`. `instanceId`, when known,
- * must be the one it names. `keys` are whatever is unlocked.
+ * Check a served message and open its body as `me`, without parsing it:
+ * the shared core of reach outs, notes, check-ins and replies. `instanceId`,
+ * when known, must be the one it names; `groupId`, when known, the group.
+ * A whole-group message (`epoch` set) is for anyone in the group, and opens
+ * with `keys.epochKey`; without it the result is `locked`.
  */
-export function readMessage(
+export function readSealed(
 	view: MessageView,
 	me: string,
-	keys: { member?: MemberKeys | null; ally?: AllyKey | null },
+	keys: ReadKeys,
 	instanceId?: string | null,
 	/** Who the page says wrote it (the reach out's sender, the proposer). */
-	expectedAuthor?: string | null
-): ReadResult {
-	const refuse = (reason: string): ReadResult => ({
+	expectedAuthor?: string | null,
+	groupId?: string | null
+): ReadBytes {
+	const refuse = (reason: string): ReadBytes => ({
 		status: 'invalid',
-		text: null,
+		bytes: null,
 		verified: 'unverified',
 		reason
 	});
@@ -207,27 +265,54 @@ export function readMessage(
 	if (expectedAuthor && m.author_id !== expectedAuthor) return refuse('it is from someone else');
 	if (m.kind !== view.kind) return refuse('it is another kind of message');
 	if (instanceId && m.instance_id !== instanceId) return refuse('it is for another instance');
-	if (m.author_id !== me && !m.recipients.some((r) => r.user_id === me)) {
+	if (groupId && m.group_id !== groupId) return refuse('it is for another group');
+	const wholeGroup = m.epoch != null;
+	if (!wholeGroup && m.author_id !== me && !m.recipients.some((r) => r.user_id === me)) {
 		return refuse('it is not addressed to you');
 	}
 	const verified = verification(me, m.author_id, view.author.sign_pubkey);
-	if (!view.body) return { status: 'ok', text: null, verified };
+	if (!view.body) return { status: 'ok', bytes: null, verified };
+	const sealed = { message: m, body: view.body };
+	if (wholeGroup) {
+		if (!keys.epochKey) return { status: 'locked', bytes: null, verified };
+		try {
+			return { status: 'ok', bytes: openGroupMessageWithEpoch(sealed, keys.epochKey), verified };
+		} catch {
+			return { status: 'unreadable', bytes: null, verified };
+		}
+	}
 	const secrets = [keys.member, keys.ally]
 		.filter((k): k is MemberKeys | AllyKey => !!k && k.userId === me)
 		.map((k) => k.encSecret);
-	if (secrets.length === 0) return { status: 'locked', text: null, verified };
+	if (secrets.length === 0) return { status: 'locked', bytes: null, verified };
 	for (const s of secrets) {
 		try {
-			return {
-				status: 'ok',
-				text: openGroupMessage({ message: m, body: view.body }, me, s),
-				verified
-			};
+			return { status: 'ok', bytes: openGroupMessageBytes(sealed, me, s), verified };
 		} catch {
-			// Not this key (a DecryptError), or a malformed text: try the next.
+			// Not this key (a DecryptError): try the next.
 		}
 	}
-	return { status: 'unreadable', text: null, verified };
+	return { status: 'unreadable', bytes: null, verified };
+}
+
+/** [`readSealed`] for a body that is a text (reach outs and notes). */
+export function readMessage(
+	view: MessageView,
+	me: string,
+	keys: ReadKeys,
+	instanceId?: string | null,
+	expectedAuthor?: string | null,
+	groupId?: string | null
+): ReadResult {
+	const r = readSealed(view, me, keys, instanceId, expectedAuthor, groupId);
+	if (r.status !== 'ok') {
+		return { status: r.status, text: null, verified: r.verified, reason: r.reason };
+	}
+	try {
+		return { status: 'ok', text: r.bytes ? messageText(r.bytes) : null, verified: r.verified };
+	} catch {
+		return { status: 'unreadable', text: null, verified: r.verified };
+	}
 }
 
 // ---- Wording -------------------------------------------------------------------
@@ -263,7 +348,13 @@ const MESSAGES: Record<string, string> = {
 	clock_skew: "Your computer's clock seems to be off. Check it and try again.",
 	invalid_message: "The message couldn't be sent as written. Try again.",
 	message_exists: 'That message was already sent.',
-	group_archived: 'This group was closed.'
+	group_archived: 'This group was closed.',
+	group_too_large:
+		'A reach out to the whole group is only for groups of 32 people or fewer. Choose your allies, the facilitators or people by name.',
+	posting_paused: 'Waiting for a facilitator to update the group. Choose people by name for now.',
+	group_key_missing:
+		"This group's encryption isn't set up yet. A facilitator's browser does it when they open the group.",
+	stale_epoch: "The group's key changed while you were writing. Try again."
 };
 
 /** A sentence for a reach-out API error, or null when there is no special wording. */
