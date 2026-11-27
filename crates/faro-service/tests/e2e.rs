@@ -379,6 +379,73 @@ async fn other_capture_failures_are_capture_failing() {
     dev.shutdown().await;
 }
 
+/// A capture that fails with this platform error is one a window kept
+/// out of (Android's `FLAG_SECURE`).
+struct HiddenScreen;
+
+impl faro_platform::ScreenCapture for HiddenScreen {
+    fn capture_all_displays(&mut self) -> faro_platform::Result<Vec<faro_platform::Frame>> {
+        Err(faro_platform::PlatformError::Unavailable(
+            faro_service::source::HIDDEN_FROM_CAPTURE.into(),
+        ))
+    }
+    fn permission_state(&self) -> PermissionState {
+        PermissionState::Granted
+    }
+}
+
+/// 3a''. Captures a secure window refuses (Android) count as failed, but
+///       never as `capture_failing`: the platform reports the window
+///       itself (one cause, one signal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_captures_are_not_capture_failing() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    let mut platform = dev.script.platform();
+    platform.capture = Box::new(HiddenScreen);
+    let source = faro_service::InProcessFrameSource::new(platform, Duration::from_millis(10));
+    dev.start_with(quiet_classifier(), Box::new(source));
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+    drive_failures(&dev, failure_threshold() + 2).await;
+    let s = dev.status();
+    assert_eq!(s.capture.consecutive_failures, 0, "{:?}", s.capture);
+    assert!(tamper_signals(&w, &dev).await.is_empty());
+    dev.shutdown().await;
+}
+
+/// 3a'''. A source whose captures need another permission (Android's
+///        accessibility service) has it named in `permission_revoked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_capture_permission_is_the_sources() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    dev.script.with(|s| s.permission = PermissionState::Denied);
+    let source =
+        faro_service::InProcessFrameSource::new(dev.script.platform(), Duration::from_millis(10))
+            .with_capture_permission("accessibility");
+    dev.start_with(quiet_classifier(), Box::new(source));
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+    drive_failures(&dev, failure_threshold() + 2).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::PermissionRevoked {
+            permission: "accessibility".into(),
+            never_granted: true,
+        }]
+    );
+    dev.shutdown().await;
+}
+
 /// 3b. An image model that doesn't match its manifest (someone replaced the
 ///     weights) is never loaded: the service runs on context signals and
 ///     reports it as an urgent `integrity_failure` once it is active. The

@@ -521,10 +521,12 @@ pub fn failure_kind(e: &EnrollError) -> FailureKind {
     }
 }
 
-#[cfg(any(unix, windows))]
+// The enroll socket is desktop only: an Android app enrolls through its
+// own screens (`crates/faro-android`).
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub use listener::EnrollServer;
 
-#[cfg(any(unix, windows))]
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 mod listener {
     use super::EnrollService;
     use crate::config::Config;

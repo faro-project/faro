@@ -728,13 +728,13 @@ impl Drop for AbortOnDrop {
 /// through [`SystemApprover`](crate::enroll_server::SystemApprover): there
 /// is deliberately no option to use another.
 fn start_enroll_server(config: &Config) -> AbortOnDrop {
-    #[cfg(any(unix, windows))]
+    #[cfg(all(any(unix, windows), not(target_os = "android")))]
     {
         use crate::enroll_server::{EnrollServer, EnrollService, SystemApprover};
         let service = EnrollService::from_config(config, Arc::new(SystemApprover));
         AbortOnDrop(Some(tokio::spawn(EnrollServer::new(service, config).run())))
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(all(any(unix, windows), not(target_os = "android"))))]
     {
         let _ = config;
         AbortOnDrop(None)

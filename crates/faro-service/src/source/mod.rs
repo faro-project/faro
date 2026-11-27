@@ -27,12 +27,15 @@
 //! zeroized when dropped (including if a channel is closed with frames still
 //! queued). `SourceEvent`'s `Debug` never prints pixels.
 
-#[cfg(any(unix, windows))]
+// The agent over IPC, its code-signature checks and the OS session list
+// are desktop only: Android has no agent process, and captures in-process
+// (`crates/faro-android`).
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod codesign;
 mod in_process;
-#[cfg(any(unix, windows))]
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod ipc;
-#[cfg(any(unix, windows))]
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod sessions;
 #[cfg(windows)]
 pub mod win_agents;
@@ -47,6 +50,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
+
+/// What an in-process platform's capture returns, as
+/// `PlatformError::Unavailable`, when a window kept out of captures is in
+/// front and nothing else could be captured
+/// ([`SourceEvent::CaptureHidden`]).
+pub const HIDDEN_FROM_CAPTURE: &str = "window hidden from capture";
 
 /// Commands from the service to the capture side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +129,14 @@ pub enum SourceEvent {
     CaptureFailed {
         reason: String,
     },
+    /// A requested capture saw only a window that keeps itself out of
+    /// captures (Android's `FLAG_SECURE`: the screenshot is refused). The
+    /// source reports the window as a tamper signal itself, after its own
+    /// debounce, so the core counts this as a failed capture but not
+    /// towards `capture_failing` (one cause, one signal: ARCHITECTURE.md
+    /// §3.7). Only the in-process source produces it, from a platform
+    /// error reading [`HIDDEN_FROM_CAPTURE`].
+    CaptureHidden,
     Foreground {
         app: Option<AppInfo>,
         title: Option<String>,
@@ -175,6 +192,7 @@ impl fmt::Debug for SourceEvent {
                 .debug_struct("CaptureFailed")
                 .field("reason", reason)
                 .finish(),
+            SourceEvent::CaptureHidden => f.write_str("CaptureHidden"),
             // Window titles and URLs are sensitive; keep them out of logs.
             SourceEvent::Foreground { app, .. } => f
                 .debug_struct("Foreground")
@@ -246,4 +264,10 @@ pub trait FrameSource: Send + 'static {
 
     /// Short name for logs.
     fn name(&self) -> &'static str;
+
+    /// The OS permission captures need, as `permission_revoked` names it:
+    /// Screen Recording on desktops, the accessibility service on Android.
+    fn capture_permission(&self) -> &'static str {
+        crate::runtime::SCREEN_RECORDING
+    }
 }

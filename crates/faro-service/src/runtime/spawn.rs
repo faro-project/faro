@@ -7,11 +7,9 @@
 //! the capture agent itself (§3.1). This spawner runs the agent as the
 //! service's own user, which only makes sense for a non-root dev service.
 
-use crate::backoff::Backoff;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::sync::watch;
+#[cfg(not(target_os = "android"))]
+use {crate::backoff::Backoff, std::process::Stdio, std::time::Duration, tokio::sync::watch};
 
 /// How to launch the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +53,7 @@ impl AgentSpawn {
             .collect()
     }
 
+    #[cfg(not(target_os = "android"))]
     fn command(&self) -> tokio::process::Command {
         let mut c = tokio::process::Command::new(&self.program);
         c.args(self.resolved_args())
@@ -80,6 +79,7 @@ fn is_root() -> bool {
 
 /// Keep the agent running until `stop` flips. Each exit is logged; the
 /// resulting disconnect is what supervision counts.
+#[cfg(not(target_os = "android"))]
 pub async fn supervise(spec: AgentSpawn, mut stop: watch::Receiver<bool>) {
     let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
     loop {
