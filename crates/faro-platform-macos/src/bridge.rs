@@ -131,13 +131,19 @@ mod tests {
 
     #[test]
     fn late_completion_from_thread_is_harmless() {
+        // The thread completes only once the wait has timed out, however
+        // slow the machine: a fixed sleep raced on a busy runner.
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done) = std::sync::mpsc::channel::<()>();
         let r: Result<u8, _> = await_completion(Duration::from_millis(10), |c| {
             thread::spawn(move || {
-                thread::sleep(Duration::from_millis(50));
+                let _ = go_rx.recv();
                 c.complete(7);
+                let _ = done_tx.send(());
             });
         });
         assert!(matches!(r, Err(BridgeError::TimedOut(_))));
-        thread::sleep(Duration::from_millis(80));
+        go.send(()).unwrap();
+        done.recv().unwrap();
     }
 }
