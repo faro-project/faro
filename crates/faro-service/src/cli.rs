@@ -1101,11 +1101,15 @@ mod windows {
             .await
             .unwrap_or_default();
         for rel in found {
-            if reported.insert(rel.clone()) {
+            if !reported.contains(&rel) {
                 tracing::error!(path = %rel, "a Faro program file can be changed by other accounts");
-                signals.tamper(faro_proto::body::TamperSignal::IntegrityFailure {
+                // Remembered once the core has taken it (it keeps it until
+                // it commits); a full channel means it is offered again.
+                if signals.tamper(faro_proto::body::TamperSignal::IntegrityFailure {
                     component: format!("program files: {rel} can be changed by other accounts"),
-                });
+                }) {
+                    reported.insert(rel);
+                }
             }
         }
     }
