@@ -109,6 +109,31 @@ When the failures are because Screen Recording is off, the event is `permission_
 
 `flag` and `tamper` bodies carry an optional `account` field: the short name of the OS account the event came from, when it concerns one session (ARCHITECTURE §3.6). Report flagged moments, tamper records and timeline spans carry it too. It is inside the encrypted body, so the instance never sees it. Readers must accept bodies without it.
 
+### 3.4 iPhone additions
+
+An iPhone enrolls with `platform: "ios"` (`POST /v1/devices/enroll`). It blocks rather than watches (docs/IOS.md), so it sends no thumbnails. Everything below is additive: readers must accept bodies without the new fields, and no signed or hashed encoding changes, so `PROTOCOL_VERSION` stays 1. Every new body is inside the encrypted body; the instance sees only the usual header.
+
+**Tamper signals.** Three new `tamper` signals, all active tamper and so floored at `urgent` like every `tamper` event, and tamper-class (`notify::policy::is_tamper_class` picks them out by kind):
+
+| `signal` | Fields | Meaning |
+|---|---|---|
+| `screen_time_revoked` | none | Screen Time authorization is no longer approved, so Faro can be deleted. |
+| `filter_off` | `cause`: `vpn_disconnected`, `on_demand_off`, `other_vpn`, `profile_removed` or `unknown` | The DNS filter is off, and how the phone could tell. |
+| `settings_cleared` | none | Faro's Screen Time settings were found cleared or changed while authorization stands. |
+
+Three new context-only signals, `doh_dropped`, `other_vpn` and `jailbreak_suspected` (no fields), are not sent as `tamper` events. They appear in the daily report's `health.context` like the desktop ones. The agent to service IPC mirror does not carry any of the six: only an iPhone produces them.
+
+**Blocked lookups and shields.** Two new body types, both `capture`-class: the header `kind` is `capture` and the urgency is `none`.
+
+- `blocked_summary`: `bucket_start` (ms since the epoch), `bucket_secs`, `by_category` (category to count), `hosts` (a list of `{host, category, count}`, the host only, never a path or query) and `other_hosts` (blocked lookups of hosts not listed).
+- `shield_summary`: `bucket_start`, `bucket_secs`, `shown` and `closed`. Counts only, never app names.
+
+**Flags from DNS bursts.** A burst of blocked lookups is an ordinary `flag`. Its reason has source `dns`, and the label carries the explanation, for example `dns:adult ×6, 4 hosts, 3 min, screen on`.
+
+**Pending loosening.** A `settings_change` body gains optional `requested_at`, `takes_effect_at` and `cancelled_at` (ms since the epoch) and `delay_secs`. They are left out when not set.
+
+**Allies see** these in the web app and reports, which render them from the decrypted body: "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed on iPhone-X". Alert emails stay content-free (the instance cannot tell which signal it was).
+
 ## 4. Encryption
 
 ### 4.1 Items
@@ -324,7 +349,7 @@ The project's publishing location, a release directory for an air-gapped import,
 | 13 | `m` | the manifest, byte for byte |
 | 13 + `m` | rest | the file the manifest names (the model, or the domain bundle) |
 
-The target's BLAKE3 covers the whole bundle, and the manifest pins the file's BLAKE3. Such targets have platform and arch `any`, and their `version` is the manifest's `version` (semver), not a client release's. The release workflow names them `<kind>/any/<name>-<version>-<first channel>.data` (`+` in the version becomes `_`), for example `model/any/opennsfw-1.0.0_int8-stable.data`: a version listed for `beta` and later for `stable` is two entries with the same bytes.
+The target's BLAKE3 covers the whole bundle, and the manifest pins the file's BLAKE3. Such targets have platform and arch `any`, and their `version` is the manifest's `version` (semver), not a client release's. The release workflow names them `<kind>/any/<name>-<version>-<first channel>.data` (`+` in the version becomes `_`), for example `model/any/opennsfw-1.0.0_int8-stable.data`: a version listed for `beta` and later for `stable` is two entries with the same bytes. An iPhone (`platform: "ios"`) takes only these `any` data bundles (the domain bundle), never packages: the App Store updates the app.
 
 `GET /v1/updates` returns `{"available": bool, "channel": "<channel>"}`: whether the instance has verified metadata to serve, and the channel its admin chose (`stable`, `beta`, … or the pin `stable-1`). Every path under `/v1/updates` is public: the content is project-signed, and a member's browser may download the installer from it.
 

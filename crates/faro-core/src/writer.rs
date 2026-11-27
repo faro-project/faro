@@ -372,11 +372,7 @@ mod tests {
             .unwrap();
         assert_eq!(p.event().header.urgency, Urgency::Urgent);
         let p = w
-            .prepare(
-                &EventBody::SettingsChange { changes: vec![] },
-                Urgency::None,
-                &set,
-            )
+            .prepare(&EventBody::settings_change(vec![]), Urgency::None, &set)
             .unwrap();
         assert_eq!(p.event().header.urgency, Urgency::Normal);
         // Caller may raise above the floor.

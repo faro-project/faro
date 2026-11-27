@@ -178,7 +178,7 @@ impl MemberSettings {
     /// The `settings_change` body for a transition, or `None` if nothing changed.
     pub fn change_event(old: &MemberSettings, new: &MemberSettings) -> Option<EventBody> {
         let changes = Self::diff(old, new);
-        (!changes.is_empty()).then_some(EventBody::SettingsChange { changes })
+        (!changes.is_empty()).then_some(EventBody::settings_change(changes))
     }
 }
 

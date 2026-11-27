@@ -29,6 +29,9 @@ pub enum ReasonSource {
     App,
     Ocr,
     Context,
+    /// A burst of blocked DNS lookups on an iPhone (`dns:adult ×6, 4 hosts,
+    /// 3 min, screen on`). The label carries the whole explanation.
+    Dns,
 }
 
 /// One explainable reason, e.g. `image:explicit 0.93` or `domain:adult`.
@@ -191,6 +194,18 @@ pub enum TamperSignal {
     WindowHiddenFromCapture {
         app: String,
     },
+    /// iPhone: Screen Time authorization is no longer approved, so the
+    /// shields and `denyAppRemoval` are gone and Faro can be deleted
+    /// (docs/IOS.md §10.2).
+    ScreenTimeRevoked,
+    /// iPhone: the DNS filter is off. `cause` says how, as far as the phone
+    /// could tell.
+    FilterOff {
+        cause: FilterOffCause,
+    },
+    /// iPhone: Faro's ManagedSettings store was found cleared or changed
+    /// while authorization still stands.
+    SettingsCleared,
     // Context-only (reported in the daily report, never paged):
     BrowserWithoutExtension {
         browser: String,
@@ -198,6 +213,37 @@ pub enum TamperSignal {
     VpnActive,
     VirtualMachine,
     RemoteDesktop,
+    /// iPhone: connections to DNS-over-HTTPS resolvers were dropped.
+    DohDropped,
+    /// iPhone: another VPN is connected.
+    OtherVpn,
+    /// iPhone: the phone looks jailbroken.
+    JailbreakSuspected,
+}
+
+/// Why an iPhone's DNS filter is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOffCause {
+    /// The VPN was switched off.
+    VpnDisconnected,
+    /// Connect On Demand was turned off.
+    OnDemandOff,
+    /// Another VPN took over.
+    OtherVpn,
+    /// The Faro VPN profile was deleted.
+    ProfileRemoved,
+    /// The tunnel stopped reporting and nothing says why.
+    Unknown,
+}
+
+/// One host in a [`EventBody::BlockedSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedHost {
+    /// The host only, never a path or query.
+    pub host: String,
+    pub category: String,
+    pub count: u32,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -214,6 +260,9 @@ impl TamperSignal {
                 | TamperSignal::VpnActive
                 | TamperSignal::VirtualMachine
                 | TamperSignal::RemoteDesktop
+                | TamperSignal::DohDropped
+                | TamperSignal::OtherVpn
+                | TamperSignal::JailbreakSuspected
         )
     }
 }
@@ -256,6 +305,41 @@ pub enum EventBody {
     },
     SettingsChange {
         changes: Vec<SettingChange>,
+        /// Pending loosening (docs/IOS.md §9), all in ms since the epoch.
+        /// When the member asked for the loosening.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_at: Option<i64>,
+        /// When it will apply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        takes_effect_at: Option<i64>,
+        /// When the member cancelled it, if they did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancelled_at: Option<i64>,
+        /// The delay that was in force, in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay_secs: Option<u64>,
+    },
+    /// iPhone: blocked DNS lookups in one bucket (docs/IOS.md §11). A
+    /// `capture`-class event, so its header urgency is `none`.
+    BlockedSummary {
+        /// Start of the bucket, ms since the epoch.
+        bucket_start: i64,
+        bucket_secs: u64,
+        /// Blocked lookups per category.
+        by_category: std::collections::BTreeMap<String, u32>,
+        /// The hosts listed (adult and gambling only).
+        hosts: Vec<BlockedHost>,
+        /// Blocked lookups of hosts not listed above.
+        other_hosts: u32,
+    },
+    /// iPhone: how often a Screen Time shield was shown or closed in one
+    /// bucket. Counts only, never app names. A `capture`-class event.
+    ShieldSummary {
+        /// Start of the bucket, ms since the epoch.
+        bucket_start: i64,
+        bucket_secs: u64,
+        shown: u32,
+        closed: u32,
     },
     AgentRestarted {
         count_last_hour: u32,
@@ -286,10 +370,23 @@ impl EventBody {
         }
     }
 
+    /// A `settings_change` body with no pending-loosening fields.
+    pub fn settings_change(changes: Vec<SettingChange>) -> Self {
+        EventBody::SettingsChange {
+            changes,
+            requested_at: None,
+            takes_effect_at: None,
+            cancelled_at: None,
+            delay_secs: None,
+        }
+    }
+
     pub fn kind(&self) -> crate::event::EventKind {
         use crate::event::EventKind as K;
         match self {
-            EventBody::Capture { .. } => K::Capture,
+            EventBody::Capture { .. }
+            | EventBody::BlockedSummary { .. }
+            | EventBody::ShieldSummary { .. } => K::Capture,
             EventBody::Flag(_) => K::Flag,
             EventBody::Tamper { .. } => K::Tamper,
             EventBody::SettingsChange { .. } => K::SettingsChange,
@@ -441,5 +538,144 @@ mod tests {
                 && Rating::Medium > Rating::Low
                 && Rating::Low > Rating::Clean
         );
+    }
+
+    fn ios_signals() -> Vec<TamperSignal> {
+        let mut v = vec![
+            TamperSignal::ScreenTimeRevoked,
+            TamperSignal::SettingsCleared,
+        ];
+        for cause in [
+            FilterOffCause::VpnDisconnected,
+            FilterOffCause::OnDemandOff,
+            FilterOffCause::OtherVpn,
+            FilterOffCause::ProfileRemoved,
+            FilterOffCause::Unknown,
+        ] {
+            v.push(TamperSignal::FilterOff { cause });
+        }
+        v
+    }
+
+    #[test]
+    fn ios_tamper_signals_round_trip_and_are_floored_urgent() {
+        for signal in ios_signals() {
+            assert!(!signal.is_context_only(), "{signal:?}");
+            let b = EventBody::tamper(signal);
+            let back: EventBody =
+                serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+            assert_eq!(back, b);
+            assert_eq!(b.kind(), crate::event::EventKind::Tamper);
+            assert_eq!(
+                b.kind().min_urgency(),
+                crate::event::Urgency::Urgent,
+                "{b:?}"
+            );
+        }
+        let j = serde_json::to_value(TamperSignal::FilterOff {
+            cause: FilterOffCause::ProfileRemoved,
+        })
+        .unwrap();
+        assert_eq!(
+            j,
+            serde_json::json!({"signal": "filter_off", "cause": "profile_removed"})
+        );
+        let j = serde_json::to_value(TamperSignal::ScreenTimeRevoked).unwrap();
+        assert_eq!(j, serde_json::json!({"signal": "screen_time_revoked"}));
+        let j = serde_json::to_value(TamperSignal::SettingsCleared).unwrap();
+        assert_eq!(j, serde_json::json!({"signal": "settings_cleared"}));
+    }
+
+    #[test]
+    fn ios_context_signals_are_context_only() {
+        for (s, name) in [
+            (TamperSignal::DohDropped, "doh_dropped"),
+            (TamperSignal::OtherVpn, "other_vpn"),
+            (TamperSignal::JailbreakSuspected, "jailbreak_suspected"),
+        ] {
+            assert!(s.is_context_only());
+            assert_eq!(
+                serde_json::to_value(&s).unwrap(),
+                serde_json::json!({ "signal": name })
+            );
+        }
+    }
+
+    #[test]
+    fn summaries_round_trip_and_are_capture_class() {
+        let b = EventBody::BlockedSummary {
+            bucket_start: 1_700_000_000_000,
+            bucket_secs: 300,
+            by_category: [("adult".to_owned(), 6), ("gambling".to_owned(), 1)].into(),
+            hosts: vec![BlockedHost {
+                host: "example.test".into(),
+                category: "adult".into(),
+                count: 6,
+            }],
+            other_hosts: 1,
+        };
+        let s = EventBody::ShieldSummary {
+            bucket_start: 1_700_000_000_000,
+            bucket_secs: 300,
+            shown: 4,
+            closed: 3,
+        };
+        for body in [b, s] {
+            let back: EventBody =
+                serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
+            assert_eq!(back, body);
+            assert_eq!(body.kind(), crate::event::EventKind::Capture);
+            assert_eq!(body.kind().min_urgency(), crate::event::Urgency::None);
+        }
+        let j = serde_json::to_value(EventBody::ShieldSummary {
+            bucket_start: 0,
+            bucket_secs: 60,
+            shown: 1,
+            closed: 0,
+        })
+        .unwrap();
+        assert_eq!(j["type"], "shield_summary");
+    }
+
+    #[test]
+    fn dns_reason_round_trips() {
+        let r = Reason {
+            source: ReasonSource::Dns,
+            label: "adult ×6, 4 hosts, 3 min, screen on".into(),
+            score: None,
+        };
+        assert_eq!(r.to_string(), "dns:adult ×6, 4 hosts, 3 min, screen on");
+        let back: Reason = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(serde_json::to_value(&r).unwrap()["source"], "dns");
+    }
+
+    #[test]
+    fn settings_change_gains_pending_fields_and_reads_old_json() {
+        let old = r#"{"type":"settings_change","changes":[{"key":"k","old":"1","new":"2"}]}"#;
+        let b: EventBody = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            b,
+            EventBody::settings_change(vec![SettingChange {
+                key: "k".into(),
+                old: Some("1".into()),
+                new: Some("2".into()),
+            }])
+        );
+        // Unset fields stay out of the JSON, so old readers see old bodies.
+        assert_eq!(
+            serde_json::to_value(&b).unwrap(),
+            serde_json::from_str::<serde_json::Value>(old).unwrap()
+        );
+        let pending = EventBody::SettingsChange {
+            changes: vec![],
+            requested_at: Some(10),
+            takes_effect_at: Some(20),
+            cancelled_at: Some(15),
+            delay_secs: Some(86_400),
+        };
+        let back: EventBody =
+            serde_json::from_str(&serde_json::to_string(&pending).unwrap()).unwrap();
+        assert_eq!(back, pending);
     }
 }

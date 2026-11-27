@@ -269,6 +269,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Clock manipulation | Service | urgent | Alert |
 | Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
+| Screen Time access revoked, web filter off or Screen Time settings cleared (iPhone: `screen_time_revoked`, `filter_off`, `settings_cleared`; docs/IOS.md §10.2) | iPhone app and tunnel | urgent | "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed" |
 | Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
 
 Every urgent signal in this table, and removing an ally, reaches people as a tamper-class alert: it can be moved to the digest but not switched off (§5.4). Settings changes and pauses can be switched off.
@@ -448,7 +449,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
   | Kind | Source | Urgency | Why it can't be switched off |
   |---|---|---|---|
-  | `tamper` | device | urgent (floor) | Something interfered with Faro: a permission revoked, the agent killed repeatedly, an integrity failure, the clock changed, an account in use with no agent, a window hidden from capture, and the other §3.7 signals. Context-only signals (VPN, VM, remote desktop, browser without the extension) never become `tamper` events. |
+  | `tamper` | device | urgent (floor) | Something interfered with Faro: a permission revoked, the agent killed repeatedly, an integrity failure, the clock changed, an account in use with no agent, a window hidden from capture, an iPhone's Screen Time access revoked, its web filter turned off or its Screen Time settings cleared, and the other §3.7 signals. Context-only signals (VPN, VM, remote desktop, browser without the extension) never become `tamper` events. |
   | `goodbye` | device | urgent (floor) | Faro was uninstalled or moved to another instance. |
   | `chain_gap` | server | urgent | Events are missing, were rewritten, or the device's history forked (§3.6, PROTOCOL.md §7). |
   | `invalid_signature` | server | urgent | An event or report arrived that the device's key didn't sign. |
