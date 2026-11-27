@@ -17,6 +17,7 @@ That last part is the point. Faro exists to make honest conversations easier, no
 7. [If you want to stop being an ally](#7-if-you-want-to-stop-being-an-ally)
 8. [What the people running the server can and can't see](#8-what-the-people-running-the-server-can-and-cant-see)
 9. [Having the conversation](#9-having-the-conversation)
+10. [If the member uses an iPhone](#10-if-the-member-uses-an-iphone)
 
 ---
 
@@ -142,7 +143,7 @@ This protects you as well as the member. You will never be shown explicit images
 
 ### Tamper alerts
 
-Anyone who controls their own computer can switch Faro off. Faro can't prevent that, but it makes sure you find out. These are the alerts you may see:
+Anyone who controls their own computer can switch Faro off. Faro can't prevent that, but it makes sure you find out. These are the alerts you may see for a computer. Alerts about an iPhone are different: see [section 10](#10-if-the-member-uses-an-iphone).
 
 | What it says | What it means |
 |---|---|
@@ -270,3 +271,62 @@ Faro's real goal is honest conversation, not policing. The person you support ch
 - **Keep it between you.** Don't share what you see with other people unless they've agreed to it. The one exception is what looks like child sexual abuse material: report it, without copying it ([what to do](operators/ILLEGAL-MATERIAL.md)).
 - **Look after yourself.** You're not responsible for their choices, and you don't have to read every report the day it arrives. If this becomes too much, say so; it's fine to [step back](#7-if-you-want-to-stop-being-an-ally).
 - **Get help when it's beyond you.** If you're ever worried about someone's safety, contact people who can help, such as a pastor, a counsellor or, in an emergency, the emergency services. Faro isn't an emergency service.
+
+---
+
+## 10. If the member uses an iPhone
+
+Some members use an iPhone. Faro on an iPhone works differently from Faro on a computer. It **blocks** adult websites and apps on the phone. It doesn't watch the screen, takes no screenshots and can't see what is on it. So an iPhone sends no screen checks, no pictures and no blurred screenshots. The member may also choose more things to block, such as gambling sites, sites they name, or apps. Faro counts how often a blocked app was opened, but never learns which app it was.
+
+What you see is about the blocking: whether protection stayed on, what was blocked, and any change to it.
+
+### The iPhone's alerts
+
+An iPhone's alerts use the phone's name, such as **iPhone-X**. They are the ones you may see:
+
+| What it says | What it means | What to say |
+|---|---|---|
+| **Screen Time protection is off on *iPhone-X*** | The member turned off Faro's Screen Time access. The blocks and app shields are gone, and Faro can now be deleted from the phone. This one is urgent. | "I saw that Faro's Screen Time access was turned off on your phone. What happened?" |
+| **Faro's web filter is off on *iPhone-X*** | The VPN setting that checks website names has stopped. The alert says why: the VPN was switched off, Connect On Demand was turned off, another VPN took over, or the Faro VPN was deleted. Sometimes the phone doesn't say why. This one is urgent. | "Faro's web filter stopped on your phone. Do you know why?" |
+| **Faro's Screen Time settings were changed on *iPhone-X*** | The settings Faro applies were cleared or changed, although Screen Time access is still on. This one is urgent. | "Some of Faro's Screen Time settings on your phone changed. What happened?" |
+| **Protection on *iPhone-X* is being loosened** | The member asked to unblock something, or turn off a limit. It takes effect later. See [pending loosenings](#pending-loosenings) below. | "You asked to unblock something. Can we talk about it before it takes effect?" |
+| **Faro settings changed** | The member blocked more, or a change took effect. It takes effect at once. | Nothing urgent. You might ask what prompted it. |
+| **A change to *iPhone-X* was cancelled** | The member cancelled an unblocking before it took effect. Nothing changed. | Nothing to act on. |
+| **Something was flagged** | A burst of blocked lookups came in a short time. The details say how many, and whether the phone's screen was on. Adverts and link previews can cause some of these. | "Your phone tried to reach a lot of blocked sites in a short time. What was happening?" |
+| **Faro stopped on a computer** | On an iPhone this means Faro was removed from the phone. The words say "Faro was uninstalled from this computer", because the alert is worded for computers. This one is urgent. | "Did you remove Faro from your phone?" |
+| ***iPhone-X* stopped checking in** | The phone has been silent for longer than the instance allows. Its last report said what it was doing. A phone that is switched off or out of signal looks like this. | Ask what happened, as you would for a computer ([missed check-ins](#missed-check-ins)). |
+
+Some things are only context and don't come as alerts. An example is a VPN that is connected while Faro is on, or a phone that looks jailbroken. They appear in the daily report.
+
+Blocked lookups and blocked app counts don't come as separate alerts. They are in the daily report.
+
+### Pending loosenings
+
+A loosening is when the member unblocks something, or turns off a limit. It doesn't take effect at once. It waits for the wait the member chose, which is 24 hours unless they changed it. The member can set it from 0 to 72 hours.
+
+You hear about it twice:
+
+- **When it is asked for**, for example: "Gambling sites will be unblocked on iPhone-X tomorrow at 21:04. That is after the member's 24 hours delay. The member can still cancel it."
+- **When it takes effect, or is cancelled.** A cancelled change says the member cancelled it before it took effect, and that nothing changed.
+
+Until the time has passed, the old blocking stays. Only the member can cancel a pending change. You can't, and Faro doesn't let you stop it. If you see one you didn't expect, talk to the member about it.
+
+### What the iPhone report shows
+
+The daily report for an iPhone has no activity timeline and no screen checks. It shows:
+
+- **Protection:** for each period, whether Screen Time and the web filter were **on**, **off** or **unknown**. It says unknown when the phone couldn't tell.
+- **Changes to protection:** each unblocking that was asked for, took effect, or was cancelled, with its time.
+- **Blocked lookups:** for each day, how many were blocked, by category (**adult** or **gambling**). It lists the names of those sites, with how often each was blocked. Other sites are counted, not listed.
+- **Blocked apps opened:** for each day, how many times a blocked app was opened, and how many times the block screen was closed. Faro never records which app.
+- **Flagged bursts:** moments flagged for a burst of blocked lookups, with their reasons.
+
+At the top of each iPhone report there is this notice: "Faro on iPhone blocks; it doesn't see the screen. It can't block sites reached through some private DNS services or apps."
+
+### An ally holding the Screen Time passcode
+
+Some members and allies agree that the ally holds the Screen Time passcode on the member's phone. This is the member's and the ally's own arrangement. Faro doesn't set it up, doesn't ask for the passcode and doesn't rely on it. Faro can't tell whether anyone holds it.
+
+If a passcode is set, changing Faro's Screen Time settings may need it. Turning off Faro's Screen Time access may need it too, depending on how iOS handles this.
+
+Be careful with this. Faro's rule is that a member can always leave. A passcode held by an ally can stop a member from leaving. Before you agree to hold one, talk through what happens if the member wants out, and agree on it in advance.
