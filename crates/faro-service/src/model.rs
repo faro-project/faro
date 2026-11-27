@@ -1,7 +1,8 @@
 //! The image classifier the service runs (ARCHITECTURE.md §3.5).
 //!
 //! The macOS package installs the model at
-//! `faro_platform_macos::pkg_layout::MODEL_MANIFEST`. [`load_classifier`]
+//! `faro_platform_macos::pkg_layout::MODEL_MANIFEST`, the Windows MSI at
+//! `faro_platform_windows::layout::MODEL_MANIFEST`. [`load_classifier`]
 //! loads it with the licence, attribution and BLAKE3 checks of
 //! [`faro_detect::load_model`] and runs it on ONNX Runtime (feature `onnx`,
 //! on in release packages). Without a model the service still runs, with
@@ -49,7 +50,11 @@ pub fn packaged_manifest() -> Option<PathBuf> {
             faro_platform_macos::pkg_layout::MODEL_MANIFEST,
         ))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        Some(PathBuf::from(faro_platform_windows::layout::MODEL_MANIFEST))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         None
     }
@@ -58,14 +63,11 @@ pub fn packaged_manifest() -> Option<PathBuf> {
 /// Whether this process is the packaged service, which must have its model:
 /// built with ONNX Runtime and run from the installed location.
 pub fn model_required() -> bool {
-    #[cfg(all(target_os = "macos", feature = "onnx"))]
+    #[cfg(all(any(target_os = "macos", windows), feature = "onnx"))]
     {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.canonicalize().ok())
-            .is_some_and(|p| p == Path::new(faro_platform_macos::pkg_layout::SERVICE_PROGRAM))
+        crate::update::artifacts::is_packaged_service()
     }
-    #[cfg(not(all(target_os = "macos", feature = "onnx")))]
+    #[cfg(not(all(any(target_os = "macos", windows), feature = "onnx")))]
     {
         false
     }
