@@ -657,7 +657,7 @@ async fn signed_but_unusable_artifacts_are_refused_once() {
     let cases: Vec<(Artifact, &str)> = vec![
         (
             bad_model("1.2.0", |i| i.license = "AGPL-3.0-only".into()),
-            "not Apache-2.0 compatible",
+            "not on the permissive licence allowlist",
         ),
         (bad_model("1.3.0", |i| i.attribution = None), "attribution"),
         (bad_model("1.4.0", |i| i.version = "1.4.1".into()), "1.4.1"),

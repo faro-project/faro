@@ -247,18 +247,20 @@ if (Get-Rows 'SELECT `Root` FROM `Registry` WHERE `Root` = 1' 1 | Where-Object {
 # The goodbye and the agents, in the execute sequence.
 $seq = @{}
 foreach ($r in (Get-Rows 'SELECT `Action`, `Condition`, `Sequence` FROM `InstallExecuteSequence`' 3)) { $seq[$r[0]] = $r }
-foreach ($a in 'StopServices', 'FaroStopAgents', 'FaroGoodbye', 'DeleteServices', 'RemoveFiles', 'InstallFiles') {
+foreach ($a in 'StopServices', 'FaroStopAgents', 'FaroGoodbye', 'FaroRemoveState', 'DeleteServices', 'RemoveFiles', 'InstallFiles') {
     if (-not $seq.ContainsKey($a)) { Fail "the execute sequence has no $a" }
 }
-$order = 'StopServices', 'FaroStopAgents', 'FaroGoodbye', 'DeleteServices', 'RemoveFiles'
+$order = 'StopServices', 'FaroStopAgents', 'FaroGoodbye', 'FaroRemoveState', 'DeleteServices', 'RemoveFiles'
 for ($i = 1; $i -lt $order.Count; $i++) {
     if ([int]$seq[$order[$i - 1]][2] -ge [int]$seq[$order[$i]][2]) { Fail "$($order[$i - 1]) must come before $($order[$i])" }
 }
-$cond = $seq['FaroGoodbye'][1]
-if ($cond -notmatch 'REMOVE~="ALL"' -or $cond -notmatch 'NOT UPGRADINGPRODUCTCODE') { Fail "the goodbye runs on '$cond' (want a real uninstall only)" }
+foreach ($a in 'FaroGoodbye', 'FaroRemoveState') {
+    $cond = $seq[$a][1]
+    if ($cond -notmatch 'REMOVE~="ALL"' -or $cond -notmatch 'NOT UPGRADINGPRODUCTCODE') { Fail "$a runs on '$cond' (want a real uninstall only)" }
+}
 $cas = @{}
 foreach ($r in (Get-Rows 'SELECT `Action`, `Type`, `Source`, `Target` FROM `CustomAction`' 4)) { $cas[$r[0]] = $r }
-foreach ($a in 'FaroGoodbye', 'FaroStopAgents') {
+foreach ($a in 'FaroGoodbye', 'FaroStopAgents', 'FaroRemoveState') {
     $t = [int]$cas[$a][1]
     # Deferred (0x400), no impersonation (0x800), return ignored (0x40).
     if (($t -band 0x400) -eq 0 -or ($t -band 0x800) -eq 0 -or ($t -band 0x40) -eq 0) { Fail "$a is not deferred as SYSTEM with its exit status ignored (type $t)" }
@@ -267,6 +269,8 @@ foreach ($a in 'FaroGoodbye', 'FaroStopAgents') {
 $data = @($cas.Values | Where-Object { ((([int]$_[1]) -band 0x3F) -eq 0x33) -and $_[2] -eq 'FaroGoodbye' })
 if ($data.Count -ne 1) { Fail 'no command line for FaroGoodbye' }
 if ($data[0][3] -ne '"[FaroProgramDir]faro-service.exe" goodbye --reason uninstalled --within 30') { Fail "the goodbye runs $($data[0][3])" }
+$data = @($cas.Values | Where-Object { ((([int]$_[1]) -band 0x3F) -eq 0x33) -and $_[2] -eq 'FaroRemoveState' })
+if ($data.Count -ne 1 -or $data[0][3] -ne '"[System64Folder]cmd.exe" /d /c rmdir /s /q "[FaroDataDir]"') { Fail "the state directory is removed with $($data[0][3])" }
 $remove = Get-Rows 'SELECT `Component_`, `Property`, `InstallMode` FROM `Wix4RemoveFolderEx`' 3
 if ($remove.Count -ne 1 -or $remove[0][1] -ne 'FARODATADIR' -or $remove[0][2] -ne '2') { Fail 'the uninstall does not remove the state directory' }
 Say 'tables: ok'
@@ -432,11 +436,26 @@ try {
         if ($u -notmatch 'faro-service\.exe" goodbye --reason uninstalled') { Fail "the goodbye's command line is not in the log: $ulog" }
         if (Get-Service $ServiceName -ErrorAction SilentlyContinue) { Fail 'the service is still installed after the uninstall' }
         foreach ($d in $ProgramDir, $DataDir, 'HKLM:\Software\Classes\faro', 'HKLM:\Software\Faro') {
-            if (Test-Path $d) { Fail "$d is still there after the uninstall" }
+            if (Test-Path $d) {
+                if ($d -eq $DataDir) {
+                    # What is left, and what the uninstall said about it.
+                    Get-ChildItem -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue |
+                        ForEach-Object { Write-Host "left: $($_.FullName)" }
+                    $u -split "`r?`n" |
+                        Select-String -Pattern 'RemoveFolder|FARODATADIR|RemoveFiles|StateCleanup|Return value 3|Error \d' |
+                        Select-Object -First 60 | ForEach-Object { Write-Host "log: $_" }
+                }
+                Fail "$d is still there after the uninstall"
+            }
         }
         Say 'uninstall: ok'
     }
 } finally {
+    # Keep the Windows Installer logs where CI can upload them.
+    if ($env:FARO_CHECK_MSI_LOGS) {
+        New-Item -ItemType Directory -Force $env:FARO_CHECK_MSI_LOGS | Out-Null
+        Copy-Item (Join-Path $work '*.log') $env:FARO_CHECK_MSI_LOGS -ErrorAction SilentlyContinue
+    }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 Say "$leaf is well-formed"

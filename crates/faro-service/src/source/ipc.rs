@@ -2161,26 +2161,43 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // An agent's messages are handled in order: once this tamper signal
+        // is out, so is the second late batch, which must be settled before
+        // the next request (or it would count as a late answer to it).
+        agent
+            .send(&AgentMsg::Tamper(faro_proto::body::TamperSignal::VpnActive))
+            .await
+            .unwrap();
         match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
             SourceEvent::CaptureFailed { reason } => {
                 assert_eq!(reason, "capture taken 6 s after the request")
             }
             other => panic!("{other:?}"),
         }
+        match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+            SourceEvent::Tamper { .. } => {}
+            other => panic!("only the first late batch fails the capture: {other:?}"),
+        }
 
         // A prompt answer is forwarded, up to MAX_FRAMES_PER_CAPTURE frames.
         request(&h, &mut agent).await;
         let batches = MAX_BATCHES_PER_CAPTURE + 2;
-        for _ in 0..batches {
-            agent
+        for i in 0..batches {
+            let sent = agent
                 .send(&AgentMsg::Frames {
                     captured_at_mono_ms: 10_050,
                     frames: (0..faro_ipc::MAX_FRAMES_PER_MESSAGE)
                         .map(|_| wire_frame())
                         .collect(),
                 })
-                .await
-                .unwrap();
+                .await;
+            if let Err(e) = sent {
+                // Say why the service let the agent go.
+                let left = h
+                    .until(|e| matches!(e, SourceEvent::AgentDisconnected { .. }))
+                    .await;
+                panic!("batch {i} of {batches}: {e}; the service: {left:?}");
+            }
         }
         let mut frames = 0;
         while frames < MAX_FRAMES_PER_CAPTURE {

@@ -53,9 +53,10 @@ pub fn process_session_id(pid: u32) -> Option<u32> {
 
 /// Create `C:\ProgramData\Faro` and its `logs` directory and protect
 /// them: the state directory SYSTEM and Administrators only, then the log
-/// directory SYSTEM full and Administrators read (that order, since the
-/// log directory is inside the state directory). Does nothing unless this
-/// process is LocalSystem, and only once per process.
+/// directory SYSTEM full and Administrators read. `protect_state_dir`
+/// leaves the log directory alone, so later opens of the state directory
+/// keep this. Does nothing unless this process is LocalSystem, and only
+/// once per process.
 pub fn prepare_dirs() -> io::Result<()> {
     use faro_platform_windows::{acl, layout};
     static DONE: OnceLock<()> = OnceLock::new();
