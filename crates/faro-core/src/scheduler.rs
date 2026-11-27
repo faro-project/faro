@@ -51,8 +51,18 @@ pub fn interval_bounds_ms(mean_secs: u32) -> (u64, u64) {
 pub struct SchedulerConfig {
     /// Mean regular interval in seconds, within [`MEAN_MIN_SECS`]..=[`MEAN_MAX_SECS`].
     pub mean_secs: u32,
-    /// The session counts as idle after this many seconds without input.
+    /// The session counts as input-idle after this many seconds without
+    /// input. Input-idle with the display awake and unlocked does **not**
+    /// pause capture (a video or slideshow keeps the screen on with no
+    /// input); it only lowers the rate, see [`Self::idle_interval_factor`].
     pub idle_threshold_secs: u64,
+    /// While input-idle (and not in burst mode) each regular interval is
+    /// multiplied by this factor, then capped at [`Self::idle_interval_max_ms`].
+    /// The unchanged-frame skip (dHash) in the capture path avoids repeated
+    /// work when the screen is static. Must be at least 1.
+    pub idle_interval_factor: u32,
+    /// Longest interval while input-idle, in milliseconds (default 900 s).
+    pub idle_interval_max_ms: u64,
     /// How long burst mode lasts after the last qualifying result (default 120 s).
     pub burst_duration_ms: u64,
     /// Burst-mode interval is uniform in `[burst_min_ms, burst_max_ms]` (5–10 s).
@@ -80,6 +90,8 @@ impl Default for SchedulerConfig {
         SchedulerConfig {
             mean_secs: MEAN_DEFAULT_SECS,
             idle_threshold_secs: 300,
+            idle_interval_factor: 3,
+            idle_interval_max_ms: 900_000,
             burst_duration_ms: 120_000,
             burst_min_ms: 5_000,
             burst_max_ms: 10_000,
@@ -123,6 +135,11 @@ impl SchedulerConfig {
                 return Err(SchedulerError::InvalidConfig(what));
             }
         }
+        if self.idle_interval_factor == 0 {
+            return Err(SchedulerError::InvalidConfig(
+                "idle_interval_factor must be >= 1",
+            ));
+        }
         if self.burst_min_ms == 0 {
             return Err(SchedulerError::InvalidConfig("burst_min_ms must be > 0"));
         }
@@ -152,7 +169,6 @@ pub enum PauseReason {
     MemberPaused,
     DisplayAsleep,
     Locked,
-    Idle,
 }
 
 impl PauseReason {
@@ -162,7 +178,6 @@ impl PauseReason {
             PauseReason::MemberPaused => ActivityState::Paused,
             PauseReason::DisplayAsleep => ActivityState::Asleep,
             PauseReason::Locked => ActivityState::Locked,
-            PauseReason::Idle => ActivityState::Idle,
         }
     }
 }
@@ -243,6 +258,8 @@ pub struct Scheduler<R: Rng> {
     burst_until_ms: Option<u64>,
     last_capture_ms: Option<u64>,
     paused: Option<PauseReason>,
+    /// Input-idle (and not paused) as of the last tick.
+    idle: bool,
     last_now: u64,
     transitions: Vec<Transition>,
 }
@@ -259,6 +276,7 @@ impl<R: Rng> Scheduler<R> {
             burst_until_ms: None,
             last_capture_ms: None,
             paused: None,
+            idle: false,
             last_now: 0,
             transitions: Vec::new(),
         })
@@ -275,6 +293,17 @@ impl<R: Rng> Scheduler<R> {
     /// The current pause reason, if paused.
     pub fn paused(&self) -> Option<PauseReason> {
         self.paused
+    }
+
+    /// Whether the session is input-idle: capture continues, at the lower
+    /// rate. (Whether it is *paused* is [`Self::paused`].)
+    pub fn input_idle(&self, session: &SessionSnapshot) -> bool {
+        session.idle_secs >= self.cfg.idle_threshold_secs
+    }
+
+    /// Whether the last tick found the session input-idle and not paused.
+    pub fn is_idle(&self) -> bool {
+        self.idle
     }
 
     /// Whether burst mode is active at `now_ms`.
@@ -308,8 +337,6 @@ impl<R: Rng> Scheduler<R> {
             Some(PauseReason::DisplayAsleep)
         } else if s.locked {
             Some(PauseReason::Locked)
-        } else if s.idle_secs >= self.cfg.idle_threshold_secs {
-            Some(PauseReason::Idle)
         } else {
             None
         }
@@ -339,7 +366,12 @@ impl<R: Rng> Scheduler<R> {
             self.next_ms = Some(now.saturating_add(d));
             self.next_cause = CaptureCause::Burst;
         } else {
-            let d = self.regular_interval_ms();
+            let mut d = self.regular_interval_ms();
+            if self.idle {
+                d = d
+                    .saturating_mul(u64::from(self.cfg.idle_interval_factor))
+                    .min(self.cfg.idle_interval_max_ms.max(d));
+            }
             self.next_ms = Some(now.saturating_add(d));
             self.next_cause = CaptureCause::Scheduled;
         }
@@ -366,13 +398,19 @@ impl<R: Rng> Scheduler<R> {
             }
             // Triggers observed before the pause are stale by the time we resume.
             self.pending_trigger = None;
+            self.idle = false;
             return Decision::Paused(reason);
         }
+        let now_idle = self.input_idle(session);
+        let was_idle = std::mem::replace(&mut self.idle, now_idle);
         if self.paused.take().is_some() {
             self.transitions.push(Transition::Resumed { at_ms: now });
             self.schedule_resume(now);
         } else if self.next_ms.is_none() {
             // First tick after start-up.
+            self.schedule_resume(now);
+        } else if was_idle && !self.idle && !self.in_burst(now) {
+            // Input is back: do not wait out an idle-length interval.
             self.schedule_resume(now);
         }
 
@@ -615,13 +653,18 @@ mod tests {
             s.on_tick(30_000, &locked),
             Decision::Paused(PauseReason::Locked)
         );
+        // Input-idle with the display on and unlocked is not a pause.
         let idle = SessionSnapshot {
             idle_secs: 300,
             ..ACTIVE
         };
+        let locked_idle = SessionSnapshot {
+            locked: true,
+            ..idle
+        };
         assert_eq!(
-            s.on_tick(40_000, &idle),
-            Decision::Paused(PauseReason::Idle)
+            s.on_tick(40_000, &locked_idle),
+            Decision::Paused(PauseReason::Locked)
         );
         let asleep = SessionSnapshot {
             display_asleep: true,
@@ -648,10 +691,6 @@ mod tests {
                     reason: PauseReason::Locked
                 },
                 Transition::Paused {
-                    at_ms: 40_000,
-                    reason: PauseReason::Idle
-                },
-                Transition::Paused {
                     at_ms: 50_000,
                     reason: PauseReason::DisplayAsleep
                 },
@@ -659,17 +698,115 @@ mod tests {
             ]
         );
         assert!(s.drain_transitions().is_empty());
-        assert_eq!(PauseReason::Idle.activity_state(), ActivityState::Idle);
     }
+
+    const IDLE: SessionSnapshot = SessionSnapshot {
+        idle_secs: 3600,
+        ..ACTIVE
+    };
 
     #[test]
     fn idle_threshold_is_respected() {
-        let mut s = sched(1);
+        let s = sched(1);
         let almost = SessionSnapshot {
             idle_secs: 299,
             ..ACTIVE
         };
-        assert!(!matches!(s.on_tick(0, &almost), Decision::Paused(_)));
+        assert!(!s.input_idle(&almost));
+        assert!(s.input_idle(&SessionSnapshot {
+            idle_secs: 300,
+            ..ACTIVE
+        }));
+    }
+
+    /// Run with a fixed session, returning capture times.
+    fn run_with(
+        s: &mut Scheduler<StdRng>,
+        session: &SessionSnapshot,
+        from: u64,
+        until: u64,
+    ) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut now = from;
+        while now <= until {
+            match s.on_tick(now, session) {
+                Decision::CaptureNow(_) => out.push(now),
+                Decision::SleepUntil(t) => now = t,
+                Decision::Paused(r) => panic!("unexpected pause {r:?}"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn idle_with_display_on_keeps_capturing_at_the_lower_rate() {
+        let span = 6 * 3_600_000;
+        let active = run_with(&mut sched(5), &ACTIVE, 0, span).len();
+        let mut s = sched(5);
+        let idle = run_with(&mut s, &IDLE, 0, span);
+        assert!(s.paused().is_none());
+        assert!(s.is_idle());
+        assert!(idle.len() > 20, "idle must keep capturing: {}", idle.len());
+        assert!(
+            idle.len() * 2 < active,
+            "idle rate {} should be well below active {active}",
+            idle.len()
+        );
+        // Never longer than the idle cap between captures.
+        let cap = s.config().idle_interval_max_ms;
+        assert!(idle.windows(2).all(|w| w[1] - w[0] <= cap));
+    }
+
+    #[test]
+    fn idle_with_display_off_or_locked_pauses() {
+        let mut s = sched(6);
+        let asleep = SessionSnapshot {
+            display_asleep: true,
+            ..IDLE
+        };
+        assert_eq!(
+            s.on_tick(0, &asleep),
+            Decision::Paused(PauseReason::DisplayAsleep)
+        );
+        let locked = SessionSnapshot {
+            locked: true,
+            ..IDLE
+        };
+        assert_eq!(s.on_tick(1, &locked), Decision::Paused(PauseReason::Locked));
+        assert!(!s.is_idle());
+    }
+
+    #[test]
+    fn burst_mode_is_not_slowed_by_input_idleness() {
+        let mut s = sched(7);
+        let caps = run_with(&mut s, &IDLE, 0, 10_000);
+        let t = *caps.last().unwrap();
+        s.on_result(t, Rating::High, false);
+        let burst = run_with(&mut s, &IDLE, t, t + 100_000);
+        assert!(burst.len() >= 8, "burst cadence kept: {}", burst.len());
+        assert!(burst.windows(2).all(|w| w[1] - w[0] <= 10_000));
+    }
+
+    #[test]
+    fn input_returning_ends_the_long_idle_wait() {
+        let mut s = sched(8);
+        let caps = run_with(&mut s, &IDLE, 0, 3_000_000);
+        let t = *caps.last().unwrap() + 1;
+        // Next idle capture is scheduled far out; input resumes.
+        match s.on_tick(t, &ACTIVE) {
+            Decision::SleepUntil(at) => assert!(at <= t + 3_000),
+            other => panic!("{other:?}"),
+        }
+        assert!(!s.is_idle());
+    }
+
+    #[test]
+    fn zero_idle_factor_is_rejected() {
+        let bad = SchedulerConfig {
+            idle_interval_factor: 0,
+            ..Default::default()
+        };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

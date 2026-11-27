@@ -113,9 +113,6 @@ fn signal_key(sig: &TamperSignal, account: &Option<String>) -> SignalKey {
     };
     (std::mem::discriminant(sig), detail, account.clone())
 }
-/// Idle seconds after which the heartbeat says `idle` (the scheduler's
-/// default idle threshold).
-const IDLE_SECS: u64 = 300;
 /// Awake time a session can go without a connected agent before the
 /// service raises `unmonitored_user_session` (§3.7): two missed pings of
 /// the slowest allowed ping interval plus launchd's relaunch throttle, with
@@ -960,7 +957,7 @@ impl Core {
             }
         } else if self.session.locked {
             CaptureState::Locked
-        } else if self.session.display_asleep || self.session.idle_secs >= IDLE_SECS {
+        } else if self.session.display_asleep {
             CaptureState::Idle
         } else {
             CaptureState::Active
@@ -999,7 +996,11 @@ impl Core {
             DeviceState::Idle
         } else if self.session.locked {
             DeviceState::Locked
-        } else if self.session.display_asleep || self.session.idle_secs >= IDLE_SECS {
+        } else if self.session.display_asleep
+            || self.session.idle_secs >= self.scheduler.config().idle_threshold_secs
+        {
+            // Display asleep, or awake with no input (capturing at the lower
+            // rate).
             DeviceState::Idle
         } else {
             DeviceState::Active
@@ -1087,12 +1088,14 @@ impl Core {
                 Transition::Resumed { .. } => self.set_activity(ActivityState::Active),
             }
         }
-        let was_unmonitored = matches!(
-            self.activity,
-            ActivityState::Unmonitored | ActivityState::Off
-        );
-        if was_unmonitored && self.scheduler.paused().is_none() {
-            self.set_activity(ActivityState::Active);
+        if self.scheduler.paused().is_none() {
+            // Input-idle with the display on is not a pause: capture goes on
+            // at the lower rate, and the timeline says "idle".
+            self.set_activity(if self.scheduler.is_idle() {
+                ActivityState::Idle
+            } else {
+                ActivityState::Active
+            });
         }
         self.publish_state();
         if let Decision::CaptureNow(info) = decision {
@@ -1193,14 +1196,12 @@ impl Core {
     }
 
     /// Capture is legitimately paused: by the member (allies were told),
-    /// or because the session is locked, idle or asleep (the scheduler's
-    /// pause reasons, plus system sleep).
+    /// or because the session is locked or the display asleep (the
+    /// scheduler's pause reasons, plus system sleep). Input-idle is not a
+    /// pause.
     fn capture_paused(&self) -> bool {
         let s = self.snapshot();
-        s.member_paused
-            || s.display_asleep
-            || s.locked
-            || s.idle_secs >= self.scheduler.config().idle_threshold_secs
+        s.member_paused || s.display_asleep || s.locked
     }
 
     /// Count awake time the session at the screen has had its agent
@@ -1227,7 +1228,14 @@ impl Core {
         }
         self.stall.ms = self.stall.ms.saturating_add(awake_ms);
         let mean_secs = self.scheduler.mean_secs();
-        if self.stall.ms < capture_stall_ms(mean_secs) || self.stall.reported {
+        let mut limit = capture_stall_ms(mean_secs);
+        if self.scheduler.is_idle() {
+            // Input-idle stretches the interval; the stall limit follows.
+            let cfg = self.scheduler.config();
+            limit =
+                limit.max(cfg.idle_interval_max_ms + u64::from(mean_secs).saturating_mul(2_000));
+        }
+        if self.stall.ms < limit || self.stall.reported {
             return;
         }
         self.stall.reported = true;

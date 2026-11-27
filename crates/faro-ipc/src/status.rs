@@ -148,8 +148,8 @@ pub enum CaptureState {
     NotStarted,
     /// Captures run.
     Active,
-    /// The person at the screen is idle or the display is off: captures are
-    /// paused until they come back.
+    /// The display is off: captures are paused until it wakes. (Input-idle
+    /// with the display on is `Active`: captures continue at a lower rate.)
     Idle,
     /// The screen is locked.
     Locked,

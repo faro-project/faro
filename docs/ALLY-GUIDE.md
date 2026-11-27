@@ -137,7 +137,7 @@ Each computer signs what it sends, and the member's key vouches for each compute
 - **Urgent** items have an **Urgent** label. They are things you'd probably want to hear about soon: something on screen rated **high** (or **medium**, which is urgent unless the member lowered it), signs that Faro was switched off or interfered with, a computer that stopped checking in, or Faro being uninstalled.
 - **Normal** items have no label. They are worth knowing but not pressing: a change to Faro's settings, monitoring being paused or resumed, an ally being added or removed, or the member keeping their history for less time.
 - **Daily reports** are titled **Daily report**. Once a day the member's computer sums up the day: how many times it checked the screen and how many were flagged. Click **Show the report** to see:
-  - **Activity**: a bar showing when the computer was in use, idle, locked, asleep, paused or off, and any time it was **Not monitored**;
+  - **Activity**: a bar showing when the computer was in use, idle (screen on, no keyboard or mouse use; checks continue, less often), locked, asleep, paused or off, and any time it was **Not monitored**;
   - **Screen checks**: how many checks were **clean**, **low**, **medium** or **high**;
   - **Flagged moments**: each flagged moment, with its blurred picture and the reasons;
   - **Most used apps** and **Most visited sites**, only if the member chose to share them;
