@@ -526,6 +526,8 @@ export type ServerAlertKind =
 	| 'ally_added'
 	| 'member_settings_changed'
 	| 'upload_stalled'
+	| 'alerts_coalesced'
+	| 'storage_quota'
 	| 'account_disabled'
 	| 'account_enabled'
 	| 'ally_disabled'

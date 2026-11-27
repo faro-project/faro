@@ -520,6 +520,28 @@ What the error codes mean:
 
 ---
 
+### Device limits
+
+Faro limits what one computer, and one member across all their computers, can push at your instance, so a modified or broken client cannot bury everyone else's alerts or fill the disk. The defaults suit normal use; change them in `faro.toml` under `[device_limits]`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `requests_per_minute` | 60 | Event-batch and report requests per computer. |
+| `events_per_device_per_hour` | 6000 | Events per computer. Over it, uploads get `429` with `Retry-After`; the computer waits and sends the rest later. |
+| `events_per_member_per_hour` | 12000 | Events per member, all computers together. |
+| `reports_per_device_per_hour` | 24 | Reports per computer. |
+| `alerts_per_device_per_hour` | 30 | Alerts a computer can raise. Further alerts are never dropped: they are folded into one urgent "sent a flood of alerts" alert that says how many. |
+| `alerts_per_member_per_hour` | 60 | The same, per member. |
+| `alert_coalesce_secs` | 3600 | Repeats of a rejected upload (bad signature, forked or rewritten history) within this window count on one alert per computer, instead of one alert per attempt. |
+| `email_interval_secs` | 60 | At most one immediate email per recipient and member in this time. Alerts that arrive meanwhile go out together in one email ("Urgent: 5 new alerts for Sam"). `0` sends every alert on its own. |
+| `storage_quota_mib` | 2048 | Encrypted data stored per computer (event bodies and reports). `0` turns the quota off. |
+
+Environment overrides: `FARO_DEVICE_EVENTS_PER_HOUR`, `FARO_DEVICE_ALERTS_PER_HOUR`, `FARO_EMAIL_INTERVAL_SECS`, `FARO_DEVICE_STORAGE_QUOTA_MIB`. The limits are kept in memory, per process, and reset on restart.
+
+Fan-out and sending take turns between members, so one member's backlog does not delay anyone else's alerts.
+
+**Over the storage quota.** A new event is still accepted and its signed header stored (the history must stay whole, and a tamper event must never be lost), but its encrypted picture is not kept, and the computer sees an ordinary "accepted". A new report is refused with `413` and the code `storage_quota_exceeded`. Either way allies get an urgent "over its storage limit" alert (one per interval, with a count of repeats) rather than a silent loss. Raise the quota, or let retention free space.
+
 ## 8. Checking your instance: `faro-server doctor`
 
 `doctor` checks the configuration and prints a report. Run it after setup, after changing settings, and whenever something seems wrong:
@@ -786,6 +808,7 @@ The unit runs Faro as the unprivileged `faro` user in a tight sandbox: it can on
 | Mode A: the browser or `curl` shows a certificate or connection error | Check that DNS points at this server (`ping faro.yourchurch.org`), that port 443 is open in the provider's and the server's firewall, and the log for ACME messages. While experimenting, add `FARO_TLS_ACME_PRODUCTION=false` to use Let's Encrypt's test service and avoid its rate limits (its certificates aren't trusted by browsers; remove the line when it works). |
 | `curl http://…` doesn't answer | Faro only speaks HTTPS; use `https://`. |
 | `docker compose ps` shows `unhealthy` | Look at the logs. The health check asks Faro for `/.well-known/faro` (or, with built-in HTTPS, only checks that the port is open). |
+| `429` with `Retry-After` from a computer's uploads, or alerts saying "sent a flood of alerts" or "over its storage limit" | Faro limits what one computer and one member can upload (see "Device limits" below). Honest computers stay far below the defaults. |
 | `{"error":"rate_limited","message":"too many requests; slow down"}`, especially when many people sign up at once | Faro limits sign-in, setup and enrollment requests per address. Behind a proxy or tunnel, make sure `FARO_BEHIND_PROXY=true` is set, otherwise everyone shares one limit. Raise `FARO_RATE_LIMIT_PER_MINUTE` if needed. |
 | `invalid_setup_token` | The token was mistyped, already used, replaced by a newer `init`, or older than 24 hours. Run `sudo docker compose exec faro faro-server init` for a new one. |
 | `admin grant` says `there is no account with the address …` | That person has never signed in. Grant the role to someone who has, or ask them to sign in once at `/signin` if your registration setting lets them create an account. |

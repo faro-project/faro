@@ -500,6 +500,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
   | `invalid_signature` | server | urgent | An event or report arrived that the device's key didn't sign. |
   | `missed_checkin` | server | urgent only | The device went silent past the grace period. The normal-urgency "back online" alert of the same kind is not tamper-class. |
   | `upload_stalled` | server | urgent | The device is alive but not uploading what it records (PROTOCOL.md §7). |
+  | `alerts_coalesced` | server | urgent | A device or member exceeded the alert rate limit; the alerts beyond it are counted on this one (`folded=N`) instead of each paging allies. The events themselves are stored and visible. |
+  | `storage_quota` | server | urgent | A device is over its storage quota: new event bodies are not stored (headers are) and new reports are refused. |
   | `device_removed` | server | urgent | The member removed an active computer, which stops its monitoring. |
   | `ally_removed` | server | normal | The member removed an ally, or an ally left. That is the most direct way to stop being watched. A removed ally is told too. |
   | `account_disabled` | server | urgent | An admin disabled the account (§4.3). The person is told even though their account is disabled. |

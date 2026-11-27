@@ -316,6 +316,14 @@ pub enum ServerAlertKind {
     /// exactly like the deletion notice it follows (on the person, and on
     /// each member they are an ally for, naming them). Tamper-class.
     AccountDeletionCancelled,
+    /// A device or member exceeded the instance's alert rate limit, so
+    /// further alerts in the interval were folded into this one; its detail
+    /// says how many (`coalesced;folded=N`). Tamper-class: never silent.
+    AlertsCoalesced,
+    /// A device is over its storage quota: events keep their signed headers
+    /// but their encrypted bodies were not stored (and reports are refused).
+    /// Tamper-class: it is never silent.
+    StorageQuota,
 }
 
 impl ServerAlertKind {
@@ -337,10 +345,12 @@ impl ServerAlertKind {
             ServerAlertKind::AccountDeleted => "account_deleted",
             ServerAlertKind::AllyDeleted => "ally_deleted",
             ServerAlertKind::AccountDeletionCancelled => "account_deletion_cancelled",
+            ServerAlertKind::AlertsCoalesced => "alerts_coalesced",
+            ServerAlertKind::StorageQuota => "storage_quota",
         }
     }
 
-    pub const ALL: [ServerAlertKind; 16] = [
+    pub const ALL: [ServerAlertKind; 18] = [
         ServerAlertKind::MissedCheckin,
         ServerAlertKind::ChainGap,
         ServerAlertKind::InvalidSignature,
@@ -357,6 +367,8 @@ impl ServerAlertKind {
         ServerAlertKind::AccountDeleted,
         ServerAlertKind::AllyDeleted,
         ServerAlertKind::AccountDeletionCancelled,
+        ServerAlertKind::AlertsCoalesced,
+        ServerAlertKind::StorageQuota,
     ];
 
     /// Inverse of [`Self::as_str`].
@@ -374,6 +386,8 @@ impl ServerAlertKind {
             | ServerAlertKind::UploadStalled
             | ServerAlertKind::AccountDisabled
             | ServerAlertKind::AllyDisabled
+            | ServerAlertKind::AlertsCoalesced
+            | ServerAlertKind::StorageQuota
             | ServerAlertKind::AccountDeleted => Urgency::Urgent,
             ServerAlertKind::AllyRemoved
             | ServerAlertKind::AllyAdded
