@@ -10,6 +10,8 @@
 #                                                 (the macOS package)
 #   release/notices/third-party.sh windows OUT  faro-service and faro-agent
 #                                                 (the Windows MSI)
+#   release/notices/third-party.sh ios OUT      faro-mobile, the Rust core of the
+#                                                 iOS app (apps/ios/build-notices.sh)
 #   release/notices/third-party.sh --cargo-about-version
 #   release/notices/third-party.sh --install-cargo-about
 #
@@ -31,7 +33,7 @@ CARGO_ABOUT_VERSION=0.9.3
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-usage="usage: third-party.sh server|macos|windows OUT"
+usage="usage: third-party.sh server|macos|windows|ios OUT"
 
 if [[ "${1:-}" == --cargo-about-version ]]; then
     echo "$CARGO_ABOUT_VERSION"
@@ -67,6 +69,12 @@ case "$component" in
         # build-msi.ps1 builds faro-service with the image classifier
         # (unless -NoOnnx, which only drops crates from the list).
         runs=("crates/faro-service/Cargo.toml|onnx" "crates/faro-agent/Cargo.toml|")
+        ;;
+    ios)
+        title="the Faro app for iOS (the faro-mobile core)"
+        targets='"aarch64-apple-ios", "aarch64-apple-ios-sim"'
+        # build-rust.sh builds faro-mobile with its default features.
+        runs=("crates/faro-mobile/Cargo.toml|")
         ;;
     *) echo "$usage" >&2; exit 2 ;;
 esac
