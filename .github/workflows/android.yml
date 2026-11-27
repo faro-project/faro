@@ -50,13 +50,12 @@ jobs:
       # (task buildFaroCore), so the Rust core is built for both ABIs there. Check
       # that the crate builds for the host first, so a Rust error fails fast.
       - run: cargo test --locked -p faro-android
-      # No Gradle wrapper jar is committed: use an explicit Gradle version.
+      # The committed wrapper pins Gradle 8.10.2 by checksum; setup-gradle
+      # also validates the wrapper jar and caches Gradle's downloads.
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10.2"
       - name: Unit tests and a debug APK
         working-directory: apps/android
-        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: faro-android-debug-${{ github.sha }}

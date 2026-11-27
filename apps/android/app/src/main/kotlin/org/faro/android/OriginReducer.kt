@@ -12,8 +12,8 @@ import java.util.Locale
 object OriginReducer {
     private const val MAX_LEN = 2048
     private val SCHEME = Regex("^([A-Za-z][A-Za-z0-9+.-]*)://")
-    private val LABELS = Regex("^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$")
-    private val IPV6 = Regex("^\[[0-9a-fA-F:.]+]$")
+    private val LABELS = Regex("""^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$""")
+    private val IPV6 = Regex("""^\[[0-9a-fA-F:.]+]$""")
 
     /** The origin of [text] as `scheme://host/`, or null when it isn't a web address. */
     fun reduce(text: CharSequence?): String? {

@@ -30,12 +30,11 @@ key (keys are files in `noBackupFilesDir/faro`), a release signing setup.
 
 - JDK 17 or newer.
 - Android SDK with `platforms;android-35` and build-tools (`ANDROID_HOME` set).
-- Android NDK r30: `sdkmanager "ndk;30.0.16248370"`, with `ANDROID_NDK_HOME` pointing at it.
+- Android NDK r30 (`ndk;30.0.16248370`). Recent command-line tools replace `sdkmanager` with `android sdk install ndk/30.0.16248370`; `build-android.sh` finds it under `ANDROID_HOME/ndk/` or through `ANDROID_NDK_HOME`.
 - Rust with the Android targets: `rustup target add aarch64-linux-android x86_64-linux-android`.
 - `cargo install cargo-ndk`.
-- Gradle 8.10 or newer, only to create the wrapper: `cd apps/android && gradle wrapper --gradle-version 8.10.2`.
-  The wrapper is not committed.
-- Git Bash on Windows (the Gradle build runs `crates/faro-android/build-android.sh` with `bash`).
+- Nothing for Gradle: the committed wrapper (`./gradlew`) downloads Gradle 8.10.2 and checks its checksum.
+- Git Bash on Windows. The Gradle build runs `crates/faro-android/build-android.sh` with Git Bash's `bash.exe` (not WSL's); `-Pfaro.bash=<path>` picks another shell.
 
 ## Build and install a debug APK
 

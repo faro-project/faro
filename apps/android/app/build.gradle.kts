@@ -19,14 +19,29 @@ val faroGenerated: Provider<Directory> = prebuilt
     .map { rootProject.layout.projectDirectory.dir(it) }
     .orElse(generatedDir)
 
+// The shell that runs build-android.sh. On Windows `bash` on PATH is often
+// WSL's (System32\bash.exe), which can't see this toolchain, so prefer Git
+// Bash; -Pfaro.bash=<path> overrides it.
+val bash: String = providers.gradleProperty("faro.bash").orNull
+    ?: if (System.getProperty("os.name").startsWith("Windows")) {
+        listOfNotNull(System.getenv("ProgramFiles"), System.getenv("ProgramW6432"))
+            .map { File(it, "Git/bin/bash.exe") }
+            .firstOrNull { it.isFile }?.path ?: "bash"
+    } else {
+        "bash"
+    }
+
 val buildFaroCore = tasks.register<Exec>("buildFaroCore") {
     group = "build"
     description = "Builds the Rust core (libfaro_android.so) and its UniFFI Kotlin bindings."
-    val script = repoRoot.resolve("crates/faro-android/build-android.sh")
     val out = generatedDir
     workingDir = repoRoot
-    // Git Bash on Windows, /bin/bash elsewhere: `bash` is on PATH in both.
-    commandLine("bash", script.absolutePath, out.get().asFile.absolutePath)
+    // Forward slashes: bash reads backslashes in Windows paths as escapes.
+    commandLine(
+        bash,
+        "crates/faro-android/build-android.sh",
+        out.get().asFile.absolutePath.replace('\\', '/'),
+    )
     inputs.dir(repoRoot.resolve("crates/faro-android")).withPropertyName("faroAndroidCrate")
     inputs.file(repoRoot.resolve("Cargo.lock")).withPropertyName("cargoLock")
     outputs.dir(out)
