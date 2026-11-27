@@ -20,7 +20,7 @@
 //!   able to stop uploads that way. Clock manipulation itself is detected and
 //!   reported separately (`ClockGuard`, heartbeats).
 
-use crate::state::Enrollment;
+use crate::enroll::Enrollment;
 use faro_core::clock::Clock;
 use faro_core::request::sign_request;
 use faro_crypto::SigningKey;
@@ -159,6 +159,8 @@ pub struct ClientOptions {
     pub timeout: Duration,
     /// Extra PEM CA certificates to trust.
     pub ca_file: Option<std::path::PathBuf>,
+    /// The product named in the `User-Agent` header, before the version.
+    pub product: &'static str,
 }
 
 impl Default for ClientOptions {
@@ -166,7 +168,15 @@ impl Default for ClientOptions {
         ClientOptions {
             timeout: Duration::from_secs(30),
             ca_file: None,
+            product: "faro-service",
         }
+    }
+}
+
+impl ClientOptions {
+    /// `product/version`, the `User-Agent` of every request.
+    pub fn user_agent(&self) -> String {
+        format!("{}/{}", self.product, env!("CARGO_PKG_VERSION"))
     }
 }
 
@@ -252,7 +262,7 @@ impl InstanceClient {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(opts.timeout)
             .connect_timeout(opts.timeout.min(Duration::from_secs(15)))
-            .user_agent(concat!("faro-service/", env!("CARGO_PKG_VERSION")))
+            .user_agent(opts.user_agent())
             .https_only(base.scheme() == "https");
         if let Some(path) = &opts.ca_file {
             for cert in load_ca_file(path)? {
@@ -530,7 +540,8 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-pub(crate) fn load_ca_file(path: &Path) -> Result<Vec<reqwest::Certificate>, ClientError> {
+/// Read extra trusted CA certificates from a PEM file of at most 1 MiB.
+pub fn load_ca_file(path: &Path) -> Result<Vec<reqwest::Certificate>, ClientError> {
     let err = |reason: String| ClientError::CaFile {
         path: path.display().to_string(),
         reason,

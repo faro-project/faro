@@ -532,6 +532,7 @@ async fn cmd_enroll(
     let opts = ClientOptions {
         timeout: config.network.request_timeout(),
         ca_file: config.network.ca_file.clone(),
+        ..ClientOptions::default()
     };
     let params = EnrollParams {
         instance,
