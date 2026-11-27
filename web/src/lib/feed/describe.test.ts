@@ -7,6 +7,7 @@ import {
 	describeBody,
 	describeEntry,
 	isIosBody,
+	platformOf,
 	HIDDEN_WINDOW_CONTEXT,
 	SCREEN_RECORDING_FIX
 } from './describe.ts';
@@ -156,4 +157,39 @@ test('only iPhone-only bodies mark a device as an iPhone', () => {
 	assert.equal(isIosBody(tamper({ signal: 'filter_off', cause: 'unknown' })), true);
 	assert.equal(isIosBody(tamper({ signal: 'capture_failing', consecutive_failures: 1 })), false);
 	assert.equal(isIosBody({ type: 'goodbye', reason: 'uninstalled' }), false);
+});
+
+test("an ally's feed words an iPhone's goodbye and missed check-in from the feed's platforms", () => {
+	// What an ally's page has: the feed's map, no device list and no iPhone body.
+	const fromFeed = { d1: 'ios', d2: 'macos' } as const;
+	const ally = (id: string | null) => platformOf(id, undefined, fromFeed);
+	const goodbye = {
+		type: 'event',
+		kind: 'goodbye',
+		urgency: 'urgent',
+		device_id: 'd1',
+		received_at_ms: 0
+	} as FeedEntry;
+	assert.equal(
+		describeEntry(goodbye, () => undefined, 'iPhone-X', ally('d1')).title,
+		'Faro stopped on an iPhone'
+	);
+	const bye: EventBody = { type: 'goodbye', reason: 'uninstalled' };
+	assert.equal(bodyTitle(bye, 'iPhone-X', ally('d1')), 'Faro was removed from iPhone-X');
+	const quiet = missed(`last_state=idle;since_ms=${7 * HOUR}`);
+	assert.equal(
+		describeEntry(quiet, () => undefined, 'iPhone-X', ally('d1')).title,
+		"iPhone-X hasn't checked in for 3 hours"
+	);
+	// A computer, a device the feed doesn't list, and an older instance keep the computer wording.
+	assert.equal(
+		describeEntry(goodbye, () => undefined, 'Laptop', ally('d2')).title,
+		'Faro stopped on a computer'
+	);
+	assert.equal(ally('d9'), undefined);
+	assert.equal(platformOf('d1', undefined, undefined), undefined);
+	// The member's own device list wins over the feed's map.
+	assert.equal(platformOf('d1', { d1: 'macos' }, fromFeed), 'macos');
+	// A device id can't reach into the object's prototype.
+	assert.equal(platformOf('constructor', fromFeed), undefined);
 });

@@ -115,6 +115,16 @@ function describeMeta(
 	return describeAlert(e, e.kind, e.detail, nameOf, device, tone, platform);
 }
 
+/** The first platform any of the maps knows for a device, in order of trust. */
+export function platformOf(
+	id: string | null,
+	...maps: (Record<string, Platform> | undefined)[]
+): Platform | undefined {
+	if (!id) return undefined;
+	for (const m of maps) if (m && Object.hasOwn(m, id)) return m[id];
+	return undefined;
+}
+
 /**
  * Whether a decrypted body can only come from an iPhone. The instance can't
  * say what kind of device a feed entry is about (and an ally has no device

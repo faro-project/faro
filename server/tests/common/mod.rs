@@ -250,6 +250,18 @@ impl TestApp {
 
     /// Enroll a fresh device with `code` (device stays pending).
     pub async fn enroll(&self, code: &str, member_enc: &EncryptionKeypair) -> TestDevice {
+        self.enroll_as(code, member_enc, "macos", "Sam's MacBook")
+            .await
+    }
+
+    /// Enroll a fresh device of any platform (device stays pending).
+    pub async fn enroll_as(
+        &self,
+        code: &str,
+        member_enc: &EncryptionKeypair,
+        platform: &str,
+        name: &str,
+    ) -> TestDevice {
         let key = SigningKey::generate();
         let r = self
             .post(
@@ -257,8 +269,8 @@ impl TestApp {
                 json!({
                     "enroll_code": code,
                     "sign_pubkey": key.public(),
-                    "platform": "macos",
-                    "device_name": "Sam's MacBook",
+                    "platform": platform,
+                    "device_name": name,
                     "client_version": "0.1.0",
                 }),
                 None,

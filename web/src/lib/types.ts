@@ -562,6 +562,11 @@ export interface FeedResponse {
 	items: FeedEntry[];
 	next_cursor: string | null;
 	has_more: boolean;
+	/**
+	 * What each device in `items` is. Lets an ally, who has no device list,
+	 * word an iPhone's alerts as an iPhone's. Absent from older instances.
+	 */
+	device_platforms?: Record<string, Platform>;
 }
 
 // ---- Decrypted bodies (faro_proto::body, faro_proto::report) --------------

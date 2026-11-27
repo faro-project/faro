@@ -26,8 +26,8 @@
 
 use crate::auth::session::SessionUser;
 use crate::blob::{BlobError, BlobId};
-use crate::db::repo::allies;
 use crate::db::repo::feed::{self, Cursor, FeedRowKind};
+use crate::db::repo::{allies, devices};
 use crate::db::to_u64;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -35,9 +35,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use faro_proto::api::{FeedItem, ServerAlertKind};
+use faro_proto::api::{FeedItem, Platform, ServerAlertKind};
 use faro_proto::UserId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const DEFAULT_FEED_LIMIT: i64 = 100;
 pub const MAX_FEED_LIMIT: i64 = 500;
@@ -68,6 +69,13 @@ pub struct FeedResponse {
     pub next_cursor: Option<String>,
     /// More items may be available right now.
     pub has_more: bool,
+    /// What each device in `items` is (`device_id` to platform), so a reader
+    /// with no device list of their own, an ally, words an iPhone's alerts
+    /// as an iPhone's. The instance already stores this (sent at enrollment)
+    /// and it goes only to callers who can read the feed. Absent from older
+    /// instances.
+    #[serde(default)]
+    pub device_platforms: BTreeMap<String, Platform>,
 }
 
 /// Whether `caller` may read `member`'s feed and blobs.
@@ -159,8 +167,26 @@ pub async fn get_feed(
             item,
         });
     }
+    let mut device_platforms = BTreeMap::new();
+    let wanted: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|e| match &e.item {
+            FeedItem::Event { device_id, .. } | FeedItem::Report { device_id, .. } => {
+                Some(device_id.as_str())
+            }
+            FeedItem::Alert { device_id, .. } => device_id.as_ref().map(|d| d.as_str()),
+        })
+        .collect();
+    if !wanted.is_empty() {
+        for (id, platform) in devices::platforms_for_owner(&mut *conn, &member).await? {
+            if wanted.contains(id.as_str()) {
+                device_platforms.insert(id.as_str().to_owned(), platform);
+            }
+        }
+    }
     Ok(Json(FeedResponse {
         member_id: member,
+        device_platforms,
         items,
         next_cursor,
         has_more,

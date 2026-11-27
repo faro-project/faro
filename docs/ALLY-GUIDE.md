@@ -296,8 +296,6 @@ An iPhone's alerts use the phone's name, such as **iPhone-X**. They are the ones
 | **Faro was removed from *iPhone-X*** | The member chose **Leave Faro** on the phone, so Faro was removed from it. This one is urgent. | "Did you remove Faro from your phone?" |
 | ***iPhone-X* hasn't checked in for 3 hours** | The phone has been silent for longer than the instance allows. The alert says how long, and what the phone last reported. A phone that is switched off or out of signal looks like this. | Ask what happened, as you would for a computer ([missed check-ins](#missed-check-ins)). |
 
-Faro knows a device is an iPhone once it has sent a report or an iPhone-only alert. Until then, an alert about it may use the computer's wording ("Faro stopped on a computer", "*Name* stopped checking in"). Read the phone's name to tell.
-
 Some things are only context and don't come as alerts. An example is a VPN that is connected while Faro is on, or a phone that looks jailbroken. They appear in the daily report.
 
 Blocked lookups and blocked app counts don't come as separate alerts. They are in the daily report.

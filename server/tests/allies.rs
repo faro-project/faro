@@ -863,6 +863,47 @@ async fn feed_pages_never_skip_items_sharing_a_millisecond() {
     assert!(f.items.is_empty());
 }
 
+#[tokio::test]
+async fn the_feed_says_which_devices_are_iphones_to_those_who_can_read_it() {
+    let t = TestApp::new().await;
+    let (member, ms, mkeys, mut mac) = t.active_device().await;
+    let code = t.enroll_code(&ms).await;
+    let mut phone = t.enroll_as(&code, &mkeys.enc, "ios", "iPhone-X").await;
+    assert_eq!(t.endorse(&phone, &mkeys, &ms).await.status, StatusCode::OK);
+    // A third device that never sends anything stays out of the map.
+    let code = t.enroll_code(&ms).await;
+    let quiet = t.enroll_as(&code, &mkeys.enc, "windows", "Desk").await;
+    assert_eq!(t.endorse(&quiet, &mkeys, &ms).await.status, StatusCode::OK);
+
+    let pat = t.link_ally(&member, &mkeys, &ms, "pat@elsewhere.net").await;
+    let bye = phone.next_event(EventKind::Goodbye, Urgency::Urgent);
+    let flag = mac.next_event(EventKind::SettingsChange, Urgency::Normal);
+    t.post_events(&phone, &[bye]).await;
+    t.post_events(&mac, &[flag]).await;
+
+    let want = |f: &FeedResponse| {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(phone.id.to_string(), faro_proto::api::Platform::Ios);
+        m.insert(mac.id.to_string(), faro_proto::api::Platform::Macos);
+        assert_eq!(f.device_platforms, m);
+    };
+    // The ally and the member both get it.
+    want(&feed_of(&t.feed(&member, &pat.session).await));
+    want(&feed_of(&t.feed(&member, &ms).await));
+
+    // Someone who is not an ally gets a 404, and so no map.
+    let (_stranger, ss) = t.sign_in("stranger@example.org").await;
+    let r = t.feed(&member, &ss).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.body);
+    assert!(r.body.get("device_platforms").is_none());
+    // Neither does a removed ally.
+    let r = t.remove_ally(&member, &mkeys, &ms, &pat.id).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
+    let r = t.feed(&member, &pat.session).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.body);
+    assert!(r.body.get("device_platforms").is_none());
+}
+
 /// Ask for a re-wrap challenge as `session` and open it with `keys`.
 async fn open_challenge(t: &TestApp, session: &str, keys: &AllyKeys) -> (i64, [u8; 32]) {
     let r = t
