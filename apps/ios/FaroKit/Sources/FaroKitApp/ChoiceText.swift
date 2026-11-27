@@ -1,3 +1,4 @@
+import FaroKit
 import Foundation
 
 extension SettingChange {

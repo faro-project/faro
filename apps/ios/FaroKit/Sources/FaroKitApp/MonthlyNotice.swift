@@ -1,3 +1,4 @@
+import FaroKit
 import Foundation
 
 /// The monthly notice (docs/IOS.md §12, ARCHITECTURE.md §12): a local

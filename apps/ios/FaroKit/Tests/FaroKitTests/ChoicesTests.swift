@@ -1,5 +1,6 @@
 import XCTest
 @testable import FaroKit
+@testable import FaroKitApp
 
 /// The choice diff, the pending-change state machine and its clock edges
 /// (docs/IOS.md §9).

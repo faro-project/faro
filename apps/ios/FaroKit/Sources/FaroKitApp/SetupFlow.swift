@@ -1,3 +1,4 @@
+import FaroKit
 import Foundation
 
 /// Where the member is in setting up Faro on this phone (docs/IOS.md §14):

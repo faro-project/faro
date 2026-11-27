@@ -1,5 +1,6 @@
 import XCTest
 @testable import FaroKit
+@testable import FaroKitApp
 
 final class FaroKitTests: XCTestCase {
     private var root: URL!
