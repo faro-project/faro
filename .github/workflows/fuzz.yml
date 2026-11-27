@@ -1,10 +1,8 @@
 name: Fuzz
 
 # Every cargo-fuzz target (docs/DEVELOPMENT.md "Fuzzing"), for a bounded
-# time each, on the Linux runner. Scheduled and manual only, never on pull
-# requests: a run holds the runner for over an hour, and the self-hosted
-# runners must not take jobs that anyone with a branch can start more often
-# than CI already does (docs/DEVELOPMENT.md "CI runners").
+# time each, on a Linux runner. Scheduled and manual only, never on pull
+# requests: a run takes over an hour of Actions minutes.
 on:
   schedule:
     - cron: "17 2 * * *" # nightly, 02:17 UTC
@@ -28,11 +26,10 @@ env:
 jobs:
   fuzz:
     name: fuzz (${{ matrix.crate }})
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - crate: faro-update
@@ -49,8 +46,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
-      # Installed into the runner's own Cargo home, so later runs only check
-      # for a newer release.
       - run: cargo install cargo-fuzz --locked
       # Each run starts from the corpus the previous run grew.
       - uses: actions/cache@v4
