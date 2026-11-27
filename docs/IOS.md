@@ -1,6 +1,6 @@
 # Faro: iOS client
 
-**Status:** Proposal, draft v0.1 (2026-11-26). Nothing here is built yet.
+**Status:** Proposal, draft v0.1 (2026-11-26). Being built on the `ios-client` branch (epic #138).
 **Replaces:** "a limited iOS client (Screen Time / content filter)" in [ARCHITECTURE.md §13](ARCHITECTURE.md#13-roadmap) Phase 3, and answers the "Mobile timing" open question (§14) for iOS.
 **Changes a v1 non-goal, on iOS only:** content **blocking** ([ARCHITECTURE.md §1](ARCHITECTURE.md#non-goals-for-v1)). The desktop clients still don't block.
 **Depends on:** enrollment and member approval (§3.8, §7), the hash chain and heartbeats ([PROTOCOL.md](PROTOCOL.md)), urgency flags and tamper-class alerts (§5.4), the signed data-bundle channel and the domain category bundle ([DEVELOPMENT.md](DEVELOPMENT.md#the-domain-category-bundle)).
@@ -286,11 +286,11 @@ crates/faro-mobile/        UniFFI bindings over the Rust core, built as an XCFra
 Small, and none of them gives the instance new visibility:
 
 - **Device platform `ios`** in enrollment and the device list, with its own name pattern ("iPhone-X") and the "blocks, doesn't watch" label.
-- **New tamper reasons**, all tamper-class (`notify::policy::is_tamper_class`, ARCHITECTURE.md §5.4): `screen_time_revoked`, `filter_off`, `settings_cleared`. They are documented in PROTOCOL.md and floored at `urgent` by `EventKind::min_urgency()`.
+- **New tamper reasons**, all tamper-class (`notify::policy::is_tamper_class`, ARCHITECTURE.md §5.4): `screen_time_revoked`, `filter_off`, `settings_cleared`. They are `TamperSignal` variants inside the encrypted body of an ordinary `tamper` event, so `EventKind::min_urgency()` already floors them at `urgent` and the instance can't tell them apart. Its alert emails stay content-free, as for every tamper event. The iPhone wording in §10.2 ("Ally sees") is rendered by the web app after decryption. Documented in PROTOCOL.md §3.4.
 - **New encrypted body types:** `blocked_summary` (category and host counts per bucket) and `shield_summary` (counts). They are ordinary `capture`-class events, so the header urgency is `none`.
 - **`blocked_burst` flags** use the existing `flag` kind and urgency mapping.
 - **`settings_change` bodies** gain the pending-loosening fields (requested, takes effect, cancelled).
-- **Web app:** the iOS device card, the report sections in §11, and iPhone wording in the alert emails ("Faro's web filter is off on iPhone-X").
+- **Web app:** the iOS device card, the report sections in §11, and the iPhone wording for each tamper signal ("Faro's web filter is off on iPhone-X"), shown in alerts and reports after decryption, never in emails.
 - **Liveness:** the grace period per device stays the instance's setting. Phase A measures real phones to see whether iOS needs its own default (§19).
 
 ---
