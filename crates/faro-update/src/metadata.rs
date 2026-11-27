@@ -233,7 +233,7 @@ pub enum TargetKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetCustom {
     pub kind: TargetKind,
-    /// `macos`, `windows`, `linux`, or `any` for platform-independent
+    /// `macos`, `windows`, `linux`, `android`, or `any` for platform-independent
     /// artifacts such as models and blocklists. An iPhone (`ios`) takes
     /// only `any` data bundles, never packages.
     pub platform: String,

@@ -92,6 +92,8 @@ pub fn this_platform() -> Platform {
         Platform::Macos
     } else if cfg!(windows) {
         Platform::Windows
+    } else if cfg!(target_os = "android") {
+        Platform::Android
     } else {
         Platform::Linux
     }

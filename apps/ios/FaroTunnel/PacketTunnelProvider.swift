@@ -325,7 +325,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let group else { return }
         // Fails before the first unlock (the container is protected); the
         // next minute tries again.
-        try? Markers(group: group).touch(Markers.tunnelAlive, nowMs: Self.nowMs())
+        try? Markers(group: group).touch(MarkerName.tunnelAlive, nowMs: Self.nowMs())
     }
 
     /// Save the counters (blocked lookups only) for the next run and for
