@@ -54,6 +54,12 @@ pub enum FaroError {
     /// metadata didn't verify against the root.
     #[error("{message}")]
     Update { message: String },
+    /// The member is leaving Faro on this phone (Leave Faro): the goodbye
+    /// is the last event, so nothing else is recorded and no heartbeat is
+    /// sent (a heartbeat after a goodbye would tell the instance the phone
+    /// is back).
+    #[error("this phone is leaving Faro: nothing more is recorded or sent")]
+    Left,
     /// The caller passed something this API doesn't accept.
     #[error("{message}")]
     InvalidArgument { message: String },

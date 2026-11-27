@@ -14,9 +14,14 @@ public enum MarkerName {
     /// the app and the tunnel can tell it is still being called.
     public static let monitorAlive = "monitor_alive"
     /// Set by the packet tunnel every minute while it runs (docs/IOS.md
-    /// §10.2). Older than 20 minutes while the phone is in use means the DNS
-    /// filter is off.
+    /// §10.2). Older than `TunnelWatch.staleAfterMs` (20 minutes) while the
+    /// phone is in use means the DNS filter is off.
     public static let tunnelAlive = "tunnel_alive"
+    /// Set by the packet tunnel when the phone goes to sleep, and when it
+    /// stops for a reason that isn't the member's (no network, an app
+    /// update), so a quiet `tunnel_alive` then isn't read as the filter
+    /// being switched off (`TunnelWatch`).
+    public static let tunnelResting = "tunnel_resting"
 }
 
 /// The words on the block screen (docs/IOS.md §6.4).
@@ -95,15 +100,52 @@ public struct ScreenTimePlan: Equatable, Sendable {
 /// The monitor extension's schedule (docs/IOS.md §6.3). DeviceActivity won't
 /// take an interval under 15 minutes, and a schedule repeats daily at the
 /// same times, so "every 15 minutes" is a chain: each window runs from now
-/// to 15 minutes on, and the extension starts the next one when it ends. The
-/// window also repeats daily, so if the chain is ever broken the monitor
-/// still runs once a day until the app restarts it.
+/// to 15 minutes on, and the extension starts the next one when it ends.
+///
+/// One dropped callback would stop a chain, and with it the re-applying
+/// and the checks of §10.2, until the app next opens. So under the chain
+/// there is a backbone: `backboneWindows` daily-repeating windows end to end
+/// around the clock, whose every start and end also runs the checks and
+/// restarts the chain. A dropped callback then costs at most one backbone
+/// window. Apple allows about 20 monitored activities per app; this uses
+/// 19 (the chain and 18 windows), leaving one spare.
 public enum MonitorSchedule {
-    /// The `DeviceActivityName` of the one activity.
+    /// The `DeviceActivityName` of the chain.
     public static let activityName = "faro.reapply"
     public static let windowMinutes = 15
 
-    /// The start and end of the window that begins at `date`.
+    /// How many backbone windows, and how long each is (80 minutes).
+    public static let backboneWindows = 18
+    public static let backboneMinutes = 24 * 60 / backboneWindows
+
+    /// The backbone's `DeviceActivityName`s, `faro.backbone.00` and on.
+    public static var backboneNames: [String] {
+        (0..<backboneWindows).map { String(format: "faro.backbone.%02d", $0) }
+    }
+
+    /// Every monitored activity: the chain, then the backbone.
+    public static var allActivityNames: [String] { [activityName] + backboneNames }
+
+    /// Whether `name` is a backbone window rather than the chain.
+    public static func isBackbone(_ name: String) -> Bool { name.hasPrefix("faro.backbone.") }
+
+    /// The longest the monitor goes without a callback while Screen Time
+    /// stands, if one is dropped: one backbone window, plus a chain window
+    /// of slack. An older `monitor_alive` means the monitor isn't being
+    /// called (docs/IOS.md §10.3, spike S8).
+    public static var monitorStaleAfterMs: Int64 { Int64(backboneMinutes + windowMinutes) * 60 * 1000 }
+
+    /// Backbone window `index`: from `index * backboneMinutes` past
+    /// midnight to the next one; the last ends at midnight.
+    public static func backboneWindow(_ index: Int) -> (start: DateComponents, end: DateComponents) {
+        func at(_ minutes: Int) -> DateComponents {
+            let m = minutes % (24 * 60)
+            return DateComponents(hour: m / 60, minute: m % 60, second: 0)
+        }
+        return (at(index * backboneMinutes), at((index + 1) * backboneMinutes))
+    }
+
+    /// The start and end of the chain window that begins at `date`.
     public static func window(
         from date: Date, calendar: Calendar = .current
     ) -> (start: DateComponents, end: DateComponents) {

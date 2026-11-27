@@ -67,6 +67,62 @@ pub struct CoreStatus {
     pub pending_events: u64,
     /// The recipient manifest version events are sealed to.
     pub manifest_version: Option<u64>,
+    /// The member started Leave Faro ([`crate::FaroCore::goodbye`]):
+    /// nothing more is recorded or sent but the goodbye.
+    pub leaving: bool,
+    /// The instance acknowledged the goodbye, or had already retired this
+    /// phone, so its allies know. What is left is local: lifting the
+    /// protection and removing the VPN configuration.
+    pub goodbye_delivered: bool,
+}
+
+/// How [`crate::FaroCore::goodbye`] ended. In every case but
+/// [`GoodbyeOutcome::Queued`] the app goes on to lift the protection.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum GoodbyeOutcome {
+    /// The instance acknowledged the goodbye (event `seq`): allies are told
+    /// "Faro was removed from" this phone. The device's keys are deleted.
+    Delivered { seq: u64 },
+    /// The goodbye (event `seq`) is written but the instance didn't
+    /// acknowledge it in time. Call `goodbye` again to retry: it is never
+    /// written twice.
+    Queued { seq: u64, error: String },
+    /// The instance had already retired this phone (the member removed it,
+    /// or the account was deleted), and allies were told then.
+    AlreadyRetired,
+    /// Enrolled but never approved: allies never knew about this phone,
+    /// and nothing can be sealed to them.
+    NotActivated,
+    /// Not enrolled: no instance knows this phone.
+    NotEnrolled,
+}
+
+/// One ally in the recipient manifest the member signed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AllyRecord {
+    /// The ally's account id on the instance.
+    pub ally_id: String,
+    /// The safety code of the member's key and this ally's key: the code
+    /// the member and the ally compared when the ally was approved, which
+    /// the member's web app shows next to the ally's name.
+    pub safety_code: String,
+}
+
+/// Who this phone reports to, from the recipient manifest the member
+/// signed (docs/IOS.md §12): the monthly notice and "Who Faro reports to".
+/// The manifest carries keys, not names, so the allies are listed by
+/// safety code; the instance is named as enrollment recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RecipientsInfo {
+    pub instance_name: String,
+    pub instance_url: String,
+    /// The member key's fingerprint (the safety code shown at enrollment).
+    pub member_fingerprint: String,
+    pub manifest_version: u64,
+    /// When the member signed this manifest, Unix ms.
+    pub signed_at_ms: i64,
+    /// Sorted by `ally_id`, as the manifest lists them.
+    pub allies: Vec<AllyRecord>,
 }
 
 /// An active tamper signal: an urgent `tamper` event, tamper-class on the

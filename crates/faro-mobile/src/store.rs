@@ -7,7 +7,7 @@
 //!
 //! | Table | Contents |
 //! |---|---|
-//! | `mobile_state` | small JSON records by key: the enrollment (without its token, which is in the key store), the verified endorsement, the update trust state, the installed domain bundle |
+//! | `mobile_state` | small JSON records by key: the enrollment (without its token, which is in the key store), the verified endorsement, the update trust state, the installed domain bundle, Leave Faro's progress, whether a clock skew was reported |
 //! | `mobile_context` | context signals for the daily report (§10.2 "context"), oldest first |
 //! | `mobile_report_log` | the facts the daily report is built from (`crate::reports`): blocked and shield summaries, protection samples, flags, loosenings. Kept a few days, then dropped |
 //!
@@ -38,6 +38,12 @@ pub(crate) const ENROLLMENT: &str = "enrollment";
 pub(crate) const ENDORSEMENT: &str = "endorsement";
 pub(crate) const UPDATE_TRUST: &str = "update_trust";
 pub(crate) const DOMAINS: &str = "domains";
+/// Leave Faro's progress (`crate::core::Leaving`): once set, nothing more
+/// is recorded or sent but the goodbye.
+pub(crate) const LEAVING: &str = "leaving";
+/// Whether a clock skew against the instance was reported and not yet
+/// seen back in range (one signal per skew, across processes).
+pub(crate) const CLOCK_SKEW: &str = "clock_skew_reported";
 /// Bucket starts already turned into `blocked_summary` events.
 pub(crate) const BLOCKED_REPORTED: &str = "blocked_reported";
 /// The shield counters' totals at the last flush.
@@ -205,6 +211,17 @@ impl Store {
         Ok(out)
     }
 
+    /// Set the boolean record `key` to `value` in one transaction and
+    /// return what it was (`false` if missing). Nothing is written when it
+    /// already holds `value`. Two processes racing see exactly one `false`
+    /// to `true` change between them.
+    pub(crate) fn swap_flag(&mut self, key: &str, value: bool) -> Result<bool, FaroError> {
+        self.update::<bool, bool>(key, |old| {
+            let old = old.unwrap_or(false);
+            ((old != value).then_some(value), old)
+        })
+    }
+
     /// Add one fact for the daily report.
     pub(crate) fn add_fact(&mut self, ts_ms: i64, json: &str) -> Result<(), FaroError> {
         let tx = self
@@ -285,6 +302,10 @@ mod tests {
         assert_eq!(s.get::<u32>("x").unwrap(), Some(1));
         s.put("x", &3u32).unwrap();
         assert_eq!(s.get::<u32>("x").unwrap(), Some(3));
+        assert!(!s.swap_flag("f", true).unwrap());
+        assert!(s.swap_flag("f", true).unwrap(), "already set");
+        assert!(s.swap_flag("f", false).unwrap());
+        assert!(!s.swap_flag("f", false).unwrap());
         s.add_context(5, "{}").unwrap();
         s.add_context(9, "[]").unwrap();
         assert_eq!(s.context_since(6).unwrap(), vec![(9, "[]".to_owned())]);

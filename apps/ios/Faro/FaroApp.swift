@@ -28,10 +28,10 @@ struct FaroApp: App {
                 }
         }
         .onChange(of: scenePhase) { phase in
-            // docs/IOS.md §6.3: re-apply the Screen Time settings each time
-            // the app comes forward. Does nothing before setup.
+            // docs/IOS.md §6.3, §10.2: re-apply the Screen Time settings and
+            // check every layer each time the app comes forward.
             if phase == .active {
-                ScreenTimeEnforcer.refreshOnForeground()
+                Task { await model.foreground() }
                 // docs/IOS.md §7.2: look for a newer domain list (skipped if
                 // one was checked in the last 6 hours).
                 let group = updateGroup
@@ -50,6 +50,8 @@ struct RootView: View {
             Group {
                 if !model.loaded {
                     ProgressView()
+                } else if let leave = model.leave {
+                    LeaveView(flow: leave)
                 } else if model.flow.step == .done {
                     StatusView()
                 } else {

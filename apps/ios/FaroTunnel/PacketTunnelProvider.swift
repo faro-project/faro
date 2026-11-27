@@ -1,5 +1,7 @@
 import Darwin
+import FamilyControls
 import FaroKit
+import FaroKitApp
 import Network
 import NetworkExtension
 import os
@@ -16,13 +18,20 @@ private let log = Logger(subsystem: "org.faro.ios.tunnel", category: "tunnel")
 ///   a fresh one on `wake`, all through the Rust core, which signs them
 ///   (skipped while the keys are locked: the filter never waits for them);
 /// * the "tunnel alive" marker every minute, which the monitor extension
-///   and the app watch;
+///   and the app watch, and the "tunnel resting" marker on sleep and when
+///   it stops for a reason that isn't the member's;
 /// * every minute: bursts of blocked lookups recorded as `flag` events;
+/// * every minute and on wake: Screen Time authorization read (the tunnel
+///   watches layer 1, docs/IOS.md §10.2), and the tamper ledger's queued
+///   requests recorded and uploaded;
+/// * on stop: the reason, which says whether the member switched the
+///   filter off and why (`FilterOff` at once);
 /// * every 10 minutes: the ended counter buckets recorded as
 ///   `blocked_summary` events and the shield counters as `shield_summary`
 ///   (docs/IOS.md §7.5, once each however many processes or restarts), the
 ///   counters saved to the app group, the member's choices and a newer
-///   installed domain list picked up, and the memory left logged.
+///   installed domain list picked up, the encrypted-DNS drops noted as
+///   context, and the memory left logged.
 ///
 /// "Screen on" for a burst is `awake`: true from `wake`, false from `sleep`.
 /// The tunnel sees the device only through those two callbacks, so a lookup
@@ -36,6 +45,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let coreQueue = DispatchQueue(label: "org.faro.ios.tunnel.core", qos: .utility)
 
     private let group = AppGroup.container()
+    private let ledger = AppGroup.container().map(TamperLedger.init(group:))
     private let network = tunnelNetwork()
     private var filter: DnsFilter?
     private var upstream: Upstream?
@@ -53,6 +63,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     static let flushInterval: TimeInterval = 10 * 60
     /// How long `sleep` waits for its heartbeat before letting the phone sleep.
     static let sleepHeartbeatWait: TimeInterval = 5
+    /// How long `stopTunnel` waits to record and send a `FilterOff`.
+    static let stopReportWait: TimeInterval = 5
+    /// How long after a first "not approved" reading the second one is made.
+    static let screenTimeRecheck: TimeInterval = 5
 
     // MARK: Lifecycle
 
@@ -97,10 +111,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.startPathMonitor()
                     self.startTimers()
                     self.touchMarker()
+                    self.checkScreenTime()
                     completionHandler(nil)
                     self.coreQueue.async {
                         self.refreshFromCore()
                         self.heartbeat(.active)
+                        self.recordQueuedTamper()
                     }
                 }
             }
@@ -111,6 +127,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         queue.async { [self] in
             log.notice("stopping (reason \(reason.rawValue, privacy: .public))")
             flushCounters()
+            let meaning = TunnelStopMeaning.of(Self.stopReason(reason))
             for t in timers {
                 t.cancel()
             }
@@ -121,12 +138,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // No `shutting_down` heartbeat: the tunnel stopping while the
             // phone runs is what the monitor reports as the filter being off,
             // and the instance should not read it as an expected silence.
-            // The last counts and a "filter off" sample go out first, within
-            // the same few seconds `sleep` allows itself.
+            // The last counts and a "filter off" sample go out first, then
+            // a switch-off is said at once, with the cause the reason
+            // gives, all within the same few seconds `sleep` allows itself.
+            let now = Self.nowMs()
+            switch meaning {
+            case .off(let cause):
+                _ = try? ledger?.update { $0.sawOff(.filterOff(cause), nowMs: now) }
+            case .resting:
+                touchResting()
+            case .unexplained:
+                // If it doesn't come back, the monitor's staleness check
+                // and the app report it.
+                break
+            }
             let once = Once()
             let finish = { once.run(completionHandler) }
-            queue.asyncAfter(deadline: .now() + Self.sleepHeartbeatWait, execute: finish)
+            queue.asyncAfter(deadline: .now() + Self.stopReportWait, execute: finish)
             coreQueue.async {
+                if case .off = meaning { self.recordQueuedTamper() }
                 self.flushReports(filterOn: false)
                 finish()
             }
@@ -136,6 +166,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func sleep(completionHandler: @escaping () -> Void) {
         queue.async { [self] in
             awake = false
+            touchResting()
             flushCounters()
             let once = Once()
             let finish = { once.run(completionHandler) }
@@ -152,7 +183,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         queue.async { [self] in
             awake = true
             touchMarker()
-            coreQueue.async { self.heartbeat(.active) }
+            checkScreenTime()
+            coreQueue.async {
+                self.heartbeat(.active)
+                self.recordQueuedTamper()
+            }
         }
     }
 
@@ -310,6 +345,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             timer(every: Self.markerInterval) { [weak self] in
                 guard let self else { return }
                 self.touchMarker()
+                self.checkScreenTime()
+                self.coreQueue.async { self.recordQueuedTamper() }
                 // No resolver yet: try again, at most every 5 minutes.
                 if self.filter?.status().upstreams == 0, Date().timeIntervalSince(self.lastReread) > 300 {
                     self.rereadResolvers(reason: "retry")
@@ -325,9 +362,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard let self else { return }
                 self.flushCounters()
                 self.logStatus("periodic")
+                let dohDropped = self.filter?.takeDohDropped() ?? 0
                 self.coreQueue.async {
                     self.refreshFromCore()
                     self.flushReports(filterOn: true)
+                    self.noteDohDropped(dohDropped)
                 }
             },
         ]
@@ -343,11 +382,48 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: The app group
 
+    /// The "tunnel alive" marker, and the filter layer seen on.
     private func touchMarker() {
         guard let group else { return }
         // Fails before the first unlock (the container is protected); the
         // next minute tries again.
         try? Markers(group: group).touch(MarkerName.tunnelAlive, nowMs: Self.nowMs())
+        _ = try? ledger?.update { $0.sawOn(.filter) }
+    }
+
+    /// Asleep, or stopped for a reason that isn't the member's: a quiet
+    /// "alive" marker from now on isn't the filter being switched off.
+    private func touchResting() {
+        guard let group else { return }
+        try? Markers(group: group).touch(MarkerName.tunnelResting, nowMs: Self.nowMs())
+    }
+
+    // MARK: Watching Screen Time (docs/IOS.md §10.2)
+
+    /// Reads Screen Time authorization into the ledger. A revocation is
+    /// believed after a second reading a few seconds later, and only from a
+    /// tunnel that has read it approved before: spike S6 hasn't said whether
+    /// a packet tunnel can read the status at all, and if it can't, it
+    /// reads "not determined" from the start and this never reports. Then
+    /// the app (on launch) and the monitor extension (each callback) are
+    /// the ones that see it, through the same ledger.
+    private func checkScreenTime(recheck: Bool = false) {
+        guard let ledger else { return }
+        let approved = AuthorizationCenter.shared.authorizationStatus == .approved
+        let verdict = try? ledger.update {
+            $0.sawScreenTime(approved: approved, source: .tunnel, nowMs: Self.nowMs())
+        }
+        switch verdict {
+        case .recheck where !recheck:
+            queue.asyncAfter(deadline: .now() + Self.screenTimeRecheck) {
+                self.checkScreenTime(recheck: true)
+            }
+        case .reported:
+            log.notice("Screen Time access is off")
+            coreQueue.async { self.recordQueuedTamper() }
+        default:
+            break
+        }
     }
 
     /// Save the counters (blocked lookups only) for the next run and for
@@ -421,6 +497,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// Records what the watchers queued in the ledger (this tunnel, the
+    /// monitor extension, the app) as urgent `tamper` events, and uploads
+    /// them at once. Before the first unlock, or before approval, they wait.
+    private func recordQueuedTamper() {
+        guard let ledger, !ledger.read().pending.isEmpty else { return }
+        if core == nil {
+            refreshFromCore()
+        }
+        guard let core else { return }
+        let n = TamperLink.drain(ledger, into: core)
+        guard n > 0 else { return }
+        log.notice("recorded \(n, privacy: .public) tamper event(s)")
+        do {
+            _ = try core.uploadPending()
+        } catch {
+            log.error("tamper upload failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Notes that encrypted-DNS connections were dropped, as context for
+    /// the daily report (never an alert), at most once an hour.
+    private func noteDohDropped(_ count: UInt64) {
+        guard count > 0, let ledger, let core else { return }
+        log.notice("dropped \(count, privacy: .public) packet(s) to encrypted-DNS resolvers")
+        TamperLink.context(
+            .dohDropped, named: ContextName.dohDropped, ledger: ledger, core: core, nowMs: Self.nowMs())
+    }
+
     /// One heartbeat. Before the first unlock the keys are locked, and the
     /// heartbeat waits for the next round; the filter runs regardless.
     private func heartbeat(_ state: HeartbeatState) {
@@ -434,6 +538,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             log.info("keys locked: heartbeat skipped, filtering continues")
         } catch FaroError.NotEnrolled {
             // Nothing to report to yet.
+        } catch FaroError.Left {
+            // Leave Faro: the goodbye was the last word.
         } catch {
             log.error("heartbeat failed: \(String(describing: error), privacy: .public)")
         }
@@ -474,9 +580,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let core, let filter = queue.sync(execute: { self.filter }), let group else { return }
         let now = Self.nowMs()
         do {
-            // Screen Time's state isn't known here (spike S6); the report
-            // says so rather than guessing.
-            try core.recordProtectionSample(screenTimeOn: nil, filterOn: filterOn)
+            // Screen Time as this tunnel reads it if it can (spike S6), else
+            // as the app and the monitor last read it, else unknown.
+            let reading = AuthorizationCenter.shared.authorizationStatus == .approved
+            let screenTime = ledger?.read().screenTimeState(reading: reading, source: .tunnel)
+            try core.recordProtectionSample(screenTimeOn: screenTime, filterOn: filterOn)
             _ = try filter.flushSummaries(core: core, nowMs: now)
             let shown = (try? Counter(group: group, name: CounterName.shieldShown))?.value() ?? 0
             let closed = (try? Counter(group: group, name: CounterName.shieldClosed))?.value() ?? 0
@@ -534,6 +642,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     static func nowMs() -> Int64 {
         Int64((Date().timeIntervalSince1970 * 1000).rounded())
+    }
+
+    /// `NEProviderStopReason`, as FaroKit names it.
+    static func stopReason(_ r: NEProviderStopReason) -> TunnelStopReason {
+        switch r {
+        case .none: return .none
+        case .userInitiated: return .userInitiated
+        case .providerFailed: return .providerFailed
+        case .noNetworkAvailable: return .noNetworkAvailable
+        case .unrecoverableNetworkChange: return .unrecoverableNetworkChange
+        case .providerDisabled: return .providerDisabled
+        case .authenticationCanceled: return .authenticationCanceled
+        case .configurationFailed: return .configurationFailed
+        case .idleTimeout: return .idleTimeout
+        case .configurationDisabled: return .configurationDisabled
+        case .configurationRemoved: return .configurationRemoved
+        case .superceded: return .superceded
+        case .userLogout: return .userLogout
+        case .userSwitch: return .userSwitch
+        case .connectionFailed: return .connectionFailed
+        case .sleep: return .sleep
+        case .appUpdate: return .appUpdate
+        case .internalError: return .internalError
+        @unknown default: return .none
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import FamilyControls
 import FaroKit
+import FaroKitApp
 import Foundation
 import NetworkExtension
 import UserNotifications
@@ -111,6 +112,68 @@ enum TunnelInstaller {
         else { return false }
         return m.isEnabled && m.isOnDemandEnabled
     }
+
+    /// What the app can see of Faro's VPN, for `FilterVerdict` (docs/IOS.md
+    /// §10.2). `nil` when the configurations can't be read at all, which
+    /// says nothing about the filter.
+    static func snapshot() async -> VPNSnapshot? {
+        guard let managers = try? await NETunnelProviderManager.loadAllFromPreferences() else { return nil }
+        let m = managers.first(where: {
+            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == providerBundleID
+        })
+        let state = m.map { vpnState($0.connection.status) } ?? .invalid
+        let up = state == .connected || state == .connecting || state == .reasserting
+        return VPNSnapshot(
+            configured: m != nil, enabled: m?.isEnabled ?? false, onDemand: m?.isOnDemandEnabled ?? false,
+            state: state, otherVPN: OtherVPN.active(scopedInterfaces: scopedInterfaces(), faroTunnelUp: up))
+    }
+
+    /// Leave Faro: removes Faro's VPN configuration, which stops the tunnel.
+    static func remove() async throws {
+        let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+        for m in managers where (m.protocolConfiguration as? NETunnelProviderProtocol)?
+            .providerBundleIdentifier == providerBundleID
+        {
+            try await m.removeFromPreferences()
+        }
+    }
+
+    static func vpnState(_ s: NEVPNStatus) -> VPNState {
+        switch s {
+        case .invalid: return .invalid
+        case .disconnected: return .disconnected
+        case .connecting: return .connecting
+        case .connected: return .connected
+        case .reasserting: return .reasserting
+        case .disconnecting: return .disconnecting
+        @unknown default: return .invalid
+        }
+    }
+
+    /// The interfaces the system's proxy settings list per network: a VPN's
+    /// `utun` or `ipsec` shows here while it is connected.
+    static func scopedInterfaces() -> [String] {
+        guard let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any],
+              let scoped = settings["__SCOPED__"] as? [String: Any]
+        else { return [] }
+        return Array(scoped.keys)
+    }
+}
+
+// MARK: Context
+
+enum DeviceContext {
+    /// The cheap, well-known jailbreak checks (`JailbreakCheck`).
+    static func jailbreakSuspected() -> Bool {
+        JailbreakCheck.suspected(
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            canWriteOutsideSandbox: {
+                let probe = "/private/faro-sandbox-check"
+                guard (try? Data().write(to: URL(fileURLWithPath: probe))) != nil else { return false }
+                try? FileManager.default.removeItem(atPath: probe)
+                return true
+            })
+    }
 }
 
 // MARK: The monthly notice
@@ -119,13 +182,13 @@ enum NoticeScheduler {
     /// Asks for permission to show notifications, and schedules the monthly
     /// notice either way: if the member declines, the screen is still one
     /// tap away on the status screen, and the status screen says so.
-    static func schedule(enrolledAt: Date) async -> Bool {
+    static func schedule(enrolledAt: Date, recipients: RecipientsInfo? = nil) async -> Bool {
         let center = UNUserNotificationCenter.current()
         let allowed = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
 
         let content = UNMutableNotificationContent()
         content.title = "Faro is on this phone"
-        content.body = "Tap to see who it reports to and which Faro instance holds the reports."
+        content.body = body(recipients)
         content.userInfo = [MonthlyNotice.routeKey: MonthlyNotice.routeValue]
         let trigger = UNCalendarNotificationTrigger(
             dateMatching: MonthlyNotice.fireComponents(enrolledAt: enrolledAt), repeats: true)
@@ -133,6 +196,26 @@ enum NoticeScheduler {
         try? await center.add(UNNotificationRequest(
             identifier: MonthlyNotice.identifier, content: content, trigger: trigger))
         return allowed
+    }
+
+    /// The notification's text: who Faro reports to, as far as the signed
+    /// recipient list says (allies by count; the list names no one).
+    static func body(_ r: RecipientsInfo?) -> String {
+        guard let r else {
+            return "Tap to see who it reports to and which Faro instance holds the reports."
+        }
+        let who: String
+        switch r.allies.count {
+        case 0: who = "It reports to you only, for now"
+        case 1: who = "It reports to 1 ally"
+        default: who = "It reports to \(r.allies.count) allies"
+        }
+        return "\(who), through \(r.instanceName). Tap to see who."
+    }
+
+    /// Leave Faro: no more monthly notices.
+    static func cancel() {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [MonthlyNotice.identifier])
     }
 
     static func notificationsAllowed() async -> Bool {

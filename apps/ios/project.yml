@@ -69,6 +69,8 @@ targets:
         optional: true
     dependencies:
       - package: FaroKit
+      - package: FaroKit
+        product: FaroKitApp
       - framework: FaroCore.xcframework
         embed: false
       - sdk: DeviceActivity.framework
@@ -138,12 +140,17 @@ targets:
         buildPhase: resources
     dependencies:
       - package: FaroKit
+      - package: FaroKit
+        product: FaroKitApp
       - framework: FaroCore.xcframework
         embed: false
       - sdk: NetworkExtension.framework
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: libresolv.tbd
+      # AuthorizationCenter: the tunnel watches Screen Time (docs/IOS.md
+      # §10.2; spike S6 says whether it can read it).
+      - sdk: FamilyControls.framework
     entitlements:
       path: FaroTunnel/FaroTunnel.entitlements
       properties:
@@ -183,6 +190,7 @@ targets:
       - package: FaroKit
       - sdk: DeviceActivity.framework
       - sdk: ManagedSettings.framework
+      - sdk: FamilyControls.framework
     entitlements:
       path: FaroMonitor/FaroMonitor.entitlements
       properties:
