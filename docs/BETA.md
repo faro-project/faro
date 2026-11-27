@@ -9,7 +9,7 @@ This guide covers what is different about the beta, and what to expect from it. 
 - [A guide for allies](ALLY-GUIDE.md), for allies: accepting an invitation, reading alerts, having the conversation.
 - [Developing Faro](DEVELOPMENT.md), for anyone who wants the technical detail behind this guide.
 
-Notes in the form **[Maintainer: …]** mark things the Faro project still has to fill in or confirm. Until a note is resolved, don't rely on that part.
+Notes in the form **[TO FILL IN: …]** mark things the Faro project still has to fill in or confirm. Until a note is resolved, don't rely on that part.
 
 ## Contents
 
@@ -24,14 +24,22 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 
 ## 1. What the beta is
 
-- **One version: `0.1.0-beta.1`.** The Mac app, the Windows client and the server have the same version number.
-- **Macs and Windows PCs.** The Mac package runs on Apple Silicon and Intel Macs with macOS 13 or later. [Maintainer: confirm the minimum macOS for the beta. ONNX Runtime, which runs the image model, is built for macOS 13.3, and nobody has tried Faro on 13.0 to 13.2.]
-- **Windows 10 and 11, x64 only.** The Windows package is an MSI. It runs on Windows 10 22H2 (build 19045) and Windows 11, on 64-bit (x64) PCs. Windows on ARM comes later.
-- **iPhones, through TestFlight.** The iPhone app blocks rather than watches, and has its own setup and limits ([3.9](#39-on-an-iphone), [4.6](#46-on-an-iphone)).
+Which platforms can you use today?
+
+- **Mac: available now.** The Mac package runs on Apple Silicon and Intel Macs with macOS 13 or later. The installer accepts macOS 13.0, but nobody has tried Faro on 13.0 to 13.2, and the library that runs the image checks (ONNX Runtime) is built for macOS 13.3. [TO FILL IN: confirm the minimum macOS for the beta.]
+- **Windows: not yet.** The Windows client is built, but no installer is published until the project has chosen a company to sign it, and an unsigned one is not safe to use on anyone ([3.1](#31-download-only-the-signed-package)). When it is published, it is a Windows installer file (an MSI) for Windows 10 22H2 (build 19045) and Windows 11, on 64-bit (x64) PCs. Windows on ARM comes later.
+- **iPhone: not yet.** The app is built to be installed through Apple's TestFlight, but that needs Apple's approval for each part of the app first, and some things about iPhones haven't been checked on real phones ([3.9](#39-on-an-iphone), [4.6](#46-on-an-iphone)). It blocks rather than watches.
+- **Android: not in this beta.** The app is still being built and no package is published. Nothing about Android below applies yet.
+
+Also in this beta:
+
+- **One version: `0.1.0-beta.1`.** The Mac app, the Windows client and the server have the same version number. The iPhone app is built as version 0.1.0 (build 1).
 - **The `beta` update channel.** Members' computers get updates through their instance, and the instance offers one channel. A `0.1.0-beta.1` release goes to `beta` only. `stable` gets nothing until `0.1.0`, so every pilot instance must choose **Beta** ([2.2](#22-choose-the-beta-update-channel)).
 - **Small on purpose.** A few instances and the people they invite, so problems are found while they are easy to fix. Expect some false alarms ([section 4](#4-known-limitations-and-false-alarms)), and please report what goes wrong ([section 5](#5-reporting-problems)).
 
 ### What works
+
+The Windows items below describe the client as built. No Windows package is published yet, so nothing on Windows can be installed in this beta.
 
 - **The instance** (`faro-server`), with its web app: setup, sign-in by emailed link, the admin console, and the member and ally pages. SQLite only: Postgres is experimental and not supported in the beta ([SELF-HOSTING.md](SELF-HOSTING.md)).
 - **The Mac app**, one package with two parts: the Faro service, which checks the screen, and **Faro Agent**, the Faro icon in the menu bar. Members enroll from the web app's **Open in Faro** button or the menu's **Enroll this computer…**, with an administrator of the Mac approving in macOS's own password dialog.
@@ -43,8 +51,8 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 - **`sudo /Library/Faro/bin/faro-service status`** (and `--json`), which shows whether monitoring is working, and **`faro-service diagnose`**, which makes a problem report ([section 5](#5-reporting-problems)).
 - **On Windows,** run `& "C:\Program Files\Faro\faro-service.exe" status` in a terminal opened as administrator (in Command Prompt, leave out the leading `& `). A problem report is made the same way, with `diagnose` ([section 5](#5-reporting-problems)).
 - **Logs** in `/Library/Logs/Faro/faro-service.log` (any administrator of the Mac can read it) and `~/Library/Logs/Faro/faro-agent.log` for each account ([Faro's logs](MEMBER-GUIDE.md#faros-logs)).
-- **Logs on Windows:** `C:\ProgramData\Faro\logs\faro-service.log` (Administrators can read it) and `%LOCALAPPDATA%\Faro\Logs\faro-agent.log` for each account. Logs rotate at 5 MiB, and 3 old files are kept.
-- **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-computers)). On Windows, the service checks the project-signed update metadata first, as on a Mac, and then installs the signed MSI after checking its Authenticode signature and that its version is the expected, newer one.
+- **Logs on Windows:** `C:\ProgramData\Faro\logs\faro-service.log` (Administrators can read it) and `%LOCALAPPDATA%\Faro\Logs\faro-agent.log` for each account. A log file is replaced by a new one when it reaches about 5 megabytes, and 3 old files are kept.
+- **Signed updates** for the Mac app, the image model and the website list, through the instance ([2.3](#23-updates-for-members-computers)). On Windows, the service checks the project-signed update metadata first, as on a Mac, and then installs the signed installer file (MSI) after checking its publisher's signature (Windows calls this Authenticode) and that its version is the expected, newer one.
 - **Licences.** The notices for the software Faro is built from are in `/Library/Faro/notices/` on the Mac (**About Faro…** has a button that opens the folder), and on the **Licences** page (`/licenses`) of every instance's web app.
 - **Admin changes are never silent.** Disabling or re-enabling an account is in the admin log and is emailed to the other admins, and the person and their allies are always told.
 
@@ -56,12 +64,13 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 - **Passkeys.** Everyone signs in with an emailed link.
 - **Web Push and phone notifications.** Alerts come by email only.
 - **S3 storage.** Encrypted attachments are kept on the instance's own disk.
-- **The browser extension.** Faro reads the website from the browser instead: through Accessibility on a Mac, and UI Automation on Windows. Neither can tell a private window from an ordinary one.
+- **The browser extension.** Faro reads the website from the browser's address bar instead: through the Mac's Accessibility permission, and, on Windows, through Windows' accessibility features (called UI Automation). Neither can tell a private window from an ordinary one.
 - **Pausing.** There is no way for a member to pause monitoring yet: neither the web app nor the menu has one.
 - **An allowlist for apps that hide their windows.** Every third-party app that does it is reported by name ([4.3](#43-a-window-was-hidden-from-faro)).
 - **A desktop app for allies.** Allies read their alerts in the instance's web app.
 - **Sending a problem report from the menu.** **Report a problem…** explains how to make one in Terminal and copies the command; it doesn't make or send the report itself.
-- **Allies' names on an iPhone.** An iPhone shows its allies by count and safety code until issue #169 adds their names.
+- **Android.** The app is still being built and has no installable package ([ANDROID.md](ANDROID.md)).
+- **Hiding the icon.** On macOS 26 and later, the member can switch off the Faro icon in the menu bar (System Settings → Menu Bar) and Faro doesn't notice. On Windows, hiding the tray icon in the notification area's overflow isn't noticed either. Monitoring keeps running. The icon is for people who use the computer, not a tamper signal.
 
 ---
 
@@ -71,7 +80,7 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 
 Follow [SELF-HOSTING.md](SELF-HOSTING.md): what you need, the three ways to host it, the first admin account, email, `doctor`, backups and upgrading. Everything there applies to the beta.
 
-**Get the `0.1.0-beta.1` server.** [Maintainer: how pilot operators get the `0.1.0-beta.1` server. A release tags the container image `ghcr.io/faro-project/faro-server:0.1.0-beta.1`, and the GitHub Release has the `faro-server` binaries, but the repository is private, so only its collaborators can download from it.] Until then, the development image `:main` from SELF-HOSTING.md is the latest code, which can be broken.
+**Get the `0.1.0-beta.1` server.** [TO FILL IN: how pilot operators get the `0.1.0-beta.1` server. A release tags the container image `ghcr.io/faro-project/faro-server:0.1.0-beta.1`, and the GitHub Release has the `faro-server` binaries, but the repository is private, so only its collaborators can download from it.] Until then, the development image `:main` from SELF-HOSTING.md is the latest code, which can be broken.
 
 **Before every upgrade, make a backup** and copy it off the server ([section 9](SELF-HOSTING.md#9-backups-and-restore) and [section 10](SELF-HOSTING.md#10-upgrading) of SELF-HOSTING.md). Database changes only go forward: the only way back to an older version is restoring the backup you made before upgrading. Keep a copy of `faro.env` too, which isn't in the backup.
 
@@ -91,10 +100,10 @@ FARO_UPDATES_UPSTREAM=https://updates.faro-project.org/   # updates.upstream in 
 ```
 
 - The official image includes `update-root.json` once the project has made it (the key ceremony). An instance without the image downloads the file and points `FARO_UPDATES_ROOT` at it.
-- Check your copy with `shasum -a 256 update-root.json` and compare it with **[Maintainer: the SHA-256 of `update-root.json` for `0.1.0-beta.1`]**.
-- [Maintainer: confirm when `https://updates.faro-project.org/` serves `0.1.0-beta.1`. Until the first real release, nothing is published there, and the mirror has nothing to fetch.]
+- Check your copy with `shasum -a 256 update-root.json` and compare it with **[TO FILL IN: the SHA-256 of `update-root.json` for `0.1.0-beta.1`]**.
+- [TO FILL IN: confirm when `https://updates.faro-project.org/` serves `0.1.0-beta.1`. Until the first real release, nothing is published there, and the mirror has nothing to fetch.]
 
-Your instance can't change an update: every computer checks the project's signature itself. A Mac checks your instance for updates about every 6 hours, and a Windows PC checks on the same schedule. On Windows, the project-signed update metadata is checked first, as on a Mac, and then the MSI's Authenticode signature and version.
+Your instance can't change an update: every computer checks the project's signature itself. A Mac checks your instance for updates about every 6 hours, and a Windows PC checks on the same schedule. On Windows, the project-signed update metadata is checked first, as on a Mac, and then the installer's publisher signature and version.
 
 ### 2.4 What to watch in `faro-server doctor`
 
@@ -117,6 +126,7 @@ Run `faro-server doctor` after setting up, after every upgrade and whenever some
 - **Only people who choose Faro for themselves.** Don't enroll minors. Faro monitors **every account** on a Mac, including ones added later and the guest account. On Windows, it monitors every signed-in session of every account, including Remote Desktop. Everyone who logs in is told. So only install it on a member's own computer, never on a shared computer such as a lab or office Mac or PC that other people use without having chosen Faro.
 - **Send your members and allies this guide,** especially [section 4](#4-known-limitations-and-false-alarms), so allies aren't alarmed by the alerts that setting up causes.
 - **Make a second admin** ([More than one admin](SELF-HOSTING.md#more-than-one-admin)), so the instance doesn't depend on one person's email.
+- **If someone tells you they were pressured to use Faro,** believe them, and talk to them privately. Show them the exits that need no administrator password: **Computers → Remove…** (the computer stops reporting at once) and **Settings → Delete your account** ([If this wasn't your choice](#310-if-this-wasnt-your-choice)). Be honest about what you can't do: you can't make an exit quiet (their allies are always told), you can't stop monitoring on the computer yourself (disabling an account stops sign-in, not monitoring), and an account you delete is still held for 7 days. Don't pressure them to stay, and don't tell the allies more than Faro already does.
 
 ---
 
@@ -132,7 +142,7 @@ The order that works best:
 
 ### 3.1 Download: only the signed package
 
-Download Faro from **[Maintainer: download link for 0.1.0-beta.1]**.
+Download Faro from **[TO FILL IN: download link for 0.1.0-beta.1]**.
 
 **Only install a signed, notarized package from that link.** The Faro project also makes unsigned test packages for its own testing (their names end in `-dev.pkg`). They are not safe to use on anyone: an unsigned package's service accepts any program running in a logged-in account as its agent. If someone sends you a Faro package any other way, don't install it.
 
@@ -142,9 +152,9 @@ To check the package before you open it, run in Terminal (with the real file nam
 pkgutil --check-signature ~/Downloads/Faro-0.1.0-beta.1.pkg
 ```
 
-It must say the package is signed with a **Developer ID Installer** certificate and is **notarized** by Apple, and name **[Maintainer: the Developer ID name and Team ID pilots should see]**. If it says `no signature`, delete the file. The package's name has no `-dev` in it.
+It must say the package is signed with a **Developer ID Installer** certificate and is **notarized** by Apple, and name **[TO FILL IN: the Developer ID name and Team ID pilots should see]**. If it says `no signature`, delete the file. The package's name has no `-dev` in it.
 
-**On Windows,** the installer is `Faro-0.1.0-beta.1-x64.msi`. No Windows package is published yet, because the signing provider isn't chosen, so there is no Windows link for the beta. Don't install an unsigned build. To check the signature, right-click the MSI, choose **Properties**, then **Digital Signatures**. TODO(windows): the publisher name to expect, which depends on the signing provider.
+**On Windows,** the installer will be `Faro-0.1.0-beta.1-x64.msi`. No Windows package is published yet, because the company that will sign it isn't chosen, so there is no Windows link for the beta. Don't install an unsigned build. To check the signature once there is a package, right-click the file, choose **Properties**, then **Digital Signatures**. [TO FILL IN: the publisher name to expect, which depends on the signing provider.]
 
 ### 3.2 Install it
 
@@ -157,7 +167,7 @@ On Windows, the MSI installs Faro to `C:\Program Files\Faro` for the whole compu
 ### 3.3 Your account, your keys and your allies
 
 1. **Accept the invitation.** Your operator invites you by email. Open the link and sign in: Faro emails you a sign-in link (there is no password).
-2. **Set up your keys** on the **Keys** page: choose a passphrase, click **Create my keys**, and save the recovery code the page shows once. Then sign your recipient list there (**Sign my recipient list**). Your computers can't start until you have.
+2. **Set up your keys.** On the web app's Home page, choose **Set up keys**. (The **Keys** page isn't in the top menu: Home and **Settings** link to it.) Choose a passphrase, click **Create my keys**, and save the recovery code the page shows once. Faro signs your recipient list (the list of allies your computers send reports to) by itself while you save the code. Only if that failed does the page show **Sign my recipient list**: click it, because your computers can't start without a signed list. Read [If you lose your passphrase and recovery code](MEMBER-GUIDE.md#if-you-lose-your-passphrase-and-recovery-code) now: Faro can't create your member keys a second time.
 3. **Invite your allies** on the **Allies** page: type their email address and click **Send invitation**. Each invitation works for 7 days. Send them the [ally guide](ALLY-GUIDE.md).
 4. **Approve each ally** once they have accepted: compare the safety code with them in person or on a call, then approve them on the **Allies** page ([Comparing the safety code](ALLY-GUIDE.md#4-comparing-the-safety-code)). Allies only see what happened after you approved them.
 
@@ -171,11 +181,11 @@ On Windows, the link opens the running Faro Agent, and an administrator approves
 
 **Screen Recording is required.** Without it Faro can't see the screen, and your allies are told. After you approve the computer, macOS asks every account on the Mac, once, to let **Faro Agent** record the screen. Allow it straight away: if captures keep failing for a few minutes (5 in a row), your allies get **"Screen Recording is off"**.
 
-If you missed the question, or the menu says **Status: Screen Recording is off**: choose **Open Screen Recording Settings…** in the menu, or open System Settings → Privacy & Security → **Screen & System Audio Recording** (called **Screen Recording** on macOS 13 and 14), and switch on **Faro Agent**. If it is on already, select it, remove it with **−** and add it again (`/Library/Faro/Faro Agent.app`). [Maintainer: confirm whether Faro Agent needs a log out and in after Screen Recording is first switched on.]
+If you missed the question, or the menu says **Status: Screen Recording is off**: choose **Open Screen Recording Settings…** in the menu, or open System Settings → Privacy & Security → **Screen & System Audio Recording** (called **Screen Recording** on macOS 13 and 14), and switch on **Faro Agent**. If it is on already, select it, remove it with **−** and add it again (`/Library/Faro/Faro Agent.app`). [TO FILL IN: confirm whether Faro Agent needs a log out and in after Screen Recording is first switched on.]
 
 **Accessibility is optional, but without it Faro can't tell which website a browser shows,** so the website categories don't work, and Faro doesn't see window titles. macOS never asks for it: switch it on yourself in System Settings → Privacy & Security → **Accessibility** (add **Faro Agent** if it isn't listed). While it is off, the menu shows **Monitoring** with a note about it and an **Open Accessibility Settings…** item. Turning it off after it was on sends your allies an urgent alert. Never turning it on sends nothing.
 
-[Maintainer: whether recent versions of macOS ask again from time to time if Faro Agent may keep recording the screen, and what members should answer.]
+[TO FILL IN: whether recent versions of macOS ask again from time to time if Faro Agent may keep recording the screen, and what members should answer.]
 
 **On Windows,** there is no Screen Recording or Accessibility permission, and Windows asks for nothing. Websites are read with no permission. The lock screen, UAC prompts and the Ctrl+Alt+Del screen can't be captured, so they are recorded as unavailable, not as tamper. Video with copy protection shows black in Faro's captures.
 
@@ -205,17 +215,35 @@ It tells your allies first, with an urgent **"Faro stopped on a computer"** ("Fa
 
 On Windows, uninstall in **Settings → Apps**, or run `msiexec /x` with the MSI. Faro tells the allies first. If the instance can't be reached, it still uninstalls, but then it can't tell them.
 
-To stop a computer reporting without uninstalling, remove it on the **Computers** page (**Remove…**). Your allies get an urgent alert that a computer was removed. Uninstall Faro on it afterwards, too.
+Uninstalling needs an administrator's name and password, on a Mac and on Windows. If an ally holds that password, you can't uninstall Faro yourself, and the ally can ([If this wasn't your choice](#310-if-this-wasnt-your-choice)).
+
+To stop a computer reporting without uninstalling, remove it on the **Computers** page (**Remove…**). This needs no administrator password. Your allies get an urgent alert that a computer was removed. Uninstall Faro on it afterwards, too.
 
 ### 3.9 On an iPhone
 
 The iPhone app blocks adult websites and apps on the phone. It doesn't watch the screen. The steps are in [Adding your iPhone](MEMBER-GUIDE.md#adding-your-iphone). Before you start:
 
-- **Get the app through TestFlight.** In the beta the iPhone app comes through Apple's TestFlight, not the App Store. [Maintainer: confirm how pilot members are invited to TestFlight, and by whom.]
+- **Not available yet.** The route below needs Apple's approval for each part of the app first, and that isn't confirmed.
+- **Get the app through TestFlight.** In the beta the iPhone app is meant to come through Apple's TestFlight (Apple's app for testing unreleased apps), not the App Store. [TO FILL IN: confirm how pilot members are invited to TestFlight, and by whom.]
 - **The phone needs iOS 17 or later.**
 - **Setup asks for Screen Time and the VPN,** and can't be finished without them. Turning either one off later is reported to your allies.
-- **The version is 0.1.0.** The iPhone app doesn't carry the `-beta.1` suffix of the Mac and Windows builds. [Maintainer: confirm the version and build number that TestFlight shows.]
+- **The version is 0.1.0.** The iPhone app doesn't carry the `-beta.1` suffix of the Mac and Windows builds. The project builds it as version 0.1.0, build 1. [TO FILL IN: confirm the version and build number that TestFlight shows.]
 - **To remove Faro,** use **Leave Faro** in its Settings ([Leaving Faro](MEMBER-GUIDE.md#9-leaving-faro)). You can't delete the app while Faro protects itself.
+
+### 3.10 If this wasn't your choice
+
+Faro is for people who choose it for themselves. If someone pressured you to install it, or you are using it because you were made to, read this.
+
+- **What Faro is.** It looks at your screen on the computer, checks what it finds there, and sends the allies you chose a report with blurred pictures. It tells them if it is switched off or tampered with.
+- **Everyone who uses the computer is told.** Every account on it is monitored, and each one sees the Faro icon and a notice that the computer is monitored.
+- **There is no quiet way out.** Every exit tells your allies first. If leaving openly is unsafe for you, put your safety first: Faro isn't more important than that. Talk to someone you trust, or, in an emergency, the emergency services.
+- **Ways out that need no administrator password:**
+  - **Computers → Remove…** in the web app. The computer stops reporting at once, and your allies get an urgent alert. Faro stays installed on it until an administrator uninstalls it.
+  - **Settings → Delete your account** in the web app. Your allies are emailed straight away. For 7 days nothing else changes and the computer is still monitored, then everything about you is removed from the instance and it stops accepting your computers.
+- **Uninstalling needs an administrator's name and password.** If someone else keeps it, you can't uninstall Faro yourself, but the two exits above still work, and removing the computer in the web app stops it reporting. Allies who hold the password are asked not to use it to stop you leaving ([ally guide](ALLY-GUIDE.md#an-ally-holding-the-administrator-password)).
+- **Your allies are told** in each case. Faro can't hide it.
+
+The [member guide](MEMBER-GUIDE.md#if-this-wasnt-your-choice) says the same in more detail.
 
 ---
 
@@ -228,7 +256,7 @@ The iPhone app blocks adult websites and apps on the phone. It doesn't watch the
 | What happens on the Mac | What allies may see | Is it expected? |
 |---|---|---|
 | The computer is approved, but Screen Recording isn't allowed yet in the account being used | After about 5 failed captures (a few minutes): **Possible tampering**, which unlocks to **"Screen Recording is off on *computer*"**, saying Faro doesn't have the permission on this computer | Yes, if the member was slow to allow it. It should stop once they do ([3.5](#35-screen-recording-and-accessibility)). |
-| Faro is reinstalled, or a new test package installed | **"Screen Recording is off"**, because the reinstall dropped the permission even though System Settings may still show Faro Agent switched on | Yes for unsigned test packages: **every** reinstall of one drops the permission. The fix is to remove Faro Agent with **−** in System Settings and add it again. [Maintainer: confirm whether an update from one signed package to the next keeps the permission.] |
+| Faro is reinstalled, or a new test package installed | **"Screen Recording is off"**, because the reinstall dropped the permission even though System Settings may still show Faro Agent switched on | Yes for unsigned test packages: **every** reinstall of one drops the permission. The fix is to remove Faro Agent with **−** in System Settings and add it again. [TO FILL IN: confirm whether an update from one signed package to the next keeps the permission.] |
 | Faro is reinstalled or updated | **Computer shut down** and **Computer started** (not urgent): installing stops Faro and starts it again | Yes. |
 | A second account on the Mac logs in for the first time | **"Screen Recording is off"** for that account, until that account allows it too. Every account is asked once. | Yes, on a Mac with several accounts. |
 | Someone uses an account in which Faro Agent isn't running, for more than about 90 seconds | **Possible tampering**: "Someone used the account *name* while Faro wasn't running in it." | Rarely innocent. If Faro Agent didn't start after an install, logging out and in again starts it. |
@@ -288,8 +316,8 @@ The same kinds of alert apply to a Windows PC, with these differences.
 - **Tamper alerts.** The service stopped (its check-ins stop, so allies get a missed check-in alert), an agent is killed, the clock is changed, or Faro's program files are made writable by someone who isn't an administrator. A VPN is not an alert, as on a Mac: the daily report's **Health** may mention it ([4.1](#41-alerts-you-may-see-while-a-member-is-setting-up)). A virtual machine is treated the same as on a Mac.
 - **Hidden windows.** A window excluded from capture is reported by app name, as on a Mac ([4.3](#43-a-window-was-hidden-from-faro)). Windows' own programs in `System32` and `SystemApps` are allowed, except script hosts.
 - **The lock screen.** The lock screen, UAC prompts and the Ctrl+Alt+Del screen can't be captured. They are recorded as unavailable, not as tamper. Video with copy protection shows black.
-- **Some sessions.** Some Remote Desktop sessions and VMs use the GDI fallback for capture.
-- **Websites.** Faro reads the address bar of Edge, Chrome, Brave, Firefox, LibreWolf, Waterfox, Zen and Floorp. Only `scheme://host/` leaves the computer. Private windows can't be told apart, and Chrome hides `http://`, so a plain-http site shows as https (the host is right). Browsers are recognized by their program's file name, so a renamed copy of a browser is judged by the screen alone, as an unknown app.
+- **Some sessions.** Some Remote Desktop sessions and virtual machines can't be captured the usual way, so Faro falls back to an older Windows method (called GDI), which is slower and may miss some windows.
+- **Websites.** Faro reads the address bar of Edge, Chrome, Brave, Firefox, LibreWolf, Waterfox, Zen and Floorp. Only the site's name leaves the computer (for example `https://example.com/`), never the page or what was typed in it. Private windows can't be told apart, and Chrome hides `http://`, so a plain-http site shows as https (the host is right). Browsers are recognized by their program's file name, so a renamed copy of a browser is judged by the screen alone, as an unknown app.
 - **The notice.** The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications.
 - **Not yet tested on a real Windows PC:** several monitors; Remote Desktop sessions; fast user switching; the lock screen and UAC screen being recorded as unavailable; Brave, Waterfox, Zen and Floorp; a real VPN or virtual machine; signed builds and updates; the image model. As on a Mac ([4.4](#44-not-yet-tested-on-real-macs)), please report anything that goes wrong.
 
@@ -302,11 +330,11 @@ The alerts an iPhone can send, and what to say about each, are in the [ally guid
 - **For a moment after a network change, lookups aren't filtered.** Faro needs to read the network's DNS servers, which takes well under a second each time the network changes. Lookups in that moment go unfiltered.
 - **One VPN at a time.** Another VPN takes over, and Faro reports it as **Another VPN took over**.
 - **Bursts may be noise.** A burst of blocked lookups is flagged from its count and timing. Adverts and link previews can cause one, and the thresholds are set from beta data.
-- **Silence looks like a missed check-in.** A phone that is asleep, switched off or out of signal is reported as **stopped checking in** until it reconnects. The grace period for phones is the same as for computers, for now. [Maintainer: confirm after the beta shows how long phones sleep (IOS.md §19).]
+- **Silence looks like a missed check-in.** A phone that is asleep, switched off or out of signal is reported with the title ***name* hasn't checked in for *N* hours** until it reconnects. The grace period for phones is the same as for computers, for now. [TO FILL IN: confirm after the beta shows how long phones sleep (IOS.md §19).]
 - **Offline removal is invisible at once.** If a member turns off Screen Time access and deletes the app without a connection, the alert never leaves the phone. Allies get a missed check-in instead.
 - **Expected alerts while you test.** Turning off the VPN, Connect On Demand or Screen Time to test them sends the alerts in the ally guide. Tell your allies first, so these don't come as a surprise.
-- **Problem reports from an iPhone.** The report in [section 5](#5-reporting-problems) is made on a Mac or PC. [Maintainer: say how an iPhone member sends a problem report.]
-- **Before the pilot.** [Maintainer: confirm that the spikes S1 to S8 in [IOS.md §17](IOS.md#17-spikes-what-to-confirm-on-a-device-first) have been answered on real phones.]
+- **Problem reports from an iPhone.** The report in [section 5](#5-reporting-problems) is made on a Mac or PC. [TO FILL IN: say how an iPhone member sends a problem report.]
+- **Before the pilot.** [TO FILL IN: confirm that the eight device checks listed in [IOS.md §17](IOS.md#17-spikes-what-to-confirm-on-a-device-first) (Apple features the design depends on and that Apple's documentation doesn't settle) have been answered on real iPhones.]
 
 ---
 
@@ -325,7 +353,7 @@ It lists what it will put in the report and writes nothing until you agree: **s*
 
 On Windows, run `& "C:\Program Files\Faro\faro-service.exe" diagnose` in a terminal opened as administrator, and approve the administrator prompt. Faro lists what is in the report before it writes anything: **s** reads all of it, **y** writes it, **n** stops. The file is saved on your Desktop as `faro-report-….zip`; `--output <folder>` saves it elsewhere. The tray menu's **Report a problem…** explains this and copies the command. The report holds the same kind of content as on a Mac, with private details removed: status, versions, the service state, sessions and agents, and recent service and agent logs.
 
-Send the zip to **[Maintainer: where to send problem reports]**, with a few words on what went wrong and when.
+Send the zip to **[TO FILL IN: where to send problem reports]**, with a few words on what went wrong and when.
 
 **Operators:** for a problem with the instance itself, send the output of `faro-server doctor` and the relevant log lines ([Troubleshooting](SELF-HOSTING.md#13-troubleshooting)). Never send `faro.env`, `identity.key`, backup files, setup tokens or sign-in links.
 
