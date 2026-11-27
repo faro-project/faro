@@ -19,21 +19,23 @@ final class AppModel: ObservableObject {
     @Published private(set) var onDemandOn = false
     @Published private(set) var notificationsOn = true
     @Published private(set) var loaded = false
+    /// The settings in force, and the loosenings waiting to take effect.
+    @Published private(set) var settings: FaroSettings?
+    @Published private(set) var pending: [PendingChange] = []
+    @Published var choicesError: String?
 
     let notices = NoticeTapHandler()
     private var group: AppGroup?
     private var core: FaroCore?
     private var progressStore: SetupProgressStore?
-    private let settingsStore: SettingsStore
+    private var choicesStore: ChoicesStore?
 
     init() {
         let group = AppGroup.container() ?? AppModel.fallbackGroup()
         self.group = group
         if let group {
             progressStore = SetupProgressStore(group: group)
-            settingsStore = SettingsStore(group: group)
-        } else {
-            settingsStore = SettingsStore(url: URL(fileURLWithPath: "/dev/null"))
+            choicesStore = ChoicesStore(group: group)
         }
         notices.onNotice = { [weak self] in self?.showingNotice = true }
     }
@@ -85,6 +87,7 @@ final class AppModel: ObservableObject {
         guard let core = try? openCore() else { return }
         if let s = try? await Task.detached(operation: { try core.status() }).value { status = s }
         await refreshPlatformState()
+        await refreshChoices()
     }
 
     private func openCore() throws -> FaroCore {
@@ -162,7 +165,8 @@ final class AppModel: ObservableObject {
     func authorizeScreenTime() async {
         guard flow.step == .screenTime else { return }
         await run {
-            try await ScreenTime.authorize(settingsStore: self.settingsStore)
+            guard let choices = self.choicesStore else { throw SetupError("Faro can't find a place to keep its files.") }
+            try await ScreenTime.authorize(choices: choices)
             try self.progressStore?.update { $0.screenTimeDone = true }
             self.flow.apply(.screenTimeAuthorized)
         } onError: { message in
@@ -174,7 +178,9 @@ final class AppModel: ObservableObject {
     func installTunnel() async {
         guard flow.step == .tunnel else { return }
         await run {
-            try await TunnelInstaller.install(instanceName: self.status?.instanceName ?? "")
+            try await TunnelInstaller.install(
+                instanceName: self.status?.instanceName ?? "",
+                settings: try? self.choicesStore?.read().settings)
             try self.progressStore?.update { $0.tunnelDone = true }
             self.flow.apply(.tunnelInstalled)
             await self.scheduleNotice()
@@ -206,6 +212,63 @@ final class AppModel: ObservableObject {
     }
 
     func finishRedo() { flow = SetupFlow(step: .done) }
+
+    // MARK: What is blocked (docs/IOS.md §9)
+
+    private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+    /// Brings the choices up to date: applies a loosening whose time has
+    /// come, writes the settings to Screen Time and the tunnel's
+    /// configuration, and sends the events that are waiting.
+    func refreshChoices() async {
+        guard let store = choicesStore else { return }
+        if let changed = try? store.applyDue(nowMs: Self.nowMs()), screenTimeOn {
+            ScreenTimeEnforcer.apply(changed)
+        }
+        guard let snapshot = try? store.read() else { return }
+        settings = snapshot.settings
+        pending = snapshot.pending.items.sorted { $0.takesEffectAtMs < $1.takesEffectAtMs }
+        await TunnelInstaller.updateProviderConfiguration(snapshot.settings)
+        await sendSettingsEvents()
+    }
+
+    /// Turns the settings events in the app group into `settings_change`
+    /// events, if the core can sign them now.
+    func sendSettingsEvents() async {
+        guard let group, let core = try? openCore() else { return }
+        await Task.detached { SettingsEventSender.send(group: group, core: core) }.value
+    }
+
+    /// The member saved their choices. Tightening applies at once; loosening
+    /// waits for the delay (`PendingState.submit`).
+    @discardableResult
+    func saveChoices(_ draft: FaroSettings) async -> SubmitResult? {
+        guard let store = choicesStore else { return nil }
+        do {
+            let result = try store.submit(draft, nowMs: Self.nowMs())
+            if screenTimeOn, let s = try? store.read().settings { ScreenTimeEnforcer.apply(s) }
+            choicesError = nil
+            await refreshChoices()
+            return result
+        } catch {
+            choicesError = "Couldn't save your choices: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func cancelPending(_ id: String) async {
+        guard let store = choicesStore else { return }
+        switch try? store.cancel(id, nowMs: Self.nowMs()) {
+        case .alreadyApplied?:
+            choicesError = "That change had already taken effect."
+        case nil:
+            choicesError = "Couldn't cancel that change."
+        default:
+            choicesError = nil
+        }
+        if screenTimeOn, let s = try? store.read().settings { ScreenTimeEnforcer.apply(s) }
+        await refreshChoices()
+    }
 
     // MARK: Helpers
 

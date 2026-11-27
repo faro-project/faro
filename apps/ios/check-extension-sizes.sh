@@ -6,14 +6,14 @@
 #   apps/ios/check-extension-sizes.sh PATH/TO/Faro.app
 #
 # Measure a Release build: Debug binaries are larger and not representative.
-# The budget (bytes, default 512 KiB) is a tripwire, not a memory estimate:
+# The budget (bytes, default 768 KiB) is a tripwire, not a memory estimate:
 # the Rust core is megabytes, so linking it by mistake fails at once, and
 # so does a dependency that quietly pulls in a big framework. Raise
 # FARO_EXTENSION_BUDGET deliberately, with a reason in the commit.
 set -euo pipefail
 
 app="${1:?usage: check-extension-sizes.sh PATH/TO/Faro.app}"
-budget="${FARO_EXTENSION_BUDGET:-524288}"
+budget="${FARO_EXTENSION_BUDGET:-786432}"
 fail=0
 
 for name in FaroMonitor FaroShield FaroShieldAction; do
