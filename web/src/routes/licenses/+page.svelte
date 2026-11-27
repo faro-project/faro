@@ -28,8 +28,9 @@
 <div class="page-head">
 	<h1>Licences</h1>
 	<p>
-		Faro is free software under the Apache License 2.0. It is built on open-source work by others,
-		whose licences ask that their copyright notices and licence texts travel with it.
+		Faro is free software under the GNU Affero General Public License, version 3 or later. It is
+		built on open-source work by others, whose licences ask that their copyright notices and licence
+		texts travel with it.
 	</p>
 </div>
 

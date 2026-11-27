@@ -2,7 +2,7 @@
 
 **Status:** Draft v0.2 (2026-11-23). This is the design. What is built today, what is partly built and what is only planned is in [STATUS.md](STATUS.md) (dated 2026-11-27); items marked *planned* below are not built.
 **Scope:** A free, open-source, **self-hosted** screen-accountability service, comparable to Covenant Eyes. The first release covers desktop: macOS and Windows built, Linux planned (see [STATUS.md](STATUS.md)).
-**License:** Apache-2.0 (client, server, web app and tooling).
+**License:** AGPL-3.0-or-later (client, server, web app and tooling); contributions under the [CLA](../CLA.md).
 
 ---
 
@@ -600,9 +600,10 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 ## 11. Licensing
 
-- All Faro code is **Apache-2.0**: client, server, web app and installers. Forks, including closed or commercial ones, are allowed.
-- **Trademark**: Apache-2.0 doesn't grant trademark rights. Keep the "Faro" name and logo for official builds so that users can tell which installers are signed by the project. Forks distribute under their own name.
-- Third-party components must be Apache-2.0 compatible. That rules out AGPL or non-commercial model weights and blocklists that don't allow redistribution. CI runs `cargo-deny` to enforce license policy.
+- All Faro code is **AGPL-3.0-or-later**: client, server, web app and installers. Anyone may use, modify and redistribute it. Whoever distributes a modified version, or runs one that people use over a network, must offer those people its source. For a monitoring tool this is the point: a fork can't quietly weaken the privacy guarantees (§3.5, §5.3) and keep the change hidden from the people it monitors.
+- **Contributions** come in under the [Contributor License Agreement](../CLA.md). Contributors keep their copyright and grant the maintainer a license that includes distributing their work under other terms: an app-store build (app-store terms conflict with the GPL family, which matters for the Phase 3 iOS client), or a commercial edition. The CLA also promises that every contribution stays publicly available under the AGPL or another OSI-approved license, and lets these rights pass to a future steward such as a nonprofit (§14, question 1).
+- **Trademark**: the license doesn't grant trademark rights. Keep the "Faro" name and logo for official builds so that users can tell which installers are signed by the project. Forks distribute under their own name.
+- **Third-party components must be permissive** (Apache-2.0, MIT, BSD, ISC, CC0 and similar; MPL-2.0 only as an unmodified dependency), so that every edition of Faro can include them. That rules out GPL or AGPL dependencies, non-commercial model weights and blocklists that don't allow redistribution. CI runs `cargo-deny` to enforce this for Rust dependencies, and `faro_detect::load_model` checks each model manifest's license.
 
 ---
 

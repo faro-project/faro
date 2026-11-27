@@ -377,7 +377,7 @@ pub fn about(agent_version: &str, seen: &Seen) -> About {
     }
     lines.push(String::new());
     lines.push(
-        "Faro is free software under the Apache License 2.0. It includes third-party \
+        "Faro is free software under the GNU AGPL, version 3 or later. It includes third-party \
          software, whose licences and notices are in "
             .to_owned()
             + NOTICES_DIR

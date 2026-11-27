@@ -48,6 +48,6 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Faro is free software under the Apache License 2.0.</string>
+	<string>Copyright © 2026 Isaiah Zimmerman. Faro is free software under the GNU Affero General Public License, version 3 or later.</string>
 </dict>
 </plist>

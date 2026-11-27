@@ -4,6 +4,7 @@ description = "Faro's Rust core for iOS (event log, chain, outbox, keys, enrollm
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [lints]

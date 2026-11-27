@@ -9,6 +9,9 @@ node_modules/
 /web/build
 /web/.svelte-kit
 
+# The maintainer's personal release checklist
+/RELEASE-CHECKLIST.md
+
 # Local only: Claude Code worktrees and settings, and the maintainer's
 # scratch notes (release checklist, task lists).
 /.claude/

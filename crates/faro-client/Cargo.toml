@@ -4,6 +4,7 @@ description = "Faro device side of the instance API, shared by the desktop servi
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [lints]

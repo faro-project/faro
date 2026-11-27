@@ -31,7 +31,8 @@ pub mod onnx;
 pub(crate) mod test_onnx;
 
 /// SPDX identifiers of licences accepted for model weights (§11). These are
-/// permissive and Apache-2.0 compatible; copyleft-network (AGPL) and
+/// permissive, so a model can ship in every edition of Faro, including builds
+/// distributed under terms other than the AGPL; copyleft (GPL, AGPL) and
 /// non-commercial licences are deliberately absent.
 pub const ALLOWED_MODEL_LICENSES: &[&str] = &[
     "Apache-2.0",

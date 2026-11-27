@@ -3,7 +3,7 @@ name = "faro-uniffi-bindgen"
 description = "UniFFI's bindgen CLI, pinned to the version faro-mobile uses, for apps/ios/build-rust.sh"
 version = "0.0.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 publish = false
 
 # Not a member of the root workspace: it has its own lockfile, so the

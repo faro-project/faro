@@ -26,7 +26,8 @@
 # `cargo deny check` enforces, and a crate whose licence can't be read or
 # isn't on it fails the run. Only the crates built for the component's
 # targets are listed, without build and dev dependencies. Faro's own
-# crates are listed too, under its Apache-2.0 licence.
+# crates (publish = false) are left out: they are AGPL-3.0-or-later, which
+# the third-party allowlist rejects, and the header states Faro's licence.
 set -euo pipefail
 
 CARGO_ABOUT_VERSION=0.9.3
@@ -98,14 +99,16 @@ accepted = [$allow]
 targets = [$targets]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
+private = { ignore = true }
 EOF
 
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -n1)"
 {
     echo "Third-party software in $title $version"
     echo
-    echo "Faro is free software under the Apache License 2.0. Its programs are"
-    echo "built from the Rust crates listed below, generated from Cargo.lock."
+    echo "Faro is free software under the GNU Affero General Public License,"
+    echo "version 3 or later. Its programs are built from the Rust crates listed"
+    echo "below, generated from Cargo.lock."
     echo "Each licence is shown once, with every crate that uses it, followed by"
     echo "its text as the crates ship it."
 } > "$work/out.txt"

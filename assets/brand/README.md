@@ -34,7 +34,7 @@ Both are fine for the logo itself. On light backgrounds they are too low for bod
 
 ## Using the logo
 
-The code is Apache-2.0, but that licence does not cover the Faro name or logo (see ARCHITECTURE.md §11). They identify official, project-signed builds, so that people can tell which installers came from the project.
+The code is under the GNU AGPL (version 3 or later), but that licence does not cover the Faro name or logo (see ARCHITECTURE.md §11). They identify official, project-signed builds, so that people can tell which installers came from the project.
 
 - Instance operators may use the logo to say they run Faro, for example "Powered by Faro".
 - Forks and modified builds should use their own name and logo.

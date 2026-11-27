@@ -21,8 +21,8 @@ pub enum DetectError {
     #[error("invalid model manifest: {0}")]
     Manifest(String),
 
-    /// The model's licence is not on the Apache-2.0-compatible allowlist (§11).
-    #[error("model licence {0:?} is not Apache-2.0 compatible")]
+    /// The model's licence is not on the permissive allowlist (§11).
+    #[error("model licence {0:?} is not on the permissive licence allowlist")]
     License(String),
 
     /// Reading a model or manifest from disk failed.
