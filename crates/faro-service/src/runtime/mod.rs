@@ -30,7 +30,7 @@ pub mod status;
 pub mod supervisor;
 mod updates;
 
-pub use self::core::{capture_stall_ms, PauseRequest, AGENT_ABSENT_MS};
+pub use self::core::{capture_stall_ms, PauseRequest, AGENT_ABSENT_MS, SCREEN_RECORDING};
 pub use goodbye::{say_goodbye, GoodbyeError, GoodbyeOptions, GoodbyeOutcome};
 pub use spawn::AgentSpawn;
 pub use status::{Phase, ServiceStatus};
@@ -496,7 +496,7 @@ fn start_detection(
     }
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 fn default_source(config: &Config) -> Result<Box<dyn FrameSource>, ServiceError> {
     let ping = Duration::from_secs(config.capture.agent_ping_secs);
     // `allowed_uids` are Unix uids; Windows has no such setting.
@@ -515,7 +515,9 @@ fn default_source(config: &Config) -> Result<Box<dyn FrameSource>, ServiceError>
     Ok(Box::new(source))
 }
 
-#[cfg(not(any(unix, windows)))]
+/// Android has no agent: its app injects an in-process source
+/// (`crates/faro-android`).
+#[cfg(not(all(any(unix, windows), not(target_os = "android"))))]
 fn default_source(_config: &Config) -> Result<Box<dyn FrameSource>, ServiceError> {
     Err(ServiceError::NoFrameSource)
 }
@@ -715,6 +717,7 @@ impl Service {
         let (src_cmd_tx, src_cmd_rx) = mpsc::channel::<SourceCommand>(8);
         let (src_ev_tx, src_ev_rx) = mpsc::channel::<SourceEvent>(64);
         tracing::info!(source = source.name(), "starting capture driver");
+        let capture_permission = source.capture_permission();
         let (feed_tx, feed_rx) = watch::channel(None);
         tasks.spawn(status::feed_loop(
             status_rx.clone(),
@@ -729,7 +732,11 @@ impl Service {
             status: feed_rx,
         }));
         if let Some(spec) = spawn_agent {
+            #[cfg(not(target_os = "android"))]
             tasks.spawn(spawn::supervise(spec, stop_rx.clone()));
+            // No agent process to launch: the capture side is in-process.
+            #[cfg(target_os = "android")]
+            tracing::warn!(program = %spec.program.display(), "agent spawning is desktop only; ignored");
         }
         {
             let up = uploader.clone();
@@ -796,6 +803,7 @@ impl Service {
                 config.capture.agent_kill_window_secs,
             ),
             capture_failure_threshold: config.capture.capture_failure_threshold,
+            capture_permission,
             source_tx: src_cmd_tx,
             hb_state: hb_state_tx,
             upload_poke: pokes.upload.clone(),

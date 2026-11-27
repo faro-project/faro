@@ -1,0 +1,3 @@
+# Shell scripts keep LF on every checkout: Git Bash on Windows (the Android
+# build runs crates/faro-android/build-android.sh there) fails on CRLF.
+*.sh text eol=lf

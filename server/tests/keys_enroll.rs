@@ -264,11 +264,34 @@ async fn an_iphone_enrolls_and_is_listed_as_ios() {
         .post(
             "/v1/devices/enroll",
             json!({"enroll_code": code, "sign_pubkey": SigningKey::generate().public(),
-                   "platform": "android", "device_name": "Pixel", "client_version": "0.1.0"}),
+                   "platform": "symbian", "device_name": "N95", "client_version": "0.1.0"}),
             None,
         )
         .await;
     assert!(r.status.is_client_error(), "{:?}", r.body);
+    let _ = keys;
+}
+
+#[tokio::test]
+async fn an_android_phone_enrolls_and_is_listed_as_android() {
+    let t = TestApp::new().await;
+    let (member, s) = t.sign_in("sam@example.org").await;
+    let keys = t.create_member_keys(&member, &s).await;
+    let code = t.enroll_code(&s).await;
+    let key = SigningKey::generate();
+    let r = t
+        .post(
+            "/v1/devices/enroll",
+            json!({"enroll_code": code, "sign_pubkey": key.public(),
+                   "platform": "android", "device_name": "Pixel-8", "client_version": "0.1.0-beta.1"}),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.body);
+    let list = t.get("/v1/me/devices", Some(&s)).await;
+    assert_eq!(list.body[0]["platform"], "android");
+    assert_eq!(list.body[0]["name"], "Pixel-8");
+    assert_eq!(list.body[0]["status"], "pending_endorsement");
     let _ = keys;
 }
 
