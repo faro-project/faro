@@ -115,6 +115,15 @@ You only see things from after the member approved you. Older items say **"Not s
 - The list refreshes itself every couple of minutes, or click **Refresh**.
 - Items marked **Server** were noticed by the server itself (for example, a computer that stopped checking in), rather than sent by the member's computer.
 
+### Is it really from their computer?
+
+Each computer signs what it sends, and the member's key vouches for each computer. Your browser checks every item against the key you compared in the safety code ([section 4](#4-comparing-the-safety-code)), so the server can't make up an item, change one, or quietly drop one without it showing:
+
+- **✓ Every event and report below is signed by one of their computers, and their history has no gaps** means everything checked out.
+- **Unconfirmed** next to items, and a note at the top, means you haven't compared safety codes with this person yet. The items may be real, but nothing proves the server didn't make them up. Compare the codes.
+- **Not verified** means the item isn't what the member's computer signed. Its details aren't shown. Ask the member, and tell whoever runs the server.
+- **The history the server provided has gaps** lists events from a computer that are missing, or that the server holds but didn't list. A computer that couldn't send for a long time can lose events too; the server then also shows a **chain gap** alert. Either way, it is worth a conversation.
+
 ### Urgent, normal and daily items
 
 - **Urgent** items have an **Urgent** label. They are things you'd probably want to hear about soon: something on screen rated **high** (or **medium**, which is urgent unless the member lowered it), signs that Faro was switched off or interfered with, a computer that stopped checking in, or Faro being uninstalled.

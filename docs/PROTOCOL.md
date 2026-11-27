@@ -158,6 +158,35 @@ A reader that doesn't know a key shows it as `key: old → new`.
 
 **Allies see** these in the web app and reports, which render them from the decrypted body: "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed on iPhone-X". Alert emails stay content-free (the instance cannot tell which signal it was).
 
+### 3.5 What the feed's readers check
+
+The instance knows every recipient's public key and sealed boxes are anonymous, so a valid seal proves nothing about who wrote an item. The web app therefore checks every event and report in `GET /v1/ally/feed` against the device's signature before it shows it, the same way for the member and for allies (`web/src/lib/feed/verify.ts`, `open.ts`; the encodings are `web/src/lib/crypto/event.ts`, checked against the `event_chain` and `report_header` test vectors).
+
+**What the instance serves.** Each `event` and `report` item carries `header` (the `EventHeader` or `ReportHeader` as the device signed it) and `sig`. The response carries `device_endorsements`: `device_id` to the member-signed `Signed<DeviceEndorsement>` of each device in the page. `GET /v1/ally/chain?member_id=&device_id=&from_seq=&limit=` (at most 1000 per page, the same access as the feed) serves one device's stored headers in ascending `seq` as `{received_at_ms, header, sig}`, including the urgency `none` events the feed leaves out, with `has_more`. All of these fields are additive: older readers ignore them.
+
+**The member key.** Everything is checked against the member's signing key, from a source the reader trusts:
+
+- the member's own key, once unlocked in their browser;
+- for an ally, the key they compared by safety code (remembered in that browser, `web/src/lib/keys/verified.ts`). If the server now reports a different key, the compared one is still used, and anything signed only with the new one fails.
+- An ally who hasn't compared codes is checked against the key the server reports, and every item is shown as **Unconfirmed** with a notice saying the server could have made it up.
+
+**Checks, in order.**
+
+1. The device's endorsement verifies under the member key and names this instance, member and device.
+2. The header verifies under the endorsed device key (strict Ed25519 over `signing_bytes`), names this instance (and, for a report, this member), and agrees with the item's plain fields: device, `seq`, `ts_ms`, `kind`, and `urgency` equal to `max(header.urgency, kind floor)` (§3.3); for a report, device and period.
+3. When the content is fetched: `alg`, `BLAKE3(nonce ‖ ciphertext)` and the ciphertext length match `body_hash` and `body_len`, and a decrypted report's `device_id`, period, `first_seq` and `last_seq` match its header (as `open_report` does).
+4. For each device, the chain from the lowest to the highest `seq` the passing items cover (events' `seq`, reports' `first_seq` and `last_seq`): every link verifies under the device key; `seq 0` carries the genesis hash; each `prev_hash` is the chain hash of the link before it; `seq` and receive times only go up; every feed event is the link at its `seq`; no `seq` in the range is missing; and every stored link above urgency `none` that was received inside the feed's time window is in the feed.
+
+**What the reader shows.** An item failing step 1, 2 or 3, or not in its device's chain, is marked **Not verified** with the reason, and its details are not shown. A missing `seq` (a gap, also noting when a daily report counts those events), a link left out of the feed, and a chain that doesn't link are listed above the feed. Server alerts (`type: alert`) are the instance's own and carry nothing to check; they stay labelled **Server**.
+
+**Limits.**
+
+- A gap doesn't say who made it: a device that lost events from its outbox leaves one too (and the instance raises a `chain_gap` alert). The reader can only say that something is missing.
+- The newest events can be withheld without a trace until a later event, or the next daily report's `last_seq`, shows the gap. Events before the lowest `seq` the feed shows are judged only where a report's range covers them.
+- A whole daily report can be withheld; only the events it would count are checked, through the chain.
+- Fetching stops at 20,000 headers per device; the reader then says the history was checked only in part.
+- Headers expire after `event_header_days`. A member who chose a shorter header window than blob window can see gaps inside an old report's range.
+
 ## 4. Encryption
 
 ### 4.1 Items

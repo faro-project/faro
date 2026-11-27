@@ -396,7 +396,8 @@ GET  /v1/members/{id}/allies/keys member-signed ally pubkeys
 POST /v1/events:batch             signed headers (incl. urgency) + ciphertext
 POST /v1/heartbeat                signed {seq, ts, state}
 POST /v1/reports                  encrypted report blob + envelopes
-GET  /v1/ally/feed                metadata list of reports and alerts, and each device's platform
+GET  /v1/ally/feed                metadata list of reports and alerts with their device-signed headers, each device's platform and member-signed endorsement
+GET  /v1/ally/chain               one device's stored event headers by seq, for checking its hash chain
 GET  /v1/blobs/{id}               ciphertext (served directly or via presigned S3 URL)
 GET  /v1/updates/...              mirrored, project-signed update metadata + artifacts
 POST /v1/invites, /accept         ally invitations
@@ -466,7 +467,7 @@ Self-hosting means many operators with varying security skills. The design assum
 |---|---|
 | Read reports | E2EE. Only ciphertext is stored |
 | Insert their own ally key | Ally keys must be member-signed |
-| Forge or suppress urgent events | Headers are device-signed, and suppression shows up as a gap in the member's own view and the hash chain |
+| Forge, replace or suppress events and reports | Headers are device-signed and device keys member-endorsed. The feed carries each signed header and endorsement, and every reader's browser checks them against the member's key (their own, or one an ally compared by safety code), the ciphertext against the signed `body_hash`, and each device's hash chain (PROTOCOL.md §3.5). A forged or replaced item is marked unverified and its details hidden; a dropped event shows as a gap. Limits: a gap can't say whether the device or the instance lost it, and the newest events can be withheld until a later event or daily report shows the gap |
 | Push a malicious client update | Clients verify **project** signatures, not instance signatures |
 | **Serve malicious web-app JavaScript to steal ally keys** | The hardest risk, common to all web E2EE. Mitigations: (a) the embedded web app is a **project-signed, versioned bundle**, and the server refuses to start with an unsigned bundle unless run in `--dev`; (b) a **Faro Ally desktop app** (Tauri, project-signed, Phase 2) gives security-sensitive allies a client that doesn't load code from the instance; (c) Subresource Integrity plus a strict CSP; (d) document honestly that an ally using the web app trusts the instance operator not to modify the code |
 | Make a page look like a Faro security message (instance branding) | Branding is plain text, one short line, labelled as the instance admins', and shown only in page chrome (header, footer, sign-in and setup pages), never in alerts, feeds, reports, safety codes, fingerprints, tamper warnings, enrollment or emails. The logo is decoded and re-encoded to PNG by the server (SVG refused) and always sits next to Faro's, never in place of it |

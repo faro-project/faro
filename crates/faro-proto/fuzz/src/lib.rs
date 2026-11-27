@@ -958,6 +958,8 @@ pub fn seeds() -> Vec<(&'static str, String, Vec<u8>)> {
         kind: EventKind::Flag,
         urgency: Urgency::Normal,
         blob_id: None,
+        header: None,
+        sig: None,
     };
     add("api", "FeedItem-event", with_selector("FeedItem", &feed));
     add(

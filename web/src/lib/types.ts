@@ -8,6 +8,7 @@ import type {
 	Signed
 } from './crypto/proto.ts';
 import type { EncryptedItem } from './crypto/seal.ts';
+import type { EventHeader, ReportHeader } from './crypto/event.ts';
 
 export type { EncryptedItem, ManifestRef, RecipientManifest, Signed };
 
@@ -538,8 +539,12 @@ export type FeedItem =
 			seq: number;
 			ts_ms: number;
 			kind: EventKind;
+			/** Effective: the signed urgency raised to the kind's floor. */
 			urgency: Urgency;
 			blob_id: string | null;
+			/** The device-signed header and its signature (PROTOCOL.md §3.5). */
+			header?: EventHeader;
+			sig?: string;
 	  }
 	| {
 			type: 'report';
@@ -549,6 +554,8 @@ export type FeedItem =
 			period_start_ms: number;
 			period_end_ms: number;
 			blob_id: string;
+			header?: ReportHeader;
+			sig?: string;
 	  }
 	| {
 			type: 'alert';
@@ -574,6 +581,23 @@ export interface FeedResponse {
 	 * word an iPhone's alerts as an iPhone's. Absent from older instances.
 	 */
 	device_platforms?: Record<string, Platform>;
+	/** The member-signed endorsement of each device in `items`. */
+	device_endorsements?: Record<string, Signed<DeviceEndorsement>>;
+}
+
+/** One stored header in `GET /v1/ally/chain`. */
+export interface ChainLink {
+	received_at_ms: number;
+	header: EventHeader;
+	sig: string;
+}
+
+/** `GET /v1/ally/chain`: one device's headers by `seq`, those the feed leaves out included. */
+export interface ChainResponse {
+	member_id: string;
+	device_id: string;
+	links: ChainLink[];
+	has_more: boolean;
 }
 
 // ---- Decrypted bodies (faro_proto::body, faro_proto::report) --------------

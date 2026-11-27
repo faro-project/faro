@@ -139,6 +139,7 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/v1/ally/members", get(allies::list_my_members))
         .route("/v1/ally/members/{member_id}", delete(allies::leave))
         .route("/v1/ally/feed", get(feed::get_feed))
+        .route("/v1/ally/chain", get(feed::get_chain))
         .route("/v1/blobs/{id}", get(feed::get_blob))
         // Groups (docs/GROUPS.md).
         .route("/v1/groups", get(groups::list_mine).post(groups::create))
