@@ -38,12 +38,13 @@
 //! recorded, so the device simply retries from `acked_through + 1`.
 
 use crate::blob::BlobId;
-use crate::db::repo::alerts::{self, AlertSource, NewAlert};
+use crate::db::repo::alerts::{AlertSource, NewAlert};
 use crate::db::repo::devices::{self, DeviceRow};
 use crate::db::repo::events::{self as ev_repo, BlobKind, NewEvent};
 use crate::db::repo::liveness as liveness_repo;
 use crate::db::to_i64;
 use crate::device_auth::SignedJson;
+use crate::device_limits;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::State;
@@ -100,6 +101,7 @@ pub async fn post_batch(
             format!("at most {MAX_EVENTS_PER_BATCH} events per batch"),
         ));
     }
+    device_limits::check_ingest(&state, device.row(), body.events.len())?;
     // One ingest at a time per device in this process, and a fresh read of
     // the head under the lock.
     let _guard = state.lock_device(device.id().as_str()).await;
@@ -109,6 +111,13 @@ pub async fn post_batch(
     let mut head = head_of(&state, &dev)?;
     let mut last_seq = dev.last_seq;
 
+    let mut quota = Quota {
+        limit: device_limits::quota_bytes(&state),
+        used: 0,
+    };
+    if quota.limit.is_some() && body.events.iter().any(|e| e.body.is_some()) {
+        quota.used = ev_repo::device_stored_bytes(state.db().pool(), &dev.id).await?;
+    }
     let mut results = Vec::with_capacity(body.events.len());
     let mut halted = false;
     for ev in body.events {
@@ -117,7 +126,7 @@ pub async fn post_batch(
             results.push(rejected(seq, RETRY_LATER));
             continue;
         }
-        match ingest_one(&state, &dev, &mut head, &mut last_seq, ev).await {
+        match ingest_one(&state, &dev, &mut head, &mut last_seq, &mut quota, ev).await {
             Ok(r) => results.push(r),
             Err(e) => {
                 tracing::error!(device = %dev.id, seq, error = %e, "event ingest failed");
@@ -132,12 +141,26 @@ pub async fn post_batch(
     }))
 }
 
+/// A device's storage use during one batch.
+struct Quota {
+    limit: Option<u64>,
+    used: u64,
+}
+
+impl Quota {
+    fn allows(&self, bytes: usize) -> bool {
+        self.limit
+            .is_none_or(|l| self.used.saturating_add(bytes as u64) <= l)
+    }
+}
+
 /// Process one event. `Err` means an internal failure (nothing was recorded).
 async fn ingest_one(
     state: &AppState,
     dev: &DeviceRow,
     head: &mut ChainHead,
     last_seq: &mut Option<u64>,
+    quota: &mut Quota,
     ev: SignedEvent,
 ) -> Result<EventResult, AppError> {
     let seq = ev.header.seq;
@@ -167,7 +190,18 @@ async fn ingest_one(
     );
     match verdict {
         Ok(link) => {
-            store_event(state, dev, *last_seq, &ev, link).await?;
+            // Over quota the signed header is still stored (the chain must
+            // stay whole and a tamper event must never be lost) but the
+            // encrypted body is not, and allies are alerted.
+            let body_len = ev.body.as_ref().map(|b| b.ciphertext.len());
+            let drop_body = body_len.is_some_and(|n| !quota.allows(n));
+            if drop_body {
+                quota_alert(state, dev, "event_bodies").await?;
+            }
+            store_event(state, dev, *last_seq, &ev, link, drop_body).await?;
+            if !drop_body {
+                quota.used = quota.used.saturating_add(body_len.unwrap_or(0) as u64);
+            }
             head.advance(&ev.header);
             *last_seq = Some(seq);
             Ok(EventResult::Accepted { seq })
@@ -188,7 +222,7 @@ async fn ingest_one(
                         ServerAlertKind::ChainGap,
                         seq,
                         detail,
-                        format!("behind:{}:{seq}", dev.id),
+                        device_limits::interval_key(state, "behind", &dev.id),
                     )
                     .await?;
                     Ok(rejected(seq, detail))
@@ -203,7 +237,7 @@ async fn ingest_one(
                 ServerAlertKind::ChainGap,
                 seq,
                 "fork",
-                format!("fork:{}:{seq}", dev.id),
+                device_limits::interval_key(state, "fork", &dev.id),
             )
             .await?;
             Ok(rejected(seq, "fork"))
@@ -216,7 +250,7 @@ async fn ingest_one(
                 ServerAlertKind::InvalidSignature,
                 seq,
                 "bad_event_signature",
-                format!("badsig:{}:{seq}", dev.id),
+                device_limits::interval_key(state, "badsig", &dev.id),
             )
             .await?;
             Ok(rejected(seq, "bad_signature"))
@@ -227,7 +261,32 @@ async fn ingest_one(
     }
 }
 
-/// Record a server-raised alert about a rejected upload (deduplicated).
+/// Tell allies a device is over its storage quota (one alert per interval,
+/// repeats counted on it).
+pub async fn quota_alert(state: &AppState, dev: &DeviceRow, detail: &str) -> Result<(), AppError> {
+    let kind = ServerAlertKind::StorageQuota;
+    let mut conn = state.db().pool().acquire().await?;
+    device_limits::raise(
+        state,
+        &mut conn,
+        &NewAlert {
+            member_id: &dev.owner_user_id,
+            device_id: Some(&dev.id),
+            source: AlertSource::Server,
+            kind: kind.as_str(),
+            urgency: kind.urgency(),
+            event_seq: None,
+            detail: Some(detail.to_owned()),
+            dedupe_key: Some(device_limits::interval_key(state, "quota", &dev.id)),
+            now_ms: state.now_ms(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record a server-raised alert about a rejected upload (coalesced per
+/// device per interval, never per attacker-chosen value).
 async fn server_alert(
     state: &AppState,
     member: &UserId,
@@ -237,8 +296,10 @@ async fn server_alert(
     detail: &str,
     dedupe_key: String,
 ) -> Result<(), AppError> {
-    let created = alerts::insert(
-        state.db().pool(),
+    let mut conn = state.db().pool().acquire().await?;
+    let created = device_limits::raise(
+        state,
+        &mut conn,
         &NewAlert {
             member_id: member,
             device_id: Some(&dev.id),
@@ -266,13 +327,15 @@ async fn store_event(
     expected_last_seq: Option<u64>,
     ev: &SignedEvent,
     link: Link,
+    drop_body: bool,
 ) -> Result<(), AppError> {
     let h = &ev.header;
     let now = state.now_ms();
     let member = &dev.owner_user_id;
 
     // Ciphertext (plus wrapped keys) to the blob store first.
-    let blob = match &ev.body {
+    let stored_body = ev.body.as_ref().filter(|_| !drop_body);
+    let blob = match stored_body {
         Some(body) => {
             let bytes = serde_json::to_vec(body)
                 .map_err(|_| AppError::internal("cannot serialize event body"))?;
@@ -311,7 +374,7 @@ async fn store_event(
             },
         )
         .await?;
-        if let Some(body) = &ev.body {
+        if let Some(body) = stored_body {
             for env in &body.envelopes {
                 // Recipients are device-declared routing hints for the feed,
                 // not access control; skip anything that is not an id.
@@ -334,8 +397,9 @@ async fn store_event(
         } = link
         {
             let kind = ServerAlertKind::ChainGap;
-            alerts::insert(
-                &mut *tx,
+            device_limits::raise(
+                state,
+                &mut tx,
                 &NewAlert {
                     member_id: member,
                     device_id: Some(&dev.id),
@@ -352,8 +416,9 @@ async fn store_event(
             tracing::warn!(device = %dev.id, missing_from, missing_to, "chain gap");
         }
         if effective >= Urgency::Normal {
-            alerts::insert(
-                &mut *tx,
+            device_limits::raise(
+                state,
+                &mut tx,
                 &NewAlert {
                     member_id: member,
                     device_id: Some(&dev.id),

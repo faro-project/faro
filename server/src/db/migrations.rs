@@ -99,6 +99,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "group_posts",
                     include_str!("../../migrations/0016_group_posts.sql"),
                 ),
+                (
+                    17,
+                    "alert_repeats",
+                    include_str!("../../migrations/0017_alert_repeats.sql"),
+                ),
             ]
         }
     }
@@ -163,9 +168,9 @@ mod tests {
             .await
             .unwrap();
         let all = sources(Backend::Sqlite);
-        let (last, before) = all.split_last().unwrap();
-        assert_eq!(last.0, 16);
-        for (_, _, sql) in before {
+        // Apply everything before 16, then 16 itself on top of the data.
+        let last = all.iter().find(|m| m.0 == 16).unwrap();
+        for (_, _, sql) in all.iter().filter(|m| m.0 < 16) {
             sqlx::raw_sql(*sql).execute(&mut conn).await.unwrap();
         }
         for sql in [

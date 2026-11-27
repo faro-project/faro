@@ -26,6 +26,23 @@ fn seq_i64(seq: u64) -> Result<i64, sqlx::Error> {
     to_i64(seq).ok_or_else(|| sqlx::Error::Encode("seq overflow".into()))
 }
 
+/// Ciphertext bytes currently stored for a device (event bodies and reports).
+pub async fn device_stored_bytes<'e>(
+    e: impl Executor<'e, Database = Any>,
+    device: &faro_proto::DeviceId,
+) -> Result<u64, sqlx::Error> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(b.size), 0) AS BIGINT) FROM blobs b
+         WHERE b.id IN (SELECT blob_id FROM events WHERE device_id = $1 AND blob_id IS NOT NULL
+                        UNION
+                        SELECT blob_id FROM reports WHERE device_id = $1 AND blob_id IS NOT NULL)",
+    )
+    .bind(device.as_str())
+    .fetch_one(e)
+    .await?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
 pub async fn insert_blob<'e>(
     e: impl Executor<'e, Database = Any>,
     id: &BlobId,

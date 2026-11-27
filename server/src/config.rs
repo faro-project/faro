@@ -227,6 +227,56 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Limits on what one device (and one member) may push at the instance
+/// (`[device_limits]`). Every limit is a token bucket whose burst equals its
+/// per-period value, kept in memory per process like [`RateLimitConfig`].
+///
+/// Nothing a limit rejects is lost silently: excess alerts are folded into
+/// one alert that counts them, and over-quota uploads raise an alert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DeviceLimitsConfig {
+    /// Event-batch and report requests per device per minute (HTTP 429).
+    pub requests_per_minute: u32,
+    /// Events per device per hour (HTTP 429 with `Retry-After`).
+    pub events_per_device_per_hour: u32,
+    /// Events per member per hour, across all of their devices.
+    pub events_per_member_per_hour: u32,
+    /// Reports per device per hour.
+    pub reports_per_device_per_hour: u32,
+    /// Alerts per device per hour; further alerts fold into one.
+    pub alerts_per_device_per_hour: u32,
+    /// Alerts per member per hour, across all of their devices.
+    pub alerts_per_member_per_hour: u32,
+    /// Repeats of one kind of rejected-upload alert (bad signature, fork,
+    /// behind, bad report signature) and of quota alerts within this many
+    /// seconds count on a single alert per device.
+    pub alert_coalesce_secs: u64,
+    /// At most one immediate email per recipient and member per this many
+    /// seconds; whatever arrives meanwhile is sent together afterwards.
+    pub email_interval_secs: u64,
+    /// Ciphertext a device may have stored (event bodies and reports), in
+    /// MiB. Over it, new event bodies are not stored and new reports are
+    /// refused, and allies get a `storage_quota` alert. 0 disables the quota.
+    pub storage_quota_mib: u64,
+}
+
+impl Default for DeviceLimitsConfig {
+    fn default() -> Self {
+        DeviceLimitsConfig {
+            requests_per_minute: 60,
+            events_per_device_per_hour: 6_000,
+            events_per_member_per_hour: 12_000,
+            reports_per_device_per_hour: 24,
+            alerts_per_device_per_hour: 30,
+            alerts_per_member_per_hour: 60,
+            alert_coalesce_secs: 3600,
+            email_interval_secs: 60,
+            storage_quota_mib: 2048,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InstanceConfig {
@@ -361,6 +411,7 @@ pub struct Config {
     pub retention: RetentionConfig,
     pub liveness: LivenessConfig,
     pub rate_limit: RateLimitConfig,
+    pub device_limits: DeviceLimitsConfig,
     pub tls: TlsConfig,
     pub updates: UpdatesConfig,
 }
@@ -380,6 +431,7 @@ impl Default for Config {
             retention: RetentionConfig::default(),
             liveness: LivenessConfig::default(),
             rate_limit: RateLimitConfig::default(),
+            device_limits: DeviceLimitsConfig::default(),
             tls: TlsConfig::default(),
             updates: UpdatesConfig::default(),
         }
@@ -502,6 +554,18 @@ impl Config {
                 "RATE_LIMIT_PER_MINUTE" => {
                     self.rate_limit.unauthenticated_per_minute = parse_num(k, &val)?
                 }
+                "DEVICE_EVENTS_PER_HOUR" => {
+                    self.device_limits.events_per_device_per_hour = parse_num(k, &val)?
+                }
+                "DEVICE_ALERTS_PER_HOUR" => {
+                    self.device_limits.alerts_per_device_per_hour = parse_num(k, &val)?
+                }
+                "EMAIL_INTERVAL_SECS" => {
+                    self.device_limits.email_interval_secs = parse_num(k, &val)?
+                }
+                "DEVICE_STORAGE_QUOTA_MIB" => {
+                    self.device_limits.storage_quota_mib = parse_num(k, &val)?
+                }
                 _ if ENV_HANDLED_ELSEWHERE.contains(&k) => {}
                 _ => unknown.push(key.clone()),
             }
@@ -600,6 +664,17 @@ impl Config {
             || self.rate_limit.magic_links_per_email_per_hour == 0
         {
             return invalid("rate limits must be at least 1".into());
+        }
+        let d = &self.device_limits;
+        if d.requests_per_minute == 0
+            || d.events_per_device_per_hour == 0
+            || d.events_per_member_per_hour == 0
+            || d.reports_per_device_per_hour == 0
+            || d.alerts_per_device_per_hour == 0
+            || d.alerts_per_member_per_hour == 0
+            || d.alert_coalesce_secs == 0
+        {
+            return invalid("device_limits values must be at least 1".into());
         }
         Ok(())
     }

@@ -98,6 +98,36 @@ pub async fn insert_routed<'e>(
     Ok(r.rows_affected() == 1)
 }
 
+/// Whether an alert with this dedupe key exists.
+pub async fn exists(e: &mut sqlx::AnyConnection, dedupe_key: &str) -> Result<bool, sqlx::Error> {
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM alerts WHERE dedupe_key = $1")
+        .bind(dedupe_key)
+        .fetch_optional(e)
+        .await?;
+    Ok(id.is_some())
+}
+
+/// Count a repeat on the alert with this dedupe key: `repeat_count` goes up
+/// and `detail` becomes `{base_detail};folded={n}`. Returns whether the
+/// alert exists.
+pub async fn bump_repeat<'e>(
+    e: impl Executor<'e, Database = Any>,
+    dedupe_key: &str,
+    base_detail: &str,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE alerts
+         SET repeat_count = repeat_count + 1,
+             detail = CAST($2 AS TEXT) || ';folded=' || CAST(repeat_count + 1 AS TEXT)
+         WHERE dedupe_key = $1",
+    )
+    .bind(dedupe_key)
+    .bind(base_detail)
+    .execute(e)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 /// A compact view of an alert row (used by tests and, later, the feed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertRow {
@@ -160,7 +190,10 @@ pub async fn undispatched<'e>(
     let rows = sqlx::query(
         "SELECT id, member_id, device_id, source, kind, urgency, extra_recipient_id,
                 skip_recipient_id FROM alerts
-         WHERE dispatched_at IS NULL ORDER BY created_at, id LIMIT $1",
+         WHERE dispatched_at IS NULL
+         ORDER BY ROW_NUMBER() OVER (PARTITION BY member_id ORDER BY created_at, id),
+                  created_at, id
+         LIMIT $1",
     )
     .bind(limit)
     .fetch_all(e)
