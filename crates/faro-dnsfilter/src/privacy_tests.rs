@@ -139,3 +139,65 @@ proptest! {
         assert_no_marker(&e, &kept, &blocked);
     }
 }
+
+/// The same through a [`Session`], with every allowed query answered by
+/// upstream: half the answers alias the allowed name to another allowed
+/// name with the marker, half to a blocked one. Only the blocked targets
+/// are counted, and once every answer is back the session holds nothing
+/// with the marker either.
+#[test]
+fn answers_and_their_aliases_leave_no_allowed_name() {
+    let upstream: std::net::SocketAddr = "192.168.1.1:53".parse().unwrap();
+    let filter = Filter::new(categorizer(), &FilterConfig::default()).unwrap();
+    let mut s = Session::new(Engine::new(filter), 7);
+    s.set_upstreams([upstream]);
+    let mut blocked = vec![];
+    for i in 0..40 {
+        let labels = [format!("h{i}"), MARKER.to_owned(), "net".to_owned()];
+        let ls: Vec<&[u8]> = labels.iter().map(|l| l.as_bytes()).collect();
+        let p = v4_packet(&query(0x0100, 1, &ls));
+        let now = 1_800_000_000_000 + i;
+        let Step::Send { payload, .. } = s.packet(&p, now, true) else {
+            panic!("not forwarded");
+        };
+        let target = if i % 2 == 0 {
+            format!("cdn{i}.{MARKER}.org")
+        } else {
+            let t = format!("c{i}.porn.test");
+            blocked.push(t.clone());
+            t
+        };
+        let mut answer = payload.clone();
+        answer[2] |= 0x80;
+        answer[7] = 1; // one answer record
+        answer.extend_from_slice(&[0xc0, 0x0c, 0, 5, 0, 1, 0, 0, 0, 60]);
+        let mut rdata = vec![];
+        for l in target.split('.') {
+            rdata.push(l.len() as u8);
+            rdata.extend_from_slice(l.as_bytes());
+        }
+        rdata.push(0);
+        answer.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        answer.extend_from_slice(&rdata);
+        let rcode = match s.answer(upstream, &answer, false, now, true) {
+            Step::Reply(p) => p[0][28 + 3] & 0x0f,
+            other => panic!("no reply: {other:?}"),
+        };
+        assert_eq!(rcode, if i % 2 == 0 { 0 } else { 3 });
+    }
+    assert_eq!(s.pending(), 0);
+    let shown = format!("{s:?}");
+    assert!(!shown.contains(MARKER), "an allowed name is held: {shown}");
+    let json = serde_json::to_string(s.engine().counters()).unwrap();
+    assert!(!json.contains(MARKER), "{json}");
+    let mut hosts: Vec<String> = s
+        .engine()
+        .counters()
+        .summaries()
+        .into_iter()
+        .flat_map(|b| b.hosts.into_iter().map(|h| h.host))
+        .collect();
+    hosts.sort();
+    blocked.sort();
+    assert_eq!(hosts, blocked);
+}

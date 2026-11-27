@@ -157,6 +157,98 @@ pub enum BuildError {
     MixedFamilies,
     #[error("payload too large for one UDP datagram")]
     TooLarge,
+    #[error("MTU too small to fragment into")]
+    MtuTooSmall,
+}
+
+/// The IPv6 next-header value of a Fragment header.
+pub const PROTO_IPV6_FRAGMENT: u8 = 44;
+/// Smallest MTU [`build_udp_fragments`] accepts for IPv4 (RFC 791's 68,
+/// rounded up to leave room for a useful fragment).
+pub const MIN_MTU_V4: usize = 576;
+/// Smallest MTU of any IPv6 link (RFC 8200 §5).
+pub const MIN_MTU_V6: usize = 1280;
+
+/// [`build_udp`], split into IP fragments of at most `mtu` bytes when the
+/// datagram doesn't fit in one packet. A datagram that fits is one packet,
+/// exactly as [`build_udp`] builds it. Otherwise each fragment is a full
+/// IP packet: IPv4 with `MF` and the offset set (and no `DF`), IPv6 with a
+/// Fragment header (RFC 8200 §4.5). Every fragment but the last carries a
+/// multiple of 8 bytes. `ident` tells this datagram's fragments apart from
+/// another's; IPv4 uses its low 16 bits. The UDP checksum covers the whole
+/// datagram, as the receiver checks it after reassembly.
+///
+/// The tunnel needs this for upstream answers larger than its MTU: an
+/// answer to a client that asked with a large EDNS buffer, or one fetched
+/// over TCP after a truncated one.
+pub fn build_udp_fragments(
+    src: SocketAddr,
+    dst: SocketAddr,
+    payload: &[u8],
+    mtu: usize,
+    ident: u32,
+) -> Result<Vec<Vec<u8>>, BuildError> {
+    let whole = build_udp(src, dst, payload)?;
+    if whole.len() <= mtu {
+        return Ok(vec![whole]);
+    }
+    match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            if mtu < MIN_MTU_V4 {
+                return Err(BuildError::MtuTooSmall);
+            }
+            let udp = whole.get(IPV4_HEADER..).unwrap_or_default();
+            let chunk = (mtu - IPV4_HEADER) / 8 * 8;
+            let mut out = Vec::with_capacity(udp.len().div_ceil(chunk));
+            for (i, part) in udp.chunks(chunk).enumerate() {
+                let offset = i * chunk;
+                let more = offset + part.len() < udp.len();
+                let total = (IPV4_HEADER + part.len()) as u16;
+                let frag = ((offset / 8) as u16) | if more { 0x2000 } else { 0 };
+                let mut p = Vec::with_capacity(usize::from(total));
+                p.extend_from_slice(&[0x45, 0]);
+                p.extend_from_slice(&total.to_be_bytes());
+                p.extend_from_slice(&(ident as u16).to_be_bytes());
+                p.extend_from_slice(&frag.to_be_bytes());
+                p.extend_from_slice(&[HOP_LIMIT, PROTO_UDP, 0, 0]);
+                p.extend_from_slice(&s.octets());
+                p.extend_from_slice(&d.octets());
+                let sum = checksum::finish(checksum::add(0, &p));
+                p[10..12].copy_from_slice(&sum.to_be_bytes());
+                p.extend_from_slice(part);
+                out.push(p);
+            }
+            Ok(out)
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            if mtu < MIN_MTU_V6 {
+                return Err(BuildError::MtuTooSmall);
+            }
+            const FRAGMENT_HEADER: usize = 8;
+            let udp = whole.get(IPV6_HEADER..).unwrap_or_default();
+            let chunk = (mtu - IPV6_HEADER - FRAGMENT_HEADER) / 8 * 8;
+            let mut out = Vec::with_capacity(udp.len().div_ceil(chunk));
+            for (i, part) in udp.chunks(chunk).enumerate() {
+                let offset = i * chunk;
+                let more = offset + part.len() < udp.len();
+                let len = (FRAGMENT_HEADER + part.len()) as u16;
+                let field = (((offset / 8) as u16) << 3) | u16::from(more);
+                let mut p = Vec::with_capacity(IPV6_HEADER + usize::from(len));
+                p.extend_from_slice(&[0x60, 0, 0, 0]);
+                p.extend_from_slice(&len.to_be_bytes());
+                p.extend_from_slice(&[PROTO_IPV6_FRAGMENT, HOP_LIMIT]);
+                p.extend_from_slice(&s.octets());
+                p.extend_from_slice(&d.octets());
+                p.extend_from_slice(&[PROTO_UDP, 0]);
+                p.extend_from_slice(&field.to_be_bytes());
+                p.extend_from_slice(&ident.to_be_bytes());
+                p.extend_from_slice(part);
+                out.push(p);
+            }
+            Ok(out)
+        }
+        _ => Err(BuildError::MixedFamilies),
+    }
 }
 
 /// Largest UDP payload [`build_udp`] accepts for IPv4: the total length
