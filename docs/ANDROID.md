@@ -264,7 +264,7 @@ Small, and none of them gives the instance new visibility:
 
 ## 13. Consent, multiple users and never invisible
 
-- **Visible on the phone:** the persistent notification while Faro runs, Faro in the accessibility and device admin lists in Settings, and the status screen.
+- **Visible on the phone:** the persistent notification while Faro runs, Faro in the accessibility and device admin lists in Settings, and the status screen. From Android 14 the member can swipe a foreground service's notification away; Faro posts it straight back (its delete intent restarts the running service), and the service's 30-second tick posts it again in any case.
 - **The monthly notice** (ARCHITECTURE.md §12) is `show_notice`: a full-screen activity or a notification, listing the allies and the instance.
 - **Setup explains the cost** in plain words: that Faro watches the screen, that allies see blurred thumbnails of flagged frames, that Faro can't be uninstalled quietly, and that apps which hide their window are reported.
 - **Leaving is allowed and never silent.** Settings → **Leave Faro** sends `goodbye` (urgent), deactivates device admin, and tells the member they can now uninstall the app. Deactivating device admin by hand works too, and is reported (§8).
@@ -349,6 +349,8 @@ These are facts the design depends on that platform documentation doesn't settle
 - **UniFFI 0.29 in proc-macro mode**, in a new crate `faro-android`, package `org.faro.core`.
 - **Tamper signals reuse the existing variants** (§8). Context-only additions if needed.
 - **Keys in the no-backup directory**, Keystore wrapping later.
+- **A dismissed notification comes straight back** (§13), so Faro stays visible on Android 14 and later.
+- **`QUERY_ALL_PACKAGES` stays**, so reports can name the app behind a hidden window or in the foreground. Play restricts it, which doesn't matter while the APK is distributed outside Play; a Play listing would have to revisit it.
 
 ### Open
 
