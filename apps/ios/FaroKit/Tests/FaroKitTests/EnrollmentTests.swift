@@ -32,6 +32,8 @@ final class EnrollLinkTests: XCTestCase {
             "faro://enroll?i=https%3A%2F%2Ff.example&c=7Q2K-M9X!",
             "faro://enroll?i=https%3A%2F%2Ff.example&i=https%3A%2F%2Fg.example&c=7Q2KM9XD",
             "faro://enroll?i=https%3A%2F%2Ff.example&c=7Q2KM9XD&c=7Q2KM9XE",
+            "faro://enroll?i=https%3A%2F%2Ff.example&c=7Q2KM9XD#m=0123456789abcdef",
+            "faro://enroll?i=https%3A%2F%2Ff.example&c=7Q2KM9XD#",
         ]
         for text in bad { XCTAssertNil(EnrollLink(text), text) }
         XCTAssertNil(EnrollLink(
