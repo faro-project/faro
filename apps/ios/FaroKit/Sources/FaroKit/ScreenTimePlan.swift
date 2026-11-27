@@ -40,6 +40,11 @@ public struct ScreenTimePlan: Equatable, Sendable {
     public var requireAutomaticDateAndTime: Bool
     /// `appStore.maximumRating`, `nil` for off.
     public var maximumAppRating: Int?
+    /// The member's picks for `shield.*`: opaque tokens, sorted (docs/IOS.md §6.2).
+    public var shieldApps: [String]
+    public var shieldAppCategories: [String]
+    public var shieldWebDomains: [String]
+    public var shieldWebDomainCategories: [String]
 
     /// The ratings the App Store accepts: 4+, 9+, 12+, 17+, and 1000 for "all".
     public static let validRatings: [Int] = [0, 4, 9, 12, 17, 1000]
@@ -53,6 +58,10 @@ public struct ScreenTimePlan: Equatable, Sendable {
         // A domain the member both blocks and allows stays blocked.
         let blocked = Set(extraBlockedDomains)
         allowedDomains = ScreenTimePlan.cleanDomains(settings.allowedDomains).filter { !blocked.contains($0) }
+        shieldApps = Set(settings.shieldApps).sorted()
+        shieldAppCategories = Set(settings.shieldAppCategories).sorted()
+        shieldWebDomains = Set(settings.shieldWebDomains).sorted()
+        shieldWebDomainCategories = Set(settings.shieldWebDomainCategories).sorted()
         denyAppRemoval = settings.denyAppRemoval
         denyExplicitContent = settings.denyExplicitContent
         requireAutomaticDateAndTime = settings.requireAutomaticDateAndTime
@@ -63,7 +72,7 @@ public struct ScreenTimePlan: Equatable, Sendable {
 
     /// Lowercased, trimmed, without a scheme, path or leading dot, no
     /// duplicates, in a stable order. Entries that aren't a hostname are dropped.
-    static func cleanDomains(_ raw: [String]) -> [String] {
+    public static func cleanDomains(_ raw: [String], limit: Int = ScreenTimePlan.maxDomains) -> [String] {
         var seen = Set<String>()
         var out: [String] = []
         for entry in raw {
@@ -79,7 +88,7 @@ public struct ScreenTimePlan: Equatable, Sendable {
             guard labelsOK, d.contains("."), d.count <= 253, seen.insert(d).inserted else { continue }
             out.append(d)
         }
-        return Array(out.sorted().prefix(maxDomains))
+        return Array(out.sorted().prefix(limit))
     }
 }
 

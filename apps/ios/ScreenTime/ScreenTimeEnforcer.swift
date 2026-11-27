@@ -11,8 +11,9 @@ import ManagedSettings
 /// by `ScreenTimePlan` in FaroKit, which the tests cover; this file only
 /// copies it into the store, and it only runs on a device.
 ///
-/// It never touches the app, category or site shields: Phase B's picker
-/// owns those, and they stay empty until then.
+/// The shields hold the member's `FamilyActivityPicker` choices as opaque
+/// tokens: the settings file keeps each token's JSON, base64 encoded, and
+/// Faro never learns which app one is (docs/IOS.md §4 principle 4).
 enum ScreenTimeEnforcer {
     static let storeName = ManagedSettingsStore.Name("faro")
 
@@ -28,14 +29,38 @@ enum ScreenTimeEnforcer {
         store.media.denyExplicitContent = plan.denyExplicitContent
         store.dateAndTime.requireAutomaticDateAndTime = plan.requireAutomaticDateAndTime
         store.appStore.maximumRating = plan.maximumAppRating
+
+        let apps = Set(tokens(plan.shieldApps, as: ApplicationToken.self))
+        store.shield.applications = apps.isEmpty ? nil : apps
+        let appCategories = Set(tokens(plan.shieldAppCategories, as: ActivityCategoryToken.self))
+        store.shield.applicationCategories = appCategories.isEmpty ? nil : .specific(appCategories)
+        let sites = Set(tokens(plan.shieldWebDomains, as: WebDomainToken.self))
+        store.shield.webDomains = sites.isEmpty ? nil : sites
+        let siteCategories = Set(tokens(plan.shieldWebDomainCategories, as: ActivityCategoryToken.self))
+        store.shield.webDomainCategories = siteCategories.isEmpty ? nil : .specific(siteCategories)
     }
 
-    /// Re-applies the settings file in the app group. With no file (setup
-    /// hasn't run), a file from a newer Faro or a damaged one, it leaves the
-    /// store alone and returns false rather than guess.
+    /// The tokens a list of encoded ones stands for. One that no longer
+    /// decodes is skipped: it can't name an app any more.
+    private static func tokens<T: Decodable>(_ encoded: [String], as: T.Type) -> [T] {
+        encoded.compactMap { Data(base64Encoded: $0).flatMap { try? JSONDecoder().decode(T.self, from: $0) } }
+    }
+
+    /// A token as the settings file keeps it.
+    static func encode<T: Encodable>(_ token: T) -> String? {
+        try? JSONEncoder().encode(token).base64EncodedString()
+    }
+
+    /// Re-applies the settings file in the app group, after applying any
+    /// loosening whose time has come (docs/IOS.md §9; the app, the monitor
+    /// and the tunnel each do this, whichever runs first). With no file
+    /// (setup hasn't run), a file from a newer Faro or a damaged one, it
+    /// leaves the store alone and returns false rather than guess.
     @discardableResult
     static func applySavedSettings(group: AppGroup? = AppGroup.container()) -> Bool {
-        guard let group, let settings = try? SettingsStore(group: group).load() else { return false }
+        guard let group else { return false }
+        _ = try? ChoicesStore(group: group).applyDue(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        guard let settings = try? SettingsStore(group: group).load() else { return false }
         apply(settings)
         return true
     }

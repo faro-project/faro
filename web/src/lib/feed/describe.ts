@@ -17,6 +17,7 @@ import type {
 	TamperSignal
 } from '../types.ts';
 import { date } from '../format.ts';
+import { describeIosSetting, type Tense } from './ios-settings.ts';
 
 export type Tone = 'urgent' | 'normal' | 'info' | 'good';
 
@@ -464,24 +465,37 @@ export function describeBody(b: EventBody, device = 'this device', now = Date.no
 				...(b.signal.signal === 'window_hidden_from_capture' ? [HIDDEN_WINDOW_CONTEXT] : [])
 			];
 		case 'settings_change': {
-			const lines = b.changes.map(settingChange);
-			if (b.requested_at === undefined && b.takes_effect_at === undefined) return lines;
+			const words = (tense: Tense) =>
+				b.changes.map((c) => describeIosSetting(c, device, tense) ?? settingChange(c));
+			if (b.requested_at === undefined && b.takes_effect_at === undefined)
+				return words({ when: 'done' });
 			const asked =
 				b.requested_at !== undefined ? ` (asked for ${whenText(b.requested_at, now)})` : '';
-			if (b.cancelled_at !== undefined)
-				return [
-					`The member cancelled this before it took effect, on ${whenText(b.cancelled_at, now)}. Nothing changed on ${device}.${asked}`,
-					...lines
-				];
-			if (b.takes_effect_at === undefined) return lines;
+			// iPhone settings read as sentences with the time in them; the
+			// plain "key: old → new" lines still need a sentence to say when.
+			const allWords = b.changes.every((c) => describeIosSetting(c, device) !== undefined);
+			if (b.cancelled_at !== undefined) {
+				const lead = `The member cancelled this before it took effect, on ${whenText(b.cancelled_at, now)}. Nothing changed on ${device}.${asked}`;
+				return [lead, ...words({ when: 'cancelled' })];
+			}
+			if (b.takes_effect_at === undefined) return words({ when: 'done' });
 			const delay = b.delay_secs
 				? ` after the member's ${duration(b.delay_secs * 1000)} delay`
 				: '';
+			const future = b.takes_effect_at > now;
+			const at = whenText(b.takes_effect_at, now);
+			if (allWords)
+				return [
+					...words({ when: future ? 'future' : 'past', at }),
+					future
+						? `${delay ? `That is${delay}. ` : ''}The member can still cancel it.${asked}`
+						: `${delay ? `That was${delay}.` : ''}${asked}`.trim()
+				].filter(Boolean);
 			return [
-				b.takes_effect_at > now
-					? `This will take effect on ${device} ${whenText(b.takes_effect_at, now)}${delay}. The member can still cancel it.${asked}`
-					: `This took effect on ${device} ${whenText(b.takes_effect_at, now)}${delay}.${asked}`,
-				...lines
+				future
+					? `This will take effect on ${device} ${at}${delay}. The member can still cancel it.${asked}`
+					: `This took effect on ${device} ${at}${delay}.${asked}`,
+				...words({ when: 'done' })
 			];
 		}
 		case 'blocked_summary': {

@@ -55,7 +55,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             do {
                 filter = try DnsFilter(
                     packagedManifest: Bundle.main.url(forResource: "domains.manifest", withExtension: "json")?.path,
-                    configJson: readText(group?.filterConfigFile),
+                    configJson: memberChoices(),
                     savedCountersJson: readText(group?.dnsCountersFile))
             } catch {
                 log.error("the DNS filter did not start: \(String(describing: error), privacy: .public)")
@@ -341,6 +341,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// The member's choices for the filter: the copy in the VPN
+    /// configuration, which is readable before the first unlock, or
+    /// `filter.json` when that is newer (`TunnelConfig`).
+    private func memberChoices() -> String? {
+        let provider = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        let generation = group.flatMap { try? SettingsStore(group: $0).load() }?.generation
+        return TunnelConfig.choose(
+            provider: provider, fileJSON: readText(group?.filterConfigFile), fileGeneration: generation)
+    }
+
     private func readText(_ url: URL?) -> String? {
         guard let url, let data = try? Data(contentsOf: url) else { return nil }
         return String(data: data, encoding: .utf8)
@@ -355,7 +365,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if core == nil, let group {
             core = try? CoreLink.open(group: group)
         }
-        let config = readText(group?.filterConfigFile)
+        // A loosening whose time has come is applied here too (docs/IOS.md
+        // §9), whichever of the app, the monitor and the tunnel runs first.
+        if let group {
+            _ = try? ChoicesStore(group: group).applyDue(nowMs: Self.nowMs())
+        }
+        let config = memberChoices()
         // Unread (no core yet, or the database can't be opened yet): keep
         // what the filter has.
         let status = try? core?.status()
@@ -373,6 +388,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
         guard let core, let filter = queue.sync(execute: { self.filter }) else { return }
+        // Settings events the monitor or the app left for whoever can sign them.
+        if let group { SettingsEventSender.send(group: group, core: core) }
         do {
             if let version = try filter.refreshDomains(core: core) {
                 log.notice("switched to the installed domain list \(version, privacy: .public)")
