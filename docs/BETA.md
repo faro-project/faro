@@ -295,7 +295,7 @@ The same kinds of alert apply to a Windows PC, with these differences.
 
 ### 4.6 On an iPhone
 
-The alerts an iPhone can send, and what to say about each, are in the [ally guide's section 10](ALLY-GUIDE.md#10-if-the-member-uses-an-iphone). These are the limits to expect in the beta:
+The alerts an iPhone can send, and what to say about each, are in the [ally guide's section 11](ALLY-GUIDE.md#11-if-the-member-uses-an-iphone). These are the limits to expect in the beta:
 
 - **It blocks; it doesn't watch.** There are no screen checks, no pictures and no image model. Allies see blocked lookups by category and host, and how often a blocked app was opened, never which app.
 - **Some sites get around the DNS filter.** Sites reached through some private DNS services or apps aren't blocked. Sites reached by IP address, or on brand-new domains, aren't covered by the DNS filter either. Apple's filter still covers adult sites in Safari and other web views.

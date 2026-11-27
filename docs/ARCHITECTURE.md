@@ -354,7 +354,7 @@ Per device: about 288 heartbeats a day (~90 KB) plus a 20–200 KB daily report,
 
 **Registration modes** (admin setting): `invite-only` (default), `open` with an email-domain allowlist (for example `@college.edu`), or `closed`.
 
-**Optional groups** (Phase 2): an organization-chosen grouping, for example "Men's group, Tuesday", used only for admin bookkeeping and bulk invites. Groups don't get access to content.
+**Groups** are a place for people doing this together, such as "Men's group, Tuesday", run by one or more facilitators who invite and look after it. Being in a group, or facilitating one, gives no access to content: only an approved ally link does that. Groups can propose alliances, but a link becomes active only when the member approves it. See [GROUPS.md](GROUPS.md).
 
 ### 4.4 Core tables (sketch)
 
@@ -363,7 +363,7 @@ instance(id, name, identity_pubkey, settings_json)
 users(id, email, display_name, roles, created_at, auth...)
 devices(id, owner_user_id, platform, name, sign_pubkey, member_sig, enrolled_at,
         last_seen_at, last_seq, last_hash, status)
-ally_links(id, member_id, ally_id, state[pending|active|removed], member_sig, created_at, removed_at)
+ally_links(id, member_id, ally_id, state[pending|active|removed], member_sig, created_at, removed_at, origin_group_id)
 ally_keys(user_id, enc_pubkey, wrapped_privkey_blob, created_at, revoked_at)
 events(device_id, seq, ts, kind, urgency, header_sig, blob_ref|inline_ct, received_at)
 envelopes(item_id, recipient_user_id, wrapped_key)
@@ -373,6 +373,15 @@ notifications(id, alert_or_item_id, recipient_id, channel, urgency, status, sent
 notification_prefs(user_id, member_id, urgency, channel, mode[immediate|digest|off], quiet_hours)
 instance_uptime(started_at, stopped_at)   -- for liveness-vs-downtime logic
 invites(token_hash, member_id, expires_at)
+accountability_groups(id, name, description, created_by, meeting_json, settings_json, listed, listing_json, max_participants, archived_at)
+group_participants(id, group_id, user_id, role[facilitator|participant], state[active|left|removed], joined_via, joined_at, ended_at)
+group_history(id, group_id, at, kind, subject_id, actor_id)   -- joins, leaves, role changes
+group_invites(token_hash, group_id, inviter_id, email|user_id, expires_at, used_at, outcome)
+group_join_requests(id, group_id, user_id, state[open|accepted|not_accepted|withdrawn|void], expires_at, cooldown_until)
+group_meeting_prefs(group_id, user_id, reminders, email)
+group_notices(id, kind, recipient_id, actor_id, detail, dedupe_key, created_at)   -- notifications.group_notice_id points here
+alliance_proposals(id, group_id, from_id, to_id, kind[request|offer|partnership], state[open|accepted|not_accepted|withdrawn|void], expires_at, cooldown_until)
+proposal_blocks(user_id, blocked_id, created_at)
 ```
 
 ### 4.5 API surface (v1)
@@ -390,12 +399,41 @@ GET  /v1/ally/feed                metadata list of reports and alerts, and each 
 GET  /v1/blobs/{id}               ciphertext (served directly or via presigned S3 URL)
 GET  /v1/updates/...              mirrored, project-signed update metadata + artifacts
 POST /v1/invites, /accept         ally invitations
+POST|GET /v1/groups               create a group; list your groups (GROUPS.md §16)
+GET|PATCH|DELETE /v1/groups/{id}  read, edit (facilitators), or close a group
+GET /v1/groups/{id}/participants  paged roster
+GET /v1/groups/{id}/history       joins, leaves, removals and role changes
+GET /v1/groups/{id}/me/allies     your allies who are in this group
+GET /v1/groups/{id}/user-search   facilitators find existing users to invite
+GET|POST /v1/groups/{id}/invites  list or send invitations
+DELETE /v1/groups/{id}/me         leave a group (alliances stay)
+DELETE /v1/groups/{id}/participants/{user_id}   remove someone (facilitators)
+PUT /v1/groups/{id}/participants/{user_id}/role   make a facilitator or participant
+POST /v1/groups/{id}/facilitator-offer/accept|decline   take on a vacant facilitator role
+POST /v1/groups/{id}/proposals    propose a request, offer or partnership (GROUPS.md §7)
+GET /v1/me/proposals              your incoming and outgoing proposals
+DELETE /v1/proposals/{id}         withdraw a proposal you sent
+POST /v1/proposals/{id}/accept|decline   answer a proposal (accept creates pending links only)
+GET /v1/me/proposal-blocks        people you have stopped from proposing
+PUT|DELETE /v1/me/proposal-blocks/{user_id}   stop or allow proposals from someone
+GET /v1/group-directory           listed groups, for signed-in people (listing fields only)
+GET|POST /v1/groups/{id}/join-requests   list or send join requests (GROUPS.md §8.8)
+DELETE /v1/groups/{id}/join-requests/me  withdraw your join request
+GET /v1/me/join-requests          your own join requests
+POST /v1/join-requests/{id}/accept|decline   facilitators answer a join request
+PUT /v1/groups/{id}/me/meeting-reminders     your meeting reminder choices
+GET /v1/me/group-invites          group invitations waiting for you
+GET /v1/group-invites/{token}     read an invitation
+POST /v1/group-invites/{token}/accept|decline   answer an invitation
 DELETE /v1/me                     ask for your account to be deleted (§12): recent sign-in + your address
 POST /v1/me/deletion/cancel       cancel it during the 7-day hold, whoever asked
 DELETE /admin/api/users/{id}     an admin asks for someone else's account to be deleted (§12)
 POST /admin/api/users/{id}/deletion/cancel   an admin cancels a deletion an admin asked for
 GET  /v1/branding                 instance logo id, welcome line, support contact (public; only what is switched on)
 GET  /v1/branding/logo/{id}.png   the logo, re-encoded by the server; the id changes with the logo
+GET /admin/api/groups             group names and counts, no rosters (admins only)
+DELETE /admin/api/groups/{id}     close a group as an admin (logged)
+PUT /admin/api/groups/{id}/listed unlist or relist a group (logged)
 /admin/*                          admin console (instance admins only, metadata only)
 ```
 
@@ -474,6 +512,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
   Changing the mapping in either direction, including lowering `medium` flags to `normal`, is itself a `normal` event that allies are told about. The floors are enforced on the device: the instance can't see a flag's rating, so its own floor (`EventKind::min_urgency`) applies to event kinds, not ratings.
 - A device keeps the mapping it last announced to allies. Devices that started before `medium` defaulted to `urgent` stay at `normal` until the member changes it; only new devices start at the new default, so allies never see a mapping change the member didn't make.
+- **Group notices are not tamper-class.** Joins, leaves, removals, archiving, proposals and meeting reminders ([GROUPS.md §14](GROUPS.md#14-notifications)) are normal urgency, and each recipient's own choice for normal alerts applies. Existing kinds still fire for links formed in groups: removing an ally sends `ally_removed` whether the link began in a group or not. Leaving or being removed from a group ends no link.
 - Notification text is content-free: *"Urgent: new alert for Sam on Laptop-X. Open Faro to view."* Details only appear after decryption in the app.
 - **Privacy trade-off, accepted:** the operator can see *that* an urgent event happened and when, but not what it was. The operator privacy notice states this.
 
@@ -585,7 +624,7 @@ Institutions running instances (churches, colleges) make consent even more impor
 Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash chain, outbox, E2EE, urgency flags and notifier (SMTP, immediate and digest), liveness monitor with downtime awareness, `faro-server` (SQLite and Postgres, local disk and S3, ACME, setup wizard, admin console, backups, update mirror), ally and member web app, tray UI, project-signed installers and updates, docker-compose and self-hosting docs. Closed beta with 2–3 pilot instances (an individual, a church, a college). *Status of the tray UI: on macOS, the agent's menu-bar status menu ([#89](https://github.com/faro-project/faro/issues/89), §3.1); no separate tray app. On Windows the agent's tray icon has the same menu.*
 
 **Phase 2: Hardening, Linux, institutions**
-Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
+Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups ([GROUPS.md §20](GROUPS.md#20-rollout) for the phases), `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
 
 **Phase 3: Beyond**
 Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter, specified in [IOS.md](IOS.md)), Helm chart, and possibly federation between instances.

@@ -17,7 +17,8 @@ That last part is the point. Faro exists to make honest conversations easier, no
 7. [If you want to stop being an ally](#7-if-you-want-to-stop-being-an-ally)
 8. [What the people running the server can and can't see](#8-what-the-people-running-the-server-can-and-cant-see)
 9. [Having the conversation](#9-having-the-conversation)
-10. [If the member uses an iPhone](#10-if-the-member-uses-an-iphone)
+10. [Groups](#10-groups)
+11. [If the member uses an iPhone](#11-if-the-member-uses-an-iphone)
 
 ---
 
@@ -143,7 +144,7 @@ This protects you as well as the member. You will never be shown explicit images
 
 ### Tamper alerts
 
-Anyone who controls their own computer can switch Faro off. Faro can't prevent that, but it makes sure you find out. These are the alerts you may see for a computer. Alerts about an iPhone are different: see [section 10](#10-if-the-member-uses-an-iphone).
+Anyone who controls their own computer can switch Faro off. Faro can't prevent that, but it makes sure you find out. These are the alerts you may see for a computer. Alerts about an iPhone are different: see [section 11](#11-if-the-member-uses-an-iphone).
 
 | What it says | What it means |
 |---|---|
@@ -272,9 +273,19 @@ Faro's real goal is honest conversation, not policing. The person you support ch
 - **Look after yourself.** You're not responsible for their choices, and you don't have to read every report the day it arrives. If this becomes too much, say so; it's fine to [step back](#7-if-you-want-to-stop-being-an-ally).
 - **Get help when it's beyond you.** If you're ever worried about someone's safety, contact people who can help, such as a pastor, a counsellor or, in an emergency, the emergency services. Faro isn't an emergency service.
 
+## 10. Groups
+
+Some people using Faro also belong to a **group**: a recovery group, a small group at church, a team that meets each week. Being in a group shares nothing about anyone's computer. Nobody in a group sees your reports or alerts, and you see no one else's unless you are their ally.
+
+- **Joining.** Someone invites you by email, or you ask to join a listed group (below). Open the invitation from the email, or choose **Look at it** under **Invitations** on the **Groups** page. Read the group's name, its description and who invited you, then choose **Join this group** or **No thanks**. Whoever invited you sees only whether you accepted.
+- **Leaving.** Open the group, choose **Leave group…**, then **Leave group**. The facilitators are told. Your alliances stay as they are.
+- **Being asked, offered or partnered.** Proposals to you from people in a group wait under **Waiting for you** on the group's page. Someone can ask you to be their ally, offer to be yours, or suggest you partner up, which makes you allies of each other. Choose **Accept** or **Not now**, or **Decide later** to leave it. If you say no, the person is never told that. Their proposal shows as pending until it runs out after two weeks.
+- **Comparing safety codes.** Accepting doesn't make the alliance active yet. It waits under **Compare at your next meeting**. Meet in person or on a call, choose **Compare codes**, and follow [section 4](#4-comparing-the-safety-code). Each of you approves only your own side.
+- **Finding a group.** Choose **Find a group** on the **Groups** page. You can search by name, and only groups listed on this instance appear. You see whether a group is full, never who is in it. Choose **Ask to join**. The facilitators say yes or no and don't have to say why. If the answer is no, the page shows the date you can ask again.
+
 ---
 
-## 10. If the member uses an iPhone
+## 11. If the member uses an iPhone
 
 Some members use an iPhone. Faro on an iPhone works differently from Faro on a computer. It **blocks** adult websites and apps on the phone. It doesn't watch the screen, takes no screenshots and can't see what is on it. So an iPhone sends no screen checks, no pictures and no blurred screenshots. The member may also choose more things to block, such as gambling sites, sites they name, or apps. Faro counts how often a blocked app was opened, but never learns which app it was.
 

@@ -20,6 +20,7 @@
 //! | [`api`] | HTTP handlers, one module per area of §4.5 |
 //! | [`router`] | route table and the security middleware stack |
 //! | [`settings`] | admin-editable settings (registration, retention, grace) |
+//! | [`groups`] | group rules shared by the API, admin console and purge (docs/GROUPS.md) |
 //! | [`roles`] | granting and revoking the admin role, always told |
 //! | [`branding`] | instance logo and customizations, and the rules for operator text |
 //! | [`notify`] | the notifier: fan-out, immediate email, hourly digests (§5.4) |
@@ -50,9 +51,12 @@ pub mod deletion;
 pub mod device_auth;
 pub mod doctor;
 pub mod error;
+pub mod groups;
 pub mod identity;
 pub mod liveness;
 pub mod mailer;
+pub mod meetings;
+pub mod messages;
 pub mod notify;
 pub mod ratelimit;
 pub mod retention;

@@ -110,6 +110,18 @@ It shows what Faro is doing, never what was on the screen. The lines to look at:
 
 On Windows, run `& "C:\Program Files\Faro\faro-service.exe" status` in a terminal opened as administrator. It shows the same details.
 
+## Groups
+
+A **group** is a place for people doing this together, such as a recovery group or a small group at church. Groups are in the web app under **Groups**. Being in one shares nothing about your Mac or your reports, and nobody in a group sees them.
+
+- **Joining and leaving.** Accept an invitation from its email, or from **Look at it** under **Invitations** on the **Groups** page, then choose **Join this group**. To leave, open the group, choose **Leave group…**, then **Leave group**. Your alliances stay as they are.
+- **Asking someone to be your ally.** In a group's **People** list, choose **Ally…** next to a person. Then choose **Ask to be my ally**, **Offer to be their ally** or **Partner up**. A proposal is only a question. Nothing becomes active until you both compare safety codes and the link is approved on your **Allies** page, as in [the ally guide](ALLY-GUIDE.md#4-comparing-the-safety-code).
+- **Stopping proposals from someone.** Under **Ally…**, choose **Don't let them send me proposals**. They aren't told.
+- **Answering proposals.** Proposals to you, and safety codes to compare, are under **Waiting for you** on the group's page. If you say no, the other person is never told that you did.
+- **Meetings.** A facilitator can set a meeting day, time and place. Under **Meeting**, tick **Remind me before each meeting**, and **Also email me** if you want the reminder by email. In a large group, email reminders start switched off. A reminder email says only that your group meets. It never names the group.
+- **Finding a group.** Choose **Find a group** on the **Groups** page and search by name. You can ask to join a listed group, and its facilitators decide. A group doesn't say why it said no.
+- **Facilitating.** A group has at least one facilitator. Facilitators can edit the group, invite people, remove people and close it, on the **Manage** tab. They can't see anyone's reports or alerts.
+
 ## Reporting a problem
 
 If Faro isn't working and you'd like help, make a **problem report**: one file with what Faro is doing on your Mac and its recent logs, with private details taken out. Someone who knows an administrator password runs, in Terminal, from your account:

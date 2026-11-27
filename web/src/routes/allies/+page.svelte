@@ -18,24 +18,20 @@
 
 	import { resolve } from '$app/paths';
 	import { api, ApiError, describeError, seg } from '#lib/api.ts';
-	import { unb64 } from '#lib/crypto/bytes.ts';
-	import { safetyCode } from '#lib/crypto/keys.ts';
-	import {
-		allyEndorsementSigningBytes,
-		nextManifest,
-		signWith,
-		type ManifestAlly
-	} from '#lib/crypto/proto.ts';
+	import { nextManifest, type ManifestAlly } from '#lib/crypto/proto.ts';
 	import { ago, date, dateTime } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
+	import { approveAlly, approveErrorMessage, codeForAlly } from '#lib/keys/approve.ts';
 	import { keyring, type MemberKeys } from '#lib/keys/keyring.svelte.ts';
-	import { ensureManifest, ManifestTrustError, signManifest } from '#lib/keys/member.ts';
+	import { ensureManifest, signManifest } from '#lib/keys/member.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { AllyLink, ApproveAlly, InviteCreated, MyAllies } from '#lib/types.ts';
+	import type { AllyLink, InviteCreated, MyAllies } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
 
 	let mine = $state<MyAllies | null>(null);
+	/** Names of the groups links came from, for the "From Tuesday group" label. */
+	let groupNames = $state<Record<string, string>>({});
 	let loadError = $state('');
 	let loadedFor = '';
 
@@ -58,6 +54,12 @@
 		loadError = '';
 		try {
 			mine = await api.get<MyAllies>('/v1/me/allies');
+			if (mine.allies.some((a) => a.origin_group_id)) {
+				api
+					.get<{ id: string; name: string }[]>('/v1/groups')
+					.then((gs) => (groupNames = Object.fromEntries(gs.map((g) => [g.id, g.name]))))
+					.catch(() => {});
+			}
 		} catch (e) {
 			loadError = describeError(e);
 		}
@@ -78,22 +80,7 @@
 		)
 	);
 
-	function message(e: unknown): string {
-		if (e instanceof ManifestTrustError) return e.message;
-		if (e instanceof ApiError) {
-			switch (e.code) {
-				case 'ally_not_active':
-				case 'ally_already_in_manifest':
-					return 'Your recipient list still names an ally who left. Confirm the updated list (above) first.';
-				case 'manifest_version_mismatch':
-					return 'Your recipient list changed in another tab. Reload this page and try again.';
-				case 'not_pending':
-				case 'already_active':
-					return 'This ally was already approved or removed elsewhere.';
-			}
-		}
-		return describeError(e);
-	}
+	const message = approveErrorMessage;
 
 	async function invite(e: SubmitEvent) {
 		e.preventDefault();
@@ -155,8 +142,12 @@
 	 * Phones show these names (docs/PROTOCOL.md §5.1); `nextManifest`
 	 * sanitizes them.
 	 */
+	function currentNames(): Map<string, string> {
+		return new Map((mine?.allies ?? []).map((l) => [l.ally_id, l.display_name]));
+	}
+
 	function withNames(allies: ManifestAlly[]): ManifestAlly[] {
-		const names = new Map((mine?.allies ?? []).map((l) => [l.ally_id, l.display_name]));
+		const names = currentNames();
 		return allies.map((a) => ({ ...a, name: names.get(a.ally_id) ?? a.name ?? '' }));
 	}
 
@@ -167,30 +158,7 @@
 		busy = true;
 		actionError = '';
 		try {
-			const latest = await ensureManifest(keys, inst.instance_id, activeAllyEntries);
-			const endorsement = signWith(
-				keys.signSeed,
-				{
-					instance_id: inst.instance_id,
-					member_id: keys.userId,
-					ally_id: a.ally_id,
-					ally_enc_pubkey: a.ally_enc_pubkey,
-					endorsed_at_ms: Date.now()
-				},
-				allyEndorsementSigningBytes
-			);
-			const manifest = signManifest(
-				keys,
-				nextManifest(
-					latest,
-					withNames([
-						...latest.allies,
-						{ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey, name: a.display_name }
-					])
-				)
-			);
-			const body: ApproveAlly = { endorsement, manifest };
-			await api.post(`/v1/me/allies/${seg(a.ally_id)}/approve`, body);
+			await approveAlly(keys, inst.instance_id, a, activeAllyEntries, currentNames());
 			done = `${a.display_name} is now your ally. Your computers start encrypting to them within a few minutes.`;
 			reviewing = null;
 			await load();
@@ -264,9 +232,7 @@
 
 	/** The safety code from the unlocked member key and the ally's key. */
 	function codeFor(a: AllyLink): string | null {
-		const keys = keyring.member;
-		if (!keys || !a.ally_enc_pubkey) return null;
-		return safetyCode(keys.signPk, unb64(a.ally_enc_pubkey));
+		return codeForAlly(keyring.member, a);
 	}
 </script>
 
@@ -338,7 +304,12 @@
 								<div>
 									<div class="row-title">
 										<strong>{a.display_name}</strong>
-										<span class="chip pending">Accepted your invitation</span>
+										<span class="chip pending">
+											{a.origin_group_id ? 'Accepted your proposal' : 'Accepted your invitation'}
+										</span>
+										{#if a.origin_group_id && groupNames[a.origin_group_id]}
+											<span class="chip normal">From {groupNames[a.origin_group_id]}</span>
+										{/if}
 										{#if a.deletion_purge_after_ms}
 											<span class="chip off">Account being deleted</span>
 										{/if}
@@ -446,6 +417,9 @@
 								<div>
 									<div class="row-title">
 										<strong>{a.display_name}</strong><span class="chip good">Ally</span>
+										{#if a.origin_group_id && groupNames[a.origin_group_id]}
+											<span class="chip normal">From {groupNames[a.origin_group_id]}</span>
+										{/if}
 										{#if a.deletion_purge_after_ms}
 											<span class="chip normal">Leaving {date(a.deletion_purge_after_ms)}</span>
 										{/if}

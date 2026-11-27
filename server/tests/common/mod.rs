@@ -31,6 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
+pub mod roster;
+
 pub const COOKIE: &str = "faro_session";
 
 pub struct TestApp {

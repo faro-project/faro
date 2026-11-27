@@ -7,6 +7,7 @@
 	import icon from '$brand/faro-icon.svg';
 	import { describeError } from '#lib/api.ts';
 	import { branding } from '#lib/branding.svelte.ts';
+	import { directory } from '#lib/directory.svelte.ts';
 	import { date } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
@@ -40,13 +41,17 @@
 
 	// Pages that are a single form or message read better narrow.
 	let narrow = $derived(
-		/\/(signin|auth\/verify|invite|setup|keys|privacy|licenses)$/.test(page.url.pathname)
+		/\/(signin|auth\/verify|invite|group-invite|setup|keys|privacy|licenses)$/.test(
+			page.url.pathname
+		)
 	);
 
 	type NavItem = {
-		path: '/' | '/activity' | '/computers' | '/allies' | '/supporting' | '/admin';
+		path: '/' | '/activity' | '/computers' | '/allies' | '/groups' | '/supporting' | '/admin';
 		label: string;
 		match: RegExp;
+		/** Jumps to a part of the page, as "Find a group" does on Groups. */
+		hash?: string;
 	};
 	let nav = $derived.by((): NavItem[] => {
 		const r = session.user?.roles;
@@ -60,6 +65,17 @@
 			);
 		}
 		if (r.ally) items.push({ path: '/supporting', label: 'Supporting', match: /^\/supporting/ });
+		// Groups are for everyone with an account: joining one needs neither role.
+		items.push({ path: '/groups', label: 'Groups', match: /^\/groups/ });
+		// "Find a group" (GROUPS.md §17) is shown when the instance lists groups.
+		if (directory.has) {
+			items.push({
+				path: '/groups',
+				label: 'Find a group',
+				hash: '#find-a-group',
+				match: /^$never/
+			});
+		}
 		if (r.admin) items.push({ path: '/admin', label: 'Admin', match: /^\/admin/ });
 		return items;
 	});
@@ -83,6 +99,13 @@
 		if (!i) return 'Powered by Faro';
 		const powered = `Powered by Faro ${i.server_version}`;
 		return i.name === 'Faro' ? powered : `${i.name} · ${powered}`;
+	});
+
+	// Whether to offer "Find a group": asked once per person who is signed in.
+	$effect(() => {
+		const u = session.user;
+		if (u) void directory.check(u.id);
+		else directory.clear();
 	});
 
 	onMount(() => {
@@ -140,8 +163,11 @@
 	</div>
 	{#if nav.length > 1}
 		<nav class="main-nav" aria-label="Main">
-			{#each nav as item (item.path)}
-				<a href={resolve(item.path)} aria-current={current(item) ? 'page' : undefined}>
+			{#each nav as item (item.label)}
+				<a
+					href="{resolve(item.path)}{item.hash ?? ''}"
+					aria-current={current(item) ? 'page' : undefined}
+				>
 					{item.label}
 				</a>
 			{/each}

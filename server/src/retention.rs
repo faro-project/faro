@@ -335,6 +335,10 @@ const DELETE_REPORTS: ScopedSql =
     scoped_sql!("DELETE FROM reports WHERE", "received_at", "member_id");
 const DELETE_EVENTS: ScopedSql =
     scoped_sql!("DELETE FROM events WHERE", "received_at", "member_id");
+/// Check-ins follow blob retention (GROUPS.md §18); their replies go with
+/// them (`group_posts.parent_id` cascades).
+const DELETE_GROUP_POSTS: ScopedSql =
+    scoped_sql!("DELETE FROM group_posts WHERE", "created_at", "author_id");
 const DELETE_ALERTS: ScopedSql = scoped_sql!("DELETE FROM alerts WHERE", "created_at", "member_id");
 const DELETE_EPISODES: ScopedSql = scoped_sql!(
     "DELETE FROM liveness_episodes WHERE closed_at IS NOT NULL AND",
@@ -439,6 +443,7 @@ async fn purge_scope(
         purge_blobs(state, *r, &scope, s).await?;
         // Reports whose blob was already gone.
         s.reports += exec_scoped(state, &DELETE_REPORTS, *r, &scope).await?;
+        s.other += exec_scoped(state, &DELETE_GROUP_POSTS, *r, &scope).await?;
     }
     for r in &plan.events {
         s.events += exec_scoped(state, &DELETE_EVENTS, *r, &scope).await?;
@@ -564,6 +569,26 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             .execute(pool)
             .await?
             .rows_affected();
+    }
+
+    // Groups: archived ones are deleted after 30 days, unaccepted
+    // facilitator offers end, old invitations go (GROUPS.md §9, §18).
+    {
+        let mut conn = state.db().pool().acquire().await?;
+        let g = crate::db::repo::groups::sweep(&mut conn, now).await?;
+        s.other += g.groups_deleted + g.requests_deleted;
+        s.expired_secrets += g.invites_deleted;
+        // Alliance proposals: mark the expired ones, forget them 90 days
+        // after they expired.
+        let p = crate::db::repo::proposals::sweep(&mut conn, now).await?;
+        s.other += p.pruned;
+        // Reach outs follow alert retention; messages go with whatever
+        // used them (a proposal, a join request or a reach out), GROUPS.md §18.
+        use crate::db::repo::group_messages;
+        s.other += group_messages::prune(&mut *conn, alert_cut).await?;
+        s.other += group_messages::sweep_unused(&mut *conn, now - 3600 * 1000).await?;
+        // An epoch key goes once no stored item uses it (§18).
+        s.other += crate::db::repo::group_posts::prune_epoch_keys(&mut *conn).await?;
     }
 
     s.orphan_files = sweep_orphans(state, now).await?;

@@ -21,6 +21,8 @@ pub enum Target {
     /// An admin log entry: a role change, told to the person and every
     /// other admin ([`crate::roles`]).
     AdminLog(String),
+    /// A content-free notice about a group ([`super::group_notices`]).
+    GroupNotice(String),
 }
 
 pub struct NewNotification<'a> {
@@ -38,20 +40,21 @@ pub async fn insert<'e>(
     e: impl Executor<'e, Database = Any>,
     n: &NewNotification<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let (alert_id, report_id, log_id) = match n.target {
-        Target::Alert(a) => (Some(a.clone()), None, None),
-        Target::Report(r) => (None, Some(r.clone()), None),
-        Target::AdminLog(l) => (None, None, Some(l.clone())),
+    let (alert_id, report_id, log_id, group_notice_id) = match n.target {
+        Target::Alert(a) => (Some(a.clone()), None, None, None),
+        Target::Report(r) => (None, Some(r.clone()), None, None),
+        Target::AdminLog(l) => (None, None, Some(l.clone()), None),
+        Target::GroupNotice(g) => (None, None, None, Some(g.clone())),
     };
     let (status, mode) = match n.mode {
         None | Some(Mode::Off) => ("suppressed", Mode::Immediate),
         Some(m) => ("pending", m),
     };
     let r = sqlx::query(
-        "INSERT INTO notifications (id, alert_id, report_id, admin_log_id, recipient_id, channel,
-                                    urgency, status, attempts, created_at, mode, due_at,
-                                    next_attempt_at)
-         VALUES ($1, $2, $3, $4, $5, 'email', $6, $7, 0, $8, $9, $10, $10)
+        "INSERT INTO notifications (id, alert_id, report_id, admin_log_id, group_notice_id,
+                                    recipient_id, channel, urgency, status, attempts,
+                                    created_at, mode, due_at, next_attempt_at)
+         VALUES ($1, $2, $3, $4, $11, $5, 'email', $6, $7, 0, $8, $9, $10, $10)
          ON CONFLICT DO NOTHING",
     )
     .bind(new_hex_id())
@@ -64,6 +67,7 @@ pub async fn insert<'e>(
     .bind(n.now_ms)
     .bind(mode.as_str())
     .bind(n.due_at_ms)
+    .bind(group_notice_id)
     .execute(e)
     .await?;
     Ok(r.rows_affected() == 1)
@@ -104,6 +108,21 @@ pub struct DueNotification {
     pub alert_created_at_ms: Option<i64>,
     /// `Some` for an admin log entry.
     pub admin_log: Option<AdminLogNotice>,
+    /// `Some` for a notice about a group.
+    pub group_notice: Option<GroupNoticeInfo>,
+}
+
+/// What a notification about a group needs to word it: never the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupNoticeInfo {
+    pub kind: String,
+    /// A daily summary rather than one notice per change.
+    pub summary: bool,
+    /// The display name of the person who caused it, for the notices that
+    /// name them (proposals); `None` once their account is deleted.
+    pub actor_name: Option<String>,
+    /// A meeting reminder's time (see `group_notices.detail`).
+    pub detail: Option<String>,
 }
 
 /// What a notification about an admin log entry needs to word it.
@@ -128,7 +147,7 @@ pub async fn due<'e>(
     let rows = sqlx::query(
         "SELECT n.id, n.recipient_id, n.urgency, n.attempts, n.created_at,
                 r.email AS recipient_email, r.disabled AS recipient_disabled,
-                COALESCE(a.member_id, rp.member_id, al.user_id) AS member_id,
+                COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id) AS member_id,
                 COALESCE(a.device_id, rp.device_id) AS device_id,
                 a.source AS alert_source, a.kind AS alert_kind,
                 a.detail AS alert_detail, a.created_at AS alert_created_at,
@@ -137,7 +156,10 @@ pub async fn due<'e>(
                 ab.display_name AS about_name,
                 al.action AS log_action, al.via AS log_via, al.actor_id AS log_actor_id,
                 act.display_name AS log_actor_name,
+                gn.kind AS group_kind, gn.summary AS group_summary, gn.detail AS group_detail,
+                gna.display_name AS group_actor_name,
                 CASE WHEN n.admin_log_id IS NOT NULL
+                       OR n.group_notice_id IS NOT NULL
                        OR n.recipient_id = COALESCE(a.member_id, rp.member_id)
                        OR n.recipient_id = a.extra_recipient_id
                        OR EXISTS (SELECT 1 FROM ally_links l
@@ -149,7 +171,9 @@ pub async fn due<'e>(
          LEFT JOIN alerts a ON a.id = n.alert_id
          LEFT JOIN reports rp ON rp.id = n.report_id
          LEFT JOIN admin_log al ON al.id = n.admin_log_id
-         JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id, al.user_id)
+         LEFT JOIN group_notices gn ON gn.id = n.group_notice_id
+         LEFT JOIN users gna ON gna.id = gn.actor_id
+         JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id)
          LEFT JOIN devices d ON d.id = COALESCE(a.device_id, rp.device_id)
          LEFT JOIN users ab ON ab.id = a.about_user_id
          LEFT JOIN users act ON act.id = al.actor_id
@@ -202,6 +226,18 @@ pub async fn due<'e>(
                 alert_detail: r.try_get("alert_detail")?,
                 alert_created_at_ms: r.try_get("alert_created_at")?,
                 admin_log,
+                group_notice: r
+                    .try_get::<Option<String>, _>("group_kind")?
+                    .map(|kind| {
+                        Ok::<_, sqlx::Error>(GroupNoticeInfo {
+                            kind,
+                            summary: r.try_get::<Option<i64>, _>("group_summary")?.unwrap_or(0)
+                                != 0,
+                            actor_name: r.try_get("group_actor_name")?,
+                            detail: r.try_get("group_detail")?,
+                        })
+                    })
+                    .transpose()?,
             })
         })
         .collect()

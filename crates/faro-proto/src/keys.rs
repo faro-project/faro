@@ -483,6 +483,12 @@ pub struct Signed<T> {
 pub fn safety_code(a: &[u8], b: &[u8]) -> String {
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     let h = Hash32::of(&Canonical::new(TAG_SAFETY).bytes(lo).bytes(hi).finish());
+    digits_from_hash(&h)
+}
+
+/// Twelve groups of five digits from 60 bytes of BLAKE3 XOF output of `h`
+/// (each byte mod 10), as safety codes print them.
+pub(crate) fn digits_from_hash(h: &Hash32) -> String {
     // Expand to 60 digits with an XOF so every group has uniform-ish entropy.
     let mut xof = blake3::Hasher::new();
     xof.update(h.as_bytes());
