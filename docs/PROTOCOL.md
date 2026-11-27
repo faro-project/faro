@@ -132,6 +132,8 @@ An iPhone enrolls with `platform: "ios"` (`POST /v1/devices/enroll`). It blocks 
 
 Three new context-only signals, `doh_dropped`, `other_vpn` and `jailbreak_suspected` (no fields), are not sent as `tamper` events. They appear in the daily report's `health.context` like the desktop ones. The agent to service IPC mirror does not carry any of the six: only an iPhone produces them.
 
+**Android.** An Android phone enrolls with `platform: "android"` and watches like a computer (docs/ANDROID.md), so it reuses the desktop's signals (`permission_revoked` with `permission` `accessibility_service` or `device_admin`; `accessibility` stays the Mac's window-title permission, `window_hidden_from_capture`, `capture_failing`). It adds two context-only signals with no fields, `battery_optimization_on` and `usb_debugging_on`, which appear in `health.context` only. The IPC mirror doesn't carry them: the Android app runs the service in its own process.
+
 **Blocked lookups and shields.** Two new body types, both `capture`-class: the header `kind` is `capture` and the urgency is `none`.
 
 - `blocked_summary`: `bucket_start` (ms since the epoch), `bucket_secs`, `by_category` (category to count), `hosts` (a list of `{host, category, count}`, the host only, never a path or query) and `other_hosts` (blocked lookups of hosts not listed).

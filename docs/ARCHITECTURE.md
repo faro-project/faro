@@ -23,8 +23,8 @@ There is **no central Faro service.** A church, a college, a ministry, a small g
 
 ### Non-goals for v1
 
-- Mobile (iOS and Android). The iOS client is specified in [IOS.md](IOS.md).
-- Content **blocking** or filtering. iOS blocks: an iPhone's client is the one exception, and [IOS.md](IOS.md#1-summary) (§1) says what it does. The desktop clients still don't block.
+- Mobile (iOS and Android). The iOS client is specified in [IOS.md](IOS.md), the Android client in [ANDROID.md](ANDROID.md): an Android phone watches like a computer.
+- Content **blocking** or filtering. iOS blocks: an iPhone's client is the one exception, and [IOS.md](IOS.md#1-summary) (§1) says what it does. The desktop and Android clients don't block.
 - Live viewing of the screen. That will never be built.
 - Any ML on the server.
 - **Storing unblurred images anywhere.** That includes the member's own device (§3.5).
@@ -270,6 +270,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
 | Screen Time access revoked, web filter off or Screen Time settings cleared (iPhone: `screen_time_revoked`, `filter_off`, `settings_cleared`; docs/IOS.md §10.2) | iPhone app and tunnel | urgent | "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed" |
+| Accessibility service turned off, a `FLAG_SECURE` window kept in front, or Device Admin deactivation requested (Android: `permission_revoked` for `accessibility_service` and `device_admin`, `window_hidden_from_capture`; docs/ANDROID.md §8) | Android app | urgent | "Accessibility is off on Phone-X", "A window was hidden from Faro on Phone-X", "Faro's uninstall protection is being turned off on Phone-X" |
 | Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
 
 Every urgent signal in this table, and removing an ally, reaches people as a tamper-class alert: it can be moved to the digest but not switched off (§5.4). Settings changes and pauses can be switched off.
@@ -627,7 +628,7 @@ Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash ch
 Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups ([GROUPS.md §20](GROUPS.md#20-rollout) for the phases), `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
 
 **Phase 3: Beyond**
-Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter, specified in [IOS.md](IOS.md)), Helm chart, and possibly federation between instances.
+Optional DNS-level blocking, ChromeOS, Android (specified in [ANDROID.md](ANDROID.md)), a limited iOS client (Screen Time / content filter, specified in [IOS.md](IOS.md)), Helm chart, and possibly federation between instances.
 
 ---
 
@@ -636,7 +637,7 @@ Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Tim
 ### Open
 
 - **Funding and stewardship of the project**: signing certificates, the Apple Developer account and the release infrastructure have small fixed costs and need a responsible owner (a nonprofit? fiscal sponsorship?).
-- **Mobile timing**: many users' main risk is the phone, so mobile shouldn't slip so far that the product isn't useful.
+- **Mobile timing**: many users' main risk is the phone, so mobile shouldn't slip so far that the product isn't useful. See docs/IOS.md and docs/ANDROID.md.
 
 ### Decisions
 

@@ -578,6 +578,9 @@ mod compat {
                 | T::DohDropped
                 | T::OtherVpn
                 | T::JailbreakSuspected => return Err("iPhone-only tamper signal"),
+                T::BatteryOptimizationOn | T::UsbDebuggingOn => {
+                    return Err("Android-only tamper signal")
+                }
             })
         }
     }

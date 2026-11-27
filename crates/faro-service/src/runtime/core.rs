@@ -123,14 +123,18 @@ const REPORT_RETRY_MS: u64 = 60_000;
 /// Unsealed reports kept for retry; older ones are given up (with an error).
 const MAX_UNSEALED_REPORTS: usize = 8;
 
-/// The permission name in `permission_revoked` for Screen Recording.
-const SCREEN_RECORDING: &str = "screen_recording";
-/// How a capture refused for want of Screen Recording reads in
-/// `CaptureFailed` (the agent's `PlatformError::PermissionDenied`).
-const SCREEN_RECORDING_DENIED: &str = "permission denied: screen_recording";
+/// The permission name in `permission_revoked` for Screen Recording, the
+/// permission desktop captures need. A source can name another one
+/// ([`crate::source::FrameSource::capture_permission`]: Android's
+/// accessibility service); "Screen Recording" in this module means
+/// whichever permission that is.
+pub const SCREEN_RECORDING: &str = "screen_recording";
 
-fn is_screen_recording_off(sig: &TamperSignal) -> bool {
-    matches!(sig, TamperSignal::PermissionRevoked { permission, .. } if permission == SCREEN_RECORDING)
+/// How a capture refused for want of `permission` reads in
+/// `CaptureFailed` (the agent's `PlatformError::PermissionDenied`):
+/// `permission denied: screen_recording` on desktops.
+fn denied_reason(permission: &str) -> String {
+    format!("permission denied: {permission}")
 }
 
 /// Persisted in [`PERMISSIONS_FILE`].
@@ -187,6 +191,18 @@ pub fn login_notice(
         Some(n) => format!("the member and their {n} allies"),
         None => "the member and their allies".to_owned(),
     };
+    if cfg!(target_os = "android") {
+        // A phone: Faro covers the Android user it is installed in, not
+        // every account (docs/ANDROID.md §13), so the notice claims no more.
+        return (
+            "This phone is monitored by Faro".to_owned(),
+            format!(
+                "This phone (\"{device_name}\") is monitored by Faro for a member of \
+                 {instance_name}. Screenshots are blurred on this phone and shared, \
+                 encrypted, only with {shared}."
+            ),
+        );
+    }
     (
         "This computer is monitored by Faro".to_owned(),
         format!(
@@ -260,6 +276,9 @@ pub struct CoreParts {
     pub utc_offset_minutes: i32,
     pub supervisor: Supervisor,
     pub capture_failure_threshold: u32,
+    /// The permission captures need, as `permission_revoked` names it
+    /// ([`SCREEN_RECORDING`] on desktops).
+    pub capture_permission: &'static str,
     pub source_tx: mpsc::Sender<SourceCommand>,
     pub hb_state: watch::Sender<DeviceState>,
     pub upload_poke: Arc<Notify>,
@@ -309,6 +328,8 @@ pub struct Core {
     failures_in_row: u32,
     capture_failing_reported: bool,
     capture_failure_threshold: u32,
+    /// [`CoreParts::capture_permission`].
+    capture_permission: &'static str,
     screen_permission: Option<PermissionState>,
     /// A Screen Recording `permission_revoked` was sent for the capture
     /// target since its permission was last seen granted. The failures it
@@ -404,6 +425,7 @@ impl Core {
             failures_in_row: 0,
             capture_failing_reported: false,
             capture_failure_threshold: p.capture_failure_threshold,
+            capture_permission: p.capture_permission,
             screen_permission: None,
             screen_off_reported: false,
             accessibility: None,
@@ -503,6 +525,10 @@ impl Core {
         None
     }
 
+    fn is_screen_recording_off(&self, sig: &TamperSignal) -> bool {
+        matches!(sig, TamperSignal::PermissionRevoked { permission, .. } if permission == self.capture_permission)
+    }
+
     /// Route a tamper or context signal that concerns the whole computer
     /// (§3.7, PROTOCOL.md §3.3).
     pub async fn signal(&mut self, sig: TamperSignal) {
@@ -511,7 +537,7 @@ impl Core {
 
     /// Route a signal from `account`'s session.
     async fn signal_for(&mut self, sig: TamperSignal, account: Option<String>) {
-        if is_screen_recording_off(&sig) && account == self.target_account() {
+        if self.is_screen_recording_off(&sig) && account == self.target_account() {
             self.screen_off_reported = true;
         }
         let wall = self.clock.wall_ms();
@@ -1219,7 +1245,7 @@ impl Core {
         {
             self.capture_failing_reported = true;
             let account = self.target_account();
-            let denied = reason.contains(SCREEN_RECORDING_DENIED)
+            let denied = reason.contains(&denied_reason(self.capture_permission))
                 || self.screen_permission == Some(PermissionState::Denied);
             let sig = match (denied, self.screen_off_reported) {
                 // Allies were already told Screen Recording is off.
@@ -1228,7 +1254,7 @@ impl Core {
                 // here (a new install, or a reinstall that dropped the
                 // grant), or turned off in a way it missed.
                 (true, false) => TamperSignal::PermissionRevoked {
-                    permission: SCREEN_RECORDING.into(),
+                    permission: self.capture_permission.into(),
                     never_granted: !self
                         .seen_permissions
                         .granted_before(account.as_deref().unwrap_or_default()),
@@ -1239,6 +1265,25 @@ impl Core {
             };
             self.signal_for(sig, account).await;
         }
+    }
+
+    /// A capture that saw only a window kept out of captures (Android's
+    /// `FLAG_SECURE`). It failed, and counts as a failure on the report
+    /// and in the status, but not towards `capture_failing`: the source
+    /// reports the window itself (`window_hidden_from_capture`, after its
+    /// own debounce, or not at all for the system's own windows), and one
+    /// cause gives one signal (§3.7).
+    fn capture_hidden(&mut self) {
+        tracing::info!("capture hidden by a secure window");
+        self.journal.capture_failure();
+        let failure = CaptureFailure {
+            at_ms: self.clock.wall_ms(),
+            reason: crate::source::HIDDEN_FROM_CAPTURE.to_owned(),
+        };
+        self.status.update(|s| {
+            s.capture_failures += 1;
+            s.capture.last_failure = Some(failure);
+        });
     }
 
     /// Hand a model or domain list the update task installed to the
@@ -1452,6 +1497,10 @@ impl Core {
                 self.capture_in_flight = None;
                 self.capture_failed(&reason).await;
             }
+            SourceEvent::CaptureHidden => {
+                self.capture_in_flight = None;
+                self.capture_hidden();
+            }
             SourceEvent::Foreground { app, title } => {
                 let changed =
                     self.context.app.as_ref().map(|a| &a.id) != app.as_ref().map(|a| &a.id);
@@ -1531,7 +1580,7 @@ impl Core {
                 if revoked {
                     self.signal_for(
                         TamperSignal::PermissionRevoked {
-                            permission: SCREEN_RECORDING.into(),
+                            permission: self.capture_permission.into(),
                             never_granted: false,
                         },
                         account.clone(),

@@ -154,6 +154,19 @@ pub async fn enroll(
     params: &EnrollParams,
     confirm: impl FnOnce(&InstanceInfo) -> bool,
 ) -> Result<Enrollment, EnrollError> {
+    enroll_as(dir, clock, params, this_platform(), confirm).await
+}
+
+/// [`enroll`] as `platform` rather than [`this_platform`]: the Android
+/// core (`crates/faro-android`) is always `android`, also in its tests on
+/// a desktop host.
+pub async fn enroll_as(
+    dir: &StateDir,
+    clock: Arc<dyn Clock>,
+    params: &EnrollParams,
+    platform: Platform,
+    confirm: impl FnOnce(&InstanceInfo) -> bool,
+) -> Result<Enrollment, EnrollError> {
     if let Some(existing) = dir.read_json::<Enrollment>(ENROLLMENT_FILE)? {
         return Err(StateError::AlreadyEnrolled {
             instance: existing.instance_url.clone(),
@@ -173,7 +186,7 @@ pub async fn enroll(
         &shared::Registration {
             code: &params.code,
             device_pubkey: key.public(),
-            platform: this_platform(),
+            platform,
             device_name: &params.device_name,
             client_version: env!("CARGO_PKG_VERSION"),
             member_key: params.member_key.as_deref(),
