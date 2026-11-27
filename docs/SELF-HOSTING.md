@@ -365,6 +365,21 @@ The logo and these settings are stored in the database, so backups include them.
 
 **Faro's logo and yours.** Faro's logo comes with the software and is never recoloured or changed (see `assets/brand/README.md`); you may use it to say you run Faro. Your logo is yours: Faro shows it next to its own, re-encoded, never in place of it.
 
+### Groups
+
+**Admin → Settings**, in the **Groups** card, sets how groups work on your instance. Groups are on by default. The settings are:
+
+- **Groups are on.** Turning this off hides groups. Existing groups become read-only and unlisted. Alliances are never affected.
+- **Who can start a group:** anyone with an account (the default), or admins only.
+- **Who can list a group in the directory:** facilitators (the default), admins only, or nobody (no directory).
+- **Who can invite people into a group:** facilitators (the default), or any participant. A facilitator can narrow this for their own group, never widen it.
+- **Group invitations can create accounts:** when registration is `invite-only`, whether an invitation to a group lets a new address sign up.
+- **Most groups one person can be in:** 10 by default.
+
+There is no size limit for a group. A facilitator can set a participant limit for their own group.
+
+**Large groups add email.** Each invitation sends an email. Above 32 participants, a group counts as large: meeting reminder emails are off by default (each person can switch them on), and join and leave notices to facilitators arrive as one daily summary. Your email provider may cap how many messages you can send a day, and tamper alerts need that allowance too, so check the cap before you invite a large group.
+
 ### The same tasks with `curl`
 
 Everything above can also be done with `curl`, for example to script it, or with a build of `faro-server` that has no web app. Run these commands on the server itself (or on any Mac or Linux computer). They talk to your instance's real `https://` address, which also proves HTTPS works.
@@ -483,6 +498,7 @@ Notes:
 - If the password contains a `$`, wrap it in single quotes in `faro.env`: `FARO_SMTP_PASSWORD='pa$word'`.
 - Plain unencrypted SMTP (`FARO_SMTP_TLS=none`) is only accepted for a mail relay on the same machine.
 - Email settings can only be changed in `faro.env`, not through the admin API.
+- Groups can add a lot of email in a large group. See [Groups](#groups).
 
 **Test it** in two ways:
 

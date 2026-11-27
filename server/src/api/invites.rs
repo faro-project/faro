@@ -65,6 +65,18 @@ pub struct InviteCreated {
     pub invite_url: String,
 }
 
+/// What [`MAX_LIVE_INVITES`] counts: unused, unexpired email invitations
+/// and alliance proposals that are open in the sender's view (GROUPS.md
+/// §7.6: they share the limit).
+pub(crate) async fn live_invites_and_proposals(
+    conn: &mut sqlx::AnyConnection,
+    user: &UserId,
+    now: i64,
+) -> AppResult<i64> {
+    Ok(invites::count_live_by_inviter(&mut *conn, user, now).await?
+        + crate::db::repo::proposals::count_open_by_sender(&mut *conn, user, now).await?)
+}
+
 fn invite_url(state: &AppState, token: &str) -> String {
     format!("{}/invite#token={token}", state.config().public_url)
 }
@@ -82,9 +94,10 @@ pub(crate) async fn create(
         return Err(crate::auth::session::account_being_deleted());
     }
     let now = state.now_ms();
-    if invites::count_live_by_inviter(state.db().pool(), &inviter.id, now).await?
-        >= MAX_LIVE_INVITES
-    {
+    let mut conn = state.db().pool().acquire().await?;
+    let live = live_invites_and_proposals(&mut conn, &inviter.id, now).await?;
+    drop(conn);
+    if live >= MAX_LIVE_INVITES {
         return Err(AppError::conflict(
             "too_many_invites",
             "too many open invitations; wait for some to be accepted or expire",
@@ -248,18 +261,7 @@ pub async fn accept(
     ApiJson(up): ApiJson<AllyKeyUpload>,
 ) -> AppResult<(StatusCode, Json<InviteAccepted>)> {
     s.require_not_being_deleted()?;
-    if faro_crypto::validate_enc_pubkey(&up.enc_pubkey).is_err() {
-        return Err(AppError::bad_request(
-            "invalid_enc_pubkey",
-            "enc_pubkey is not a usable X25519 key",
-        ));
-    }
-    if !up.wrapped_privkey.is_object() || up.wrapped_privkey.to_string().len() > MAX_WRAPPED_BYTES {
-        return Err(AppError::bad_request(
-            "invalid_wrapped_key",
-            "wrapped_privkey must be a JSON object of at most 8 KiB",
-        ));
-    }
+    validate_ally_key_upload(&up)?;
     let inv = live_invite(&state, &token).await?;
     // Member invites are redeemed by signing in, not here.
     if inv.kind != InviteKind::Ally {
@@ -269,67 +271,16 @@ pub async fn accept(
         return Err(AppError::Forbidden("invite_email_mismatch"));
     }
     let member = inv.inviter_id.clone();
-    if member == s.user.id {
-        return Err(AppError::bad_request(
-            "cannot_invite_self",
-            "you cannot be your own ally",
-        ));
-    }
     let now = state.now_ms();
 
     let mut tx = state.db().begin_write().await?;
-    // Validate everything before consuming the invite, so a mistake (a
-    // freshly generated key on a second device) does not burn it. Neither
-    // side may be on the way out: the member was not told about a new ally
-    // in their deletion notice, nor the ally about a new member.
-    if users::is_being_deleted(&mut *tx, &member).await? {
-        return Err(AppError::NotFound);
-    }
-    super::account::refuse_if_being_deleted(&mut *tx, &s.user.id).await?;
-    if allies::live_state(&mut *tx, &member, &s.user.id)
-        .await?
-        .is_some()
-    {
-        return Err(AppError::conflict(
-            "already_linked",
-            "you are already linked to this member",
-        ));
-    }
-    match allies::live_key(&mut *tx, &s.user.id).await? {
-        Some(k) if k.enc_pubkey != up.enc_pubkey => {
-            // One key per ally: replacing it would silently cut them off
-            // from every other member who endorsed the old one.
-            return Err(AppError::conflict(
-                "ally_key_mismatch",
-                "you already have an ally key; unlock it (GET /v1/me/ally-key) and use it",
-            ));
-        }
-        Some(_) => {}
-        None => {
-            allies::insert_key(
-                &mut *tx,
-                &s.user.id,
-                &up.enc_pubkey,
-                &up.wrapped_privkey,
-                now,
-            )
-            .await?;
-        }
-    }
+    // Everything is checked before the invite is consumed, and in one
+    // transaction, so a mistake (a freshly generated key on a second
+    // device) does not burn it.
+    let ally_key_id = accept_ally_link(&mut tx, &member, &s.user.id, Some(&up), None, now).await?;
     if !invites::consume(&mut *tx, &inv.token_hash, &s.user.id, now).await? {
         return Err(AppError::NotFound);
     }
-    match allies::insert_pending(&mut *tx, &member, &s.user.id, now).await {
-        Ok(_) => {}
-        Err(e) if is_unique_violation(&e) => {
-            return Err(AppError::conflict(
-                "already_linked",
-                "you are already linked to this member",
-            ))
-        }
-        Err(e) => return Err(e.into()),
-    }
-    users::grant_ally(&mut *tx, &s.user.id).await?;
     tx.commit().await?;
     tracing::info!(member = %member, ally = %s.user.id, "ally invitation accepted");
 
@@ -349,9 +300,115 @@ pub async fn accept(
         Json(InviteAccepted {
             member_id: member,
             state: allies::LinkState::Pending.as_str().to_owned(),
-            ally_key_id: key_id(up.enc_pubkey.as_bytes()),
+            ally_key_id,
         }),
     ))
+}
+
+// ---- Accepting to be someone's ally ------------------------------------------
+//
+// Shared by email invitations (bound to an address, above) and alliance
+// proposals in groups (bound to a user id, `super::proposals`). Both end in
+// the same place: a **pending** link. Only the member's signed approval
+// (`POST /v1/me/allies/{ally_id}/approve`) ever makes it active.
+
+/// Check an uploaded ally key before anything is stored.
+pub(crate) fn validate_ally_key_upload(up: &AllyKeyUpload) -> AppResult<()> {
+    if faro_crypto::validate_enc_pubkey(&up.enc_pubkey).is_err() {
+        return Err(AppError::bad_request(
+            "invalid_enc_pubkey",
+            "enc_pubkey is not a usable X25519 key",
+        ));
+    }
+    if !up.wrapped_privkey.is_object() || up.wrapped_privkey.to_string().len() > MAX_WRAPPED_BYTES {
+        return Err(AppError::bad_request(
+            "invalid_wrapped_key",
+            "wrapped_privkey must be a JSON object of at most 8 KiB",
+        ));
+    }
+    Ok(())
+}
+
+/// Inside a transaction: `user`'s ally key, by its fingerprint. Their
+/// existing key if they have one (an upload must then be that same key),
+/// else the uploaded one, stored now. Without either: `409
+/// ally_key_required`.
+pub(crate) async fn ensure_ally_key(
+    tx: &mut sqlx::AnyConnection,
+    user: &UserId,
+    up: Option<&AllyKeyUpload>,
+    now: i64,
+) -> AppResult<String> {
+    if let Some(up) = up {
+        validate_ally_key_upload(up)?;
+    }
+    match (allies::live_key(&mut *tx, user).await?, up) {
+        (Some(k), Some(up)) if k.enc_pubkey != up.enc_pubkey => {
+            // One key per ally: replacing it would silently cut them off
+            // from every other member who endorsed the old one.
+            Err(AppError::conflict(
+                "ally_key_mismatch",
+                "you already have an ally key; unlock it (GET /v1/me/ally-key) and use it",
+            ))
+        }
+        (Some(k), _) => Ok(k.key_id),
+        (None, Some(up)) => {
+            allies::insert_key(&mut *tx, user, &up.enc_pubkey, &up.wrapped_privkey, now).await?;
+            Ok(key_id(up.enc_pubkey.as_bytes()))
+        }
+        (None, None) => Err(AppError::conflict(
+            "ally_key_required",
+            "create your ally key first: send it with the request (ally_key)",
+        )),
+    }
+}
+
+/// Inside a transaction: `ally` agrees to be `member`'s ally, with their
+/// existing ally key or `up`. Creates the **pending** link (labelled with
+/// `origin_group` when it was proposed in a group) and returns the ally
+/// key's fingerprint. Neither side may be on the way out: the member was
+/// not told about a new ally in their deletion notice, nor the ally about a
+/// new member. The member must have room for another ally; only the caller
+/// (the person accepting) learns why not.
+///
+/// The caller has established that `ally` is the person entitled to accept
+/// (the invited address, or a proposal's recipient or sender).
+pub(crate) async fn accept_ally_link(
+    tx: &mut sqlx::AnyConnection,
+    member: &UserId,
+    ally: &UserId,
+    up: Option<&AllyKeyUpload>,
+    origin_group: Option<&str>,
+    now: i64,
+) -> AppResult<String> {
+    if member == ally {
+        return Err(AppError::bad_request(
+            "cannot_invite_self",
+            "you cannot be your own ally",
+        ));
+    }
+    if users::is_being_deleted(&mut *tx, member).await? {
+        return Err(AppError::NotFound);
+    }
+    super::account::refuse_if_being_deleted(&mut *tx, ally).await?;
+    let already = || AppError::conflict("already_linked", "these two people are already linked");
+    if allies::live_state(&mut *tx, member, ally).await?.is_some() {
+        return Err(already());
+    }
+    if allies::count_live(&mut *tx, member).await? >= MAX_ALLIES {
+        return Err(AppError::conflict(
+            "too_many_allies",
+            format!("a member can have at most {MAX_ALLIES} allies, and this one has no room"),
+        ));
+    }
+    let ally_key_id = ensure_ally_key(tx, ally, up, now).await?;
+    match allies::insert_pending(&mut *tx, member, ally, origin_group, now).await {
+        Ok(_) => {}
+        Err(e) if is_unique_violation(&e) => return Err(already()),
+        Err(e) => return Err(e.into()),
+    }
+    users::grant_ally(&mut *tx, ally).await?;
+    Ok(ally_key_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

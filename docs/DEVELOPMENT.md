@@ -39,7 +39,7 @@ cargo deny check                                        # licenses, bans, source
 
 ## Invariants every change must keep
 
-These come from ARCHITECTURE.md §3.5, §4.3, §5 and §12. Reviewers check them on every PR.
+These come from ARCHITECTURE.md §3.5, §4.3, §5 and §12, and invariant 7 from GROUPS.md §4. Reviewers check them on every PR.
 
 1. **No unblurred image leaves memory.** `faro_platform::Frame` has no `Clone`, `Serialize` or pixel-printing `Debug`, and it is zeroized on drop. The only image type in any wire or storage format is `BlurredThumbnail`.
 2. **The instance only sees ciphertext and header metadata.** Nothing in `faro-server` can decrypt anything.
@@ -47,6 +47,7 @@ These come from ARCHITECTURE.md §3.5, §4.3, §5 and §12. Reviewers check them
 4. **Tamper can't be silenced.** The server floors urgency with `EventKind::min_urgency()`, and tamper-class alerts can only be moved to the digest, never turned off. `notify::policy::is_tamper_class` decides which alerts those are; ARCHITECTURE.md §5.4 lists them.
 5. **Clients trust project signatures for updates, never the instance.**
 6. **Disabling or deleting an account is never silent.** The person and every accountability partner are told, and the alerts can't be switched off: `account_disabled` and `ally_disabled` when an admin disables an account, `account_deleted` and `ally_deleted` when someone asks for theirs to be deleted (or an admin does: then the notices say "deleted by the instance administrator", and a disabled person is told too), and `account_deletion_cancelled` when it is cancelled. Disabling stops sign-in, never monitoring. Deleting stops monitoring only at the purge, after the 7-day hold and once every notice has been delivered. The purge removes every row that names the person: a migration that adds a reference to `users` must add it to `db::repo::deletion::USER_COLUMNS` too, or `every_reference_to_users_is_purged` fails.
+7. **Groups never grant access or activate a link.** Group membership never shows anyone's reports or alerts, and leaving, being removed or a group closing never ends an alliance. Only the member's own `POST /v1/me/allies/{ally_id}/approve` activates an `ally_links` row, after the safety-code check. Facilitators never act for someone else, declined proposals stay private, emails never name a group, and group content is encrypted to its recipients. Nobody joins without a yes. The full list is GROUPS.md [§4](GROUPS.md#4-principles-invariants). `no_route_but_approve_activates_a_link` in `server/tests/proposals.rs` checks at runtime that only `approve` activates a link, and `only_approve_calls_the_one_statement_that_activates_a_link` checks the source.
 
 ## Dependency notes
 

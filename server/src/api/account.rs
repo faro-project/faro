@@ -47,6 +47,7 @@ use crate::auth::normalize_email;
 use crate::auth::session::SessionUser;
 use crate::db::repo::admin_log::{self, Action, Via};
 use crate::db::repo::alerts::{self, AlertSource, NewAlert};
+use crate::db::repo::proposals::{self, VoidScope};
 use crate::db::repo::users::{self, PendingDeletion};
 use crate::db::repo::{allies, sessions};
 use crate::error::{AppError, AppResult};
@@ -283,6 +284,9 @@ pub(crate) async fn start(
     if !users::request_deletion(&mut *tx, id, now, purge_after_ms, by_admin).await? {
         return Err(already());
     }
+    // An account in its hold can't send or receive alliance proposals: the
+    // open ones end now (GROUPS.md §7.6, §9). Links stay as they are.
+    proposals::void(&mut *tx, VoidScope::User(id)).await?;
     let notice = Notice::Requested {
         purge_after_ms,
         by_admin,

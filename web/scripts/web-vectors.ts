@@ -5,7 +5,12 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { b64, hex, utf8 } from '../src/lib/crypto/bytes.ts';
+import { b64, hex, unb64, utf8 } from '../src/lib/crypto/bytes.ts';
+import {
+	checkInBytes,
+	sealGroupMessage,
+	sealGroupMessageToEpoch
+} from '../src/lib/crypto/group.ts';
 import { sign, signPublicKey } from '../src/lib/crypto/keys.ts';
 import { deriveWrapKey, wrapSecret, wrapWithKey } from '../src/lib/crypto/passphrase.ts';
 import {
@@ -18,6 +23,14 @@ import {
 	proveAllyKeyRewrap,
 	signWith
 } from '../src/lib/crypto/proto.ts';
+import {
+	emptyRoster,
+	groupSafetyCode,
+	prepareEntries,
+	sealEpochKey,
+	signSnapshot,
+	type RosterChange
+} from '../src/lib/crypto/roster.ts';
 
 const path = join(import.meta.dirname, '../../crates/faro-crypto/tests/data/web-vectors.json');
 const v = JSON.parse(readFileSync(path, 'utf8'));
@@ -55,6 +68,60 @@ const s1 = new Uint8Array(32).fill(0x21);
 const s2 = new Uint8Array(32).fill(0x31);
 
 const msg = utf8('signed by the web app');
+// A reach out sealed and signed here, to both allies.
+const messageText = 'Sealed in the browser: can someone call me? ✓';
+const groupMessage = sealGroupMessage(
+	seed,
+	unb64(memberEnc),
+	{
+		instance_id: ids.instance,
+		group_id: 'fedcba9876543210fedcba9876543210',
+		item_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+		kind: 'reach_out',
+		author_id: ids.member,
+		issued_at_ms: 1_790_000_600_000,
+		recipients: [
+			{ user_id: ids.ally_b, enc_pubkey: v.keys.ally_b_pubkey },
+			{ user_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey }
+		]
+	},
+	messageText
+);
+// A check-in to the whole group, sealed here with an epoch key.
+const checkIn = { scale: 2 as const, was_hard: 'Sealed in the browser ✓', ask: 'A call' };
+const epochKey = new Uint8Array(32).fill(0x5a);
+const wholeGroup = sealGroupMessageToEpoch(
+	seed,
+	epochKey,
+	{
+		instance_id: ids.instance,
+		group_id: 'fedcba9876543210fedcba9876543210',
+		item_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+		kind: 'check_in',
+		author_id: ids.member,
+		issued_at_ms: 1_790_000_700_000,
+		recipients: [],
+		epoch: 3
+	},
+	checkInBytes(checkIn)
+);
+// A private reply to a check-in, to ally A.
+const replyText = 'Proud of you. Calling Sunday ✓';
+const reply = sealGroupMessage(
+	seed,
+	unb64(memberEnc),
+	{
+		instance_id: ids.instance,
+		group_id: 'fedcba9876543210fedcba9876543210',
+		item_id: 'cccccccccccccccccccccccccccccccc',
+		kind: 'check_in_reply',
+		author_id: ids.member,
+		issued_at_ms: 1_790_000_800_000,
+		recipients: [{ user_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey }],
+		parent_id: 'aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb'
+	},
+	replyText
+);
 // What an ally's browser opens from the instance's sealed challenge.
 const challenge = new Uint8Array(32).fill(0x44);
 v.from_web = {
@@ -131,7 +198,84 @@ v.from_web = {
 			},
 			challenge
 		)
+	},
+	group_message: {
+		sealed: groupMessage,
+		plaintext: JSON.stringify({ text: messageText })
+	},
+	group_message_epoch: {
+		sealed: wholeGroup,
+		epoch_key_hex: hex(epochKey),
+		plaintext: JSON.stringify(checkIn)
+	},
+	group_message_reply: {
+		sealed: reply,
+		plaintext: JSON.stringify({ text: replyText })
 	}
 };
+// A roster log signed by the web app: its creator (the web seed) and ally A
+// join, then ally B joins and ally A leaves, then a pure rotation; its
+// snapshot; and the last epoch key sealed to ally A.
+const webGroup = 'web-group-01';
+let roster = emptyRoster(ids.instance, webGroup);
+const steps: RosterChange[][] = [
+	[
+		{
+			kind: 'join',
+			user_id: ids.ally_a,
+			role: 'participant',
+			enc_pubkey: v.keys.ally_a_pubkey,
+			sign_pubkey: null
+		},
+		{
+			kind: 'join',
+			user_id: 'usr_web01',
+			role: 'facilitator',
+			enc_pubkey: memberEnc,
+			sign_pubkey: b64(pk)
+		}
+	],
+	[
+		{ kind: 'leave', user_id: ids.ally_a },
+		{
+			kind: 'join',
+			user_id: ids.ally_b,
+			role: 'participant',
+			enc_pubkey: v.keys.ally_b_pubkey,
+			sign_pubkey: null
+		}
+	],
+	[]
+];
+const rosterEntries = [];
+let lastKey: Uint8Array | null = null;
+for (const [i, changes] of steps.entries()) {
+	const r = prepareEntries(roster, changes, 'usr_web01', seed, {
+		now: 1_790_000_700_000 + i,
+		rotate: true
+	});
+	roster = r.state;
+	for (const e of r.entries) {
+		rosterEntries.push(e.entry);
+		lastKey = e.epochKey;
+	}
+}
+// Ally A left, so seal the last key to them by hand: the vector only needs
+// a box Rust can open.
+const sealedForA = sealEpochKey(lastKey!, [
+	{ user_id: ids.ally_a, role: 'participant', enc_pubkey: v.keys.ally_a_pubkey, sign_pubkey: null }
+])[0].sealed_key;
+v.from_web.roster = {
+	group_id: webGroup,
+	entries: rosterEntries,
+	snapshot: signSnapshot(roster, 'usr_web01', seed, 1_790_000_800_000),
+	epoch_key_hex: hex(lastKey!),
+	sealed_epoch_key: sealedForA,
+	safety_code: groupSafetyCode(ids.instance, webGroup, {
+		seq: roster.next_seq - 1,
+		hash: roster.head
+	})
+};
+
 writeFileSync(path, JSON.stringify(v, null, 2) + '\n');
 console.log(`wrote from_web to ${path}`);

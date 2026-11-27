@@ -25,7 +25,7 @@ The built-in notice says what Faro does. It can't say who you are, why you run t
 
 ### Where the facts come from
 
-Every statement below about what Faro collects, keeps, shows or deletes comes from the Faro source code and its documentation: [ARCHITECTURE.md](../ARCHITECTURE.md) §4.3, §5.3, §5.4, §8 and §12, [PROTOCOL.md](../PROTOCOL.md), [SELF-HOSTING.md](../SELF-HOSTING.md) and the server code (`server/src`). It describes the Faro version this file came with. If you changed Faro's code, or run a much newer or older version, check it again.
+Every statement below about what Faro collects, keeps, shows or deletes comes from the Faro source code and its documentation: [ARCHITECTURE.md](../ARCHITECTURE.md) §4.3, §5.3, §5.4, §8 and §12, [GROUPS.md](../GROUPS.md) §11, [PROTOCOL.md](../PROTOCOL.md), [SELF-HOSTING.md](../SELF-HOSTING.md) and the server code (`server/src`). It describes the Faro version this file came with. If you changed Faro's code, or run a much newer or older version, check it again.
 
 ---
 
@@ -85,6 +85,11 @@ Our server stores the following. Some of it is shown to our admins in Faro's adm
 | **Network addresses** | Like any web server, ours sees the network (IP) address of each computer and browser that connects. Faro keeps them only in memory, to limit how many requests one address can make, and does not write them to its database or its logs | No |
 | **Server logs** | Faro's log records events such as "account deletion requested" or "ally approved", with internal account and computer codes (for example `usr_…`). At its normal log level it doesn't log names, email addresses or network addresses. We keep logs for [FILL IN: how long, and where. Faro doesn't rotate its own log: Docker or systemd does, as set up on your server]. [FILL IN: if a proxy or tunnel in front of Faro (Caddy, nginx, Cloudflare) keeps its own logs, which usually include network addresses, say so and say for how long] | No |
 | **Admin log** | What our admins did to accounts: who was made an admin or stopped being one, which accounts were disabled or re-enabled, which accounts an admin asked to delete, cancelled deletions, and accounts created on the server. Each entry says which account, which admin and when. An entry about a deleted account no longer names it | Yes |
+| **Groups** | Each group's name and description, when it was created, its facilitators and participants, and its history (who joined, left or was removed). Groups are for people who choose to join them | Counts and facilitators only |
+| **Group listings and meetings** | For a group that is listed: its name, description and facilitators, and whether it is full. A group's meeting day, time and place, if its facilitators set them. Listed groups are visible to everyone signed in to our instance | No, but it is in the database |
+| **Join requests** | Who asked to join which group, when, and whether it was accepted, declined, withdrawn or expired | No, but it is in the database |
+| **Alliance proposals** | Who proposed to whom (asking to be an ally, offering to be one, or partnering up), which group it came from, when, and the outcome. Also who has stopped whom from sending proposals | No, but it is in the database |
+| **Meeting reminders** | Which groups you want reminders for, and whether you also want them by email | No |
 | **Our branding** | Our logo, welcome line and support contact, if we set them. These are public | Yes |
 
 **What this means in practice.** We can see *that* something happened on a member's computer, and when, and whether it was urgent. With Faro's default settings, a flag rated medium or high is urgent. So we can see, for example, that an urgent flag happened at 9:04 pm on a Tuesday. We can't see what was on the screen, what website it was, or why it was flagged.
@@ -96,6 +101,7 @@ We use this information only to run the service: to sign you in, deliver encrypt
 Faro sends email for sign-in links, invitations and notifications. Emails never contain what a report or alert says. They contain:
 
 - **Notifications:** the member's name, the computer's name and whether it is urgent. For example: "Urgent: new alert for Sam on Laptop-X. Open Faro to view." The hourly digest gives counts per member.
+- **Groups:** invitations, meeting reminders (if the person asked for email) and group notices. They never name the group; they say something like "a group on our instance". Group notices follow each person's notification choices.
 - **Account changes:** when an account is disabled, re-enabled, being deleted, or a deletion is cancelled, the email says so in words, names the people concerned and gives the dates.
 - **Invitations:** the name of the person who invited you and our instance's name.
 - **Sign-in links:** a link that works once, for 15 minutes.
@@ -113,6 +119,8 @@ Faro deletes old data automatically, once a day. These are our settings:
 | Alerts and email notification records | [FILL IN] days | 90 days |
 | Sign-ins, sign-in links, invitations and setup codes | until they expire | 30 days, 15 minutes, 7 days |
 | Your account, computers, allies, keys and settings | until your account is deleted (section 8) | |
+| Groups that have been closed | 30 days after closing, then deleted | 30 days |
+| Join requests and alliance proposals | 90 days after they were decided or expired | 90 days |
 | Admin log entries | always; a deleted account's name and code are taken out of them | always |
 
 - **Members can choose shorter, never longer.** A member can shorten how long their own records are kept, in **Settings**, to as little as 7 days. A shorter choice applies only to what arrives after the change, and their allies are told about it. This stops a member from quietly deleting something before an ally has seen it.
@@ -126,6 +134,7 @@ Faro deletes old data automatically, once a day. These are our settings:
 - **The member.** A member sees everything their allies see about them.
 - **Other allies of the same member.** Allies may see each other's names, for example when an ally is added, removed or deletes their account.
 - **Members you are an ally for** see your name and email address.
+- **Others in a group you join** see its name, roster and history, and that you joined or left. Facilitators also see join requests to their group. Nobody in a group can see another person's proposals, and facilitators can't see anyone's reports or alerts.
 - **Us, the operator.** Our admins see what section 4 says is shown in the admin console. Anyone with access to the server sees the rest of section 4. Nobody here can read reports or alerts (section 3). Being an admin gives no access to anyone's content.
 - **Our service providers**, who handle data for us:
   - hosting: [FILL IN: for example "Hetzner, a server in Germany" or "a computer in our church office"];
@@ -146,7 +155,7 @@ What happens next:
 
 - **Faro tells people straight away, by email.** If you are a member, your allies are told. If you are an ally, the members you support and their other allies are told. These emails can't be switched off. This is on purpose: leaving Faro is allowed, but never silent.
 - **Nothing else changes for 7 days.** Your computers keep reporting and your allies keep getting alerts. You can still sign in, and every page has a **Cancel deletion** button. If you cancel, the same people are told. While you wait, you can't invite allies or add computers.
-- **Then everything about you is deleted** from the server: your account, computers, activity, alerts, reports, keys, allies and settings. Faro waits until every deletion email has been sent, so if our email isn't working, the deletion waits too. From then on the server refuses your computers, so uninstall Faro from them.
+- **Then everything about you is deleted** from the server: your account, computers, activity, alerts, reports, keys, allies, settings, group memberships, join requests and proposals (group history keeps the event, without your name). Faro waits until every deletion email has been sent, so if our email isn't working, the deletion waits too. From then on the server refuses your computers, so uninstall Faro from them.
 
 **What remains after deletion:**
 

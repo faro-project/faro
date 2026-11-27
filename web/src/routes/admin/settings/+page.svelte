@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, describeError } from '#lib/api.ts';
+	import GroupSettingsForm from '#lib/admin/GroupSettingsForm.svelte';
 	import SettingsForm from '#lib/admin/SettingsForm.svelte';
 	import type { InstanceSettings } from '#lib/types.ts';
 
@@ -43,4 +44,5 @@
 		showUpdates
 		onsaved={(s) => (settings = s)}
 	/>
+	<GroupSettingsForm groups={settings.groups} onsaved={(g) => settings && (settings.groups = g)} />
 {/if}

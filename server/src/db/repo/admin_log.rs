@@ -31,6 +31,16 @@ pub enum Action {
     AccountDisabled,
     /// An admin re-enabled a disabled account.
     AccountEnabled,
+    /// An admin archived a group (for example over an abusive name). The
+    /// entry names the group by id only; participants have their own
+    /// notice.
+    GroupArchived,
+    /// An admin listed a group in the directory (the instance lets only
+    /// admins list). By id only.
+    GroupListed,
+    /// An admin removed a group from the directory. The facilitators have
+    /// their own notice.
+    GroupUnlisted,
 }
 
 impl Action {
@@ -43,6 +53,9 @@ impl Action {
             Action::AccountCreated => "account_created",
             Action::AccountDisabled => "account_disabled",
             Action::AccountEnabled => "account_enabled",
+            Action::GroupArchived => "group_archived",
+            Action::GroupListed => "group_listed",
+            Action::GroupUnlisted => "group_unlisted",
         }
     }
 
@@ -55,6 +68,9 @@ impl Action {
             "account_created" => Some(Action::AccountCreated),
             "account_disabled" => Some(Action::AccountDisabled),
             "account_enabled" => Some(Action::AccountEnabled),
+            "group_archived" => Some(Action::GroupArchived),
+            "group_listed" => Some(Action::GroupListed),
+            "group_unlisted" => Some(Action::GroupUnlisted),
             _ => None,
         }
     }
@@ -113,6 +129,31 @@ pub async fn insert<'e>(
     Ok(id)
 }
 
+/// Record an admin's action on a group. The entry is about no account.
+pub async fn insert_for_group<'e>(
+    e: impl Executor<'e, Database = Any>,
+    action: Action,
+    group_id: &str,
+    actor: &UserId,
+    via: Via,
+    now_ms: i64,
+) -> Result<String, sqlx::Error> {
+    let id = new_hex_id();
+    sqlx::query(
+        "INSERT INTO admin_log (id, action, user_id, actor_id, via, created_at, group_id)
+         VALUES ($1, $2, NULL, $3, $4, $5, $6)",
+    )
+    .bind(&id)
+    .bind(action.as_str())
+    .bind(actor.as_str())
+    .bind(via.as_str())
+    .bind(now_ms)
+    .bind(group_id)
+    .execute(e)
+    .await?;
+    Ok(id)
+}
+
 /// An account named in the log. `None` in [`Entry`] once it is deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
@@ -133,6 +174,8 @@ pub struct Entry {
     pub actor: Option<Account>,
     pub via: Via,
     pub at_ms: i64,
+    /// The group it was about (group actions only).
+    pub group_id: Option<String>,
 }
 
 /// The most recent entries, newest first.
@@ -141,7 +184,7 @@ pub async fn recent<'e>(
     limit: i64,
 ) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT l.id, l.action, l.via, l.created_at,
+        "SELECT l.id, l.action, l.via, l.created_at, l.group_id,
                 u.id AS user_id, u.display_name AS user_name, u.email AS user_email,
                 a.id AS actor_id, a.display_name AS actor_name, a.email AS actor_email
          FROM admin_log l
@@ -171,6 +214,7 @@ pub async fn recent<'e>(
                 actor: account(r, "actor")?,
                 via: super::parse_col(r, "via", Via::parse)?,
                 at_ms: r.try_get("created_at")?,
+                group_id: r.try_get("group_id")?,
             })
         })
         .collect()

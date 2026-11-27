@@ -65,6 +65,9 @@ pub struct LinkView {
     pub ally_enc_pubkey: Option<EncPublicKey>,
     /// The member's signing key, if set.
     pub member_sign_pubkey: Option<SignPublicKey>,
+    /// The group the link was proposed in, if any: a label only, never used
+    /// to authorize anything (GROUPS.md §5).
+    pub origin_group_id: Option<String>,
 }
 
 /// The shared `SELECT … FROM ally_links l` prefix of the link views, as a
@@ -77,7 +80,8 @@ macro_rules! view_select {
               WHERE k.user_id = l.ally_id AND k.revoked_at IS NULL
               ORDER BY k.created_at DESC LIMIT 1) AS ally_enc_pubkey,
             (SELECT m.sign_pubkey FROM member_keys m WHERE m.user_id = l.member_id)
-              AS member_sign_pubkey
+              AS member_sign_pubkey,
+            l.origin_group_id
          FROM ally_links l"
     };
 }
@@ -95,6 +99,7 @@ fn view_from_row(r: &sqlx::any::AnyRow) -> Result<LinkView, sqlx::Error> {
         other_deletion_purge_after_ms: r.try_get("deletion_purge_after")?,
         ally_enc_pubkey: super::parse_opt_col(r, "ally_enc_pubkey", EncPublicKey::from_b64)?,
         member_sign_pubkey: super::parse_opt_col(r, "member_sign_pubkey", SignPublicKey::from_b64)?,
+        origin_group_id: r.try_get("origin_group_id")?,
     })
 }
 
@@ -177,23 +182,27 @@ pub async fn count_live<'e>(
         .try_get("n")
 }
 
-/// Create a pending link. A live link for the pair already existing
-/// surfaces as a unique violation.
+/// Create a pending link, never an active one: only the member's signed
+/// approval ([`activate`]) does that. `origin_group` is the group it was
+/// proposed in (a label only, never used to authorize anything). A live
+/// link for the pair already existing surfaces as a unique violation.
 pub async fn insert_pending<'e>(
     e: impl Executor<'e, Database = Any>,
     member: &UserId,
     ally: &UserId,
+    origin_group: Option<&str>,
     now_ms: i64,
 ) -> Result<String, sqlx::Error> {
     let id = new_hex_id();
     sqlx::query(
-        "INSERT INTO ally_links (id, member_id, ally_id, state, created_at)
-         VALUES ($1, $2, $3, 'pending', $4)",
+        "INSERT INTO ally_links (id, member_id, ally_id, state, created_at, origin_group_id)
+         VALUES ($1, $2, $3, 'pending', $4, $5)",
     )
     .bind(&id)
     .bind(member.as_str())
     .bind(ally.as_str())
     .bind(now_ms)
+    .bind(origin_group.map(str::to_owned))
     .execute(e)
     .await?;
     Ok(id)
