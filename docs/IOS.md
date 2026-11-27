@@ -204,7 +204,9 @@ The instance's liveness monitor is the backstop, exactly as on desktop. iOS hear
 
 - every 5 minutes while the phone is awake, using the existing `Heartbeat` message, signed under `faro/heartbeat/v1`;
 - `state: sleeping` from the provider's `sleep` callback, and a fresh heartbeat on `wake`;
-- from the app too, whenever it runs (foreground or `BGAppRefreshTask`), so a phone whose tunnel is off still checks in and the tamper event from §10.2 gets uploaded.
+- from the app too, whenever it runs (foreground, or the `BGAppRefreshTask` `org.faro.ios.heartbeat-upload`, which iOS runs when it chooses, at best every 15 minutes), so a phone whose tunnel is off still checks in and the tamper event from §10.2 gets uploaded.
+
+Events are uploaded where they are recorded, not left for a later tamper: the provider ends each round of its timers (the minute, the heartbeat, the 10-minute flush, `wake`, `sleep`, `start`, `stop`; `TunnelRounds` in `FaroKitApp`) by uploading whenever the outbox holds an event or a report, so an upload that failed is tried again the next minute. The app uploads after saving or cancelling a choice, and its screens say "your allies will be told" rather than "were told" while the outbox still holds the event. The core runs one upload at a time per process.
 
 **No push notifications.** APNs needs a key tied to the app's bundle ID, which only the project holds, so a self-hosted instance couldn't send them without a project relay. Nothing in this design needs the instance to wake the phone.
 

@@ -12,6 +12,7 @@ struct FaroApp: App {
     init() {
         // Must happen before the app finishes launching.
         DomainUpdates.register(group: updateGroup)
+        BackgroundUpload.register(group: updateGroup)
     }
 
     var body: some Scene {
@@ -37,7 +38,10 @@ struct FaroApp: App {
                 let group = updateGroup
                 if let group { Task.detached { DomainUpdates.check(group: group) } }
             }
-            if phase == .background { DomainUpdates.schedule(group: updateGroup) }
+            if phase == .background {
+                DomainUpdates.schedule(group: updateGroup)
+                BackgroundUpload.schedule()
+            }
         }
     }
 }
