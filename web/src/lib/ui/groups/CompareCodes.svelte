@@ -5,13 +5,23 @@
 	// read them your code and they approve you on their side. A partnership
 	// shows both. Each person approves only their own side, and approving
 	// is the same signing the Allies page does (keys/approve.ts), so nothing
-	// here can make a link active some other way.
+	// here can make a link active some other way. The list it signs is built
+	// on the checked latest one and shown first; other allies keep the names
+	// it signed (a new name is confirmed on the Allies page).
 	import { api } from '#lib/api.ts';
+	import type { RecipientManifest, Signed } from '#lib/crypto/proto.ts';
 	import { instance } from '#lib/instance.svelte.ts';
-	import { approveAlly, approveErrorMessage, codeForAlly } from '#lib/keys/approve.ts';
+	import {
+		approvalManifest,
+		approveAlly,
+		approveErrorMessage,
+		codeForAlly
+	} from '#lib/keys/approve.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
+	import { ensureManifest } from '#lib/keys/member.ts';
 	import type { AllyLink, MyAllies, SupportedMember, User } from '#lib/types.ts';
 	import AllySafetyCode from '../AllySafetyCode.svelte';
+	import RecipientList from '../RecipientList.svelte';
 	import UnlockKeys from '../UnlockKeys.svelte';
 
 	let {
@@ -27,8 +37,10 @@
 
 	let mine = $state<AllyLink | null>(null);
 	let theirs = $state<SupportedMember | null>(null);
-	let active = $state<AllyLink[]>([]);
 	let loaded = $state(false);
+	/** The checked latest list, which approving builds on. */
+	let base = $state<Signed<RecipientManifest> | null>(null);
+	let baseFor = '';
 	let error = $state('');
 	let match = $state(false);
 	let busy = $state(false);
@@ -41,7 +53,6 @@
 				api.get<MyAllies>('/v1/me/allies').catch(() => null),
 				api.get<SupportedMember[]>('/v1/ally/members').catch(() => null)
 			]);
-			active = allies?.allies.filter((a) => a.state === 'active') ?? [];
 			mine = allies?.allies.find((a) => a.ally_id === person.id && a.state === 'pending') ?? null;
 			theirs = members?.find((m) => m.member_id === person.id && m.state === 'pending') ?? null;
 		} catch (e) {
@@ -57,25 +68,43 @@
 
 	let keys = $derived(keyring.memberFor(user.id));
 	let code = $derived(mine ? codeForAlly(keys, mine) : null);
+	let next = $derived(base && mine?.ally_enc_pubkey ? approvalManifest(base, mine) : null);
+
+	async function loadBase() {
+		const inst = instance.info;
+		if (!keys || !inst) return;
+		baseFor = person.id;
+		try {
+			base = await ensureManifest(keys, inst.instance_id);
+		} catch (e) {
+			base = null;
+			error = approveErrorMessage(e);
+		}
+	}
+
+	$effect(() => {
+		if (keys && code && !base && baseFor !== person.id) void loadBase();
+	});
 
 	async function approve() {
 		const link = mine;
 		const inst = instance.info;
-		if (!link || !keys || !inst) return;
+		if (!link || !keys || !inst || !base) return;
 		busy = true;
 		error = '';
 		try {
-			await approveAlly(keys, inst.instance_id, link, async () =>
-				active
-					.filter((a) => a.ally_enc_pubkey)
-					.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey! }))
-			);
+			await approveAlly(keys, inst.instance_id, link, base);
+			base = null;
+			baseFor = '';
 			approved = true;
 			match = false;
 			ondone?.();
 			await load();
 		} catch (e) {
 			error = approveErrorMessage(e);
+			// The list may have changed meanwhile: check it again.
+			base = null;
+			baseFor = '';
 		} finally {
 			busy = false;
 		}
@@ -125,12 +154,22 @@
 				<p class="code-display digits" aria-label="Safety code to match">
 					{#each code.split(' ') as g, i (i)}<span>{g}</span>{/each}
 				</p>
+				{#if next && base}
+					<RecipientList title="Your recipient list with {person.name}" list={next} {base} />
+				{:else}
+					<p class="muted" role="status">Checking your recipient list…</p>
+				{/if}
 				<label class="check">
 					<input type="checkbox" bind:checked={match} />
 					{person.name}'s code is the same
 				</label>
 				<div class="actions">
-					<button class="primary" type="button" disabled={!match || busy} onclick={approve}>
+					<button
+						class="primary"
+						type="button"
+						disabled={!match || busy || !next}
+						onclick={approve}
+					>
 						{busy ? 'Approving…' : `Approve ${person.name}`}
 					</button>
 				</div>

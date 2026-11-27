@@ -369,7 +369,7 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **No resolver means `SERVFAIL`, never a public one.** Allowed names fail at once until the network's resolvers are found again. No lookup goes to a third party.
 - **Leave Faro needs the instance to confirm the goodbye.** There is no silent way out inside Faro. A member whose instance is gone for good leaves by revoking Screen Time access in Settings and deleting the app, and the member guide says so.
 - **Allies are named on the phone from the member-signed list.** The member's client puts each ally's display name inside the recipient manifest it signs (format 2, PROTOCOL.md §5.1), so the instance can't change the names shown in the monthly notice (§12). A phone holding an older, format 1 list shows the ally count and safety codes.
-- **The web app signs format 2 from the start.** A client too old to read format 2 keeps its last list, so it would miss an ally removal until it updates. Every enrolled client must be updated before an instance gets this web app.
+- **The web app signs format 3 (format 2 plus a link to the previous version, PROTOCOL.md §5.1).** A client too old to read format 3 keeps its last list, so it would miss an ally removal until it updates. Every enrolled client must be updated before an instance gets this web app.
 - **Names are checked leniently.** Verifiers refuse only names over 256 bytes, and devices sanitize again before showing a name, so a name can never make a valid list invalid.
 - **The desktop login notice keeps the ally count.** Everyone who signs in to the computer sees it, so it doesn't name the allies.
 

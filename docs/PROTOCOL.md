@@ -43,6 +43,7 @@ Tags in use:
 | `faro/member-enc-key/v1` | Member's own encryption key binding |
 | `faro/recipient-manifest/v1` | Member-signed, versioned recipient list, format 1 (§5.1) |
 | `faro/recipient-manifest/v2` | The same list in format 2, with the allies' names (§5.1) |
+| `faro/recipient-manifest/v3` | The same list in format 3, with the names and the hash of the previous version (§5.1) |
 | `faro/key-id/v1` | Key identifier |
 | `faro/safety-code/v1` | Safety code |
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
@@ -296,23 +297,25 @@ A device **pins the member's signing key at enrollment**, and everything it trus
 
 | Field | Type | Notes |
 |---|---|---|
-| `format` | u16 | `1` or `2`. Left out of format 1 JSON, and a missing `format` reads as `1` |
+| `format` | u16 | `1`, `2` or `3`. Left out of format 1 JSON, and a missing `format` reads as `1` |
 | `instance_id` | string | |
 | `member_id` | string | |
 | `version` | u64 | Starts at 1 and goes up by exactly 1 with every change, whatever the format |
+| `prev_hash` | hash | Format 3 only: the `hash` of version `version - 1`, the list this one was built on. Present in every format 3 document above version 1; absent at version 1 and in formats 1 and 2 |
 | `issued_at_ms` | i64 | |
 | `member_enc_pubkey` | 32 bytes | The member's own X25519 key |
-| `allies` | list | `{ally_id, enc_pubkey}` entries in format 1, `{ally_id, enc_pubkey, name}` in format 2. At most 32, sorted strictly ascending by `ally_id` |
+| `allies` | list | `{ally_id, enc_pubkey}` entries in format 1, `{ally_id, enc_pubkey, name}` in formats 2 and 3. At most 32, sorted strictly ascending by `ally_id` |
 
 - **Encoding, format 1:** `signing_bytes = Canonical("faro/recipient-manifest/v1").str(instance_id).str(member_id).u64(version).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, followed by `.str(ally_id).fixed(enc_pubkey)` for each ally in order.
 - **Encoding, format 2:** the same fields under the tag `faro/recipient-manifest/v2`, followed by `.str(ally_id).fixed(enc_pubkey).str(name)` for each ally in order. `format` itself isn't encoded: the tag carries it.
+- **Encoding, format 3:** as format 2 under the tag `faro/recipient-manifest/v3`, with `.fixed(prev_hash)` right after `.u64(version)`: `Canonical("faro/recipient-manifest/v3").str(instance_id).str(member_id).u64(version).fixed(prev_hash).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, then `.str(ally_id).fixed(enc_pubkey).str(name)` for each ally. At version 1, which has no `prev_hash`, the 32 bytes are zero.
 - **Identity:** a manifest's identity is `hash = BLAKE3(signing_bytes)`. A `ManifestRef` is `{version, hash}`.
 - **Uploads:** the member signs a new version whenever they approve or remove an ally, an ally's key rotates, or their own encryption key rotates. The instance stores the latest version and serves it at `GET /v1/members/{id}/recipient-manifest`.
 
-**Ally names (format 2).** Devices show the allies by name (the monthly notice, ARCHITECTURE.md §12), and the only ally list a device trusts is this one. So the names are inside the member's signature: an instance can't put a false name next to a real key, swap two names, or name anyone the member didn't sign.
+**Ally names (formats 2 and 3).** Devices show the allies by name (the monthly notice, ARCHITECTURE.md §12), and the only ally list a device trusts is this one. So the names are inside the member's signature: an instance can't put a false name next to a real key, swap two names, or name anyone the member didn't sign.
 
-- **Where they come from.** The member's web app signs each ally's display name as the instance gives it to that page, which shows the same names (the member approves "*name*", and sees them on the **Allies** page). The web app signs every new version in format 2.
-- **Renames** don't force a new version: the instance never compares the names with its own. The next version the member signs, for any reason, carries the current names.
+- **Where they come from.** The member's web app signs a new ally's display name as the instance gives it to that page, which shows it (the member approves "*name*"). Every other ally keeps the name the list it builds on signed, so an instance can't rename or swap allies by changing what it shows. The web app signs every new version in format 3.
+- **Renames** don't force a new version: the instance never compares the names with its own. When the member signs a new version for any reason, the page shows each ally whose name on the instance differs from the signed one, and signs the new name only if the member ticks it.
 - **Sanitizing.** Names are text people typed, so `sanitize_ally_name` (Rust, `faro_proto::keys`) and `sanitizeAllyName` (the web app) make them safe, the same way byte for byte. The web app applies it before signing, and devices apply it again before showing a name. In order:
   1. remove C0 controls (other than the ones in the next item), `DEL`, C1 controls (other than `NEL`), `U+061C`, `U+200E`, `U+200F`, `U+202A` to `U+202E`, `U+2066` to `U+2069`, `U+FEFF` and `U+FFF9` to `U+FFFB`; turn tab, line feed, vertical tab, form feed, carriage return, `NEL` (`U+0085`), `U+2028` and `U+2029` into a space;
   2. normalize to NFC;
@@ -320,10 +323,12 @@ A device **pins the member's signing key at enrollment**, and everything it trus
   4. keep at most 64 code points, then trim a trailing space again.
 
   The removed characters are an explicit list, not a Unicode property, so implementations agree whatever their Unicode version. The joiners (`U+200C`, `U+200D`) stay, because emoji and some scripts need them. The test vectors' `ally_names` section has inputs and outputs, and `from_web.manifest_v2` is a manifest the web app signed from raw names.
-- **Verifying.** `validate()` refuses a format 1 manifest whose allies carry a `name` (it isn't signed), a format 2 manifest with an ally without one, a name longer than 256 bytes, and any other `format`. It doesn't refuse a name that isn't in sanitized form: a device sanitizes it before showing it. Refusing would make every recipient change, removals included, depend on two Unicode implementations agreeing. An empty name (after sanitizing) is no name: the device shows that ally by safety code only.
-- **The instance** stores and serves format 2 like format 1. It checks names for length only (`validate()`), and compares ally sets by id and key, never by name.
+- **Verifying.** `validate()` refuses a format 1 manifest whose allies carry a `name` (it isn't signed), a format 2 or 3 manifest with an ally without one, a name longer than 256 bytes, a format 3 manifest above version 1 without a `prev_hash`, a `prev_hash` anywhere else, and any other `format`. It doesn't refuse a name that isn't in sanitized form: a device sanitizes it before showing it. Refusing would make every recipient change, removals included, depend on two Unicode implementations agreeing. An empty name (after sanitizing) is no name: the device shows that ally by safety code only.
+- **The instance** stores and serves formats 2 and 3 like format 1. It checks names for length only (`validate()`), and compares ally sets by id and key, never by name. It also refuses a format 3 upload whose `prev_hash` isn't the hash of the latest version it stores (`manifest_prev_mismatch`).
 
-**Compatibility.** Format 1 manifests keep their exact JSON, bytes and hashes, and still verify everywhere, so a `min_manifest` anchor or a checkpoint that names one stays valid. A device holding a format 1 manifest shows its allies by count and safety code, as before. A version may change format either way; a format 2 document and a format 1 document at the same version are different documents (equivocation). A client built before format 2 can't verify a format 2 manifest: it rejects it as a bad signature and keeps its last accepted list (the device rules below), so clients must understand format 2 before the member's web app signs it.
+**Fork links (format 3).** A version number alone can't tell a successor from a fork: if an instance serves the member's page an older list N-1 (which still names an ally removed at N) and the page signs a version N on it, a device at N refuses that as equivocation, but would accept the version N+1 signed on top of it. In format 3, each version names the hash of the one it was built on, so a device holding version N refuses an N+1 built on anything else (a **fork**, rule 5). The web app also refuses to build on an older list in the first place (below).
+
+**Compatibility.** Format 1 and 2 manifests keep their exact JSON, bytes and hashes, and still verify everywhere, so a `min_manifest` anchor or a checkpoint that names one stays valid. A device holding a format 1 manifest shows its allies by count and safety code, as before. A version may change format either way; documents of two formats at the same version are different documents (equivocation). The first format 3 version after a format 1 or 2 one names that version's hash like any other. A client built before format 2 can't verify a format 2 manifest (it rejects it as a bad signature), and one built before format 3 refuses a format 3 manifest as an unknown format. Either way it keeps its last accepted list (the device rules below), so clients must understand a format before the member's web app signs it. **The web app signs format 3 since #180, so every enrolled client must accept format 3.**
 
 **Device rules.** The device keeps a persisted checkpoint: the highest `ManifestRef` it has accepted, **together with that signed manifest itself**. Both are stored atomically in the outbox database. Storing the document, not just its ref, is what lets a device that restarts while offline, or whose instance withholds manifests, keep using its last accepted manifest.
 
@@ -331,7 +336,7 @@ A device **pins the member's signing key at enrollment**, and everything it trus
 
 A fetched manifest is accepted only if all of the following hold:
 
-1. It passes `validate()`: a known format, version ≥ 1, at most 32 allies, ids well formed, sorted and unique, the member not listed as their own ally, and names only in format 2, at most 256 bytes each. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
+1. It passes `validate()`: a known format, version ≥ 1, at most 32 allies, ids well formed, sorted and unique, the member not listed as their own ally, names only in formats 2 and 3, at most 256 bytes each, and a `prev_hash` exactly in format 3 above version 1. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
 2. Its signature verifies against the **pinned** member signing key.
 3. `instance_id` and `member_id` match the enrollment.
 4. No key in it is a small-order X25519 point.
@@ -339,9 +344,19 @@ A fetched manifest is accepted only if all of the following hold:
    - a lower `version` is **rollback**: reject it;
    - the same `version` with a different `hash` is **equivocation**: reject it;
    - the same `version` and `hash` means nothing changed;
-   - a higher `version` is accepted, and the checkpoint advances.
+   - exactly the next `version`, in format 3, with a `prev_hash` other than the checkpoint's `hash` is a **fork**: reject it;
+   - a higher `version` is accepted, and the checkpoint advances. Further ahead than the next version, or in format 1 or 2, there is no link to check: the versions in between were never seen.
 
 On any rejection the device keeps using its last accepted manifest and surfaces a warning to the member. It **never** falls back to endorsements.
+
+**The member's web app** builds every new version on the latest one and anchors every new computer to it, so it holds the list it is given to the same rules as a device (`web/src/lib/keys/manifest-trust.ts`):
+
+- it keeps a checkpoint per member in the browser's `localStorage`: the highest `ManifestRef` it has signed (once the instance accepted the upload) or seen;
+- it refuses a served list that is older than the checkpoint (rollback), a different list at the checkpoint's version, or the next version with another `prev_hash` (fork), and a 404 once it has a checkpoint (rollback: the member already has a list). It then signs nothing and anchors nothing, and says why;
+- the first list, signed when the instance answers 404 to a browser with no checkpoint, names only the member. Allies are added only by approving them (ARCHITECTURE.md §5.2), so nothing the instance lists as an active ally is ever signed without the member's approval;
+- before signing a new version, or approving a computer (whose `min_manifest` is that list), it shows the list: each person's signed name and key id, who is added and who is removed, and any name changes for the member to tick.
+
+`localStorage` is per browser and can be cleared, so a browser that has never seen the member's list trusts the first one it is served. A device that already holds a newer version still refuses what is signed on top of an older one (the fork rule), and the anchor of a computer approved in that browser is checked when the computer bootstraps.
 
 **Recipients:** for every new item, the recipients are the member plus exactly the allies in the accepted manifest. The device refuses to queue anything sealed to a manifest other than its current checkpoint, so a stale recipient set held in memory can't keep encrypting to a removed ally.
 
@@ -589,8 +604,8 @@ The instance runs the §10.2 checks on uploads against its own copy of the roste
 
 `/roster/pending` compares the roster with who is in the group and lists the changes to sign. A facilitator's browser checks them against the roster it verified, and when it opens the group with the facilitator's keys unlocked:
 
-- **signs on its own** leaves, removals and role changes, and changes to the facilitator's own keys (checked against the keys it holds), departures in the first entries so no new epoch is ever sealed to someone who left;
-- **asks first** before joins and other people's key changes, showing names and key ids: they add a reader, with a key the instance supplied;
+- **signs on its own** other people's leaves and removals, and changes to the facilitator's own keys (checked against the keys it holds), departures in the first entries so no new epoch is ever sealed to someone who left. A removal only takes a reader away; an instance proposing one nobody asked for gains nothing it couldn't by not serving that person;
+- **asks first** before joins and other people's key changes, showing names and key ids: they add a reader, with a key the instance supplied. It also asks before role changes and the facilitator's own leave or removal: they change who may sign the roster, on the instance's word. An approval covers that exact change only;
 - never signs a change that gives the facilitator keys that aren't theirs.
 
 While `posting_paused` (someone who left is still in the roster, or someone's keys changed), clients pause whole-group posting: "Waiting for a facilitator to update the group". Nothing is escalated to admins (GROUPS.md decision 9).
@@ -656,7 +671,9 @@ A browser shows a message only after all of these, in order:
 3. Strict Ed25519 verification against the author's member signing key.
 4. The context: `item_id` is the message asked for, `author_id` is the author the instance names, `instance_id` is this instance, and the reader is the author or a recipient. In whole-group mode there are no recipients: the reader opens it with the epoch key (§10.3) of `epoch`, which they checked against the signed roster, and the group is the one they asked for. A reply also names the check-in it answers: the reader checks the parent the instance reports against the signed `parent_id`.
 
-A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*, as are the keys a sender seals to other than their own manifest's allies, until participants have signed keys (GROUPS.md §10.3).
+A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*. For a message in a group (other than a join request's note, whose author isn't in the group yet), the reader also requires the served signing key to be the author's in the roster it verified (§10.4), once that roster has an entry; an author who isn't in it is refused.
+
+Senders check the other way round before sealing: each key the instance serves for a recipient must be the one in the sender's own manifest (for their allies) or in the roster the sender's browser verified (for anyone else in a group), and each recipient must be someone the sender chose. Otherwise nothing is sealed. The keys of people outside a group who aren't the sender's allies, and of the facilitators of a group the sender asks to join, can't be checked; they are marked *not yet verified* (GROUPS.md §10.2).
 
 ### 11.4 What the instance checks
 
@@ -673,3 +690,4 @@ Signed structures change by getting a new format and a new domain-separation tag
 | Structure | Change | Old format |
 |---|---|---|
 | Recipient manifest (§5.1) | Format 2 (`faro/recipient-manifest/v2`) adds each ally's display name inside the signed bytes, so devices can name allies without trusting the instance | Format 1 (`faro/recipient-manifest/v1`) still verifies and is still accepted everywhere |
+| Recipient manifest (§5.1) | Format 3 (`faro/recipient-manifest/v3`) adds `prev_hash`, the hash of the version it was built on, so devices can refuse a fork | Formats 1 and 2 still verify and are still accepted everywhere; the web app signs format 3 |

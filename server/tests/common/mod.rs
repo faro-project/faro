@@ -454,6 +454,7 @@ impl MemberKeys {
             instance_id: instance.clone(),
             member_id: member.clone(),
             version,
+            prev_hash: None,
             issued_at_ms,
             member_enc_pubkey: self.enc.public(),
             allies,

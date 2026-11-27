@@ -3,9 +3,17 @@
 
 import { api, ApiError, describeError, seg } from './api.ts';
 import type { GroupMessageKind } from './crypto/group.ts';
+import { instance } from './instance.svelte.ts';
+import type { MemberKeys } from './keys/keyring.svelte.ts';
+import { latestManifest } from './keys/member.ts';
 import { proposalErrorMessage } from './proposals.ts';
+import { loadRoster } from './roster-api.ts';
 import {
+	checkRecipients,
 	reachOutErrorMessage,
+	RecipientError,
+	type CheckedRecipients,
+	type Chosen,
 	type Answer,
 	type Audience,
 	type CreateReachOut,
@@ -37,6 +45,63 @@ export function loadRecipients(
 	if (opts.groupId) q.set('group_id', opts.groupId);
 	if (opts.userIds?.length) q.set('user_ids', opts.userIds.join(','));
 	return api.get<Recipients>(`/v1/me/message-recipients?${q}`);
+}
+
+type RecipientsOpts = { audience?: Audience; groupId?: string | null; userIds?: string[] };
+
+function chosenFor(kind: GroupMessageKind, opts: RecipientsOpts): Chosen {
+	switch (kind) {
+		case 'join_request_note':
+			return { audience: 'join_request' };
+		case 'proposal_note':
+		case 'check_in_reply':
+			return { audience: 'people', userIds: opts.userIds ?? [] };
+		default: {
+			const a = opts.audience ?? 'allies';
+			if (a === 'people') return { audience: 'people', userIds: opts.userIds ?? [] };
+			if (a === 'group') throw new RecipientError('A whole-group message is sealed to no one.');
+			return { audience: a };
+		}
+	}
+}
+
+/**
+ * Check `r` (from `loadRecipients(kind, opts)`) against your own verified
+ * recipient manifest and, for a message in a group, the group's roster as
+ * this browser verifies it now (`checkRecipients`). Throws a
+ * `RecipientError` (or the manifest's `ManifestTrustError`) if anything is
+ * off: then nothing may be sealed.
+ */
+export async function checkLoadedRecipients(
+	keys: MemberKeys,
+	r: Recipients,
+	kind: GroupMessageKind,
+	opts: RecipientsOpts = {}
+): Promise<CheckedRecipients> {
+	const chosen = chosenFor(kind, opts);
+	const inst = await instance.load();
+	if (r.instance_id !== inst.instance_id) {
+		throw new RecipientError("The server named another instance's people. Nothing was sent.");
+	}
+	const manifest = await latestManifest(keys, inst.instance_id);
+	const groupId = opts.groupId ?? null;
+	const roster =
+		groupId && chosen.audience !== 'join_request'
+			? (await loadRoster(groupId, keys.userId)).state
+			: null;
+	return checkRecipients(r, keys.userId, groupId, chosen, {
+		allies: manifest?.allies ?? [],
+		roster
+	});
+}
+
+/** `loadRecipients`, then `checkLoadedRecipients`: who a message may be sealed to. */
+export async function loadCheckedRecipients(
+	keys: MemberKeys,
+	kind: GroupMessageKind,
+	opts: RecipientsOpts = {}
+): Promise<CheckedRecipients> {
+	return checkLoadedRecipients(keys, await loadRecipients(kind, opts), kind, opts);
 }
 
 export function sendReachOut(body: CreateReachOut): Promise<OutgoingReachOut> {

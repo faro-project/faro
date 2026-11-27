@@ -23,7 +23,8 @@ public struct EnrollLink: Equatable, Sendable {
         guard trimmed.count <= 4096,
               let parts = URLComponents(string: trimmed),
               parts.scheme?.lowercased() == "faro",
-              parts.host?.lowercased() == "enroll"
+              parts.host?.lowercased() == "enroll",
+              parts.fragment == nil
         else { return nil }
         let items = parts.queryItems ?? []
         // A parameter given twice is refused, as the core does.

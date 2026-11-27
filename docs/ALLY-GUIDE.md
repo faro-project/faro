@@ -83,7 +83,15 @@ You type your passphrase on the **Supporting** pages whenever Faro needs to show
 
 Faro may ask you to unlock first. Nothing changes for the members you support: your safety code stays the same, they aren't told, and you can still read everything they share.
 
-If you lose both your passphrase and your recovery code, Faro can't get your key back. Tell the member, so they know you can't read their reports.
+### If you lose your passphrase and your recovery code
+
+If you lose both, Faro can't get your key back, and nobody can reset it, not even the people who run the server. It can't make you a new ally key either: Faro refuses, because you already have one. You can't read what the members you support share with you, and until you do something about it they don't know that. So:
+
+1. **Tell each member,** so they know you can't read their reports. Their computers keep sending reports locked for your old key, and nobody can read them.
+2. **Delete your account** to start again: open **Settings**, choose **Delete your account** at the bottom (it asks you to have signed in within the last 10 minutes, and to type your email address). Everyone you support, and their other allies, are emailed straight away. For 7 days nothing changes and you can cancel. After that your account and key are deleted, and you stop being anyone's ally.
+3. **Sign up again** with the same address, if the instance allows it, and ask each member to invite you again. You make a new key, compare the safety code again and the member approves you again. You see only what happens after that. What was shared with the old key stays unreadable.
+
+If you only want to stop being someone's ally in the meantime, you can still do that without your key ([section 7](#7-if-you-want-to-stop-being-an-ally)).
 
 ## 4. Comparing the safety code
 
@@ -280,7 +288,14 @@ Faro's real goal is honest conversation, not policing. The person you support ch
 - **Remember they see the same thing.** Everything you see, they can see on their own page. There are no secrets about what you were shown.
 - **Keep it between you.** Don't share what you see with other people unless they've agreed to it. The one exception is what looks like child sexual abuse material: report it, without copying it ([what to do](operators/ILLEGAL-MATERIAL.md)).
 - **Look after yourself.** You're not responsible for their choices, and you don't have to read every report the day it arrives. If this becomes too much, say so; it's fine to [step back](#7-if-you-want-to-stop-being-an-ally).
+- **Ask whether it is still their choice.** Faro is for someone who chose it. If the member seems to be there because someone made them, or says so, don't push them to stay: Faro has no quiet way out (every exit tells you), but a member can always leave. Removing a computer or deleting their account needs no administrator password. See [If this wasn't your choice](MEMBER-GUIDE.md#if-this-wasnt-your-choice) in the member guide.
 - **Get help when it's beyond you.** If you're ever worried about someone's safety, contact people who can help, such as a pastor, a counsellor or, in an emergency, the emergency services. Faro isn't an emergency service.
+
+### An ally holding the administrator password
+
+Some members and allies agree that the ally keeps the administrator name and password of the member's Mac or Windows PC, so the member can't uninstall Faro alone. The Faro installers suggest it. That is their own arrangement: Faro doesn't set it up or rely on it, and can't tell whether anyone holds it.
+
+Be careful with this, as with a passcode on an iPhone ([section 11](#an-ally-holding-the-screen-time-passcode)). Faro's rule is that a member can always leave. Uninstalling Faro needs that password, so holding it can stop a member from leaving by the front door. The member can still remove the computer (**Computers → Remove…**, which stops it reporting) or delete their account (**Settings → Delete your account**, which takes 7 days) without it, and you are told either way. Before you agree to hold the password, talk through what happens if the member wants out, agree on it in advance, and don't use it to keep someone in Faro who wants to leave.
 
 ## 10. Groups
 

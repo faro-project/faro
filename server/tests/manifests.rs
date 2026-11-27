@@ -304,7 +304,7 @@ async fn both_formats_are_stored_and_served_as_signed() {
     let mut long = next.clone();
     long.allies[0].name = Some("x".repeat(257));
     let mut unknown = next.clone();
-    unknown.format = 3;
+    unknown.format = 4;
     for body in [unsigned_name, missing, long, unknown] {
         let r = t.put_manifest(&s, &keys.sign.endorse(body)).await;
         assert_eq!(r.error_code(), "invalid_manifest", "{:?}", r.body);
@@ -331,6 +331,71 @@ async fn both_formats_are_stored_and_served_as_signed() {
     // And so does removing one.
     let r = t.remove_ally(&m, &keys, &s, &kim.id).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
+}
+
+/// Format 3 (#180) links each version to the one it follows: the instance
+/// stores one only if it follows the latest stored version, so a page that
+/// was given an older list to build on gets a clear error.
+#[tokio::test]
+async fn format_3_must_follow_the_latest_version() {
+    use faro_proto::keys::MANIFEST_FORMAT_V3;
+    let t = TestApp::new().await;
+    let (m, s, keys) = member(&t, "sam@example.org").await;
+    let v1 = latest(&t, &m, &s).await;
+    let linked = |prev: &SignedRecipientManifest, link: Option<Hash32>| {
+        let mut body = keys.next_manifest(prev, |_| {}).body;
+        body.format = MANIFEST_FORMAT_V3;
+        body.prev_hash = link;
+        keys.sign.endorse(body)
+    };
+
+    // Format 2 to format 3: the link names the format 2 version.
+    for (bad, code) in [
+        (linked(&v1, Some(Hash32([7; 32]))), "manifest_prev_mismatch"),
+        (linked(&v1, None), "invalid_manifest"),
+    ] {
+        let r = t.put_manifest(&s, &bad).await;
+        assert_eq!(r.error_code(), code, "{:?}", r.body);
+    }
+    let v2 = linked(&v1, Some(v1.body.hash()));
+    let r = t.put_manifest(&s, &v2).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.body);
+    let served = latest(&t, &m, &s).await;
+    assert_eq!(served, v2);
+    let r = t
+        .get(
+            &format!("/v1/members/{m}/recipient-manifest"),
+            Some(s.as_str()),
+        )
+        .await;
+    assert_eq!(r.body["format"], 3);
+    assert_eq!(r.body["prev_hash"], v1.body.hash().to_prefixed_hex());
+
+    // Version 3 built on version 1 again (what a page served the older
+    // list would sign): refused, though the version number fits.
+    let mut fork = linked(&v2, Some(v1.body.hash())).body;
+    fork.version = 3;
+    let r = t.put_manifest(&s, &keys.sign.endorse(fork)).await;
+    assert_eq!(r.error_code(), "manifest_prev_mismatch");
+    let v3 = linked(&v2, Some(v2.body.hash()));
+    assert_eq!(t.put_manifest(&s, &v3).await.status, StatusCode::CREATED);
+    // Approving and removing go through the same check.
+    let kim = pending_ally(&t, &s, "kim@elsewhere.net").await;
+    let mut body = keys
+        .next_manifest(&v3, |a| a.push((kim.id.clone(), kim.keys.enc.public())))
+        .body;
+    body.format = MANIFEST_FORMAT_V3;
+    body.prev_hash = Some(v1.body.hash());
+    let e = t.ally_endorsement(&m, &keys, &kim.id, kim.keys.enc.public());
+    let r = t
+        .approve_with(&s, &kim.id, &e, &keys.sign.endorse(body.clone()))
+        .await;
+    assert_eq!(r.error_code(), "manifest_prev_mismatch");
+    body.prev_hash = Some(v3.body.hash());
+    let r = t
+        .approve_with(&s, &kim.id, &e, &keys.sign.endorse(body))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
 }
 
 #[tokio::test]

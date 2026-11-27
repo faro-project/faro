@@ -42,6 +42,8 @@ pub enum LinkError {
     NotEnrollLink(String),
     #[error("link is missing the `{0}` parameter")]
     Missing(&'static str),
+    #[error("link must not contain a fragment")]
+    Fragment,
     #[error("link has more than one `{0}` parameter")]
     Duplicate(&'static str),
     #[error("invalid instance URL: {0}")]
@@ -147,6 +149,11 @@ pub fn parse_enroll_link(s: &str) -> Result<EnrollLink, LinkError> {
         return Err(LinkError::NotEnrollLink(
             "expected faro://enroll?i=…&c=…".into(),
         ));
+    }
+    // A fragment can carry a second query (`#…&m=<other>`) that a lax
+    // consumer might read in place of the member's: refuse the whole link.
+    if url.fragment().is_some() {
+        return Err(LinkError::Fragment);
     }
     let mut instance = None;
     let mut code = None;
@@ -313,6 +320,18 @@ mod tests {
             parse_member_key_id("0123 4567-89ab cdef").unwrap(),
             "0123456789abcdef"
         );
+    }
+
+    #[test]
+    fn rejects_fragments() {
+        for s in [
+            "faro://enroll?i=https://a.example/&c=ABCD-1234#",
+            "faro://enroll?i=https://a.example/&c=ABCD-1234#m=0123456789abcdef",
+            "faro://enroll?i=https://a.example/&c=ABCD-1234&m=0123456789abcdef#m=fedcba9876543210",
+            "faro://enroll?i=https://a.example/&c=ABCD-1234#&m=fedcba9876543210",
+        ] {
+            assert_eq!(parse_enroll_link(s), Err(LinkError::Fragment), "{s}");
+        }
     }
 
     #[test]

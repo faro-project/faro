@@ -44,16 +44,25 @@
 //!
 //! # What is allowed
 //!
-//! Only macOS's own processes ([`is_allowed_os_process`]): an executable on
-//! the sealed, SIP-protected system volume (`/System/…`, except the
-//! writable `/System/Volumes/…`, and `/usr/libexec/…`). macOS keeps some of
-//! its own windows out of captures (the screenshot toolbar, password and
-//! Touch ID prompts, the lock screen, system UI), and a member can't put a
-//! program of their own there. Never allowed, even from those folders:
-//! browsers (Safari's executable lives in a system cryptex), and Apple apps
-//! that run the member's own code (Script Editor, Automator, Shortcuts and
-//! other script runners; `/usr/bin/osascript` is outside the allowed
-//! folders already). Faro's own process is skipped.
+//! Only a short list of macOS's own programs, each named by its exact
+//! executable path ([`OS_PROGRAMS`]: the lock screen, the password prompt,
+//! the Touch ID prompt, the screenshot toolbar), and only when the running
+//! process is also an Apple platform binary whose code-signing identifier
+//! is the one listed ([`live`'s `is_platform_binary`]: the kernel's
+//! `CS_PLATFORM_BINARY` flag plus a Security.framework check of
+//! `anchor apple and identifier "…"` against the live process). Being under
+//! `/System` is not enough: Apple ships interpreters there (the Ruby, Tcl
+//! and Tk frameworks, `osascript`, Script Editor, Shortcuts, WebKit
+//! helpers) that run the member's own code, and any such program could
+//! hide a window. Each hides its windows only if code the member wrote
+//! tells it to, so none is on the list. Faro's own process is skipped.
+//!
+//! The list is the minimum found by inspection of a stock macOS 27 install,
+//! not by watching which processes hold capture-excluded windows (reading
+//! other apps' windows needs Screen Recording, and the lock screen and
+//! password prompts are hard to provoke from a test). A program that is
+//! missing from it is reported by name rather than hidden, which allies
+//! can judge; add one when a real case turns up.
 //!
 //! No third-party app is allowed. Password managers, DRM video players and
 //! screen-sharing tools may hide windows; one large enough to count is
@@ -83,11 +92,32 @@ pub const MAX_APP_LABEL: usize = 64;
 /// Normal application windows live on layer 0.
 const NORMAL_WINDOW_LAYER: i64 = 0;
 
-/// Bundle id or path fragments of Apple apps that run the member's own code
-/// (lowercase).
-const RUNS_USER_CODE: &[&str] = &["script", "automator", "shortcut", "workflow"];
-/// Fragments of browser bundle ids or paths (lowercase).
-const BROWSER_FRAGMENTS: &[&str] = &["safari", "webkit"];
+/// macOS's own programs that keep windows out of captures: exact
+/// executable path and the code-signing identifier it must have.
+pub const OS_PROGRAMS: &[(&str, &str)] = &[
+    // The lock screen and login window.
+    (
+        "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
+        "com.apple.loginwindow",
+    ),
+    // Administrator password and Touch ID prompts from the Security
+    // framework.
+    (
+        "/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/MacOS/SecurityAgent",
+        "com.apple.SecurityAgent",
+    ),
+    // The Touch ID / Apple Watch prompt of LocalAuthentication (the
+    // `coreauthd` daemon itself has no windows).
+    (
+        "/System/Library/PrivateFrameworks/LocalAuthenticationUI.framework/Versions/A/XPCServices/LocalAuthenticationRemoteService.xpc/Contents/MacOS/LocalAuthenticationRemoteService",
+        "com.apple.LocalAuthenticationRemoteService",
+    ),
+    // The screenshot and screen recording toolbar.
+    (
+        "/System/Library/CoreServices/screencaptureui.app/Contents/MacOS/screencaptureui",
+        "com.apple.screencaptureui",
+    ),
+];
 
 /// One on-screen window, as the window list describes it. No title.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +139,10 @@ pub struct Process {
     pub exe_path: Option<String>,
     /// Display name (`localizedName`).
     pub name: Option<String>,
+    /// The running process is an Apple platform binary with the
+    /// code-signing identifier [`OS_PROGRAMS`] lists for its path (only
+    /// checked for processes at a listed path).
+    pub platform_verified: bool,
 }
 
 /// An app with enough hidden window area this poll.
@@ -151,32 +185,14 @@ pub fn looks_unreliable(windows: &[WindowInfo], own_pid: i32) -> bool {
     pids.len() >= 2
 }
 
-fn on_os_volume(path: &str) -> bool {
-    if path.contains("/../") || path.contains("/./") {
-        return false;
-    }
-    (path.starts_with("/System/") && !path.starts_with("/System/Volumes/"))
-        || path.starts_with("/usr/libexec/")
-}
-
-/// Whether `p` is part of macOS and may keep windows out of captures (see
-/// module docs). Browsers and script runners never are.
+/// Whether `p` is one of macOS's own programs that may keep windows out of
+/// captures (see module docs): at a listed path, exactly, and verified as
+/// an Apple platform binary.
 pub fn is_allowed_os_process(p: &Process) -> bool {
-    let Some(path) = p.exe_path.as_deref() else {
-        return false;
-    };
-    if !on_os_volume(path) {
-        return false;
-    }
-    let id = p.bundle_id.as_deref().unwrap_or("").to_ascii_lowercase();
-    let path = path.to_ascii_lowercase();
-    if crate::browser::Browser::from_bundle_id(&id).is_some() {
-        return false;
-    }
-    !BROWSER_FRAGMENTS
-        .iter()
-        .chain(RUNS_USER_CODE)
-        .any(|k| id.contains(k) || path.contains(k))
+    p.platform_verified
+        && p.exe_path
+            .as_deref()
+            .is_some_and(|path| OS_PROGRAMS.iter().any(|(listed, _)| *listed == path))
 }
 
 /// Control characters removed, trimmed, at most [`MAX_APP_LABEL`]
@@ -319,11 +335,13 @@ mod live {
     use super::*;
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSRunningApplication;
-    use objc2_core_foundation::CFDictionary;
+    use objc2_core_foundation::{CFDictionary, CFString};
     use objc2_core_graphics::{
         kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerName,
         kCGWindowOwnerPID, kCGWindowSharingState, CGWindowListCopyWindowInfo, CGWindowListOption,
     };
+    use std::ffi::c_void;
+    use std::ptr;
 
     use crate::cf;
 
@@ -378,11 +396,124 @@ mod live {
         String::from_utf8(buf).ok()
     }
 
-    /// Bundle id, display name and executable path of `pid`. Must run in
-    /// an autorelease pool.
+    type CFTypeRef = *const c_void;
+
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        static kSecGuestAttributePid: CFTypeRef;
+        fn SecCodeCopyGuestWithAttributes(
+            host: CFTypeRef,
+            attributes: CFTypeRef,
+            flags: u32,
+            guest: *mut CFTypeRef,
+        ) -> i32;
+        fn SecRequirementCreateWithString(
+            text: CFTypeRef,
+            flags: u32,
+            requirement: *mut CFTypeRef,
+        ) -> i32;
+        fn SecCodeCheckValidity(code: CFTypeRef, flags: u32, requirement: CFTypeRef) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+        fn CFNumberCreate(alloc: CFTypeRef, the_type: isize, value: *const c_void) -> CFTypeRef;
+        fn CFDictionaryCreate(
+            alloc: CFTypeRef,
+            keys: *const CFTypeRef,
+            values: *const CFTypeRef,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFTypeRef;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    extern "C" {
+        fn csops(pid: i32, ops: u32, useraddr: *mut c_void, usersize: usize) -> i32;
+    }
+
+    const CS_OPS_STATUS: u32 = 0;
+    /// `CS_PLATFORM_BINARY`: the kernel treats the code as part of the OS.
+    const CS_PLATFORM_BINARY: u32 = 0x0400_0000;
+    const K_CF_NUMBER_SINT32_TYPE: isize = 3;
+
+    /// Whether `pid` is a platform binary (kernel flag) whose code
+    /// satisfies `anchor apple and identifier "<identifier>"` (checked by
+    /// Security.framework against the live process, so a copy of the file
+    /// elsewhere, or a process that merely claims the bundle id, fails).
+    pub fn is_platform_binary(pid: i32, identifier: &str) -> bool {
+        let mut flags: u32 = 0;
+        // SAFETY: `flags` is a writable u32 and the size passed is 4.
+        let rc = unsafe { csops(pid, CS_OPS_STATUS, (&raw mut flags).cast(), 4) };
+        if rc != 0 || flags & CS_PLATFORM_BINARY == 0 {
+            return false;
+        }
+        if identifier.contains(['"', '\\']) {
+            return false;
+        }
+        let text = CFString::from_str(&format!("anchor apple and identifier \"{identifier}\""));
+        let mut req: CFTypeRef = ptr::null();
+        // SAFETY: `text` is a valid CFString; `req` receives a +1 reference.
+        let status = unsafe {
+            SecRequirementCreateWithString((&*text as *const CFString).cast(), 0, &mut req)
+        };
+        if status != 0 || req.is_null() {
+            return false;
+        }
+        let mut ok = false;
+        // SAFETY: every object created below is released before returning;
+        // the key and callbacks are immutable framework statics.
+        unsafe {
+            let num = CFNumberCreate(
+                ptr::null(),
+                K_CF_NUMBER_SINT32_TYPE,
+                (&raw const pid).cast(),
+            );
+            if !num.is_null() {
+                let keys = [kSecGuestAttributePid];
+                let values = [num];
+                let attrs = CFDictionaryCreate(
+                    ptr::null(),
+                    keys.as_ptr(),
+                    values.as_ptr(),
+                    1,
+                    &raw const kCFTypeDictionaryKeyCallBacks,
+                    &raw const kCFTypeDictionaryValueCallBacks,
+                );
+                if !attrs.is_null() {
+                    let mut code: CFTypeRef = ptr::null();
+                    if SecCodeCopyGuestWithAttributes(ptr::null(), attrs, 0, &mut code) == 0
+                        && !code.is_null()
+                    {
+                        ok = SecCodeCheckValidity(code, 0, req) == 0;
+                        CFRelease(code);
+                    }
+                    CFRelease(attrs);
+                }
+                CFRelease(num);
+            }
+            CFRelease(req);
+        }
+        ok
+    }
+
+    /// Bundle id, display name and executable path of `pid`, and whether it
+    /// is a verified Apple platform binary (only checked at a listed path).
+    /// Must run in an autorelease pool.
     pub fn resolve_process(pid: i32) -> Process {
         let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
+        let exe_path = exe_path(pid);
+        let platform_verified = exe_path.as_deref().is_some_and(|path| {
+            OS_PROGRAMS
+                .iter()
+                .find(|(listed, _)| *listed == path)
+                .is_some_and(|(_, id)| is_platform_binary(pid, id))
+        });
         Process {
+            platform_verified,
             bundle_id: app
                 .as_ref()
                 .and_then(|a| a.bundleIdentifier())
@@ -391,7 +522,7 @@ mod live {
                 .as_ref()
                 .and_then(|a| a.localizedName())
                 .map(|s| s.to_string()),
-            exe_path: exe_path(pid),
+            exe_path,
         }
     }
 
@@ -428,6 +559,7 @@ mod tests {
                 "/Applications/App{pid}.app/Contents/MacOS/App{pid}"
             )),
             name: Some(format!("App {pid}")),
+            platform_verified: false,
         }
     }
 
@@ -436,6 +568,7 @@ mod tests {
             bundle_id: Some(bundle.into()),
             exe_path: Some(path.into()),
             name: Some("System thing".into()),
+            platform_verified: true,
         }
     }
 
@@ -548,67 +681,109 @@ mod tests {
     }
 
     #[test]
-    fn os_processes_are_allowed() {
-        for p in [
-            os(
-                "com.apple.screencaptureui",
-                "/System/Library/CoreServices/screencaptureui.app/Contents/MacOS/screencaptureui",
-            ),
-            os(
-                "com.apple.SecurityAgent",
-                "/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/MacOS/SecurityAgent",
-            ),
-            os("", "/usr/libexec/some-helper"),
-            os(
-                "com.apple.loginwindow",
-                "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
-            ),
-        ] {
+    fn listed_os_programs_are_allowed() {
+        for (path, id) in OS_PROGRAMS {
+            let p = os(id, path);
             assert!(is_allowed_os_process(&p), "{p:?}");
         }
         let ws = [win(10, 1, 800.0, 600.0), win(20, 0, 800.0, 600.0)];
-        let lock = |_| os("com.apple.loginwindow", "/System/Library/CoreServices/lw");
+        let (path, id) = OS_PROGRAMS[0];
+        let lock = |_| os(id, path);
         assert_eq!(names(&read(&ws, ME, lock)), Vec::<String>::new());
     }
 
     #[test]
-    fn browsers_script_runners_and_user_paths_are_never_allowed() {
-        for p in [
-            // Safari's executable is in a system cryptex.
-            os(
-                "com.apple.Safari",
-                "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari",
-            ),
-            os(
-                "com.apple.Safari",
-                "/System/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari",
-            ),
-            os(
-                "com.apple.ScriptEditor2",
-                "/System/Applications/Utilities/Script Editor.app/Contents/MacOS/Script Editor",
-            ),
-            os(
-                "com.apple.Automator",
-                "/System/Applications/Automator.app/Contents/MacOS/Automator",
-            ),
-            os(
-                "com.apple.shortcuts",
-                "/System/Applications/Shortcuts.app/Contents/MacOS/Shortcuts",
-            ),
-            os(
-                "com.apple.WorkflowKit.BackgroundShortcutRunner",
-                "/System/Library/PrivateFrameworks/WorkflowKit.framework/XPCServices/runner",
-            ),
-            os("", "/usr/bin/osascript"),
-            os("", "/usr/local/libexec/x"),
-            os("com.example.x", "/System/Volumes/Data/Users/alex/x"),
-            os("com.example.x", "/System/../Users/alex/x"),
-            os("com.google.Chrome", "/System/Library/Chrome"),
-            os("com.example.viewer", "/Applications/Viewer.app/Contents/MacOS/Viewer"),
-            Process::default(),
-        ] {
+    fn a_listed_path_without_platform_proof_is_refused() {
+        for (path, id) in OS_PROGRAMS {
+            let mut p = os(id, path);
+            p.platform_verified = false;
             assert!(!is_allowed_os_process(&p), "{p:?}");
         }
+    }
+
+    #[test]
+    fn apple_shipped_interpreters_and_other_system_paths_are_refused() {
+        for path in [
+            // Frameworks that carry interpreters.
+            "/System/Library/Frameworks/Ruby.framework/Versions/2.6/usr/bin/ruby",
+            "/System/Library/Frameworks/Tcl.framework/Versions/8.5/tclsh8.5",
+            "/System/Library/Frameworks/Tk.framework/Versions/8.5/Resources/Wish.app/Contents/MacOS/Wish",
+            "/System/Library/Frameworks/Python.framework/Versions/2.7/bin/python2.7",
+            "/System/Library/Frameworks/Python.framework/Versions/Current/Resources/Python.app/Contents/MacOS/Python",
+            "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc",
+            "/System/Library/Frameworks/OSAKit.framework/Versions/A/XPCServices/OSAKitUIHelper.xpc/Contents/MacOS/OSAKitUIHelper",
+            "/System/Library/CoreServices/Applications/Directory Utility.app/Contents/MacOS/Directory Utility",
+            "/System/Applications/Utilities/Script Editor.app/Contents/MacOS/Script Editor",
+            "/System/Applications/Automator.app/Contents/MacOS/Automator",
+            "/System/Applications/Shortcuts.app/Contents/MacOS/Shortcuts",
+            "/System/Library/CoreServices/Applications/Wish.app/Contents/MacOS/Wish",
+            "/System/Library/PrivateFrameworks/WorkflowKit.framework/XPCServices/runner",
+            "/System/Library/CoreServices/System Events.app/Contents/MacOS/System Events",
+            // Browsers (Safari lives in a system cryptex).
+            "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari",
+            "/System/Cryptexes/App/System/Applications/Safari.app/Contents/MacOS/Safari",
+            // Outside the allowed folders, or not exact.
+            "/usr/bin/osascript",
+            "/usr/bin/ruby",
+            "/usr/bin/python3",
+            "/usr/libexec/some-helper",
+            "/usr/local/libexec/x",
+            "/System/Volumes/Data/Users/alex/x",
+            "/System/../Users/alex/x",
+            "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow/../x",
+            "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow2",
+            "/Users/alex/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
+            "/Applications/Viewer.app/Contents/MacOS/Viewer",
+        ] {
+            // Even carrying every claim a process can make about itself.
+            let p = os("com.apple.loginwindow", path);
+            assert!(!is_allowed_os_process(&p), "{p:?}");
+            let p = os("", path);
+            assert!(!is_allowed_os_process(&p), "{p:?}");
+        }
+        assert!(!is_allowed_os_process(&Process::default()));
+        let mut no_path = os("com.apple.loginwindow", "");
+        no_path.exe_path = None;
+        assert!(!is_allowed_os_process(&no_path));
+    }
+
+    #[test]
+    fn the_list_is_exact_system_paths() {
+        for (path, id) in OS_PROGRAMS {
+            assert!(
+                path.starts_with("/System/") && !path.contains(".."),
+                "{path}"
+            );
+            assert!(id.starts_with("com.apple."), "{id}");
+        }
+    }
+
+    /// Needs a logged-in session (loginwindow runs in every one, including
+    /// the GUI CI runners); skipped when `pgrep` finds none.
+    #[test]
+    fn live_platform_check_accepts_loginwindow_and_refuses_the_rest() {
+        let out = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-x", "loginwindow"])
+            .output();
+        let pid = out.ok().and_then(|o| {
+            String::from_utf8(o.stdout)
+                .ok()?
+                .lines()
+                .next()?
+                .trim()
+                .parse::<i32>()
+                .ok()
+        });
+        if let Some(pid) = pid {
+            let (path, id) = OS_PROGRAMS[0];
+            assert!(live::is_platform_binary(pid, id));
+            assert!(!live::is_platform_binary(pid, "com.apple.screencaptureui"));
+            assert_eq!(live::resolve_process(pid).exe_path.as_deref(), Some(path));
+        }
+        // This test process is not an Apple program.
+        let me = std::process::id() as i32;
+        assert!(!live::is_platform_binary(me, "com.apple.loginwindow"));
+        assert!(!live::resolve_process(me).platform_verified);
     }
 
     #[test]
@@ -617,6 +792,7 @@ mod tests {
             bundle_id: Some("org.example.v".into()),
             exe_path: None,
             name: Some("  Viewer\u{7}\n".into()),
+            ..Process::default()
         };
         assert_eq!(hidden_app(9, &p, None).name, "Viewer");
         assert_eq!(hidden_app(9, &p, None).key, "org.example.v");
@@ -624,6 +800,7 @@ mod tests {
             bundle_id: None,
             exe_path: Some("/Users/a/bin/viewer".into()),
             name: None,
+            ..Process::default()
         };
         assert_eq!(hidden_app(9, &p, Some("")).name, "viewer");
         assert_eq!(hidden_app(9, &p, None).key, "/Users/a/bin/viewer");

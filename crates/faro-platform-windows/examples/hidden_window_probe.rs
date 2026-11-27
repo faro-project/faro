@@ -97,11 +97,7 @@ fn main() {
         let p = resolve_process(w.pid);
         let note = if w.pid == own {
             " (this probe)"
-        } else if p
-            .exe_path
-            .as_deref()
-            .is_some_and(|e| is_allowed_os_process(e, &root))
-        {
+        } else if is_allowed_os_process(&p, &root) {
             " (Windows, allowed)"
         } else {
             ""

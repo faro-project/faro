@@ -343,6 +343,28 @@
       "205a6f65cc88e280ae2020536d6974680a",
       "e2808ff09f998f204c656500"
     ],
+    "manifest_v3": {
+      "format": 3,
+      "instance_id": "inst_0123456789abcdef",
+      "member_id": "usr_member01",
+      "version": 3,
+      "prev_hash": "b3:1a50f924fcde15acfdd04d38f64172b50887ccf4f5949fa96f08cbd1f14dd971",
+      "issued_at_ms": 1790000000600,
+      "member_enc_pubkey": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+      "allies": [
+        {
+          "ally_id": "usr_ally_a",
+          "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+          "name": "Zoë Smith"
+        },
+        {
+          "ally_id": "usr_ally_b",
+          "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms",
+          "name": "🙏 Lee"
+        }
+      ],
+      "sig": "4_xOsCK5fkPzDnre_iDiRLMNx9ZW7nDvVL4b6SLYAMkDOUA5D-6ip7GP3n6xdBcNOBUVBKw1Bq4ry7I4YXIqAg"
+    },
     "device_endorsement": {
       "instance_id": "inst_0123456789abcdef",
       "member_id": "usr_member01",
@@ -836,6 +858,32 @@
       "version": 4
     },
     "signing_bytes_hex": "6661726f2f726563697069656e742d6d616e69666573742f76320000000015696e73745f303132333435363738396162636465660000000c7573725f6d656d62657230310000000000000004000001a0c4506c7b0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f2000000000000000020000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14000000145a6fc3ab20c3856e67737472c3b66d20f09f998f0000000a7573725f616c6c795f62ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b00000000"
+  },
+  "manifest_v3": {
+    "hash": "b3:2beeeafe888ab6946397909752e4e70a0a55f058c0ec086770047f2b86f97309",
+    "signed": {
+      "allies": [
+        {
+          "ally_id": "usr_ally_a",
+          "enc_pubkey": "ew1H2TQn-DERYHgcfHM_2J-IlwrvSQ2KoO4ZpMuKGxQ",
+          "name": "Zoë Ångström 🙏"
+        },
+        {
+          "ally_id": "usr_ally_b",
+          "enc_pubkey": "_y7kVgHsG2cxDHeQQEWFrmlzMe7hwfjPJBlzHB__Pms",
+          "name": ""
+        }
+      ],
+      "format": 3,
+      "instance_id": "inst_0123456789abcdef",
+      "issued_at_ms": 1790000000124,
+      "member_enc_pubkey": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+      "member_id": "usr_member01",
+      "prev_hash": "b3:d92459ddc9bc8ad7103bd8cb4df4cd030320f65e65b52880a66131a47ab45a03",
+      "sig": "65BZG8LxGK6JTnN3xP_sC3WV5XbLyKNlZh9Nq_0SC60MYpGsi1HZemc2eOjkUdzidKVOpXktgKe8MIaaXVZoAw",
+      "version": 5
+    },
+    "signing_bytes_hex": "6661726f2f726563697069656e742d6d616e69666573742f76330000000015696e73745f303132333435363738396162636465660000000c7573725f6d656d62657230310000000000000005d92459ddc9bc8ad7103bd8cb4df4cd030320f65e65b52880a66131a47ab45a03000001a0c4506c7c0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f2000000000000000020000000a7573725f616c6c795f617b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14000000145a6fc3ab20c3856e67737472c3b66d20f09f998f0000000a7573725f616c6c795f62ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b00000000"
   },
   "member_binding": {
     "signed": {

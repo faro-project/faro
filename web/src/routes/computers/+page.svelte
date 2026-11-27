@@ -7,7 +7,9 @@
 	// 2. The computer enrolls and shows its own key's fingerprint. It appears
 	//    here as waiting; the member compares the fingerprints and approves,
 	//    which signs a device endorsement anchored to the current recipient
-	//    list (`min_manifest`).
+	//    list (`min_manifest`). That list is checked against the highest one
+	//    this browser has signed or seen (no rollback to a list that still
+	//    names a removed ally) and shown, names and key ids, before approving.
 	// 3. Removing an active computer stops its monitoring, so the server
 	//    alerts the member's allies (urgent, can't be switched off).
 
@@ -16,15 +18,23 @@
 	import { api, ApiError, describeError, seg } from '#lib/api.ts';
 	import { unb64 } from '#lib/crypto/bytes.ts';
 	import { keyId } from '#lib/crypto/keys.ts';
-	import { deviceEndorsementSigningBytes, manifestRef, signWith } from '#lib/crypto/proto.ts';
+	import {
+		deviceEndorsementSigningBytes,
+		manifestRef,
+		signWith,
+		type RecipientManifest,
+		type Signed
+	} from '#lib/crypto/proto.ts';
 	import { ago, date, dateTime } from '#lib/format.ts';
+	import { buildEnrollLink } from '#lib/enroll-link.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
 	import { ensureManifest, latestManifest } from '#lib/keys/member.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { DeviceSummary, EnrollCode, MyAllies, Platform } from '#lib/types.ts';
+	import type { DeviceSummary, EnrollCode, Platform } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
 	import QrCode from '#lib/ui/QrCode.svelte';
+	import RecipientList from '#lib/ui/RecipientList.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
 
 	let devices = $state<DeviceSummary[] | null>(null);
@@ -43,6 +53,10 @@
 	let approveBusy = $state(false);
 	let approveError = $state('');
 	let done = $state('');
+	/** The checked list the device being approved is anchored to, as shown. */
+	let anchor = $state<Signed<RecipientManifest> | null>(null);
+	let anchorFor = $state('');
+	let anchorError = $state('');
 
 	let removeDialog = $state<HTMLDialogElement | null>(null);
 	let removing = $state<DeviceSummary | null>(null);
@@ -91,13 +105,6 @@
 		)
 	);
 
-	async function activeAllies() {
-		const mine = await api.get<MyAllies>('/v1/me/allies');
-		return mine.allies
-			.filter((a) => a.state === 'active' && a.ally_enc_pubkey)
-			.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey! }));
-	}
-
 	async function newCode() {
 		const keys = keyring.memberFor(session.user?.id);
 		const inst = instance.info;
@@ -106,7 +113,7 @@
 		codeError = '';
 		try {
 			// A computer can't start without a recipient list to bootstrap from.
-			await ensureManifest(keys, inst.instance_id, activeAllies);
+			await ensureManifest(keys, inst.instance_id);
 			code = await api.post<EnrollCode>('/v1/me/enroll-codes');
 			now = Date.now();
 		} catch (e) {
@@ -121,11 +128,21 @@
 	}
 
 	/** The link with the member key fingerprint, from the unlocked key. */
-	let link = $derived.by(() => {
+	let linkState = $derived.by(() => {
 		const keys = keyring.member;
-		if (!code || !keys) return '';
-		return `${code.enroll_url}&m=${keyId(keys.signPk)}`;
+		if (!code || !keys) return { link: '', error: '' };
+		try {
+			// Built here, not from the server's `enroll_url`: the server must not
+			// be able to choose the fingerprint the device checks (#179).
+			return {
+				link: buildEnrollLink(window.location.origin, code.enroll_url, keyId(keys.signPk)),
+				error: ''
+			};
+		} catch (e) {
+			return { link: '', error: e instanceof Error ? e.message : 'Could not build the link.' };
+		}
 	});
+	let link = $derived(linkState.link);
 
 	let remaining = $derived(code ? Math.max(0, code.expires_at_ms - now) : 0);
 	let remainingText = $derived(
@@ -148,39 +165,68 @@
 		matches = false;
 		approveError = '';
 		done = '';
+		anchor = null;
+		anchorFor = '';
+		anchorError = '';
 	}
+
+	/** Load (again) the list a device would be anchored to. */
+	async function loadAnchor(deviceId: string) {
+		const keys = keyring.memberFor(session.user?.id);
+		const inst = instance.info;
+		if (!keys || !inst) return;
+		anchorFor = deviceId;
+		anchorError = '';
+		try {
+			const m = await latestManifest(keys, inst.instance_id);
+			if (!m) throw new Error('Sign your recipient list first (Your keys page).');
+			if (approving?.device_id === deviceId) anchor = m;
+		} catch (e) {
+			anchor = null;
+			anchorError = e instanceof Error && !(e instanceof ApiError) ? e.message : describeError(e);
+		}
+	}
+
+	// Once the keys are unlocked, fetch and check the list to show.
+	$effect(() => {
+		const d = approving;
+		if (d && keyring.memberFor(session.user?.id) && anchorFor !== d.device_id) {
+			void loadAnchor(d.device_id);
+		}
+	});
 
 	async function approve() {
 		const d = approving;
 		const keys = keyring.memberFor(session.user?.id);
 		const inst = instance.info;
-		if (!d || !keys || !inst) return;
+		// Anchored to exactly the list shown, which was checked when loaded.
+		const m = anchor;
+		if (!d || !keys || !inst || !m) return;
 		approveBusy = true;
 		approveError = '';
 		try {
-			for (let attempt = 0; ; attempt++) {
-				const m = await latestManifest(keys, inst.instance_id);
-				if (!m) throw new Error('Sign your recipient list first (Your keys page).');
-				const body = signWith(
-					keys.signSeed,
-					{
-						instance_id: inst.instance_id,
-						member_id: keys.userId,
-						device_id: d.device_id,
-						device_sign_pubkey: d.sign_pubkey,
-						endorsed_at_ms: Date.now(),
-						min_manifest: manifestRef(m)
-					},
-					deviceEndorsementSigningBytes
-				);
-				try {
-					await api.post(`/v1/devices/${seg(d.device_id)}/endorse`, body);
-					break;
-				} catch (e) {
-					// The list changed between reading and approving: once more.
-					if (e instanceof ApiError && e.code === 'stale_min_manifest' && attempt === 0) continue;
-					throw e;
+			const body = signWith(
+				keys.signSeed,
+				{
+					instance_id: inst.instance_id,
+					member_id: keys.userId,
+					device_id: d.device_id,
+					device_sign_pubkey: d.sign_pubkey,
+					endorsed_at_ms: Date.now(),
+					min_manifest: manifestRef(m)
+				},
+				deviceEndorsementSigningBytes
+			);
+			try {
+				await api.post(`/v1/devices/${seg(d.device_id)}/endorse`, body);
+			} catch (e) {
+				// The list changed after it was shown: show the new one.
+				if (e instanceof ApiError && e.code === 'stale_min_manifest') {
+					anchor = null;
+					await loadAnchor(d.device_id);
+					throw new Error('Your recipient list changed. Check the new list and approve again.');
 				}
+				throw e;
 			}
 			done = `${d.name} is approved. It starts monitoring within a minute.`;
 			approving = null;
@@ -315,9 +361,16 @@
 											If it's different, or you didn't just set up this computer, don't approve it:
 											choose "Not mine".
 										</p>
+										{#if anchor}
+											<RecipientList title="{d.name} will encrypt to" list={anchor} />
+										{:else if anchorError}
+											<div class="notice error" role="alert"><p>{anchorError}</p></div>
+										{:else}
+											<p class="muted" role="status">Checking your recipient list…</p>
+										{/if}
 										<label class="check">
 											<input type="checkbox" bind:checked={matches} />
-											The fingerprint on the computer is the same
+											The fingerprint on the computer is the same, and so is the list above
 										</label>
 										{#if approveError}<div class="notice error" role="alert">
 												<p>{approveError}</p>
@@ -326,7 +379,7 @@
 											<button
 												class="primary"
 												type="button"
-												disabled={!matches || approveBusy}
+												disabled={!matches || approveBusy || !anchor}
 												onclick={approve}
 											>
 												{approveBusy ? 'Approving…' : `Approve ${d.name}`}
@@ -397,6 +450,9 @@
 										{#if code}<p class="muted small">The last code expired.</p>{/if}
 									{:else}
 										<p class="muted small">Works once, for the next {remainingText}.</p>
+										{#if linkState.error}<div class="notice error" role="alert">
+												<p>{linkState.error}</p>
+											</div>{/if}
 										<p>In Faro on the iPhone, scan this code with the camera on the link screen:</p>
 										<QrCode text={link} label="QR code for the iPhone enrollment link" />
 										<p class="muted small">
@@ -449,6 +505,9 @@
 									{:else}
 										<p class="code-display big">{code.code}</p>
 										<p class="muted small">Works once, for the next {remainingText}.</p>
+										{#if linkState.error}<div class="notice error" role="alert">
+												<p>{linkState.error}</p>
+											</div>{/if}
 										<p>On the computer, with Faro installed, open the enrollment link:</p>
 										<div class="actions inline">
 											<a class="button primary small" href={link}>Open in Faro</a>

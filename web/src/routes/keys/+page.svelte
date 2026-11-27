@@ -9,7 +9,8 @@
 	// list (version 1, no allies yet), which enrolling a computer needs.
 
 	import { resolve } from '$app/paths';
-	import { api, ApiError, describeError } from '#lib/api.ts';
+	import { ApiError, describeError } from '#lib/api.ts';
+	import type { RecipientManifest } from '#lib/crypto/proto.ts';
 	import { formatKeyId, keyId } from '#lib/crypto/keys.ts';
 	import { unb64 } from '#lib/crypto/bytes.ts';
 	import { date } from '#lib/format.ts';
@@ -22,9 +23,10 @@
 		latestManifest
 	} from '#lib/keys/member.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { MemberKeysBlob, MyAllies, User, WellKnown } from '#lib/types.ts';
+	import type { MemberKeysBlob, User, WellKnown } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
 	import NewPassphrase from '#lib/ui/NewPassphrase.svelte';
+	import RecipientList from '#lib/ui/RecipientList.svelte';
 	import RecoveryCode from '#lib/ui/RecoveryCode.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
 
@@ -40,6 +42,7 @@
 	let recoveryCode = $state('');
 	let manifestState = $state<'unknown' | 'checking' | 'missing' | 'ok' | 'error'>('unknown');
 	let manifestError = $state('');
+	let current = $state<RecipientManifest | null>(null);
 	let loadedFor = '';
 
 	async function load(user: User) {
@@ -53,13 +56,6 @@
 			error = describeError(e);
 			view = 'error';
 		}
-	}
-
-	async function activeAllies() {
-		const mine = await api.get<MyAllies>('/v1/me/allies');
-		return mine.allies
-			.filter((a) => a.state === 'active' && a.ally_enc_pubkey)
-			.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey! }));
 	}
 
 	async function create(e: SubmitEvent, user: User, inst: WellKnown) {
@@ -100,8 +96,12 @@
 		manifestState = 'checking';
 		manifestError = '';
 		try {
-			if (create) await ensureManifest(keys, inst.instance_id, activeAllies);
-			manifestState = (await latestManifest(keys, inst.instance_id)) ? 'ok' : 'missing';
+			// The first list names only the member: allies are added by
+			// approving them, never from what the server lists.
+			current = create
+				? await ensureManifest(keys, inst.instance_id)
+				: await latestManifest(keys, inst.instance_id);
+			manifestState = current ? 'ok' : 'missing';
 		} catch (e) {
 			manifestError = e instanceof Error && !(e instanceof ApiError) ? e.message : describeError(e);
 			manifestState = 'error';
@@ -197,6 +197,9 @@
 							<span class="chip good">✓ Signed</span> Your computers encrypt to you and to the allies
 							you have approved, as listed in the recipient list you signed.
 						</p>
+						{#if current}
+							<RecipientList title="Your computers encrypt to" list={current} />
+						{/if}
 						<div class="actions">
 							<a class="button primary" href={resolve('/computers')}>Add a computer</a>
 							<a class="button secondary" href={resolve('/allies')}>Invite an ally</a>

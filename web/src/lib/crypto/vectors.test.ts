@@ -25,6 +25,7 @@ import {
 	keyRewrapSigningBytes,
 	MANIFEST_FORMAT_V1,
 	MANIFEST_FORMAT_V2,
+	MANIFEST_FORMAT_V3,
 	manifestRef,
 	manifestSigningBytes,
 	memberBindingSigningBytes,
@@ -251,8 +252,10 @@ test('manifest validation and the next version', () => {
 	assert.equal(next.issued_at_ms, m.issued_at_ms + 1);
 	assert.equal(validateManifest(next), null);
 	assert.ok(!('sig' in next));
-	// Every re-sign is format 2, unnamed allies signed with an empty name.
-	assert.equal(next.format, MANIFEST_FORMAT_V2);
+	// Every re-sign is format 3, linked to the version it follows, unnamed
+	// allies signed with an empty name.
+	assert.equal(next.format, MANIFEST_FORMAT_V3);
+	assert.equal(next.prev_hash, V.manifest.hash);
 	assert.deepEqual(
 		next.allies.map((a) => a.name),
 		['', '']
@@ -293,8 +296,8 @@ test('format 2 manifests match Rust', () => {
 	assert.match(validateManifest(unnamed) ?? '', /no name/);
 	const long = { ...m, allies: m.allies.map((a) => ({ ...a, name: 'é'.repeat(129) })) };
 	assert.match(validateManifest(long) ?? '', /too long/);
-	assert.match(validateManifest({ ...m, format: 3 }) ?? '', /unknown format/);
-	// The next version keeps format 2 and signs the names it is given,
+	assert.match(validateManifest({ ...m, format: 4 }) ?? '', /unknown format/);
+	// The next version is format 3 and signs the names it is given,
 	// sanitized.
 	const next = nextManifest(
 		m,
@@ -306,6 +309,38 @@ test('format 2 manifests match Rust', () => {
 		[m.allies[0].name, 'Pat Lee']
 	);
 	assert.equal(validateManifest(next), null);
+});
+
+test('format 3 manifests match Rust and link to the previous version', () => {
+	const pk = unb64(K.member_sign_pubkey);
+	const seed = unb64(K.member_sign_seed);
+	const m = V.manifest_v3.signed as Signed<RecipientManifest>;
+	const prev = V.manifest_v2.signed as Signed<RecipientManifest>;
+	assert.equal(m.format, MANIFEST_FORMAT_V3);
+	assert.equal(m.prev_hash, V.manifest_v2.hash);
+	assert.equal(validateManifest(m), null);
+	assert.equal(hex(manifestSigningBytes(m)), V.manifest_v3.signing_bytes_hex);
+	assert.deepEqual(manifestRef(m), { version: m.version, hash: V.manifest_v3.hash });
+	assert.equal(checkManifest(m, pk, V.ids.instance, V.ids.member), null);
+	const { sig, ...body } = m;
+	assert.equal(signWith(seed, body, manifestSigningBytes).sig, sig);
+	// nextManifest builds exactly this from its predecessor.
+	assert.deepEqual(nextManifest(prev, prev.allies, m.issued_at_ms), body);
+	// The link is signed.
+	const relinked = { ...m, prev_hash: V.manifest.hash };
+	assert.match(checkManifest(relinked, pk, V.ids.instance, V.ids.member) ?? '', /signature/);
+	// It is required above version 1 and refused at version 1 and in the
+	// older formats.
+	const { prev_hash: _, ...unlinked } = m;
+	assert.match(validateManifest(unlinked) ?? '', /follows/);
+	assert.match(validateManifest({ ...m, version: 1 }) ?? '', /unexpected prev_hash/);
+	assert.match(validateManifest({ ...prev, prev_hash: V.manifest.hash }) ?? '', /unexpected/);
+	assert.match(validateManifest({ ...m, prev_hash: 'b3:zz' }) ?? '', /malformed prev_hash/);
+	// Version 1 signs 32 zero bytes in its place.
+	const first: RecipientManifest = { ...unlinked, version: 1 };
+	assert.equal(validateManifest(first), null);
+	const bytes = hex(manifestSigningBytes(first));
+	assert.ok(bytes.includes('0000000000000001' + '00'.repeat(32)), bytes);
 });
 
 test('ally names are sanitized exactly as in Rust', () => {

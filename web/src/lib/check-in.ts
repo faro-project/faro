@@ -26,16 +26,19 @@ import {
 	MAX_NAMED,
 	MAX_NOTE_CHARS,
 	noteLength,
+	NOT_IN_ROSTER,
 	readSealed,
+	RecipientError,
 	sealable,
+	type CheckedRecipients,
 	type MessageView,
-	type ReadKeys,
-	type Recipients
+	type ReadKeys
 } from './reach-out.ts';
+import type { RosterState } from './crypto/roster.ts';
 import { messageText } from './crypto/group.ts';
 
 export type { CheckInText };
-export { MAX_NAMED, MAX_NOTE_CHARS, noteLength };
+export { MAX_NAMED, MAX_NOTE_CHARS, NOT_IN_ROSTER, noteLength };
 
 /** Who a check-in is for. */
 export type CheckInAudience = 'allies' | 'facilitators' | 'people' | 'group';
@@ -62,15 +65,20 @@ type Author = Pick<MemberKeys, 'userId' | 'signSeed' | 'encPk'>;
 
 /**
  * Seal and sign a check-in to everyone in `recipients` who has a key, and to
- * yourself (allies in the group, the facilitators or named people).
+ * yourself (allies in the group, the facilitators or named people). The
+ * recipients must have been checked against the group's verified roster
+ * (`checkRecipients`, with the group's id).
  */
 export function composeCheckIn(
 	keys: Author,
-	recipients: Recipients,
+	recipients: CheckedRecipients,
 	groupId: string,
 	checkIn: CheckInText,
 	now = Date.now()
 ): SealedGroupMessage {
+	if (recipients.checked !== true || recipients.group_id !== groupId) {
+		throw new RecipientError('The recipients were not checked for this group.');
+	}
 	const to = sealable(recipients).filter((p) => p.user_id !== keys.userId);
 	if (to.length === 0) throw new Error('Nobody you chose can read a check-in yet.');
 	return sealGroupMessageBody(
@@ -116,10 +124,10 @@ export function composeGroupCheckIn(
 	);
 }
 
-/** A private reply to a check-in: `recipients` is its author alone. */
+/** A private reply to a check-in: `recipients` is its author alone, checked. */
 export function composeReply(
 	keys: Author,
-	recipients: Recipients,
+	recipients: CheckedRecipients,
 	groupId: string,
 	parentId: string,
 	text: string,
@@ -127,6 +135,9 @@ export function composeReply(
 ): SealedGroupMessage {
 	if (!text.trim() || noteLength(text) > MAX_NOTE_CHARS) {
 		throw new Error(`A reply is 1 to ${MAX_NOTE_CHARS} characters.`);
+	}
+	if (recipients.checked !== true || recipients.group_id !== groupId) {
+		throw new RecipientError('The recipients were not checked for this group.');
 	}
 	const to = sealable(recipients).filter((p) => p.user_id !== keys.userId);
 	if (to.length !== 1) throw new Error("They can't read a reply yet: they have no keys.");
@@ -162,14 +173,17 @@ export interface PostRead {
 /**
  * Check a served post and open it as `me`. `groupId` is the group it was
  * asked for in; `instanceId`, when known, must be the one it names. A
- * whole-group post needs `keys.epochKey` (the key of `view.epoch`).
+ * whole-group post needs `keys.epochKey` (the key of `view.epoch`). Its
+ * author must be in `roster`, the group's roster as this browser verified
+ * it, with the signing key the post was signed with (`readSealed`).
  */
 export function readPost(
 	view: PostView,
 	me: string,
 	keys: ReadKeys,
 	instanceId: string | null | undefined,
-	groupId: string
+	groupId: string,
+	roster: RosterState | null
 ): PostRead {
 	const fail = (
 		status: PostRead['status'],
@@ -182,7 +196,7 @@ export function readPost(
 	// The place the server files it under is what was signed.
 	if ((view.parent_id ?? null) !== (m.parent_id ?? null)) return fail('invalid', 'wrong parent');
 	if ((view.epoch ?? null) !== (m.epoch ?? null)) return fail('invalid', 'wrong epoch');
-	const r = readSealed(view, me, keys, instanceId, null, groupId);
+	const r = readSealed(view, me, keys, instanceId, null, groupId, roster);
 	if (r.status !== 'ok') return fail(r.status, r.reason, r.verified);
 	if (!r.bytes) return fail('invalid', 'a post has a body', r.verified);
 	try {

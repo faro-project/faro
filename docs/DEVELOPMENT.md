@@ -110,7 +110,7 @@ npm run vectors     # rewrite the vectors' from_web part after changing web/src/
 
 The toggles and text are in the same row (`settings_json`). Pages read `GET /v1/branding` (public, only what is switched on); admins use `GET`/`PATCH /admin/api/branding` and `PUT`/`DELETE /admin/api/branding/logo` (raw image body, `Content-Type` `image/png`, `image/jpeg` or `image/webp`). Operator text is one plain line, length-limited, with no control or invisible characters, and a support contact is an email address or an `https://` URL. The server checks this (`faro_server::branding`) and the web app checks again (`web/src/lib/branding.ts`). Only the files in `BRANDING_FILES` there may show it, all page chrome. `npm test` fails if any other file does, if any file uses `{@html}`, or if operator text is styled like a Faro notice.
 
-For `npm run dev`, start a server in another terminal with `cargo run -p faro-server -- serve --dev` (it prints a setup token; set `FARO_DEV_API` to proxy somewhere other than `127.0.0.1:8080`). To test the embedded build instead, run `npm run build` and rebuild the server: `/setup` is then served on :8080 itself.
+For `npm run dev`, start a server in another terminal with `cargo run -p faro-server -- serve --dev` (it prints a setup token; set `FARO_DEV_API` to proxy somewhere other than `127.0.0.1:8080`). To test the embedded build instead, run `npm run build` and rebuild the server: `/setup` is then served on :8080 itself. The server refuses cookie-bearing non-GET requests that are not same-origin (`Sec-Fetch-Site`, or `Origin` against `public_url`), which is why the dev proxy works but a page on another origin calling :8080 with the cookie does not; scripts such as `curl` send neither header and pass.
 
 Without `web/build`, `faro-server` still builds and its API works; page requests get a plain-text note and the setup token message points at the `curl` instructions. Release builds set `FARO_REQUIRE_WEB=1`, which makes a missing bundle a build error. CI's `web` job runs lint, check, the crypto tests and build, then the server's web-serving tests against the real bundle.
 
@@ -234,7 +234,7 @@ crates/faro-detect/models/opennsfw/build.sh --parity target/models   # and check
 - **Labels.** `sfw` and `nsfw`. The default policy reads `nsfw` as explicit; `sfw` is ignored. There is no `suggestive` output.
 - **Preprocessing.** The manifest's `resize` says how a frame becomes the 224×224 input. `"direct"` (also what a manifest without `resize` means, which includes both shipped manifests) resizes the whole frame to 224×224 and keeps a screenshot's edges. `{"resize_crop": {"side": 256}}` resizes it to 256×256 and takes the centre 224×224, dropping a 16-pixel border, as Yahoo's script does. Both resample by area averaging and ignore the aspect ratio (Yahoo's script resizes with PIL's bilinear filter and re-encodes the result as JPEG, so scores can still differ a little from its own). `preprocess` applies it, so the service and `model-bench` do the same thing. The package ships `direct`; whether to switch is for the maintainer's eval on the real set ([Comparing preprocessing](#comparing-preprocessing)).
 - **Caches.** Downloads and models are cached by digest in `~/Library/Caches/faro-models` (`FARO_MODEL_CACHE`) and checked again on every use, so a repeat build only reinstalls the tools.
-- **In the service.** `faro-service` built with `--features onnx` loads `/Library/Faro/models/opennsfw/manifest.json` (`pkg_layout::MODEL_MANIFEST`) with `load_model`'s checks and runs it on ONNX Runtime's CPU provider, one thread. Without a model it rates frames from context signals only. When the packaged service's model is missing, altered or can't be loaded, it does the same and reports an urgent `integrity_failure` (`image model (missing)`, `(changed)` or `(cannot load)`) once it runs. `faro-service model-check [--manifest PATH]` loads a model the same way and prints its scores for a few synthetic frames and its latency. A newer model from the update channel replaces the packaged one without a restart ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)); the packaged one stays as the fallback.
+- **In the service.** `faro-service` built with `--features onnx` loads `/Library/Faro/models/opennsfw/manifest.json` (`pkg_layout::MODEL_MANIFEST`; on Windows `C:\Program Files\Faro\models\opennsfw\manifest.json`, `layout::MODEL_MANIFEST`) with `load_model`'s checks and runs it on ONNX Runtime's CPU provider, one thread. Without a model it rates frames from context signals only. When the packaged service's model is missing, altered or can't be loaded, it does the same and reports an urgent `integrity_failure` (`image model (missing)`, `(changed)` or `(cannot load)`) once it runs. `faro-service model-check [--manifest PATH]` loads a model the same way and prints its scores for a few synthetic frames and its latency. A newer model from the update channel replaces the packaged one without a restart ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)); the packaged one stays as the fallback.
 
 ## Model benchmark
 
@@ -605,8 +605,6 @@ It builds everything from `main`, but:
 - it signs with throwaway keys made in the job, never the real ones, and as if nothing were published yet;
 - it publishes no layout and no image. It makes a **draft** GitHub Release named `dry-run-<version>-<run>` with the artifacts, `SHA256SUMS` and `update-layout.tar.gz` (the verified layout and its throwaway root, `dry-run-root.json`). It deletes the previous dry-run draft. Never publish it.
 
-While GitHub's runners can't start, the amd64 build fails at once and the dry run goes on without that binary: the run passes, `server (x86_64)` shows as failed, `layout` warns, and the draft's notes say which binary is missing. A real release needs every architecture.
-
 To try changes to `release.yml` or `release/` before merging them, run a dry run of their branch: `gh workflow run release.yml --ref <branch> -f dry_run=true`. Only a real release must come from a tag on `main`.
 
 ### Cutting a release
@@ -830,13 +828,15 @@ The app's Gradle build runs `crates/faro-android/build-android.sh <out-dir>`, wh
 
 ## CI runners
 
-Every workflow runs on GitHub's hosted runners. There are no self-hosted runners.
+**CI status (2026-11-27).** GitHub's hosted runners are blocked by an Actions billing problem, so no job has started since the last green run on `main`, `722c1a6` on 2026-11-25. Nothing on `main` after that has been checked by CI; run fmt, clippy and the tests of the crates you touch locally, and see [#201](https://github.com/faro-project/faro/issues/201).
+
+Every workflow runs on GitHub's hosted runners. The project has one self-hosted runner registered (a maintainer's Mac), and **no workflow may use it**: a pull request's code runs on a workflow's runner, so a self-hosted runner would run anyone's code with write access, and a fork's code if the repository goes public. A job that runs on a pull request must name a hosted runner; the `build (linux/amd64)` test job of `container.yml` ignores `FARO_LINUX_X64_RUNNER` for that reason, and the variables below apply only to pushes, manual runs, tags and schedules. Anything that has to run on the project's own hardware (the real model set, `model-eval`) runs on `push` to `main` only.
 
 | Runner | Jobs |
 |---|---|
-| `macos-15` (Apple Silicon) | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
+| `macos-15` (Apple Silicon) | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`), `model` in `android.yml` (the image model) |
 | `macos-15-intel` | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel` |
-| `ubuntu-24.04` | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the amd64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` everything else on Linux, including the signing jobs; all of `update-timestamp.yml` |
+| `ubuntu-24.04` | `android` (`android.yml`: the Android app and its Rust core, on pushes to `main` and pull requests that touch them), `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the amd64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` everything else on Linux, including the signing jobs; all of `update-timestamp.yml` |
 | `xcode-27` (Xcode 27 on macOS 27, Apple Silicon) | `ios` |
 | `ubuntu-24.04-arm` | the arm64 container build, and the arm64 server build in `release.yml` |
 | `windows-2025` | `test (windows)`, `windows-msi`, the release MSI (`release.yml`) |

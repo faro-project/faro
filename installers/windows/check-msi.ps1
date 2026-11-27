@@ -401,6 +401,19 @@ try {
                     }
                 }
             }
+            # The installed service finds its model and domain list where the
+            # MSI put them: with no --manifest, model-check and domains-check
+            # use the same default paths the running service loads at start
+            # (model::packaged_manifest, artifacts::packaged_domains_manifest).
+            $installedService = "$ProgramDir\faro-service.exe"
+            if ($hasModel) {
+                $check = @(Exec { & $installedService model-check --runs 1 })
+                if ($LASTEXITCODE -ne 0) { Fail 'the installed service cannot load its packaged model from the default path' }
+                if (-not ($check | Where-Object { $_ -match '^model\s+opennsfw\b' })) { Fail "model-check (default path) did not load opennsfw: $check" }
+            }
+            $check = @(Exec { & $installedService domains-check })
+            if ($LASTEXITCODE -ne 0) { Fail 'the installed service cannot load its packaged domain list from the default path' }
+            if (-not ($check | Where-Object { $_ -match '^domains\s+\S' })) { Fail "domains-check (default path) loaded no list: $check" }
             if (-not (Test-Path "$DataDir\service.toml")) { Fail 'no service.toml in the state directory' }
             $arp = Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
                 Get-ItemProperty | Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName -eq 'Faro' }

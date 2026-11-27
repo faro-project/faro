@@ -201,19 +201,45 @@ pub fn is_packaged_service() -> bool {
             .and_then(|p| p.canonicalize().ok())
             .is_some_and(|p| p == Path::new(faro_platform_macos::pkg_layout::SERVICE_PROGRAM))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+            .is_some_and(|p| {
+                is_installed_program(&p, faro_platform_windows::layout::SERVICE_PROGRAM)
+            })
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         false
     }
 }
 
-/// The packaged service writes notices next to the packaged ones; any other
-/// build into `notices/` in its state directory.
+/// Whether `exe` (a canonical path) is the installed program `installed`.
+/// Windows paths compare case-insensitively, and `canonicalize` returns
+/// them with a `\\?\` prefix the layout constants lack.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn is_installed_program(exe: &Path, installed: &str) -> bool {
+    let exe = exe.to_string_lossy();
+    let exe = exe.strip_prefix(r"\\?\").unwrap_or(&exe);
+    exe.eq_ignore_ascii_case(installed)
+}
+
+/// The packaged service writes notices next to the packaged ones, the
+/// folder the agent opens; any other build into `notices/` in its state
+/// directory.
 pub fn default_notices_dir(state_dir: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if is_packaged_service() {
             return PathBuf::from(faro_platform_macos::pkg_layout::NOTICES_DIR);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if is_packaged_service() {
+            return PathBuf::from(faro_platform_windows::layout::NOTICES_DIR);
         }
     }
     state_dir.join("notices")
@@ -228,7 +254,13 @@ pub fn packaged_domains_manifest() -> Option<PathBuf> {
             faro_platform_macos::pkg_layout::DOMAINS_MANIFEST,
         ))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        Some(PathBuf::from(
+            faro_platform_windows::layout::DOMAINS_MANIFEST,
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         None
     }
@@ -1055,5 +1087,39 @@ mod tests {
         assert!(text.contains("Copyright 2016, Yahoo Inc."));
         assert!(text.contains("Redistribution and use in source and binary forms"));
         assert!(notice_text(TargetKind::Model, b"{").is_none());
+    }
+
+    #[test]
+    fn the_installed_program_is_matched_as_windows_spells_it() {
+        let installed = r"C:\Program Files\Faro\faro-service.exe";
+        let same = |p: &str| is_installed_program(Path::new(p), installed);
+        assert!(same(installed));
+        // What `canonicalize` returns on Windows.
+        assert!(same(r"\\?\C:\Program Files\Faro\faro-service.exe"));
+        assert!(same(r"\\?\c:\program files\faro\FARO-SERVICE.EXE"));
+        assert!(!same(r"C:\Users\x\target\debug\faro-service.exe"));
+        assert!(!same(r"C:\Program Files\Faro\faro-agent.exe"));
+        assert!(!same(r"\\?\D:\Program Files\Faro\faro-service.exe"));
+    }
+
+    /// On Windows the packaged files are the MSI's, and the notices of
+    /// channel-installed artifacts go where the agent opens them.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_package_layout_is_used() {
+        use faro_platform_windows::layout;
+        assert_eq!(
+            packaged_domains_manifest(),
+            Some(PathBuf::from(layout::DOMAINS_MANIFEST))
+        );
+        assert_eq!(
+            crate::model::packaged_manifest(),
+            Some(PathBuf::from(layout::MODEL_MANIFEST))
+        );
+        // A test binary is not the installed service.
+        assert!(!is_packaged_service());
+        assert!(!crate::model::model_required());
+        let state = Path::new(r"C:\state");
+        assert_eq!(default_notices_dir(state), state.join("notices"));
     }
 }

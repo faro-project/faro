@@ -22,7 +22,8 @@ use faro_proto::event::{EventHeader, EVENT_HEADER_VERSION};
 use faro_proto::keys::{
     key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
     ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
-    MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MAX_ALLY_NAME_BYTES, MAX_MANIFEST_ALLIES,
+    MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3, MAX_ALLY_NAME_BYTES,
+    MAX_MANIFEST_ALLIES,
 };
 use faro_proto::report::{
     ActivityState, CountedItem, DailyReport, FlaggedMoment, HealthSummary, RatingCounts,
@@ -280,10 +281,15 @@ fn check_manifest(m: &RecipientManifest) {
         assert!(m.version >= 1 && m.allies.len() <= MAX_MANIFEST_ALLIES);
         assert!(m.allies.windows(2).all(|w| w[0].ally_id < w[1].ally_id));
         assert!(m.allies.iter().all(|a| a.ally_id != m.member_id));
-        // A name only where it is signed, and bounded.
-        assert!(m.format == MANIFEST_FORMAT_V1 || m.format == MANIFEST_FORMAT_V2);
+        // A name only where it is signed, and bounded; a link to the
+        // previous version exactly in format 3 above version 1.
+        assert!([MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3].contains(&m.format));
+        assert_eq!(
+            m.prev_hash.is_some(),
+            m.format == MANIFEST_FORMAT_V3 && m.version > 1
+        );
         for a in &m.allies {
-            assert_eq!(a.name.is_some(), m.format == MANIFEST_FORMAT_V2);
+            assert_eq!(a.name.is_some(), m.format != MANIFEST_FORMAT_V1);
             assert!(a
                 .name
                 .as_ref()
@@ -652,6 +658,7 @@ fn manifest() -> RecipientManifest {
         instance_id: inst(),
         member_id: member(),
         version: 3,
+        prev_hash: None,
         issued_at_ms: T0,
         member_enc_pubkey: EncPublicKey([1; 32]),
         allies: vec![
@@ -675,6 +682,14 @@ fn manifest_v2() -> RecipientManifest {
     m.format = MANIFEST_FORMAT_V2;
     m.allies[0].name = Some("Zoë 🙏".into());
     m.allies[1].name = Some(String::new());
+    m
+}
+
+/// `manifest_v2()` in format 3, linked to a previous version.
+fn manifest_v3() -> RecipientManifest {
+    let mut m = manifest_v2();
+    m.format = MANIFEST_FORMAT_V3;
+    m.prev_hash = Some(Hash32([4; 32]));
     m
 }
 
@@ -966,6 +981,11 @@ pub fn seeds() -> Vec<(&'static str, String, Vec<u8>)> {
         "api",
         "SignedRecipientManifest-v2",
         with_selector("SignedRecipientManifest", &signed(manifest_v2())),
+    );
+    add(
+        "api",
+        "SignedRecipientManifest-v3",
+        with_selector("SignedRecipientManifest", &signed(manifest_v3())),
     );
     out
 }

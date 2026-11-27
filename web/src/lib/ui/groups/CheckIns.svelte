@@ -9,6 +9,12 @@
 	// (one envelope, whatever the group's size), which this browser opens
 	// against the roster it verified (`roster`, from GroupKeys). They wait
 	// while a facilitator has roster work to do (`postingPaused`).
+	//
+	// Everyone else a check-in or a reply is sealed to is checked against
+	// that roster, or your own signed ally list, first: anyone the server
+	// adds, or a key that isn't the one in the roster, is refused. A post
+	// is shown only if its author is in the roster with the key that signed
+	// it (GROUPS.md §10.3 item 6).
 	import { untrack } from 'svelte';
 	import { api, seg } from '../../api.ts';
 	import { createPost, epochKeyFor, checkInError, listPosts } from '../../check-in-api.ts';
@@ -21,6 +27,7 @@
 		MAX_NAMED,
 		MAX_NOTE_CHARS,
 		noteLength,
+		NOT_IN_ROSTER,
 		readPost,
 		savePromptSetting,
 		scaleLabel,
@@ -32,7 +39,7 @@
 	import { ago, dateTime } from '../../format.ts';
 	import { instance } from '../../instance.svelte.ts';
 	import { keyring } from '../../keys/keyring.svelte.ts';
-	import { loadRecipients } from '../../reach-out-api.ts';
+	import { loadCheckedRecipients } from '../../reach-out-api.ts';
 	import type { RosterState } from '../../crypto/roster.ts';
 	import type { GroupView, Page, RosterEntry, User } from '../../types.ts';
 	import UnlockKeys from '../UnlockKeys.svelte';
@@ -95,9 +102,10 @@
 		}
 	});
 
+	// Nothing is read before the roster is: it says whose key signed what.
 	let reads = $derived(
 		new Map(
-			posts.map((p) => [
+			(roster ? posts : []).map((p) => [
 				p.id,
 				readPost(
 					p,
@@ -108,7 +116,8 @@
 						epochKey: p.epoch != null ? (epochKeys[p.epoch] ?? null) : null
 					},
 					instance.info?.instance_id,
-					group.id
+					group.id,
+					roster
 				)
 			])
 		)
@@ -213,7 +222,7 @@
 				const inst = await instance.load();
 				message = composeGroupCheckIn(keys, inst.instance_id, group.id, k.epoch, k.key, answers());
 			} else {
-				const recipients = await loadRecipients('check_in', {
+				const recipients = await loadCheckedRecipients(keys, 'check_in', {
 					audience,
 					groupId: group.id,
 					userIds: audience === 'people' ? chosen : undefined
@@ -249,7 +258,7 @@
 		replyBusy = true;
 		replyError = '';
 		try {
-			const recipients = await loadRecipients('check_in_reply', {
+			const recipients = await loadCheckedRecipients(keys, 'check_in_reply', {
 				groupId: group.id,
 				userIds: [p.author.user_id]
 			});
@@ -445,7 +454,14 @@
 							{p.epoch != null ? 'to the whole group' : 'to some people'}
 						</span>
 					</div>
-					{#if !r || r.status === 'invalid'}
+					{#if !r}
+						<p class="muted small" role="status">Checking the group's member list…</p>
+					{:else if r.status === 'invalid' && r.reason === NOT_IN_ROSTER}
+						<p class="muted small">
+							This check-in is from someone who isn't in the group's member list this browser
+							checked, so it isn't shown.
+						</p>
+					{:else if r.status === 'invalid'}
 						<div class="notice warn small" role="alert">
 							<p>This check-in's signature doesn't check out, so it isn't shown.</p>
 						</div>

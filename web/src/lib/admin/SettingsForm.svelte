@@ -37,6 +37,8 @@
 	} = $props();
 
 	const MAX_DAYS = 3650;
+	/** Server floor for retention set here (settings.rs): the same as a member's own minimum. */
+	const MIN_DAYS = 7;
 	/** Server limits (config.rs, settings.rs): 10 minutes to 7 days. */
 	const MIN_GRACE_SECS = 600;
 	const MAX_GRACE_SECS = 7 * 24 * 3600;
@@ -135,7 +137,7 @@
 	}
 
 	function validDays(n: number) {
-		return Number.isInteger(n) && n >= 1 && n <= MAX_DAYS;
+		return Number.isInteger(n) && n >= MIN_DAYS && n <= MAX_DAYS;
 	}
 
 	let parsedDomains = $derived(parseDomains(domains));
@@ -248,10 +250,13 @@
 	</fieldset>
 
 	<fieldset>
-		<legend>Retention (days, 1 to {MAX_DAYS})</legend>
+		<legend>Retention (days, {MIN_DAYS} to {MAX_DAYS})</legend>
 		<p class="hint">
-			Members can choose shorter, never longer. A change applies to data received from then on; what
-			is already stored keeps the period it arrived under.
+			Members can choose shorter, never longer. The shortest you can set is {MIN_DAYS} days, so a flagged
+			report is never gone before an ally can open it. A shorter period applies only to data received
+			after you save: what is already stored keeps the period it arrived under. Saving a shorter period
+			(or a longer missed check-in grace period) is written to the admin log, emailed to the other admins,
+			and alerts every member's allies.
 		</p>
 		<div class="days">
 			<div class="field">
@@ -259,25 +264,27 @@
 					Activity log
 					<span class="hint">What happened and when, without the details</span>
 				</label>
-				<input id="event-days" type="number" min="1" max={MAX_DAYS} bind:value={eventDays} />
+				<input id="event-days" type="number" min={MIN_DAYS} max={MAX_DAYS} bind:value={eventDays} />
 			</div>
 			<div class="field">
 				<label for="blob-days">
 					Reports and details
 					<span class="hint">Encrypted event details, reports and blurred images</span>
 				</label>
-				<input id="blob-days" type="number" min="1" max={MAX_DAYS} bind:value={blobDays} />
+				<input id="blob-days" type="number" min={MIN_DAYS} max={MAX_DAYS} bind:value={blobDays} />
 			</div>
 			<div class="field">
 				<label for="alert-days">
 					Alerts
 					<span class="hint">Alerts and missed check-ins</span>
 				</label>
-				<input id="alert-days" type="number" min="1" max={MAX_DAYS} bind:value={alertDays} />
+				<input id="alert-days" type="number" min={MIN_DAYS} max={MAX_DAYS} bind:value={alertDays} />
 			</div>
 		</div>
 		{#if !daysValid}
-			<span class="field-error">Each value must be a whole number from 1 to {MAX_DAYS}.</span>
+			<span class="field-error">
+				Each value must be a whole number from {MIN_DAYS} to {MAX_DAYS}.
+			</span>
 		{/if}
 	</fieldset>
 

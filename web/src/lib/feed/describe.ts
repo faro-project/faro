@@ -235,6 +235,21 @@ function describeAlert(
 			return { title: n ? `${n} was removed as an ally` : 'An ally was removed', tone: 'info' };
 		}
 		case 'member_settings_changed': {
+			const instance = after('instance_weakened:');
+			if (instance) {
+				const parts = instance
+					.split(',')
+					.map((w) =>
+						w === 'liveness_grace_longer'
+							? 'the missed check-in grace period is longer'
+							: `${RETENTION_NAME[w] ?? w} are kept for less time`
+					);
+				return {
+					title: 'An admin weakened monitoring for everyone',
+					text: `An instance admin changed a setting for all members: ${parts.join('; ')}.`,
+					tone: 'normal'
+				};
+			}
 			const which = after('retention_shortened:');
 			return {
 				title: 'History is kept for less time',

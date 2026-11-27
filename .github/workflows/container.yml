@@ -15,7 +15,8 @@
 # "CI runners"), never under QEMU emulation:
 #
 #   linux/arm64   ubuntu-24.04-arm
-#   linux/amd64   ubuntu-24.04. The repository variable FARO_LINUX_X64_RUNNER
+#   linux/amd64   ubuntu-24.04. On pushes to main and manual runs (never on
+#                 pull requests) the repository variable FARO_LINUX_X64_RUNNER
 #                 (JSON, the same one release.yml reads) moves it.
 #   publish       the merge job, on ubuntu-24.04
 #
@@ -70,8 +71,11 @@ jobs:
       matrix:
         # Keep in step with the `build` job's matrix.
         include:
+          # Always GitHub's runner: this job builds a pull request's code,
+          # which must never reach a self-hosted machine, so it ignores
+          # FARO_LINUX_X64_RUNNER.
           - platform: linux/amd64
-            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '"ubuntu-24.04"' }}
+            runner: '"ubuntu-24.04"'
           - platform: linux/arm64
             runner: '"ubuntu-24.04-arm"'
     runs-on: ${{ fromJSON(matrix.runner) }}

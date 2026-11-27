@@ -237,7 +237,8 @@ export interface AdminLogEntry {
 		| 'deletion_cancelled'
 		| 'account_created'
 		| 'account_disabled'
-		| 'account_enabled';
+		| 'account_enabled'
+		| 'settings_changed';
 	/** The account it was about; null once that account is deleted. */
 	user: AdminLogAccount | null;
 	/**
@@ -247,6 +248,8 @@ export interface AdminLogEntry {
 	actor: AdminLogAccount | null;
 	via: 'console' | 'command_line';
 	at_ms: number;
+	/** `settings_changed` only: `path:old>new` entries joined by `;`. */
+	detail?: string | null;
 }
 
 /** `POST /admin/api/invites` (and member ally invites) response. */

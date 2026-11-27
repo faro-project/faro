@@ -99,6 +99,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "group_posts",
                     include_str!("../../migrations/0016_group_posts.sql"),
                 ),
+                (
+                    17,
+                    "admin_log_settings_detail",
+                    include_str!("../../migrations/0017_admin_log_settings_detail.sql"),
+                ),
             ]
         }
     }
@@ -163,8 +168,8 @@ mod tests {
             .await
             .unwrap();
         let all = sources(Backend::Sqlite);
-        let (last, before) = all.split_last().unwrap();
-        assert_eq!(last.0, 16);
+        let at = all.iter().position(|m| m.0 == 16).unwrap();
+        let before = &all[..at];
         for (_, _, sql) in before {
             sqlx::raw_sql(*sql).execute(&mut conn).await.unwrap();
         }
@@ -183,7 +188,7 @@ mod tests {
             sqlx::query(sql).execute(&mut conn).await.unwrap();
         }
 
-        sqlx::raw_sql(last.2).execute(&mut conn).await.unwrap();
+        sqlx::raw_sql(all[at].2).execute(&mut conn).await.unwrap();
 
         let rows =
             sqlx::query("SELECT id, audience, group_id, blob_ref, sig FROM reach_outs ORDER BY id")

@@ -30,7 +30,7 @@ use faro_proto::group::{
 use faro_proto::keys::{
     key_id, safety_code, sanitize_ally_name, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement,
     KeyRewrap, ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap,
-    RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2,
+    RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3,
 };
 use faro_proto::report::ReportHeader;
 use faro_proto::roster::{
@@ -84,6 +84,7 @@ fn manifest() -> RecipientManifest {
         instance_id: InstanceId::new(INSTANCE),
         member_id: UserId::new(MEMBER),
         version: 3,
+        prev_hash: None,
         issued_at_ms: 1_790_000_000_123,
         member_enc_pubkey: member_enc().public(),
         allies: vec![
@@ -109,6 +110,17 @@ fn manifest_v2() -> RecipientManifest {
     m.version = 4;
     m.allies[0].name = Some("Zoë Ångström 🙏".into());
     m.allies[1].name = Some(String::new());
+    m
+}
+
+/// `manifest_v2()`'s successor in format 3, linked to it by `prev_hash`.
+fn manifest_v3() -> RecipientManifest {
+    let prev = manifest_v2();
+    let mut m = prev.clone();
+    m.format = MANIFEST_FORMAT_V3;
+    m.version = prev.version + 1;
+    m.prev_hash = Some(prev.hash());
+    m.issued_at_ms = prev.issued_at_ms + 1;
     m
 }
 
@@ -405,6 +417,7 @@ fn generate() -> Value {
     let ms = member_sign();
     let m = manifest();
     let m2 = manifest_v2();
+    let m3 = manifest_v3();
     let de = device_endorsement();
     let ae = ally_endorsement();
     let mb = member_binding();
@@ -530,6 +543,11 @@ fn generate() -> Value {
             "signed": signed_json(m2.clone(), ms.sign(&m2)),
             "signing_bytes_hex": hex::encode(m2.signing_bytes()),
             "hash": m2.hash(),
+        },
+        "manifest_v3": {
+            "signed": signed_json(m3.clone(), ms.sign(&m3)),
+            "signing_bytes_hex": hex::encode(m3.signing_bytes()),
+            "hash": m3.hash(),
         },
         "ally_names": ALLY_NAMES
             .iter()
@@ -670,6 +688,7 @@ fn web_vectors() {
         "/ed25519",
         "/manifest",
         "/manifest_v2",
+        "/manifest_v3",
         "/ally_names",
         "/device_endorsement",
         "/event_chain",
@@ -829,6 +848,15 @@ fn web_vectors() {
         got, signed,
         "the web app signed what Rust's sanitizer makes"
     );
+    // The web app's next version after that one, in format 3: linked to
+    // it, and verified here.
+    let m3: Signed<RecipientManifest> =
+        serde_json::from_value(web["manifest_v3"].clone()).expect("web v3 manifest parses");
+    assert_eq!(m3.body.format, MANIFEST_FORMAT_V3);
+    m3.body.validate().unwrap();
+    verify_signed(&pk, &m3).unwrap();
+    assert_eq!(m3.body.version, m2.body.version + 1);
+    assert_eq!(m3.body.prev_hash, Some(m2.body.hash()));
     let de: Signed<DeviceEndorsement> =
         serde_json::from_value(web["device_endorsement"].clone()).unwrap();
     verify_signed(&pk, &de).unwrap();
