@@ -361,6 +361,10 @@ impl Config {
                     "must be a non-empty requirement of at most 4096 bytes",
                 ));
             }
+            // A typo must fail here, not lock out every agent later.
+            #[cfg(windows)]
+            faro_platform_windows::SignerRequirement::parse(r)
+                .map_err(|e| invalid("ipc.agent_requirement", e.to_string()))?;
         }
         if self.ipc.socket_path.as_os_str().is_empty() || self.ipc.socket_path.file_name().is_none()
         {
@@ -437,12 +441,33 @@ fn check_config_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), Config
 
 #[cfg(not(unix))]
 fn check_config_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), ConfigError> {
-    // TODO(windows): check the file's DACL (SYSTEM/Administrators only).
     if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
         return Err(ConfigError::UnsafeFile {
             path: path.to_path_buf(),
             reason: "not a regular file of reasonable size".into(),
         });
+    }
+    // The service (SYSTEM) refuses a config that anyone but SYSTEM,
+    // Administrators or TrustedInstaller can change; a development run
+    // by hand reads whatever it is given, as on Unix.
+    #[cfg(windows)]
+    if faro_platform_windows::acl::running_as_system() {
+        match faro_platform_windows::acl::writable_by_others(path) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(ConfigError::UnsafeFile {
+                    path: path.to_path_buf(),
+                    reason: "can be changed by accounts other than SYSTEM and Administrators"
+                        .into(),
+                })
+            }
+            Err(e) => {
+                return Err(ConfigError::UnsafeFile {
+                    path: path.to_path_buf(),
+                    reason: format!("cannot read its permissions: {e}"),
+                })
+            }
+        }
     }
     Ok(())
 }
@@ -474,9 +499,9 @@ pub fn default_socket_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/var/run/faro/agent.sock")
     } else if cfg!(windows) {
-        // Placeholder: the Windows transport is a named pipe (not yet
-        // implemented in faro-ipc).
-        PathBuf::from(r"\\.\pipe\faro-agent")
+        // A named pipe: `faro_ipc::session_socket_path` makes
+        // `\\.\pipe\faro\agent.<SID>` from it.
+        PathBuf::from(r"\\.\pipe\faro\agent")
     } else {
         PathBuf::from("/run/faro/agent.sock")
     }

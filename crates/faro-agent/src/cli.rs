@@ -3,6 +3,7 @@
 //! against the exact arguments the agent accepts.
 //!
 //! ```text
+//! faro-agent open-url "<faro: link>"                           # Windows: the `faro:` scheme's command
 //! faro-agent run [--socket PATH | env FARO_AGENT_SOCKET] [--session ID] [--user NAME]
 //!                [--synthetic] [--trust-same-uid-service] [--no-ui]   # `dev` builds only
 //! ```
@@ -21,11 +22,18 @@ pub struct Cli {
 pub enum Command {
     /// Connect to the Faro service and serve it until told to stop.
     Run(RunArgs),
+    /// Windows: hand a `faro:` link to the agent running in this session
+    /// and exit. This is what the `faro:` URL scheme runs.
+    #[cfg(windows)]
+    OpenUrl {
+        /// The whole link, as the browser passed it.
+        link: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
-    /// The service's Unix socket.
+    /// The service's Unix socket (Windows: its base named pipe).
     #[arg(long, env = "FARO_AGENT_SOCKET", default_value = crate::DEFAULT_SOCKET_PATH)]
     pub socket: PathBuf,
 
@@ -49,7 +57,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub trust_same_uid_service: bool,
 
-    /// Show no menu-bar icon or notice window (macOS), e.g. to run outside
+    /// Show no menu-bar/tray icon or notice window (macOS, Windows), e.g. to run outside
     /// a GUI session. Development builds only (`--features dev`): the icon
     /// is how everyone at the computer knows it is monitored (§12).
     #[cfg(feature = "dev")]
@@ -66,9 +74,23 @@ mod tests {
     fn cli_definition_is_consistent() {
         Cli::command().debug_assert();
         let c = Cli::try_parse_from(["faro-agent", "run", "--socket", "/tmp/a.sock"]).unwrap();
-        let Command::Run(args) = c.command;
+        #[allow(irrefutable_let_patterns)]
+        let Command::Run(args) = c.command
+        else {
+            panic!("expected run");
+        };
         assert_eq!(args.socket, PathBuf::from("/tmp/a.sock"));
         // The subcommand is required.
         assert!(Cli::try_parse_from(["faro-agent", "--socket", "/tmp/a.sock"]).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_url_takes_the_link() {
+        let c = Cli::try_parse_from(["faro-agent", "open-url", "faro://enroll?code=x"]).unwrap();
+        let Command::OpenUrl { link } = c.command else {
+            panic!("expected open-url");
+        };
+        assert_eq!(link, "faro://enroll?code=x");
     }
 }

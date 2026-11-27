@@ -42,6 +42,7 @@ tick() { sleep 1; }
 keys=(--targets-key "$t/keys/targets.key.json" --timestamp-key "$t/keys/timestamp.key.json")
 mkdir -p "$t/dist"
 printf 'pkg one' > "$t/dist/Faro-0.1.0-beta.1.pkg"
+printf 'msi one' > "$t/dist/Faro-0.1.0-beta.1-x64.msi"
 printf 'server one' > "$t/dist/faro-server-0.1.0-beta.1-linux-aarch64"
 b3hex() { "$FARO_RELEASE" describe-target --file "$1" | jq -r .blake3 | sed 's/^b3://'; }
 # A model and a domain list: only the fields the scripts read.
@@ -61,13 +62,21 @@ step "first release: nothing published yet"
 [[ -z "$(ls -A "$t/pub1")" ]] || die "pull of an empty repository wrote files"
 "$here/build-layout.sh" --version 0.1.0-beta.1 \
     --artifact "client:macos:any:13=$t/dist/Faro-0.1.0-beta.1.pkg" \
+    --artifact "client:windows:x86_64:10.0.19045=$t/dist/Faro-0.1.0-beta.1-x64.msi" \
     --artifact "server:linux:aarch64=$t/dist/faro-server-0.1.0-beta.1-linux-aarch64" \
     "${data[@]}" \
     --roots "$t/keys" --published "$t/pub1" "${keys[@]}" --out "$t/layout1"
 [[ ! -e "$t/layout1/roots" ]] || die "root 1 must not be published"
 "$here/publish-layout.sh" push "$t/layout1" "Faro 0.1.0-beta.1"
 listed client/macos/Faro-0.1.0-beta.1.pkg
+listed client/windows/Faro-0.1.0-beta.1-x64.msi
 listed server/linux/faro-server-0.1.0-beta.1-linux-aarch64
+targets_payload |
+    jq -e '.targets["client/windows/Faro-0.1.0-beta.1-x64.msi"].custom
+            | .kind == "client" and .platform == "windows" and .arch == "x86_64"
+              and .version == "0.1.0-beta.1" and .min_os == "10.0.19045"' \
+        > /dev/null || die "wrong Windows client entry"
+[[ "$(published targets/client/windows/Faro-0.1.0-beta.1-x64.msi)" == "msi one" ]] || die "the MSI is not published"
 listed model/any/test-1.0.0_int8-beta.data
 listed blocklist/any/domains-1.0.0-beta.data
 targets_payload |
@@ -83,6 +92,17 @@ targets_payload |
     die "the model is not a data bundle"
 [[ "$(published targets/client/macos/Faro-0.1.0-beta.1.pkg)" == "pkg one" ]] || die "artifact not published"
 [[ "$(published CNAME)" == updates.faro-project.org ]] || die "no CNAME"
+
+step "a client package of the wrong kind, arch or version is refused"
+printf 'msi' > "$t/dist/Faro-0.0.9-x64.msi"
+for bad in "client:windows:x86_64:10.0.19045=$t/dist/Faro-0.0.9-x64.msi" \
+           "client:windows:aarch64=$t/dist/Faro-0.1.0-beta.1-x64.msi" \
+           "client:windows:x86_64=$t/dist/Faro-0.1.0-beta.1.pkg" \
+           "client:macos:any:13=$t/dist/Faro-0.1.0-beta.1-x64.msi"; do
+    fails "$here/build-layout.sh" --version 0.1.0-beta.1 --artifact "$bad" \
+        --roots "$t/keys" --published "$t/pub1" "${keys[@]}" --out "$t/bad-layout"
+    rm -rf "$t/bad-layout"
+done
 
 step "publishing the same layout again changes nothing"
 "$here/publish-layout.sh" push "$t/layout1" "again" > "$t/out.txt"

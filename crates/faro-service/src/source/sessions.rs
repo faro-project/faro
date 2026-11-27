@@ -14,19 +14,28 @@
 //!   sessions the user has. Graphical (`x11`/`wayland`) sessions of class
 //!   `user` from `/run/systemd/sessions/` are grouped by uid; a uid is
 //!   active if any of its sessions is.
-//! * A **non-root development service** only ever serves its own user, so
-//!   its list is that one session.
+//! * **Windows** has one Terminal Services (WTS) session per logon, at the
+//!   console or over RDP, and per account switched away from. A session is
+//!   `wts:<id>`; the list comes from `faro_platform_windows::service::
+//!   enumerate_sessions` and each session's account is the SID of its
+//!   logged-on user (`session_user_sid`, LocalSystem only).
+//! * A **non-root (non-SYSTEM) development service** only ever serves its
+//!   own user, so its list is that one session.
 
+use faro_ipc::AccountId;
+#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// One interactive session that should have an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
-    /// What the agent sends as `session` in `Hello` (`uid:<uid>`).
+    /// What the agent sends as `session` in `Hello` (`uid:<uid>`, or
+    /// `wts:<id>` on Windows).
     pub id: String,
-    /// The account that owns the session; its agent must run as this uid.
-    pub uid: u32,
+    /// The account that owns the session; its agent must run as this uid
+    /// (a SID on Windows).
+    pub uid: AccountId,
     /// The account's short name, used as the label in events (§3.6).
     pub account: String,
     /// At the screen right now (the console user, or an active seat).
@@ -40,19 +49,85 @@ pub type SessionLister = Arc<dyn Fn() -> Option<Vec<SessionEntry>> + Send + Sync
 /// The production lister: every OS session for a root service, our own
 /// session otherwise.
 pub fn default_lister() -> SessionLister {
-    if euid() == 0 {
+    if is_privileged() {
         Arc::new(os_sessions)
     } else {
         Arc::new(|| Some(vec![own_session()]))
     }
 }
 
+/// Root on Unix, LocalSystem on Windows: the service that serves every
+/// account rather than a developer's own.
+pub fn is_privileged() -> bool {
+    #[cfg(unix)]
+    {
+        euid() == 0
+    }
+    #[cfg(windows)]
+    {
+        crate::win::is_system()
+    }
+}
+
+#[cfg(unix)]
 fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }
 
+/// The one session a non-privileged service serves: its own.
+#[cfg(windows)]
+pub fn own_session() -> SessionEntry {
+    let account = std::env::var("USERNAME")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "user".to_owned());
+    SessionEntry {
+        id: format!("wts:{}", crate::win::own_session_id().unwrap_or(0)),
+        uid: crate::win::own_account(),
+        account,
+        active: true,
+    }
+}
+
+/// Every user session, with its account's SID.
+#[cfg(windows)]
+fn os_sessions() -> Option<Vec<SessionEntry>> {
+    use faro_platform_windows::service::{enumerate_sessions, session_id, session_user_sid};
+    let sessions = match enumerate_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot list login sessions");
+            return None;
+        }
+    };
+    let mut out = Vec::new();
+    for s in sessions {
+        // A session can end between the listing and the lookup; the next
+        // re-check settles it.
+        let sid = match session_user_sid(s.id) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(session = s.id, error = %e, "cannot read a session's account");
+                continue;
+            }
+        };
+        let Ok(uid) = sid.parse() else {
+            tracing::warn!(session = s.id, "a session's account SID is malformed");
+            continue;
+        };
+        out.push(SessionEntry {
+            id: session_id(s.id).0,
+            uid,
+            account: s.user.clone(),
+            active: s.active(),
+        });
+    }
+    Some(out)
+}
+
 /// The one session a non-root service serves: its own.
+#[cfg(unix)]
 pub fn own_session() -> SessionEntry {
     let uid = euid();
     let account = std::env::var("USER")
@@ -95,7 +170,7 @@ fn os_sessions() -> Option<Vec<SessionEntry>> {
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn os_sessions() -> Option<Vec<SessionEntry>> {
     let dir = std::path::Path::new("/run/systemd/sessions");
     let entries = match std::fs::read_dir(dir) {
@@ -122,6 +197,7 @@ fn os_sessions() -> Option<Vec<SessionEntry>> {
     Some(group_logind_sessions(&sessions))
 }
 
+#[cfg(unix)]
 /// The fields of a logind session file (`/run/systemd/sessions/<id>`) that
 /// matter here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +213,7 @@ pub struct LogindSession {
 }
 
 /// Parse a logind session file. `None` if it has no usable `UID`.
+#[cfg(unix)]
 pub fn parse_logind_session(text: &str) -> Option<LogindSession> {
     let mut kv = BTreeMap::new();
     for line in text.lines() {
@@ -156,6 +233,7 @@ pub fn parse_logind_session(text: &str) -> Option<LogindSession> {
 }
 
 /// Group graphical user sessions by uid (one agent per user manager).
+#[cfg(unix)]
 pub fn group_logind_sessions(sessions: &[LogindSession]) -> Vec<SessionEntry> {
     let mut by_uid: BTreeMap<u32, SessionEntry> = BTreeMap::new();
     for s in sessions {
@@ -181,6 +259,7 @@ pub fn group_logind_sessions(sessions: &[LogindSession]) -> Vec<SessionEntry> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn logind_files_are_grouped_by_uid() {
         let alex_gui = "# This is private data. Do not parse.\nUID=1000\nUSER=alex\nACTIVE=1\nSTATE=active\nTYPE=wayland\nCLASS=user\nSEAT=seat0\n";
@@ -216,7 +295,10 @@ mod tests {
     #[test]
     fn own_session_matches_the_agent_default() {
         let s = own_session();
+        #[cfg(unix)]
         assert_eq!(s.id, format!("uid:{}", euid()));
+        #[cfg(windows)]
+        assert!(s.id.starts_with("wts:"), "{}", s.id);
         assert!(s.active && !s.account.is_empty());
     }
 }

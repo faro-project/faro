@@ -8,6 +8,8 @@
 #                                                 (the binaries and the image)
 #   release/notices/third-party.sh macos OUT    faro-service and faro-agent
 #                                                 (the macOS package)
+#   release/notices/third-party.sh windows OUT  faro-service and faro-agent
+#                                                 (the Windows MSI)
 #   release/notices/third-party.sh --cargo-about-version
 #   release/notices/third-party.sh --install-cargo-about
 #
@@ -29,7 +31,7 @@ CARGO_ABOUT_VERSION=0.9.3
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-usage="usage: third-party.sh server|macos OUT"
+usage="usage: third-party.sh server|macos|windows OUT"
 
 if [[ "${1:-}" == --cargo-about-version ]]; then
     echo "$CARGO_ABOUT_VERSION"
@@ -57,6 +59,13 @@ case "$component" in
         title="the Faro package for macOS (faro-service and Faro Agent)"
         targets='"aarch64-apple-darwin", "x86_64-apple-darwin"'
         # build-pkg.sh builds faro-service with the image classifier.
+        runs=("crates/faro-service/Cargo.toml|onnx" "crates/faro-agent/Cargo.toml|")
+        ;;
+    windows)
+        title="the Faro package for Windows (faro-service and faro-agent)"
+        targets='"x86_64-pc-windows-msvc"'
+        # build-msi.ps1 builds faro-service with the image classifier
+        # (unless -NoOnnx, which only drops crates from the list).
         runs=("crates/faro-service/Cargo.toml|onnx" "crates/faro-agent/Cargo.toml|")
         ;;
     *) echo "$usage" >&2; exit 2 ;;

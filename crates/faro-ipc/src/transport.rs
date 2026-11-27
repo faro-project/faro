@@ -27,6 +27,10 @@
 //! [`AllowUids::root`](crate::AllowUids::root)) so it never streams frames
 //! to an impostor.
 //!
+//! The per-account naming ([`session_socket_path`](crate::session_socket_path),
+//! [`resolve_agent_socket`](crate::resolve_agent_socket)) is shared with the
+//! Windows named-pipe transport and lives in [`crate::endpoint`].
+//!
 //! Linux credential code is written against `libc` but could not be compiled
 //! on the macOS host this crate was developed on; it is small and mirrors
 //! the standard `SO_PEERCRED` pattern.
@@ -46,38 +50,6 @@ use crate::connection::{AgentConnection, Connection, ServiceConnection};
 use crate::error::{IpcError, Result};
 use crate::messages::WireMessage;
 use crate::peer::{PeerInfo, PeerVerifier};
-
-/// The per-account socket a root service binds for `uid`, next to `base`:
-/// `agent.sock` becomes `agent.<uid>.sock`.
-///
-/// Every OS account is monitored (ARCHITECTURE.md §3.1), so agents of
-/// several users connect to one service. Rather than open one socket to
-/// everyone (this module refuses modes beyond owner/group), a root service
-/// binds one `0600` socket per account, owned by that account; an agent
-/// connects to its own ([`resolve_agent_socket`]). A non-root development
-/// service binds `base` itself.
-pub fn session_socket_path(base: &Path, uid: u32) -> PathBuf {
-    let stem = base
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "agent".to_owned());
-    let name = match base.extension() {
-        Some(ext) => format!("{stem}.{uid}.{}", ext.to_string_lossy()),
-        None => format!("{stem}.{uid}"),
-    };
-    base.with_file_name(name)
-}
-
-/// Where an agent running as `uid` should connect: its per-account socket
-/// ([`session_socket_path`]) if the service has bound one, else `base`
-/// (a development service running as the user).
-pub fn resolve_agent_socket(base: &Path, uid: u32) -> PathBuf {
-    let own = session_socket_path(base, uid);
-    match fs::symlink_metadata(&own) {
-        Ok(md) if md.file_type().is_socket() => own,
-        _ => base.to_path_buf(),
-    }
-}
 
 /// Ownership and mode applied to the socket file before it becomes visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +431,8 @@ mod os {
             gid,
             pid,
             macos_audit_token,
+            windows_sid: None,
+            windows_session_id: None,
         })
     }
 
@@ -527,6 +501,8 @@ mod os {
             gid: cred.gid,
             pid: (cred.pid > 0).then_some(cred.pid as u32),
             macos_audit_token: None,
+            windows_sid: None,
+            windows_session_id: None,
         })
     }
 }
@@ -567,21 +543,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = IpcServer::bind(dir.path().join("s.sock"), crate::AllowSameUid);
         assert!(matches!(r, Err(IpcError::NoRuntime)));
-    }
-
-    #[test]
-    fn per_account_socket_names() {
-        assert_eq!(
-            session_socket_path(Path::new("/var/run/faro/agent.sock"), 501),
-            Path::new("/var/run/faro/agent.501.sock")
-        );
-        assert_eq!(
-            session_socket_path(Path::new("/run/faro/agent"), 1000),
-            Path::new("/run/faro/agent.1000")
-        );
-        // Nothing bound for the account: fall back to the base path.
-        let base = Path::new("/nonexistent-faro-dir/agent.sock");
-        assert_eq!(resolve_agent_socket(base, 501), base);
     }
 }
 

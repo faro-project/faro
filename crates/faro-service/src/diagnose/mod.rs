@@ -21,8 +21,15 @@
 //!
 //! The CLI shows the member what is in the report and writes it only
 //! once they say so ([`Report::summary`], [`Report::full_text`]);
-//! [`write_zip`] then writes `faro-report-<time>.zip` (macOS: `ditto`) to
-//! their Desktop.
+//! [`write_zip`] then writes `faro-report-<time>.zip` (macOS: `ditto`;
+//! Windows: a stored zip built in memory, `zipw`) to their Desktop.
+//!
+//! **Windows.** The command runs in an elevated terminal; the Windows
+//! counterparts of the macOS sources (the Service Control Manager's state,
+//! the login sessions, the installed product, each signed-in account's
+//! agent log) are in `windows`. The report goes to the Desktop of the
+//! account whose elevated token runs it, and nothing is written by default
+//! when that is LocalSystem (`--output` names a folder then).
 //!
 //! **Reading as root, for an account.** The agent log lives in the
 //! member's home, which they control, so it is opened without following a
@@ -33,6 +40,10 @@
 //! account.
 
 pub mod redact;
+#[cfg(windows)]
+mod windows;
+#[cfg(any(windows, test))]
+mod zipw;
 
 pub use redact::Redactor;
 
@@ -77,17 +88,21 @@ pub struct Sources {
     /// The config file the service was loaded from (named in the report).
     pub config_file: PathBuf,
     pub service_log: Option<LogSource>,
-    /// The member's agent log, with the account it belongs to.
-    pub agent_log: Option<(String, LogSource)>,
+    /// Agent logs, each with the account it belongs to: the member's on
+    /// macOS, every signed-in account's on Windows.
+    pub agent_logs: Vec<(String, LogSource)>,
     /// Lines from the end of each log.
     pub lines: usize,
     /// Directories listed by name, size and permissions only.
     pub listings: Vec<PathBuf>,
     /// Ask the system (macOS: `sw_vers`, `sysctl`, `launchctl`,
-    /// `pkgutil`, `codesign`). Off in tests.
+    /// `pkgutil`, `codesign`; Windows: the registry, the Service Control
+    /// Manager, the session list). Off in tests.
     pub system: bool,
     /// The uid whose launchd session the agent's job is looked up in.
     pub agent_uid: Option<u32>,
+    /// Why some agent logs are missing (Windows), shown in the README.
+    pub agent_log_notes: String,
 }
 
 impl Sources {
@@ -106,11 +121,12 @@ impl Sources {
         let mut s = Sources {
             config_file,
             service_log: None,
-            agent_log: None,
+            agent_logs: Vec::new(),
             lines,
             listings,
-            system: cfg!(target_os = "macos"),
+            system: cfg!(any(target_os = "macos", windows)),
             agent_uid: member.map(|m| m.uid),
+            agent_log_notes: String::new(),
         };
         #[cfg(target_os = "macos")]
         {
@@ -121,7 +137,7 @@ impl Sources {
                 owner: Some(0),
             });
             if let Some(m) = member {
-                s.agent_log = Some((
+                s.agent_logs.push((
                     m.name.clone(),
                     LogSource {
                         path: layout::agent_log(&m.home),
@@ -136,6 +152,23 @@ impl Sources {
             s.listings.push("/Library/Faro/bin".into());
             s.listings.push("/Library/Faro/models/opennsfw".into());
             s.listings.push("/Library/Faro/domains".into());
+        }
+        #[cfg(windows)]
+        {
+            use faro_platform_windows::layout;
+            let _ = member;
+            s.service_log = Some(LogSource {
+                path: layout::SERVICE_LOG.into(),
+                keep: layout::LOG_KEEP,
+                owner: None,
+            });
+            let (logs, dirs, notes) = windows::agent_logs();
+            s.agent_logs = logs;
+            s.agent_log_notes = notes;
+            s.listings.extend(dirs);
+            s.listings.push(layout::LOG_DIR.into());
+            s.listings.push(layout::PROGRAM_DIR.into());
+            s.listings.push(layout::NOTICES_DIR.into());
         }
         s
     }
@@ -184,6 +217,8 @@ pub struct Report {
     /// The instance's host name, the one host the report keeps.
     pub instance_host: Option<String>,
     pub files: Vec<ReportFile>,
+    /// When it was made, ms since the epoch (the zip's file times).
+    pub made_ms: i64,
 }
 
 impl Report {
@@ -228,11 +263,16 @@ impl Report {
 
 fn taken_out(instance_host: Option<&str>) -> String {
     let keep = instance_host.map_or_else(String::new, |h| format!(" (except your instance, {h})"));
+    let never = if cfg!(windows) {
+        "keys, tokens, the outbox (events and reports), screenshots or thumbnails"
+    } else {
+        "keys, tokens, the outbox (events and reports), screenshots, thumbnails, or other \
+         accounts' logs"
+    };
     format!(
         "Taken out of every file: web addresses, email addresses, host names and IP addresses{keep}, \
          window titles, app names and other private values in the logs, and other libraries' \
-         debug output. Never in the report: keys, tokens, the outbox (events and reports), \
-         screenshots, thumbnails, or other accounts' logs."
+         debug output. Never in the report: {never}."
     )
 }
 
@@ -254,6 +294,22 @@ pub fn collect(config: &Config, sources: &Sources, now_ms: i64) -> Report {
         .and_then(|e| url::Url::parse(&e.instance_url).ok())
         .and_then(|u| u.host_str().map(str::to_owned));
     let r = Redactor::new(instance_host.as_deref());
+    // This computer's own names are private too (a Windows report names the
+    // computer, its domain and the account in paths and `DOMAIN\user`).
+    #[cfg(windows)]
+    let r = {
+        let env = |k: &str| std::env::var(k).unwrap_or_default();
+        let logon = env("LOGONSERVER");
+        r.with_local_names(
+            &[
+                &env("COMPUTERNAME"),
+                &env("USERDOMAIN"),
+                &env("USERDNSDOMAIN"),
+                &logon,
+            ],
+            &[&env("USERNAME")],
+        )
+    };
     let name = format!("faro-report-{}", compact_utc(now_ms));
     let mut files = Vec::new();
 
@@ -278,12 +334,14 @@ pub fn collect(config: &Config, sources: &Sources, now_ms: i64) -> Report {
                 &json,
                 &r,
             ));
-            files.push(ReportFile::text(
-                "permissions.txt",
-                "Screen Recording and Accessibility, as the agent reported them",
-                &permissions(v),
-                &r,
-            ));
+            if cfg!(not(windows)) {
+                files.push(ReportFile::text(
+                    "permissions.txt",
+                    "Screen Recording and Accessibility, as the agent reported them",
+                    &permissions(v),
+                    &r,
+                ));
+            }
         }
         Err(e) => files.push(ReportFile::text(
             "status.txt",
@@ -294,11 +352,28 @@ pub fn collect(config: &Config, sources: &Sources, now_ms: i64) -> Report {
     }
     files.push(ReportFile::text(
         "system.txt",
-        "versions, macOS version, hardware model, disk space",
+        if cfg!(windows) {
+            "versions, Windows version, hardware model, disk space"
+        } else {
+            "versions, macOS version, hardware model, disk space"
+        },
         &system(sources, view.as_ref().ok()),
         &r,
     ));
-    if sources.system {
+    if sources.system && cfg!(windows) {
+        files.push(ReportFile::text(
+            "service.txt",
+            "whether the Faro service is running, and the login sessions and their agents",
+            &service_windows(),
+            &r,
+        ));
+        files.push(ReportFile::text(
+            "package.txt",
+            "the installed product's version and the programs' signatures",
+            &package(),
+            &r,
+        ));
+    } else if sources.system {
         files.push(ReportFile::text(
             "launchd.txt",
             "whether the service and agent jobs are loaded, running or disabled",
@@ -336,9 +411,14 @@ pub fn collect(config: &Config, sources: &Sources, now_ms: i64) -> Report {
             &r,
         ));
     }
-    if let Some((account, src)) = &sources.agent_log {
+    for (account, src) in &sources.agent_logs {
+        let name = if sources.agent_logs.len() == 1 {
+            "logs/faro-agent.log".to_owned()
+        } else {
+            format!("logs/faro-agent-{}.log", file_part(account))
+        };
         files.push(ReportFile::log(
-            "logs/faro-agent.log",
+            &name,
             format!("the last {} lines of {account}'s agent log", sources.lines),
             &tail_text(src, sources.lines),
             &r,
@@ -362,15 +442,37 @@ pub fn collect(config: &Config, sources: &Sources, now_ms: i64) -> Report {
         name,
         instance_host,
         files,
+        made_ms: now_ms,
     }
 }
 
+/// `alex` stays `alex`; anything but letters, digits, `-`, `_` and `.`
+/// becomes `_`, for a file name.
+fn file_part(account: &str) -> String {
+    let s: String = account
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    s.trim_start_matches('.').to_owned()
+}
+
 fn readme(now_ms: i64, s: &Sources, instance_host: Option<&str>) -> String {
-    format!(
+    let (computer, jobs) = if cfg!(windows) {
+        ("PC", "the Faro service's state and the login sessions")
+    } else {
+        ("Mac", "the launchd jobs")
+    };
+    let mut o = format!(
         "A Faro problem report, made by `faro-service diagnose` ({}) at {} UTC.\n\
          \n\
-         It holds what helps find out why Faro isn't working on this Mac: what the service \
-         is doing, versions, the launchd jobs, the installed files and the last {} lines of \
+         It holds what helps find out why Faro isn't working on this {computer}: what the service \
+         is doing, versions, {jobs}, the installed files and the last {} lines of \
          Faro's logs. Every file is plain text; read any of them before you send it.\n\
          \n\
          {}\n",
@@ -378,7 +480,12 @@ fn readme(now_ms: i64, s: &Sources, instance_host: Option<&str>) -> String {
         iso_utc(now_ms),
         s.lines,
         taken_out(instance_host),
-    )
+    );
+    if !s.agent_log_notes.is_empty() {
+        o.push('\n');
+        o.push_str(&s.agent_log_notes);
+    }
+    o
 }
 
 fn permissions(v: &crate::status_view::StatusView) -> String {
@@ -415,8 +522,27 @@ fn system(s: &Sources, view: Option<&crate::status_view::StatusView>) -> String 
     }
     if s.system {
         system_macos(&mut o);
+        system_windows(&mut o);
     }
     o
+}
+
+#[cfg(windows)]
+fn system_windows(o: &mut String) {
+    windows::system(o);
+}
+
+#[cfg(not(windows))]
+fn system_windows(_: &mut String) {}
+
+#[cfg(windows)]
+fn service_windows() -> String {
+    windows::service_text()
+}
+
+#[cfg(not(windows))]
+fn service_windows() -> String {
+    String::new()
 }
 
 #[cfg(target_os = "macos")]
@@ -586,7 +712,12 @@ fn package() -> String {
     o
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn package() -> String {
+    windows::package()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn package() -> String {
     String::new()
 }
@@ -626,6 +757,12 @@ fn listings(dirs: &[PathBuf], config_file: &Path) -> String {
     let mut o = String::new();
     for d in dirs {
         let _ = writeln!(o, "{}:", d.display());
+        #[cfg(windows)]
+        if let Err(e) = windows::check_dir_no_links(d) {
+            let _ = writeln!(o, "  not listed: {e}");
+            o.push('\n');
+            continue;
+        }
         match std::fs::symlink_metadata(d) {
             Ok(m) => {
                 let _ = writeln!(o, "  {}  .", entry(&m));
@@ -822,7 +959,28 @@ fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
         })
 }
 
-#[cfg(not(unix))]
+/// Opens a link itself (not what it points to), so that a link in an
+/// account's profile folder is seen as one and refused, whether it is a
+/// symbolic link or a junction.
+#[cfg(windows)]
+fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if f.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::other("it is a symbolic link"));
+    }
+    // The flag above covers only the last component; this covers the folders
+    // above it (a junction a user planted in their profile).
+    windows::verify_no_links(&f, path)?;
+    Ok(f)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
@@ -880,7 +1038,12 @@ pub fn member() -> Option<Member> {
     passwd(uid)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn member() -> Option<Member> {
+    windows::member()
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn member() -> Option<Member> {
     None
 }
@@ -943,6 +1106,27 @@ pub enum WriteError {
 
 /// `member`'s Desktop, if it is a real folder they own.
 pub fn desktop(member: &Member) -> Result<PathBuf, WriteError> {
+    #[cfg(windows)]
+    {
+        // The elevated token's own Desktop (which may be redirected, to
+        // OneDrive say), from the shell, not guessed from the profile.
+        let _ = member;
+        let d = windows::desktop_folder()
+            .map_err(|e| WriteError::Folder(format!("{e}; choose a folder with --output")))?;
+        match std::fs::metadata(&d) {
+            Ok(m) if m.is_dir() => Ok(d),
+            _ => Err(WriteError::Folder(format!(
+                "{} is not a folder; choose one with --output",
+                d.display()
+            ))),
+        }
+    }
+    #[cfg(not(windows))]
+    desktop_in_home(member)
+}
+
+#[cfg(not(windows))]
+fn desktop_in_home(member: &Member) -> Result<PathBuf, WriteError> {
     let d = member.home.join("Desktop");
     let m = std::fs::symlink_metadata(&d).map_err(|e| {
         WriteError::Folder(format!(
@@ -1045,7 +1229,54 @@ pub fn write_zip(
     result
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Write `report` as `<dir>/<report.name>.zip`: a stored zip built in
+/// memory (nothing is staged on disk), then written to a new file, never
+/// over an existing one or through a link. `owner` is unused: the file
+/// inherits the folder's permissions.
+#[cfg(windows)]
+pub fn write_zip(
+    report: &Report,
+    dir: &Path,
+    _owner: Option<(u32, u32)>,
+) -> Result<PathBuf, WriteError> {
+    use std::io::Write;
+    let paths: Vec<String> = report
+        .files
+        .iter()
+        .map(|f| format!("{}/{}", report.name, f.name))
+        .collect();
+    let entries: Vec<zipw::Entry<'_>> = report
+        .files
+        .iter()
+        .zip(&paths)
+        .map(|(f, name)| zipw::Entry {
+            name,
+            data: f.contents().as_bytes(),
+        })
+        .collect();
+    let bytes = zipw::stored_zip(&entries, zipw::dos_datetime(report.made_ms))
+        .map_err(|e| WriteError::Zip(e.to_string()))?;
+    let dest = dir.join(format!("{}.zip", report.name));
+    let io_err = |source| WriteError::Io {
+        path: dest.clone(),
+        source,
+    };
+    // create_new: never over an existing file, nor through a link.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest)
+        .map_err(io_err)?;
+    let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+    if let Err(e) = written {
+        drop(file);
+        let _ = std::fs::remove_file(&dest);
+        return Err(io_err(e));
+    }
+    Ok(dest)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn write_zip(_: &Report, _: &Path, _: Option<(u32, u32)>) -> Result<PathBuf, WriteError> {
     Err(WriteError::Zip(
         "problem reports are written on macOS only; use --print".into(),

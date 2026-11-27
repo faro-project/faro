@@ -51,9 +51,10 @@
 <section class="card">
 	<h2>Faro's programs</h2>
 	<p>
-		The instance's server and the Mac app list the software they are built from next to the
-		programs: in <code>/usr/share/faro/notices</code> in the server's container image (and as a
-		download next to each release's server binaries), and in <code>/Library/Faro/notices</code> on a Mac.
+		The instance's server and the Mac and Windows apps list the software they are built from next to
+		the programs: in <code>/usr/share/faro/notices</code> in the server's container image (and as a
+		download next to each release's server binaries), in <code>/Library/Faro/notices</code> on a
+		Mac, and in <code>C:\Program Files\Faro\notices</code> on Windows.
 	</p>
 </section>
 

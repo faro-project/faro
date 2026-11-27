@@ -4,6 +4,7 @@
 #   release/build-layout.sh \
 #       --version 0.1.0-beta.1 \
 #       --artifact client:macos:any:13=target/pkg/Faro-0.1.0-beta.1.pkg \
+#       --artifact client:windows:x86_64:10.0.19045=target/msi/Faro-0.1.0-beta.1-x64.msi \
 #       --artifact server:linux:aarch64=dist/faro-server-0.1.0-beta.1-linux-aarch64 \
 #       --data model=dist/model/manifest.json \
 #       --data blocklist=dist/blocklist/domains.manifest.json \
@@ -14,6 +15,13 @@
 #
 # --artifact KIND:PLATFORM:ARCH[:MIN_OS]=PATH adds one artifact under the
 # target name KIND/PLATFORM/<file name>. Repeat it for each artifact.
+# Platform and arch are what clients compare with their own (Rust's
+# std::env::consts::OS and ARCH): the universal macOS package is
+# `client:macos:any:13`, the x64 Windows MSI `client:windows:x86_64:10.0.19045`
+# (Windows 10 22H2 or later; the MSI also refuses older systems itself).
+# A macOS client must be a .pkg and a Windows client an .msi named
+# Faro-<version>[-dev]-x64.msi, of this release's version: the service reads
+# the version inside the package again before installing it.
 #
 # --data KIND[:MIN_CLIENT]=MANIFEST adds a model or a blocklist (PROTOCOL.md
 # §8.1, "Models and blocklists"): KIND is `model` (a faro_detect::ModelInfo
@@ -110,6 +118,17 @@ for spec in "${artifacts[@]+"${artifacts[@]}"}"; do
     [[ -n "$kind" && -n "$platform" && -n "$arch" && -z "${extra:-}" ]] ||
         die "--artifact $spec: expected KIND:PLATFORM:ARCH[:MIN_OS]=PATH"
     [[ -f "$path" ]] || die "--artifact $spec: no such file"
+    if [[ "$kind" == client ]]; then
+        case "$platform" in
+            macos) [[ "$path" == *.pkg ]] || die "--artifact $spec: a macOS client is a .pkg" ;;
+            windows)
+                [[ "$arch" == x86_64 ]] || die "--artifact $spec: Windows clients are x86_64 only for now"
+                file="$(basename "$path")"
+                [[ "$file" == "Faro-$version-x64.msi" || "$file" == "Faro-$version-dev-x64.msi" ]] ||
+                    die "--artifact $spec: a Windows client is Faro-$version[-dev]-x64.msi"
+                ;;
+        esac
+    fi
     name="$kind/$platform/$(basename "$path")"
     min=()
     [[ -z "${min_os:-}" ]] || min=(--min-os "$min_os")

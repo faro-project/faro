@@ -71,10 +71,11 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn is_root() -> bool {
-    // There is no dev spawner path on Windows yet (no IPC transport).
-    false
+    // LocalSystem is the Windows root: a dev service run by hand is not,
+    // and then the agent is told to trust a same-account service.
+    faro_platform_windows::acl::running_as_system()
 }
 
 /// Keep the agent running until `stop` flips. Each exit is logged; the

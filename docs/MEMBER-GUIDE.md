@@ -1,11 +1,11 @@
-# Adding your Mac to Faro
+# Adding your Mac or Windows PC to Faro
 
-**Who this is for:** a **member**: someone who chose to use Faro on their own computer. You need your Faro web app, the Mac, and someone who knows an administrator name and password for that Mac. That can be you.
+**Who this is for:** a **member**: someone who chose to use Faro on their own computer. You need your Faro web app, the computer, and someone who knows an administrator name and password for it. That can be you.
 
 ## Before you start
 
 - **In the closed beta,** read [BETA.md](BETA.md) first: where to download Faro, the permissions to grant, and the alerts your allies may see while you set up.
-- **Faro is installed** on the Mac, from the official installer. After installing, the Faro icon (a lighthouse) is in the menu bar. Faro monitors nothing until you finish the steps below.
+- **Faro is installed** on the computer, from the official installer. After installing, the Faro icon is in the menu bar on a Mac (a lighthouse) or in the notification area on Windows (the tray icon). Faro monitors nothing until you finish the steps below.
 - **Your member key is set up** in the web app (the **Keys** page).
 
 ## 1. Get an enrollment link
@@ -14,10 +14,11 @@
 2. Unlock your key if the page asks.
 3. Click **Create an enrollment code**. The page shows a code, and an enrollment link that starts with `faro://enroll`. They work once, for 10 minutes.
 
-## 2. Open the link on the Mac
+## 2. Open the link on your computer
 
 - **If the web app is open on the Mac:** click **Open in Faro**.
-- **If it is open on another device** (a phone, say): click **Copy link** and send the link to the Mac, for example by email to yourself. On the Mac, click the Faro icon in the menu bar, choose **Enroll this computer…**, paste the link into the first field and click **Continue**. You can also type your Faro address in the first field and the code in the second.
+- **On Windows:** click the link in the web app. It opens the running Faro Agent.
+- **If it is open on another device** (a phone, say): click **Copy link** and send the link to the Mac, for example by email to yourself. On the Mac, click the Faro icon in the menu bar, choose **Enroll this computer…**, paste the link into the first field and click **Continue**. You can also type your Faro address in the first field and the code in the second. On Windows, the tray icon's menu has the same **Enroll this computer…** item.
 
 ## 3. Check and confirm
 
@@ -26,11 +27,15 @@ Faro shows a window titled **"Enroll this computer with *name*?"**. Check:
 - The **name** and **address** are your Faro instance. If you don't recognize them, click **Cancel**.
 - The list of **accounts**. Faro monitors every account on this Mac, including ones added later. If the guest account is on, Faro says so: anyone could use the Mac without a password, so consider turning it off in System Settings > Users & Groups.
 
+On Windows, the preview and confirmation windows show the same content and button names as on a Mac, as ordinary Windows dialog windows: the name and address, the list of accounts, the guest-account warning, and the **Enroll** button.
+
 Click **Enroll**.
 
 ## 4. An administrator approves
 
 macOS asks for an **administrator's name and password**. This is macOS's own window, and it names your Faro instance. Faro only enrolls the Mac if an administrator approves here. If you are not an administrator of this Mac, ask someone who is to type theirs.
+
+On Windows, the administrator approves through the Windows UAC prompt instead, and cancelling that prompt cancels enrolling.
 
 ## 5. Compare the code and approve in the web app
 
@@ -40,7 +45,7 @@ Faro shows **"This computer is enrolled"** with a code of 16 letters and numbers
 2. Check that the web app shows **the same code** for it. Approve it only if it does.
 3. If Faro also shows a **member key** to check, compare it with the member key on your **Settings** page. If they differ, don't approve, and remove the computer.
 
-Monitoring starts once you approve. The first time, macOS asks every account on the Mac to let **Faro Agent** record the screen.
+Monitoring starts once you approve. The first time, macOS asks every account on the Mac to let **Faro Agent** record the screen. Windows asks for no such permission ([BETA.md](BETA.md#35-screen-recording-and-accessibility)).
 
 ## If something goes wrong
 
@@ -50,22 +55,24 @@ Monitoring starts once you approve. The first time, macOS asks every account on 
 | Faro can't reach your instance | Check that the Mac is online and the address is right. |
 | Not approved | Nothing changed. Try again when an administrator can type their password. |
 | Enrollment stopped to keep you safe | The instance answered with a key that doesn't match your link. Don't continue. Remove the new computer in the web app if it appears there, and tell whoever runs your instance. |
-| This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. |
+| This computer can't be enrolled from here | An administrator can enroll it in Terminal instead: `sudo /Library/Faro/bin/faro-service enroll --link '…'` with your link. On Windows, an administrator can run `& "C:\Program Files\Faro\faro-service.exe" enroll --link '…'` in a terminal opened as administrator, with your link. |
 | Faro can't see one of your windows | An app (it names it) keeps a window out of screenshots and screen recordings, so Faro can't check it, and your allies are told which app. Close the window if you don't need it, or turn off the app's setting that hides its windows from screen sharing, if it has one. |
-| Nothing happens when you click the link | Restart the Mac, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the Faro icon and paste the link. |
+| Nothing happens when you click the link | Restart the computer, or log out and in again, and try again. If it still doesn't open, use **Enroll this computer…** from the Faro icon (in the menu bar on a Mac, the tray icon on Windows) and paste the link. |
 
 ### Faro's logs
 
-If something doesn't work and you want to see why, or someone helping you asks for the logs, Faro keeps them on the Mac:
+If something doesn't work and you want to see why, or someone helping you asks for the logs, Faro keeps them on the computer:
 
 - **The service:** `/Library/Logs/Faro/faro-service.log`. Any administrator of the Mac can read it.
 - **The menu-bar agent, for each account:** `~/Library/Logs/Faro/faro-agent.log`, readable only by that account.
+- **On Windows, the service:** `C:\ProgramData\Faro\logs\faro-service.log`. Administrators can read it.
+- **On Windows, the agent, for each account:** `%LOCALAPPDATA%\Faro\Logs\faro-agent.log`.
 
-Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.
+Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. On Windows, logs rotate at 5 MiB, and 3 old files are kept. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.
 
 ## Checking that Faro is working
 
-Click the Faro icon in the menu bar. The line under **This computer is monitored by Faro** says what Faro is doing. Click it to see what it means and what to do; when something can fix it, an item just below opens it.
+Click the Faro icon in the menu bar (the tray icon in the notification area on Windows). The line under **This computer is monitored by Faro** says what Faro is doing. Click it to see what it means and what to do; when something can fix it, an item just below opens it.
 
 | The menu says | What to do |
 |---|---|
@@ -74,13 +81,13 @@ Click the Faro icon in the menu bar. The line under **This computer is monitored
 | **Status: Not enrolled** | Faro monitors nothing yet. Follow the steps at the top of this guide. |
 | **Status: Waiting for approval in the web app** | Choose **Open the Computers Page…**, check the code, and approve the computer ([step 5](#5-compare-the-code-and-approve-in-the-web-app)). |
 | **Status: Connecting to the Faro service…** | Wait a minute. If it stays, log out and in again, or restart the Mac. |
-| **Status: Screen Recording is off** | Choose **Open Screen Recording Settings…** and switch on **Faro Agent**. If it is on already (after reinstalling Faro, for example), select it, remove it with **−** and add it again. Your allies are told while it is off. |
+| **Status: Screen Recording is off** (Mac only) | Choose **Open Screen Recording Settings…** and switch on **Faro Agent**. If it is on already (after reinstalling Faro, for example), select it, remove it with **−** and add it again. Your allies are told while it is off. |
 | **Status: Can't reach** *your instance* | Check that the Mac is online. Faro keeps what it records and sends it once your instance answers. |
 | **Status: Faro can't take screenshots** | Restart the Mac. If it still says so, tell whoever runs your instance. |
 | **Status: Faro stopped sending to** *your instance* | Your instance no longer has the identity this Mac was enrolled with. Tell whoever runs your instance. |
 | **Status: The Faro service isn't running** | Restart the Mac. If it still says so, tell whoever runs your instance. |
 
-The menu also has **Open Faro** (your Faro web app), **Report a problem…** ([Reporting a problem](#reporting-a-problem)) and **About Faro…** (the versions, your instance, and the licences of the software Faro includes). Nothing on the menu turns Faro off, pauses it or hides anything.
+The menu also has **Open Faro** (your Faro web app), **Report a problem…** ([Reporting a problem](#reporting-a-problem)) and **About Faro…** (the versions, your instance, and the licences of the software Faro includes). Nothing on the menu turns Faro off, pauses it or hides anything. On Windows there is no Exit item either.
 
 For more detail, someone who knows an administrator password can check in Terminal:
 
@@ -98,6 +105,8 @@ It shows what Faro is doing, never what was on the screen. The lines to look at:
 | **Permissions:** Screen Recording denied, or **Failures:** permission denied: screen_recording | Open System Settings > Privacy & Security > Screen Recording (Screen & System Audio Recording on newer macOS) in that account and turn on **Faro Agent**. |
 | **Image model:** none | Faro can't check images on this Mac and rates the screen from the apps and websites in use only. Reinstall Faro, and tell whoever runs your instance if it stays. |
 | **Updates:** last check … failed | Faro couldn't check for updates. It tries again later; if it keeps failing, tell whoever runs your instance. |
+
+On Windows, run `& "C:\Program Files\Faro\faro-service.exe" status` in a terminal opened as administrator. It shows the same details.
 
 ## Groups
 
@@ -146,3 +155,4 @@ The zip holds one folder of plain-text files, so you can open any of them before
 - To save it somewhere else than the Desktop: `sudo /Library/Faro/bin/faro-service diagnose --output ~/Documents`.
 - To read it all in Terminal without saving anything: `sudo /Library/Faro/bin/faro-service diagnose --print`.
 - Fewer or more log lines: `--lines 500`.
+- On Windows: run `& "C:\Program Files\Faro\faro-service.exe" diagnose` in a terminal opened as administrator, and approve the administrator prompt. Faro lists the report's contents before it writes anything, as on a Mac. The file is saved on your Desktop as `faro-report-….zip`, or use `--output <folder>` to save it elsewhere. The tray menu's **Report a problem…** explains this and copies the command.

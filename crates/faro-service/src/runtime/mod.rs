@@ -131,7 +131,11 @@ fn packaged_update_root() -> Option<Vec<u8>> {
     let path = Some(std::path::Path::new(
         faro_platform_macos::pkg_layout::UPDATE_ROOT,
     ));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let path = Some(std::path::Path::new(
+        faro_platform_windows::layout::UPDATE_ROOT,
+    ));
+    #[cfg(not(any(target_os = "macos", windows)))]
     let path: Option<&std::path::Path> = None;
     let path = path?;
     match std::fs::read(path) {
@@ -491,15 +495,17 @@ fn start_detection(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn default_source(config: &Config) -> Result<Box<dyn FrameSource>, ServiceError> {
     let ping = Duration::from_secs(config.capture.agent_ping_secs);
-    let source = crate::source::ipc::IpcFrameSource::new(
-        &config.ipc.socket_path,
-        config.ipc.allowed_uids.iter().copied(),
-    )
-    .with_ping(ping, faro_ipc::DEFAULT_PING_TIMEOUT.min(ping))
-    .with_code_requirement(config.ipc.agent_requirement.clone());
+    // `allowed_uids` are Unix uids; Windows has no such setting.
+    #[cfg(unix)]
+    let allowed = config.ipc.allowed_uids.iter().copied();
+    #[cfg(windows)]
+    let allowed = std::iter::empty();
+    let source = crate::source::ipc::IpcFrameSource::new(&config.ipc.socket_path, allowed)
+        .with_ping(ping, faro_ipc::DEFAULT_PING_TIMEOUT.min(ping))
+        .with_code_requirement(config.ipc.agent_requirement.clone());
     // Refuse to start rather than run a service no agent can connect to
     // (or, worse, one any program can pose as the agent to).
     source
@@ -508,9 +514,8 @@ fn default_source(config: &Config) -> Result<Box<dyn FrameSource>, ServiceError>
     Ok(Box::new(source))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn default_source(_config: &Config) -> Result<Box<dyn FrameSource>, ServiceError> {
-    // TODO(windows): faro-ipc has no named-pipe transport yet.
     Err(ServiceError::NoFrameSource)
 }
 
@@ -561,6 +566,15 @@ impl Service {
 
     pub fn enrollment(&self) -> &Enrollment {
         &self.enrollment
+    }
+
+    /// A handle for reporting things the OS tells the service about
+    /// itself (the Windows service control handler), usable while
+    /// [`Service::run`] runs.
+    pub fn signals(&self) -> ServiceSignals {
+        ServiceSignals {
+            control: self.control_tx.clone(),
+        }
     }
 
     /// Run on the current task until `shutdown` completes, then stop
@@ -1013,6 +1027,27 @@ async fn activate_once(
         "device endorsed; recipient manifest bootstrapped"
     );
     Ok(true)
+}
+
+/// Reports OS-level tamper evidence to a running [`Service`]
+/// ([`Service::signals`]). Cheap to clone.
+#[derive(Debug, Clone)]
+pub struct ServiceSignals {
+    control: mpsc::Sender<Control>,
+}
+
+impl ServiceSignals {
+    /// The system clock was set: check it against the monotonic clock now
+    /// (`ClockManipulation`, §3.7).
+    pub fn clock_changed(&self) {
+        let _ = self.control.try_send(Control::ClockChanged);
+    }
+
+    /// An active tamper signal from outside the core, for example Faro's
+    /// own files changing (`IntegrityFailure`).
+    pub fn tamper(&self, signal: TamperSignal) {
+        let _ = self.control.try_send(Control::Tamper(signal));
+    }
 }
 
 /// Controls a service started with [`Service::spawn`].
