@@ -42,7 +42,7 @@
 
 use super::groups::{load_in_tx, require_writable};
 use super::invites::{self, accept_ally_link, ensure_ally_key, MAX_ALLIES, MAX_LIVE_INVITES};
-use super::{ApiJson, OptionalApiJson};
+use super::ApiJson;
 use crate::auth::session::SessionUser;
 use crate::db::repo::group_notices::NoticeKind;
 use crate::db::repo::proposals::{
@@ -423,7 +423,7 @@ pub async fn create(
 
 // ---- Answer ----------------------------------------------------------------------
 
-/// `POST /v1/proposals/{id}/accept` body (optional).
+/// `POST /v1/proposals/{id}/accept` body (JSON required; `{}` is fine).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptProposal {
@@ -477,10 +477,9 @@ pub async fn accept(
     AxState(state): AxState<AppState>,
     s: SessionUser,
     Path(id): Path<String>,
-    OptionalApiJson(req): OptionalApiJson<AcceptProposal>,
+    ApiJson(req): ApiJson<AcceptProposal>,
 ) -> AppResult<(StatusCode, Json<ProposalAccepted>)> {
     s.require_not_being_deleted()?;
-    let req = req.unwrap_or_default();
     let me = &s.user.id;
     let now = state.now_ms();
     let mut tx = state.db().begin_write().await?;

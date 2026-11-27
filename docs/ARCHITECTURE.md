@@ -566,6 +566,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 - `cargo fuzz` covers the IPC, wire and update-metadata parsers.
 - Reproducible builds for the client and server.
 - **Secure defaults for operators**: invite-only registration, admin passkey, automatic HTTPS, security headers, rate limiting, and a `faro-server doctor` command that checks the configuration (TLS, SMTP, backups, disk space, update freshness).
+- **Cross-site requests**: the session cookie is `HttpOnly` and `SameSite=Strict`; JSON endpoints also require `Content-Type: application/json`; and a middleware (`faro_server::csrf`) refuses any cookie-bearing request other than `GET`/`HEAD`/`OPTIONS` unless `Sec-Fetch-Site` is `same-origin` (or, when that header is absent, `Origin` is the instance's public origin). A request with neither header is a non-browser client and is allowed. Device routes use signatures, not the cookie, and are not checked.
 - A third-party audit of the crypto and update design before 1.0.
 
 ---
