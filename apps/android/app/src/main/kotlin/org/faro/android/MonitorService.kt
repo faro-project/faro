@@ -44,7 +44,9 @@ class MonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Started again (app opened, boot, update): look at the state now instead of at the next tick.
+        // Started again (app opened, boot, update, or the notification was swiped away and
+        // ACTION_RESHOW_NOTICE arrived): look at the state now and post the notification again,
+        // instead of waiting for the next tick.
         worker.execute { tick() }
         return START_STICKY
     }
@@ -130,6 +132,9 @@ class MonitorService : Service() {
     companion object {
         private const val TAG = "FaroMonitor"
         private const val TICK_SECONDS = 30L
+
+        /** Sent by the notification's delete intent when the member swipes it away. */
+        const val ACTION_RESHOW_NOTICE = "org.faro.android.action.RESHOW_NOTICE"
 
         /** Starts the service. Android refuses from the background in some cases; then it is a no-op. */
         fun start(context: Context) {

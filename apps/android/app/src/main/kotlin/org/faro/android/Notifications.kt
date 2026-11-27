@@ -47,6 +47,15 @@ object Notifications {
             Intent(context, StatusActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        // From Android 14 the member can swipe a foreground service's notification away. Faro must
+        // never be invisible (ARCHITECTURE.md §12), so dismissing it starts the (running) service
+        // again, whose onStartCommand posts it straight back.
+        val reshow = PendingIntent.getService(
+            context,
+            2,
+            Intent(context, MonitorService::class.java).setAction(MonitorService.ACTION_RESHOW_NOTICE),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         val text = context.getString(
             if (enrolled) R.string.notification_monitored else R.string.notification_not_monitored,
         )
@@ -56,6 +65,7 @@ object Notifications {
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
             .setContentIntent(open)
+            .setDeleteIntent(reshow)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
