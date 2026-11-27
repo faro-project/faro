@@ -2,11 +2,18 @@ import SwiftUI
 
 @main
 struct FaroApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
             NavigationStack {
                 HomeView()
             }
+        }
+        .onChange(of: scenePhase) { phase in
+            // docs/IOS.md §6.3: re-apply the Screen Time settings each time
+            // the app comes forward. Does nothing before setup.
+            if phase == .active { ScreenTimeEnforcer.refreshOnForeground() }
         }
     }
 }
