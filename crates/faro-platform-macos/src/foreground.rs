@@ -31,7 +31,8 @@
 //! Read through the Accessibility API (`AXFocusedWindow` → `AXTitle`) only
 //! when the member has granted Accessibility (`AXIsProcessTrusted`), which is
 //! optional (§3.3). Each AX call is bounded by a short messaging timeout so a
-//! hung app cannot stall the agent.
+//! hung app cannot stall the agent. Any app picks its own title, so it is
+//! cut to [`MAX_TITLE_CHARS`] (the Windows agent's limit).
 //!
 //! # Browser tabs
 //!
@@ -224,6 +225,21 @@ fn ax_copy(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFType>>
     NonNull::new(out.cast_mut()).map(|p| unsafe { CFRetained::from_raw(p) })
 }
 
+/// Longest title we report, in characters. Real titles are far shorter; a
+/// longer one is cut (the service bounds it again, `faro_ipc::limits`).
+pub const MAX_TITLE_CHARS: usize = 1024;
+
+/// `raw` trimmed and cut to [`MAX_TITLE_CHARS`]; `None` if empty.
+fn bound_title(raw: &str) -> Option<String> {
+    let title = raw.trim();
+    let end = title
+        .char_indices()
+        .nth(MAX_TITLE_CHARS)
+        .map_or(title.len(), |(i, _)| i);
+    let title = title[..end].trim_end();
+    (!title.is_empty()).then(|| title.to_owned())
+}
+
 fn focused_window_title(pid: i32) -> Option<String> {
     if pid <= 0 {
         return None;
@@ -244,13 +260,22 @@ fn focused_window_title(pid: i32) -> Option<String> {
         .downcast::<CFString>()
         .ok()?
         .to_string();
-    let title = title.trim();
-    (!title.is_empty()).then(|| title.to_owned())
+    bound_title(&title)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_are_trimmed_and_bounded() {
+        assert_eq!(bound_title("  Inbox  ").as_deref(), Some("Inbox"));
+        assert_eq!(bound_title("   "), None);
+        let long = "é".repeat(MAX_TITLE_CHARS * 4);
+        let cut = bound_title(&long).unwrap();
+        assert_eq!(cut.chars().count(), MAX_TITLE_CHARS);
+        assert!(long.starts_with(&cut));
+    }
 
     #[test]
     fn layer0_owners_keep_order_and_dedupe() {

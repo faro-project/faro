@@ -63,6 +63,10 @@ const CORRECT_OFFSET_ABOVE_MS: i64 = 60_000;
 /// Longest error code / message echoed from the instance into logs.
 const MAX_ECHO: usize = 200;
 
+/// The longest `Retry-After` honoured; a longer one is cut to this, so an
+/// instance cannot stop uploads for days with one answer.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("could not build the HTTP client: {0}")]
@@ -76,6 +80,9 @@ pub enum ClientError {
         status: StatusCode,
         code: String,
         message: String,
+        /// The answer's `Retry-After`, if it had a usable one (at most
+        /// [`MAX_RETRY_AFTER`]).
+        retry_after: Option<Duration>,
     },
     #[error("instance response is larger than the {limit}-byte limit")]
     TooLarge { limit: usize },
@@ -140,6 +147,15 @@ impl ClientError {
                     _ => None,
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// How long the instance asked us to wait (`Retry-After` on an error
+    /// answer, typically `429`).
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            ClientError::Api { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -360,6 +376,11 @@ impl InstanceClient {
         self.observe_date(&resp);
         let status = resp.status();
         if !status.is_success() {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| parse_retry_after(v, self.clock.wall_ms()));
             let raw = read_limited(resp, limits::ERROR_BODY)
                 .await
                 .unwrap_or_default();
@@ -371,6 +392,7 @@ impl InstanceClient {
                 status,
                 code,
                 message,
+                retry_after,
             });
         }
         let raw = read_limited(resp, limit).await?;
@@ -567,9 +589,41 @@ pub fn load_ca_file(path: &Path) -> Result<Vec<reqwest::Certificate>, ClientErro
     Ok(certs)
 }
 
+/// A `Retry-After` value (delta-seconds or an HTTP date, RFC 9110 §10.2.3)
+/// as a wait from `now_ms`, at most [`MAX_RETRY_AFTER`].
+fn parse_retry_after(v: &str, now_ms: i64) -> Option<Duration> {
+    let v = v.trim();
+    let wait = if let Ok(secs) = v.parse::<u64>() {
+        Duration::from_secs(secs)
+    } else {
+        let at = httpdate::parse_http_date(v).ok()?;
+        let at_ms = at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+        let now_ms = u128::try_from(now_ms).unwrap_or(0);
+        Duration::from_millis(u64::try_from(at_ms.saturating_sub(now_ms)).unwrap_or(u64::MAX))
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_parses_seconds_and_dates() {
+        assert_eq!(parse_retry_after(" 7 ", 0), Some(Duration::from_secs(7)));
+        assert_eq!(parse_retry_after("999999", 0), Some(MAX_RETRY_AFTER));
+        // 1994-11-06T08:49:37Z, 30 s after `now`.
+        let now = 784_111_747_000;
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now + 60_000),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(parse_retry_after("soon", 0), None);
+    }
 
     #[test]
     fn transient_classification() {
@@ -577,6 +631,7 @@ mod tests {
             status: StatusCode::from_u16(status).unwrap(),
             code: code.into(),
             message: String::new(),
+            retry_after: None,
         };
         assert!(api(503, "x").is_transient());
         assert!(api(429, "rate_limited").is_transient());
