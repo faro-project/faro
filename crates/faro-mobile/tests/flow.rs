@@ -177,6 +177,8 @@ async fn enrolls_waits_for_approval_then_records_and_uploads() {
         assert!(faro_core::open_event_body(e, &w.ally.id, &w.ally.keys.enc).is_ok());
     }
 
+    assert!(core.has_pending().unwrap(), "recorded events wait");
+
     // Upload, then a heartbeat that names the head.
     let c = core.clone();
     let (up, hb) = blocking(move || {
@@ -188,6 +190,10 @@ async fn enrolls_waits_for_approval_then_records_and_uploads() {
     .await;
     assert_eq!(up.acked_through, Some(3));
     assert_eq!(up.pending_events, 0);
+    assert!(
+        !core.has_pending().unwrap(),
+        "nothing waits after the upload"
+    );
     assert!(up.warnings.is_empty(), "{:?}", up.warnings);
     assert_eq!(hb.acked_through, Some(3));
     assert_eq!(w.stored_seqs(&enrolled.device_id).await, vec![0, 1, 2, 3]);
