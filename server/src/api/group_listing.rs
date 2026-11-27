@@ -11,9 +11,12 @@
 //!   **never a participant id, a name or a count**: facilitators' display
 //!   names, and only whether the group is full.
 //! * **Join requests** are private to the requester and the facilitators. A
-//!   requester is shown "Not accepted" alike for a decline, an expiry and an
-//!   unlisting ([`group_listing::MyRequest`]), and the refusal to ask again
-//!   is the same `409` whatever ended the request.
+//!   requester is shown "Not accepted" alike for a decline and an expiry,
+//!   and only once the request would have expired: until then a declined
+//!   request reads as open ([`group_listing::MyRequest`]) and asking again is
+//!   `already_requested`. The refusal to ask again after that is the same
+//!   `409` whatever ended the request. An unlisting ends it at once, since
+//!   the group leaves the directory for everyone to see.
 //!
 //! A join request may carry a note to the facilitators: signed by the
 //! requester's member key and sealed to each facilitator's key
@@ -386,8 +389,8 @@ pub async fn list_requests(
 }
 
 /// `GET /v1/me/join-requests`: the caller's own requests. Open ones, and
-/// ended ones as "not_accepted" until they could ask again; a decline, an
-/// expiry and an unlisting read the same.
+/// ended ones as "not_accepted" until they could ask again. A decline reads
+/// as open until the request would have expired, then like an expiry.
 pub async fn my_requests(
     State(state): State<AppState>,
     s: SessionUser,

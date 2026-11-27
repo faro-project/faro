@@ -286,7 +286,7 @@ P: Withdraw ──▶ request removed
 ```
 
 - A request can carry an optional note to the facilitators ("I'm new to the church and was told to ask about this group"), encrypted to the facilitators' keys and signed (§10.2, Phase B). In Phase A, requests carry no note.
-- **Private like proposals.** Other participants never see requests. The requester can't tell a decline from an expiry. After either, they can't ask the same group again for 30 days. A person may have at most 5 open join requests.
+- **Private like proposals.** Other participants never see requests. The requester can't tell a decline from an expiry: a declined request reads as open to them (in their list, in the directory's "Requested" chip, in the 5-request limit, and as `already_requested` if they ask again) until it would have expired, as with a proposal's sender, and only then shows "Not accepted". After either, they can't ask the same group again for 30 days. A person may have at most 5 open join requests.
 - **Facilitators can't see anything about a requester** beyond their display name and note: not whether they are monitored, nor who their allies are.
 - **No open joining.** Every join needs a facilitator's yes (principle 9). Real groups vet newcomers, and in Phase C each join must be signed into the roster by a facilitator (§10.3).
 - **Unlisting** removes the group from the directory at once. Open requests become "Not accepted". An admin can unlist any group, which is written to the admin log and tells the facilitators.
