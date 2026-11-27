@@ -35,5 +35,5 @@
     "license_url": "https://github.com/yahoo/open_nsfw/blob/a4e13931465f4380742545932657eeea0a10aa48/LICENSE.md",
     "changes": "Converted to ONNX from Yahoo's original Caffe files (nsfw_model/deploy.prototxt and nsfw_model/resnet_50_1by2_nsfw.caffemodel at the commit in source_url) by Faro's crates/faro-detect/models/opennsfw/convert.py: each BatchNorm and Scale layer is folded into the convolution before it. The weights are not retrained or fine-tuned. Quantized to int8 with ONNX Runtime 1.19.2 (QDQ format; stages 2 and 3 in int8, the stem and the classifier head in float), calibrated on synthetic, non-explicit images."
   },
-  "blake3": "a72a34b691f63ed1be147e2796a0e7a1c9e9c70ce924d9726ae1252ba3d8cde6"
+  "blake3": "5e2481a60540c4dc29888717e489f84da0724410d0f2a996b35548fece3821a7"
 }
