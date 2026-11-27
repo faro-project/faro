@@ -405,7 +405,7 @@ export interface AllyKeyChallenge {
 
 // ---- Devices -------------------------------------------------------------
 
-export type Platform = 'macos' | 'windows' | 'linux';
+export type Platform = 'macos' | 'windows' | 'linux' | 'ios';
 
 /** `GET /v1/me/devices` row. */
 export interface DeviceSummary {
@@ -569,7 +569,7 @@ export interface FeedResponse {
 export type Rating = 'clean' | 'low' | 'medium' | 'high';
 
 export interface Reason {
-	source: 'image' | 'domain' | 'title' | 'app' | 'ocr' | 'context';
+	source: 'image' | 'domain' | 'title' | 'app' | 'ocr' | 'context' | 'dns';
 	label: string;
 	score?: number;
 }
@@ -599,7 +599,26 @@ export type TamperSignal =
 	| { signal: 'browser_without_extension'; browser: string }
 	| { signal: 'vpn_active' }
 	| { signal: 'virtual_machine' }
-	| { signal: 'remote_desktop' };
+	| { signal: 'remote_desktop' }
+	// iPhone (docs/IOS.md §10.2). The first three are tamper events.
+	| { signal: 'screen_time_revoked' }
+	| { signal: 'filter_off'; cause: FilterOffCause }
+	| { signal: 'settings_cleared' }
+	// iPhone, context only: listed in the daily report.
+	| { signal: 'doh_dropped' }
+	| { signal: 'other_vpn' }
+	| { signal: 'jailbreak_suspected' };
+
+/** Why an iPhone's DNS filter is off, as far as the phone could tell. */
+export type FilterOffCause =
+	'vpn_disconnected' | 'on_demand_off' | 'other_vpn' | 'profile_removed' | 'unknown';
+
+/** One host in a `blocked_summary`: the host only, never a path or query. */
+export interface BlockedHost {
+	host: string;
+	category: string;
+	count: number;
+}
 
 export type EventBody =
 	| { type: 'capture'; rating: Rating; count: number }
@@ -615,7 +634,31 @@ export type EventBody =
 			account?: string;
 	  }
 	| { type: 'tamper'; signal: TamperSignal; account?: string }
-	| { type: 'settings_change'; changes: { key: string; old?: string; new?: string }[] }
+	| {
+			type: 'settings_change';
+			changes: { key: string; old?: string; new?: string }[];
+			// Pending loosening (docs/IOS.md §9), ms since the epoch; left out when not set.
+			requested_at?: number;
+			takes_effect_at?: number;
+			cancelled_at?: number;
+			/** The delay that was in force, in seconds. */
+			delay_secs?: number;
+	  }
+	| {
+			type: 'blocked_summary';
+			bucket_start: number;
+			bucket_secs: number;
+			by_category: Record<string, number>;
+			hosts: BlockedHost[];
+			other_hosts: number;
+	  }
+	| {
+			type: 'shield_summary';
+			bucket_start: number;
+			bucket_secs: number;
+			shown: number;
+			closed: number;
+	  }
 	| { type: 'agent_restarted'; count_last_hour: number }
 	| { type: 'paused'; reason?: string; until_ms?: number }
 	| { type: 'resumed' }
@@ -634,6 +677,27 @@ export interface TamperRecord {
 	ts_ms: number;
 	signal: TamperSignal;
 	account?: string;
+}
+
+/**
+ * The iPhone part of a daily report (docs/IOS.md §11). Present only in an
+ * iPhone's report, which has no screen checks. Provisional: the report
+ * builder that fills it is a later issue, so every part may be empty.
+ */
+export interface IosReport {
+	/** When each layer was on, in order. */
+	protection: { start_ms: number; end_ms: number; screen_time: boolean; filter: boolean }[];
+	/** Blocked lookups, one entry per day. */
+	blocked: {
+		day_start_ms: number;
+		by_category: Record<string, number>;
+		hosts: BlockedHost[];
+		other_hosts: number;
+	}[];
+	/** Blocked apps opened, counts only, one entry per day. */
+	shields: { day_start_ms: number; shown: number; closed: number }[];
+	/** Loosenings asked for, applied or cancelled. */
+	loosenings?: { ts_ms: number; text: string }[];
 }
 
 export interface DailyReport {
@@ -658,6 +722,7 @@ export interface DailyReport {
 	}[];
 	top_domains?: { name: string; count: number }[];
 	top_apps?: { name: string; count: number }[];
+	ios?: IosReport;
 	health: {
 		tamper: TamperRecord[];
 		context: TamperRecord[];

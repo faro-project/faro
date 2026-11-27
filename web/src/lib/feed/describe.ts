@@ -5,9 +5,11 @@
 // member and their allies (ARCHITECTURE.md §6), not at alarm.
 
 import type {
+	BlockedHost,
 	DailyReport,
 	EventBody,
 	EventKind,
+	FilterOffCause,
 	FeedEntry,
 	Rating,
 	Reason,
@@ -302,6 +304,19 @@ function screenRecordingOff(s: TamperSignal): boolean {
  * `undefined` to keep the kind's ("Possible tampering").
  */
 export function bodyTitle(b: EventBody, device: string): string | undefined {
+	if (b.type === 'tamper') {
+		const s = b.signal;
+		if (s.signal === 'screen_time_revoked') return `Screen Time protection is off on ${device}`;
+		if (s.signal === 'filter_off') return `Faro's web filter is off on ${device}`;
+		if (s.signal === 'settings_cleared')
+			return `Faro's Screen Time settings were changed on ${device}`;
+	}
+	if (b.type === 'blocked_summary') return `Websites were blocked on ${device}`;
+	if (b.type === 'shield_summary') return `Blocked apps were opened on ${device}`;
+	if (b.type === 'settings_change' && b.requested_at !== undefined)
+		return b.cancelled_at !== undefined
+			? `A change to ${device} was cancelled`
+			: `Protection on ${device} is being loosened`;
 	if (b.type === 'tamper' && screenRecordingOff(b.signal))
 		return `Screen Recording is off on ${device}`;
 	if (b.type === 'tamper' && b.signal.signal === 'window_hidden_from_capture')
@@ -339,7 +354,77 @@ export function describeTamper(s: TamperSignal): string {
 			return 'A virtual machine was running.';
 		case 'remote_desktop':
 			return 'The computer was used over remote desktop.';
+		case 'screen_time_revoked':
+			return 'Screen Time access was turned off for Faro. The app blocks and shields are gone, and Faro can now be deleted from the iPhone.';
+		case 'filter_off':
+			return `Faro's web filter is off. ${FILTER_OFF_CAUSE[s.cause] ?? FILTER_OFF_CAUSE.unknown}`;
+		case 'settings_cleared':
+			return "Faro's Screen Time settings were cleared or changed, though Screen Time access is still on.";
+		case 'doh_dropped':
+			return 'Faro dropped connections to private DNS services that could get around the web filter.';
+		case 'other_vpn':
+			return 'Another VPN was connected.';
+		case 'jailbreak_suspected':
+			return 'The iPhone looks jailbroken, so Faro may not be able to protect it.';
 	}
+}
+
+const FILTER_OFF_CAUSE: Record<FilterOffCause, string> = {
+	vpn_disconnected: 'The VPN was switched off.',
+	on_demand_off: 'Connect On Demand was turned off.',
+	other_vpn: 'Another VPN took over.',
+	profile_removed: 'The Faro VPN profile was deleted.',
+	unknown: "The filter stopped reporting, and the iPhone doesn't say why."
+};
+
+/** Said in every iPhone report (docs/IOS.md §11). */
+export const IOS_LIMITS_NOTICE =
+	"Faro on iPhone blocks; it doesn't see the screen. It can't block sites reached through some private DNS services or apps.";
+
+const CATEGORY_NAME: Record<string, string> = { adult: 'Adult', gambling: 'Gambling' };
+
+export function categoryName(c: string): string {
+	return CATEGORY_NAME[c] ?? c.replaceAll('_', ' ').replace(/^./, (m) => m.toUpperCase());
+}
+
+/** "adult 10, gambling 2", largest first. */
+export function categoryCounts(by: Record<string, number>): string {
+	return Object.entries(by)
+		.sort((a, b) => b[1] - a[1])
+		.map(([c, n]) => `${categoryName(c).toLowerCase()} ${n}`)
+		.join(', ');
+}
+
+/** Hosts grouped by category, for a list: the host and how often it was blocked. */
+export function hostsByCategory(
+	hosts: BlockedHost[]
+): { category: string; hosts: BlockedHost[] }[] {
+	const out = new Map<string, BlockedHost[]>();
+	for (const h of hosts) out.set(h.category, [...(out.get(h.category) ?? []), h]);
+	return [...out].map(([category, hs]) => ({
+		category,
+		hosts: hs.sort((a, b) => b.count - a.count)
+	}));
+}
+
+/** "today at 21:04", "tomorrow at 21:04", or a date and time. */
+export function whenText(ms: number, now: number): string {
+	const d = new Date(ms);
+	const t = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+	const n = new Date(now);
+	const dayShift = Math.round(
+		(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() -
+			new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime()) /
+			86400_000
+	);
+	if (dayShift === 0) return `today at ${t}`;
+	if (dayShift === 1) return `tomorrow at ${t}`;
+	if (dayShift === -1) return `yesterday at ${t}`;
+	return `${date(ms)} at ${t}`;
+}
+
+function settingChange(c: { key: string; old?: string; new?: string }): string {
+	return `${c.key.replaceAll('_', ' ')}: ${c.old ?? 'unset'} → ${c.new ?? 'unset'}`;
 }
 
 export function describeReason(r: Reason): string {
@@ -350,13 +435,14 @@ export function describeReason(r: Reason): string {
 		title: 'the window title',
 		app: 'the app',
 		ocr: 'text on screen',
-		context: 'context'
+		context: 'context',
+		dns: 'blocked lookups'
 	};
 	return `${label} (from ${src[r.source] ?? r.source})`;
 }
 
 /** Sentences for a decrypted event body. */
-export function describeBody(b: EventBody): string[] {
+export function describeBody(b: EventBody, device = 'this device', now = Date.now()): string[] {
 	switch (b.type) {
 		case 'flag': {
 			const out = [
@@ -377,10 +463,43 @@ export function describeBody(b: EventBody): string[] {
 				...(screenRecordingOff(b.signal) ? [SCREEN_RECORDING_FIX] : []),
 				...(b.signal.signal === 'window_hidden_from_capture' ? [HIDDEN_WINDOW_CONTEXT] : [])
 			];
-		case 'settings_change':
-			return b.changes.map(
-				(c) => `${c.key.replaceAll('_', ' ')}: ${c.old ?? 'unset'} → ${c.new ?? 'unset'}`
-			);
+		case 'settings_change': {
+			const lines = b.changes.map(settingChange);
+			if (b.requested_at === undefined && b.takes_effect_at === undefined) return lines;
+			const asked =
+				b.requested_at !== undefined ? ` (asked for ${whenText(b.requested_at, now)})` : '';
+			if (b.cancelled_at !== undefined)
+				return [
+					`The member cancelled this before it took effect, on ${whenText(b.cancelled_at, now)}. Nothing changed on ${device}.${asked}`,
+					...lines
+				];
+			if (b.takes_effect_at === undefined) return lines;
+			const delay = b.delay_secs
+				? ` after the member's ${duration(b.delay_secs * 1000)} delay`
+				: '';
+			return [
+				b.takes_effect_at > now
+					? `This will take effect on ${device} ${whenText(b.takes_effect_at, now)}${delay}. The member can still cancel it.${asked}`
+					: `This took effect on ${device} ${whenText(b.takes_effect_at, now)}${delay}.${asked}`,
+				...lines
+			];
+		}
+		case 'blocked_summary': {
+			const total = Object.values(b.by_category).reduce((a, n) => a + n, 0);
+			const lines = [
+				`${total} blocked lookup${total === 1 ? '' : 's'} in ${duration(b.bucket_secs * 1000)}${total ? `: ${categoryCounts(b.by_category)}` : ''}.`
+			];
+			for (const g of hostsByCategory(b.hosts))
+				lines.push(
+					`${categoryName(g.category)}: ${g.hosts.map((h) => `${h.host} (${h.count})`).join(', ')}.`
+				);
+			if (b.other_hosts) lines.push(`${b.other_hosts} more lookups of other sites, not listed.`);
+			return lines;
+		}
+		case 'shield_summary':
+			return [
+				`A blocked app was opened ${b.shown} time${b.shown === 1 ? '' : 's'} and the block screen was closed ${b.closed} time${b.closed === 1 ? '' : 's'}. Which apps is never recorded.`
+			];
 		case 'agent_restarted':
 			return [`Faro restarted ${b.count_last_hour} times in the last hour.`];
 		case 'paused':
