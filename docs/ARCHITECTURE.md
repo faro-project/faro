@@ -532,7 +532,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 ## 10. Testing strategy
 
 - Unit and property tests for `faro-core`, `faro-crypto` and `faro-update`. The detection eval suite runs in CI.
-- Platform CI matrix: macOS (Apple Silicon), Windows (x64) and Linux (ARM64) on self-hosted runners (DEVELOPMENT.md, CI runners). Linux display tests use Xvfb plus headless Weston.
+- Platform CI matrix: macOS (Apple Silicon and Intel), Windows (x64) and Linux (x64) on GitHub's hosted runners (DEVELOPMENT.md, CI runners). Linux display tests use Xvfb plus headless Weston.
 - **A test that no unblurred frames are kept**: run the pipeline under an instrumented allocator or file-system watcher and assert that no frame-sized buffer is written to disk or IPC beyond the classifier, and that every persisted image is a blurred thumbnail.
 - E2E: the server in both SQLite and Postgres modes, plus a headless client in synthetic-capture mode, with Playwright driving the ally app to check decryption, urgency routing and digest timing.
 - Tamper tests: kill the agent, revoke permissions, delete outbox rows, take the instance down → expect the right alerts, with no false alarms from instance downtime.

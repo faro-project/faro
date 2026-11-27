@@ -39,7 +39,7 @@
 # - FARO_TARGETS_KEY and FARO_TIMESTAMP_KEY are read only by `layout` in a
 #   real release, which runs on a GitHub-hosted runner unless
 #   FARO_SIGNING_RUNNER says otherwise. A dry run never maps a real secret
-#   and signs with throwaway keys on the Raspberry Pi.
+#   and signs with throwaway keys on ubuntu-24.04.
 # - Once the plan allows environments, set FARO_RELEASE_ENVIRONMENT
 #   (`release`, limited to v* tags and main) and move the secrets into it; jobs that
 #   read secrets then run in it.
@@ -76,7 +76,7 @@ env:
 
 jobs:
   prepare:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
       dry_run: ${{ steps.v.outputs.dry_run }}
@@ -121,9 +121,9 @@ jobs:
           [[ "${version%%+*}" == *-* ]] && prerelease=true
           # Secrets and an environment only for a real release. Its keys are
           # read on GitHub's runners (or FARO_SIGNING_RUNNER); a dry run's
-          # throwaway keys on the Raspberry Pi.
+          # throwaway keys always on GitHub's.
           environment=""
-          signing_runner='["self-hosted", "Linux", "ARM64"]'
+          signing_runner='"ubuntu-24.04"'
           if [[ "$dry_run" == false ]]; then
             environment="$RELEASE_ENVIRONMENT"
             signing_runner="$SIGNING_RUNNER"
@@ -145,7 +145,7 @@ jobs:
 
   macos-pkg:
     needs: prepare
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     environment: ${{ needs.prepare.outputs.environment }}
     timeout-minutes: 120
     env:
@@ -274,7 +274,7 @@ jobs:
   # MSI. The image model is the one the macOS job built.
   windows-msi:
     needs: [prepare, macos-pkg]
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-2025
     environment: ${{ needs.prepare.outputs.environment }}
     timeout-minutes: 120
     env:
@@ -397,7 +397,7 @@ jobs:
   # are identical.
   blocklist:
     needs: prepare
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
@@ -426,14 +426,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # No self-hosted x86_64 Linux runner yet, so amd64 builds on
-          # GitHub's runners (or FARO_LINUX_X64_RUNNER), as in container.yml.
+          # Both natively on GitHub's runners; FARO_LINUX_X64_RUNNER moves
+          # amd64, as in container.yml.
           - platform: linux/amd64
             arch: x86_64
             runner: ${{ vars.FARO_LINUX_X64_RUNNER || '"ubuntu-24.04"' }}
           - platform: linux/arm64
             arch: aarch64
-            runner: '["self-hosted", "Linux", "ARM64"]'
+            runner: '"ubuntu-24.04-arm"'
     runs-on: ${{ fromJSON(matrix.runner) }}
     # A dry run goes on without amd64 while GitHub's runners can't start
     # (the layout job warns). A release needs both.
@@ -738,7 +738,7 @@ jobs:
       && needs.layout.result == 'success'
       && (needs.publish-layout.result == 'success'
           || (needs.prepare.outputs.dry_run == 'true' && needs.publish-layout.result == 'skipped'))
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     environment: ${{ needs.prepare.outputs.environment }}
     timeout-minutes: 30
     permissions:
