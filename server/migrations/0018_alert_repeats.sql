@@ -1,4 +1,4 @@
--- Faro instance schema v17: coalesced alerts (#194).
+-- Faro instance schema v18: coalesced alerts (#194).
 --
 -- Repeats of an alert (the same rejected upload again, or alerts beyond a
 -- device's rate limit) are counted on the one existing alert instead of

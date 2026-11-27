@@ -46,6 +46,7 @@ pub mod branding;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod csrf;
 pub mod db;
 pub mod deletion;
 pub mod device_auth;

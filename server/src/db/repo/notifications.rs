@@ -135,6 +135,8 @@ pub struct AdminLogNotice {
     /// The admin who did it, if any and not deleted since.
     pub actor_id: Option<UserId>,
     pub actor_name: Option<String>,
+    /// What changed (`settings_changed` only).
+    pub detail: Option<String>,
 }
 
 /// When `recipient` was last sent an immediate alert or report email about
@@ -180,7 +182,7 @@ pub async fn due<'e>(
                     ORDER BY n.created_at, n.id) AS rn,
                 m.display_name AS member_name, m.email AS member_email, d.name AS device_name,
                 ab.display_name AS about_name,
-                al.action AS log_action, al.via AS log_via, al.actor_id AS log_actor_id,
+                al.action AS log_action, al.detail AS log_detail, al.via AS log_via, al.actor_id AS log_actor_id,
                 act.display_name AS log_actor_name,
                 gn.kind AS group_kind, gn.summary AS group_summary, gn.detail AS group_detail,
                 gna.display_name AS group_actor_name,
@@ -229,6 +231,7 @@ pub async fn due<'e>(
                         .try_get::<Option<String>, _>("log_actor_id")?
                         .map(UserId::new),
                     actor_name: r.try_get("log_actor_name")?,
+                    detail: r.try_get("log_detail")?,
                 }),
             };
             Ok(DueNotification {

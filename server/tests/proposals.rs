@@ -1140,9 +1140,13 @@ async fn only_the_two_people_see_or_act_on_a_proposal() {
         (format!("/v1/proposals/{id}/decline"), Method::POST),
         (format!("/v1/proposals/{id}"), Method::DELETE),
     ] {
-        let r = t.call(method.clone(), &path, None, Some(&w.admin_s)).await;
+        // Accept takes a JSON body (`{}` is enough).
+        let body = path.ends_with("/accept").then(|| json!({}));
+        let r = t
+            .call(method.clone(), &path, body.clone(), Some(&w.admin_s))
+            .await;
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{path}");
-        let r = t.call(method, &path, None, None).await;
+        let r = t.call(method, &path, body, None).await;
         assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{path}");
     }
     // The sender can't answer their own; the recipient can't withdraw it.

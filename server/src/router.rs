@@ -17,6 +17,9 @@
 //!    `frame-ancestors 'none'`, `X-Frame-Options: DENY`,
 //!    `Cache-Control: no-store`, and HSTS unless `--dev`.
 //!
+//! Inside those, [`crate::csrf::require_same_origin`] refuses cookie-bearing
+//! non-GET requests that are not same-origin (`Sec-Fetch-Site` / `Origin`).
+//!
 //! Endpoints that take secrets from the URL or body before any session
 //! exists, or send email (setup, magic link request/verify, device
 //! enrollment, invite lookup/accept) are additionally wrapped in the per-IP
@@ -362,6 +365,10 @@ fn set_default(name: HeaderName, value: HeaderValue) -> SetResponseHeaderLayer<H
 pub fn build(state: AppState) -> Router {
     let hsts = !state.config().dev;
     let mut app = api_routes(&state)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::csrf::require_same_origin,
+        ))
         .layer(set_default(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),

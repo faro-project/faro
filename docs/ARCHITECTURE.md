@@ -551,7 +551,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 ## 8. Data retention
 
-- Configurable per instance by the admin. Members can choose **shorter** retention, never longer.
+- Configurable per instance by the admin, at least 7 days for each window when set in the console (the same floor members have). A shorter window applies only to data received after the change; older data keeps the window it arrived under. Members can choose **shorter** retention, never longer.
+- Changing instance settings is never silent: every change goes in the admin log and is emailed to the other admins, and a longer liveness grace period or a shorter retention window also raises a `member_settings_changed` alert (`instance_weakened:…`) for every member, so each member's allies hear of it.
 - Defaults: event headers 90 days, report and thumbnail blobs 30 days, alerts 90 days.
 - A retention worker hard-deletes expired rows and blobs. Backups follow the same windows (the docs explain backup rotation).
 - Deleting an account (§12) removes everything about the person through the same code path, after a 7-day hold. **Older backups still hold it until they are rotated out**, and restoring a backup taken before a deletion brings that account back, including its computers' tokens (SELF-HOSTING.md §9).
@@ -571,6 +572,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 - Reproducible builds for the client and server (*planned*, not built).
 - **Secure defaults for operators**: invite-only registration, automatic HTTPS (an admin passkey is planned), security headers, rate limiting, and a `faro-server doctor` command that checks the configuration (TLS, SMTP, backups, disk space, update freshness).
 - **Every account is as strong as its mailbox.** Sign-in is by an emailed link only, because passkeys aren't built. Anyone who controls an account's mailbox can sign in as that person, whether member, ally or admin, so operators and users should protect mailboxes with two-factor sign-in. Report contents stay protected by the passphrase and recovery code, which the server never sees.
+- **Cross-site requests**: the session cookie is `HttpOnly` and `SameSite=Strict`; JSON endpoints also require `Content-Type: application/json`; and a middleware (`faro_server::csrf`) refuses any cookie-bearing request other than `GET`/`HEAD`/`OPTIONS` unless `Sec-Fetch-Site` is `same-origin` (or, when that header is absent, `Origin` is the instance's public origin). A request with neither header is a non-browser client and is allowed. Device routes use signatures, not the cookie, and are not checked.
 - A third-party audit of the crypto and update design before 1.0.
 
 ---

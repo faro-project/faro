@@ -101,8 +101,13 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                 ),
                 (
                     17,
+                    "admin_log_settings_detail",
+                    include_str!("../../migrations/0017_admin_log_settings_detail.sql"),
+                ),
+                (
+                    18,
                     "alert_repeats",
-                    include_str!("../../migrations/0017_alert_repeats.sql"),
+                    include_str!("../../migrations/0018_alert_repeats.sql"),
                 ),
             ]
         }
@@ -168,9 +173,9 @@ mod tests {
             .await
             .unwrap();
         let all = sources(Backend::Sqlite);
-        // Apply everything before 16, then 16 itself on top of the data.
-        let last = all.iter().find(|m| m.0 == 16).unwrap();
-        for (_, _, sql) in all.iter().filter(|m| m.0 < 16) {
+        let at = all.iter().position(|m| m.0 == 16).unwrap();
+        let before = &all[..at];
+        for (_, _, sql) in before {
             sqlx::raw_sql(*sql).execute(&mut conn).await.unwrap();
         }
         for sql in [
@@ -188,7 +193,7 @@ mod tests {
             sqlx::query(sql).execute(&mut conn).await.unwrap();
         }
 
-        sqlx::raw_sql(last.2).execute(&mut conn).await.unwrap();
+        sqlx::raw_sql(all[at].2).execute(&mut conn).await.unwrap();
 
         let rows =
             sqlx::query("SELECT id, audience, group_id, blob_ref, sig FROM reach_outs ORDER BY id")

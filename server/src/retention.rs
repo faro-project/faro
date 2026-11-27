@@ -23,6 +23,14 @@
 //! normal alerts off would not even hear about the change, so a retroactive
 //! cut would be exactly the quiet early deletion §4.3 forbids.
 //!
+//! **Instance windows.** An admin may not set a window below
+//! [`crate::settings::MIN_INSTANCE_RETENTION_DAYS`] in the console, and
+//! shortening one is just as non-retroactive: the old window is kept in
+//! [`crate::settings::RetentionBefore`] with the time of the change, and
+//! data received before it keeps that longer window ([`ranges`]). Rows with
+//! no single receive time (notifications, uptime, group messages) follow
+//! the longer alert window until it has run out.
+//!
 //! **Order.** Blob rows are deleted in the database first, then the files:
 //! a crash in between leaves orphan files (swept on the next run), never
 //! rows pointing at missing files.
@@ -33,6 +41,7 @@
 use crate::blob::BlobId;
 use crate::config::RetentionConfig;
 use crate::error::AppError;
+use crate::settings::{RetentionBefore, WindowBefore};
 use crate::state::AppState;
 use faro_proto::UserId;
 use serde::{Deserialize, Serialize};
@@ -234,8 +243,26 @@ fn cutoff(now: i64, days: u32) -> i64 {
 /// older than the instance window, plus, for a member's shorter window,
 /// anything older than it **that was received after it took effect**
 /// (`since`). Without an override (or `since`), only the first.
-pub fn ranges(now: i64, instance_days: u32, member: Option<(u32, i64)>) -> Vec<(i64, i64)> {
-    let mut out = vec![(i64::MIN, cutoff(now, instance_days))];
+pub fn ranges(
+    now: i64,
+    instance_days: u32,
+    before: Option<(u32, i64)>,
+    member: Option<(u32, i64)>,
+) -> Vec<(i64, i64)> {
+    // An admin shortened the instance window at `since`: what was received
+    // before keeps the old window `before_days`; only newer data follows
+    // `instance_days`.
+    let mut out = match before.filter(|(d, _)| *d > instance_days) {
+        Some((before_days, since)) => {
+            let mut v = vec![(i64::MIN, cutoff(now, before_days))];
+            let to = cutoff(now, instance_days);
+            if since < to {
+                v.push((since, to));
+            }
+            v
+        }
+        None => vec![(i64::MIN, cutoff(now, instance_days))],
+    };
     if let Some((days, since)) = member {
         let to = cutoff(now, days);
         if days < instance_days && since < to {
@@ -416,8 +443,10 @@ impl Plan {
     fn new(
         now: i64,
         instance: &RetentionConfig,
+        before: &RetentionBefore,
         member: Option<(&RetentionConfig, &WindowsSince)>,
     ) -> Plan {
+        let b = |w: Option<WindowBefore>| w.map(|w| (w.days, w.since));
         let m = |days: fn(&RetentionConfig) -> u32, since: fn(&WindowsSince) -> Option<i64>| {
             member.and_then(|(w, s)| since(s).map(|t| (days(w), t)))
         };
@@ -425,10 +454,21 @@ impl Plan {
             events: ranges(
                 now,
                 instance.event_header_days,
+                b(before.event_header),
                 m(|w| w.event_header_days, |s| s.event_header),
             ),
-            blobs: ranges(now, instance.blob_days, m(|w| w.blob_days, |s| s.blob)),
-            alerts: ranges(now, instance.alert_days, m(|w| w.alert_days, |s| s.alert)),
+            blobs: ranges(
+                now,
+                instance.blob_days,
+                b(before.blob),
+                m(|w| w.blob_days, |s| s.blob),
+            ),
+            alerts: ranges(
+                now,
+                instance.alert_days,
+                b(before.alert),
+                m(|w| w.alert_days, |s| s.alert),
+            ),
         }
     }
 }
@@ -490,12 +530,14 @@ pub const DEVICE_TOMBSTONE_DAYS: u32 = 365;
 /// One full retention pass.
 pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
     let now = state.now_ms();
-    let instance = state.settings().retention;
+    let settings = state.settings();
+    let instance = settings.retention;
+    let before = settings.retention_before;
     let mut s = RetentionSummary::default();
 
     purge_scope(
         state,
-        &Plan::new(now, &instance, None),
+        &Plan::new(now, &instance, &before, None),
         Scope::Default,
         &mut s,
     )
@@ -530,12 +572,20 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             ),
         };
         let w = effective(&instance, &o);
-        let plan = Plan::new(now, &instance, Some((&w, &since)));
+        let plan = Plan::new(now, &instance, &before, Some((&w, &since)));
         purge_scope(state, &plan, Scope::Member(&member), &mut s).await?;
     }
 
     let pool = state.db().pool();
-    let alert_cut = cutoff(now, instance.alert_days);
+    // Rows that follow the alert window but carry no single receive time
+    // we can split on (notifications, uptime, group messages) wait for the
+    // longer window while an admin's shortening is still protecting older
+    // alerts.
+    let alert_days = before
+        .alert
+        .filter(|b| b.since > cutoff(now, b.days))
+        .map_or(instance.alert_days, |b| instance.alert_days.max(b.days));
+    let alert_cut = cutoff(now, alert_days);
     // Notifications outlive nothing they refer to (they cascade), but
     // delivered or suppressed rows are pruned on the alert window too.
     // That includes the emails about admin log entries; the entries
@@ -718,27 +768,48 @@ mod tests {
     fn a_shorter_window_only_applies_from_when_it_was_chosen() {
         let now = 100 * DAY_MS;
         // No override: only the instance window.
-        assert_eq!(ranges(now, 30, None), vec![(i64::MIN, 70 * DAY_MS)]);
+        assert_eq!(ranges(now, 30, None, None), vec![(i64::MIN, 70 * DAY_MS)]);
         // 7 days chosen on day 90: data from day 90 on goes after 7 days;
         // older data keeps the 30-day window.
         assert_eq!(
-            ranges(now, 30, Some((7, 90 * DAY_MS))),
+            ranges(now, 30, None, Some((7, 90 * DAY_MS))),
             vec![(i64::MIN, 70 * DAY_MS), (90 * DAY_MS, 93 * DAY_MS)]
         );
         // Chosen today: nothing extra yet.
         assert_eq!(
-            ranges(now, 30, Some((7, now))),
+            ranges(now, 30, None, Some((7, now))),
             vec![(i64::MIN, 70 * DAY_MS)]
         );
         // Not actually shorter: nothing extra.
         assert_eq!(
-            ranges(now, 30, Some((30, 0))),
+            ranges(now, 30, None, Some((30, 0))),
             vec![(i64::MIN, 70 * DAY_MS)]
         );
         // Long ago: the member window applies to everything still stored.
         assert_eq!(
-            ranges(now, 30, Some((7, 0))),
+            ranges(now, 30, None, Some((7, 0))),
             vec![(i64::MIN, 70 * DAY_MS), (0, 93 * DAY_MS)]
+        );
+    }
+
+    #[test]
+    fn a_shortened_instance_window_keeps_the_old_one_for_older_data() {
+        let now = 100 * DAY_MS;
+        // Cut from 30 to 7 days on day 90: older data keeps 30 days, newer
+        // data goes after 7.
+        assert_eq!(
+            ranges(now, 7, Some((30, 90 * DAY_MS)), None),
+            vec![(i64::MIN, 70 * DAY_MS), (90 * DAY_MS, 93 * DAY_MS)]
+        );
+        // Cut today: nothing new yet.
+        assert_eq!(
+            ranges(now, 7, Some((30, now)), None),
+            vec![(i64::MIN, 70 * DAY_MS)]
+        );
+        // A rule that is no longer longer does nothing.
+        assert_eq!(
+            ranges(now, 30, Some((30, 0)), None),
+            vec![(i64::MIN, 70 * DAY_MS)]
         );
     }
 
