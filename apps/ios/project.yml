@@ -57,12 +57,15 @@ targets:
         optional: true
         buildPhase: resources
       - path: Shared
+      - path: ScreenTime
       - path: Generated/FaroCore
         optional: true
     dependencies:
       - package: FaroKit
       - framework: FaroCore.xcframework
         embed: false
+      - sdk: DeviceActivity.framework
+      - sdk: ManagedSettings.framework
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: libresolv.tbd
@@ -154,6 +157,7 @@ targets:
         excludes:
           - "*.entitlements"
           - Info.plist
+      - path: ScreenTime
     dependencies:
       - package: FaroKit
       - sdk: DeviceActivity.framework

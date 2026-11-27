@@ -24,16 +24,16 @@ final class AppModel: ObservableObject {
     private var group: AppGroup?
     private var core: FaroCore?
     private var progressStore: SetupProgressStore?
-    private let applier: ScreenTimeApplying
+    private let settingsStore: SettingsStore
 
     init() {
         let group = AppGroup.container() ?? AppModel.fallbackGroup()
         self.group = group
         if let group {
             progressStore = SetupProgressStore(group: group)
-            applier = SettingsFileApplier(store: SettingsStore(group: group))
+            settingsStore = SettingsStore(group: group)
         } else {
-            applier = SettingsFileApplier(store: SettingsStore(url: URL(fileURLWithPath: "/dev/null")))
+            settingsStore = SettingsStore(url: URL(fileURLWithPath: "/dev/null"))
         }
         notices.onNotice = { [weak self] in self?.showingNotice = true }
     }
@@ -162,7 +162,7 @@ final class AppModel: ObservableObject {
     func authorizeScreenTime() async {
         guard flow.step == .screenTime else { return }
         await run {
-            try await ScreenTime.authorize(applying: self.applier)
+            try await ScreenTime.authorize(settingsStore: self.settingsStore)
             try self.progressStore?.update { $0.screenTimeDone = true }
             self.flow.apply(.screenTimeAuthorized)
         } onError: { message in

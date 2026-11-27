@@ -5,6 +5,7 @@ import UserNotifications
 @main
 struct FaroApp: App {
     @StateObject private var model = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -18,6 +19,11 @@ struct FaroApp: App {
                 .onOpenURL { url in
                     Task { await model.receive(link: url.absoluteString) }
                 }
+        }
+        .onChange(of: scenePhase) { phase in
+            // docs/IOS.md §6.3: re-apply the Screen Time settings each time
+            // the app comes forward. Does nothing before setup.
+            if phase == .active { ScreenTimeEnforcer.refreshOnForeground() }
         }
     }
 }

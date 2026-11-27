@@ -24,12 +24,12 @@ final class FaroShieldConfiguration: ShieldConfigurationDataSource {
     }
 
     private func shield() -> ShieldConfiguration {
-        if let group = AppGroup.container(), let counter = try? Counter(group: group, name: "shield_shown") {
+        if let group = AppGroup.container(), let counter = try? Counter(group: group, name: CounterName.shieldShown) {
             _ = try? counter.increment()
         }
         return ShieldConfiguration(
-            title: ShieldConfiguration.Label(text: "Blocked by Faro", color: .label),
-            subtitle: ShieldConfiguration.Label(text: "You chose to block this.", color: .secondaryLabel),
-            primaryButtonLabel: ShieldConfiguration.Label(text: "Close", color: .white))
+            title: ShieldConfiguration.Label(text: ShieldText.title, color: .label),
+            subtitle: ShieldConfiguration.Label(text: ShieldText.subtitle, color: .secondaryLabel),
+            primaryButtonLabel: ShieldConfiguration.Label(text: ShieldText.closeButton, color: .white))
     }
 }

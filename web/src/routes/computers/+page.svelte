@@ -51,7 +51,8 @@
 		macos: 'Mac',
 		windows: 'Windows',
 		linux: 'Linux',
-		ios: 'iPhone'
+		ios: 'iPhone',
+		android: 'Android'
 	};
 
 	async function load() {

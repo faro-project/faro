@@ -20,7 +20,8 @@ public struct FaroSettings: Codable, Equatable, Sendable {
     public var denyExplicitContent: Bool
     /// `dateAndTime.requireAutomaticDateAndTime`.
     public var requireAutomaticDateAndTime: Bool
-    /// `appStore.maximumRating`, or `nil` for off.
+    /// `appStore.maximumRating` (4, 9, 12, 17 or 1000 for all), or `nil` for off.
+    /// Other numbers round up to the next rating (`ScreenTimePlan`).
     public var maximumAppRating: Int?
 
     public init(

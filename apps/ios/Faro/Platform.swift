@@ -12,24 +12,6 @@ import UserNotifications
 
 // MARK: Screen Time
 
-/// Applies the member's settings to the "faro" ManagedSettings store
-/// (docs/IOS.md §6.2). The store, the shields and the monitor belong to the
-/// settings work (#146), which replaces `SettingsFileApplier` with one that
-/// also writes the store.
-protocol ScreenTimeApplying {
-    func apply(_ settings: FaroSettings) throws
-}
-
-/// Writes the settings file in the app group, which the monitor extension
-/// re-applies (docs/IOS.md §6.3). It does not touch ManagedSettings yet.
-struct SettingsFileApplier: ScreenTimeApplying {
-    let store: SettingsStore
-
-    func apply(_ settings: FaroSettings) throws {
-        try store.save(settings)
-    }
-}
-
 enum ScreenTime {
     /// Whether Faro's Screen Time authorization stands right now.
     static var isAuthorized: Bool {
@@ -37,14 +19,18 @@ enum ScreenTime {
     }
 
     /// The Face ID or passcode prompt (docs/IOS.md §6.1), then the default
-    /// settings. Throws the system's error if the member cancels.
+    /// settings: saved to the app group file the monitor re-applies, written
+    /// to the "faro" store, and the monitor schedule started. Throws the
+    /// system's error if the member cancels.
     @MainActor
-    static func authorize(applying applier: ScreenTimeApplying) async throws {
+    static func authorize(settingsStore: SettingsStore) async throws {
         try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
         guard isAuthorized else {
             throw SetupError("Screen Time access wasn't granted.")
         }
-        try applier.apply(.default)
+        try settingsStore.save(.default)
+        ScreenTimeEnforcer.apply(.default)
+        ScreenTimeEnforcer.startMonitoring()
     }
 }
 

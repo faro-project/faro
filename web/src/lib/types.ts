@@ -405,7 +405,7 @@ export interface AllyKeyChallenge {
 
 // ---- Devices -------------------------------------------------------------
 
-export type Platform = 'macos' | 'windows' | 'linux' | 'ios';
+export type Platform = 'macos' | 'windows' | 'linux' | 'ios' | 'android';
 
 /** `GET /v1/me/devices` row. */
 export interface DeviceSummary {
