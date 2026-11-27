@@ -191,6 +191,18 @@ pub fn login_notice(
         Some(n) => format!("the member and their {n} allies"),
         None => "the member and their allies".to_owned(),
     };
+    if cfg!(target_os = "android") {
+        // A phone: Faro covers the Android user it is installed in, not
+        // every account (docs/ANDROID.md §13), so the notice claims no more.
+        return (
+            "This phone is monitored by Faro".to_owned(),
+            format!(
+                "This phone (\"{device_name}\") is monitored by Faro for a member of \
+                 {instance_name}. Screenshots are blurred on this phone and shared, \
+                 encrypted, only with {shared}."
+            ),
+        );
+    }
     (
         "This computer is monitored by Faro".to_owned(),
         format!(

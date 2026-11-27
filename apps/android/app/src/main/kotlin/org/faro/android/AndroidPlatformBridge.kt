@@ -85,10 +85,14 @@ class AndroidPlatformBridge(private val context: Context) : AndroidPlatform {
         val connected = FaroAccessibilityService.instance != null
         if (connected) {
             missingSince = 0L
+            markAccessibilitySeen()
         } else if (missingSince == 0L) {
             missingSince = maxOf(now, startedAt)
         }
-        val off = !connected && now - missingSince >= ACCESSIBILITY_GRACE_MS
+        // Only a service that was on and went off is "turned off". One that was never switched on
+        // (setup not finished yet) is the core's to report: it raises `permission_revoked` with
+        // `never_granted` once captures keep failing, as on desktop (ARCHITECTURE.md §3.7).
+        val off = !connected && accessibilitySeen() && now - missingSince >= ACCESSIBILITY_GRACE_MS
         tamper.level("accessibility", off, AndroidTamper.AccessibilityDisabled)
 
         val batteryOptimised = !Permissions.isBatteryExempt(context)
@@ -100,6 +104,14 @@ class AndroidPlatformBridge(private val context: Context) : AndroidPlatform {
         return tamper.drain()
     }
 
+    private fun prefs() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private fun accessibilitySeen(): Boolean = prefs().getBoolean(KEY_ACCESSIBILITY_SEEN, false)
+
+    private fun markAccessibilitySeen() {
+        if (!accessibilitySeen()) prefs().edit().putBoolean(KEY_ACCESSIBILITY_SEEN, true).apply()
+    }
+
     override fun showNotice(text: String) {
         NoticeStore.show(context, text)
     }
@@ -107,5 +119,9 @@ class AndroidPlatformBridge(private val context: Context) : AndroidPlatform {
     private companion object {
         const val ZERO_AFTER_MS = 2_000L
         const val ACCESSIBILITY_GRACE_MS = 20_000L
+        const val PREFS = "bridge"
+        // Set the first time Faro's accessibility service is seen connected; kept across restarts,
+        // so a service that is off after a reboot still counts as turned off.
+        const val KEY_ACCESSIBILITY_SEEN = "accessibility_seen"
     }
 }
