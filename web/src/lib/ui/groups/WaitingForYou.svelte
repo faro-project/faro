@@ -297,7 +297,7 @@
 				</button>
 				<button class="link" type="button" onclick={() => (answering = null)}>Decide later</button>
 			</div>
-			<p class="muted small">If you say no, they only see "Not accepted".</p>
+			<p class="muted small">If you say no, they won't be told you said no.</p>
 		{/if}
 	</Modal>
 {/if}

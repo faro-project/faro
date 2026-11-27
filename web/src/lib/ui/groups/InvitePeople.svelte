@@ -1,8 +1,8 @@
 <script lang="ts">
 	// Invite people to a group (GROUPS.md §8.7): paste email addresses, or
 	// pick people you already know on this instance, or (facilitators) look
-	// people up on the instance by name. They get an email (or a notice) and a
-	// 7-day invitation; nobody is added until they accept. Facilitators always
+	// people up on the instance by name. They get an email (and a notice, if they
+	// already use the instance) and a 7-day invitation; nobody is added until they accept. Facilitators always
 	// see this; participants only when the group lets them invite
 	// (`group.can_invite`). The name search shows only a name, never an
 	// address, and doesn't match addresses at all.
@@ -162,9 +162,9 @@
 <form class="card section" onsubmit={send} novalidate>
 	<h2>Invite people</h2>
 	<p class="muted">
-		Everyone you invite gets an email, or a notice if they already use this instance, with an
-		invitation that works for 7 days. Nobody joins until they accept. Joining shares nothing about
-		their computer.
+		Everyone you invite gets an email, and people who already use this instance get a notice in Faro
+		too, with an invitation that works for 7 days. Nobody joins until they accept. Joining shares
+		nothing about their computer.
 	</p>
 
 	<div class="field">
