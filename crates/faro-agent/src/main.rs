@@ -296,6 +296,21 @@ impl faro_agent::NoticeSink for MacNotices {
     }
 
     fn screen_recording_off(&mut self) {
+        // The first time in an account, ask macOS: that is what puts Faro
+        // Agent in the Screen Recording list (nothing else calls a capture
+        // API while the permission is missing). macOS's own dialog is the
+        // notice then; the next run, or the status menu, shows ours.
+        #[cfg(target_os = "macos")]
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            if home.is_absolute() {
+                if let Some(granted) =
+                    faro_platform_macos::request_screen_capture_access_once(&home)
+                {
+                    tracing::info!(granted, "asked macOS for Screen Recording");
+                    return;
+                }
+            }
+        }
         let n = faro_agent::SCREEN_RECORDING_OFF;
         self.0.show_settings_notice(platform_ui::SettingsNotice {
             title: n.title.to_owned(),

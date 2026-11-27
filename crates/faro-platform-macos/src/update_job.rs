@@ -28,7 +28,7 @@
 //! in the service's root-only state directory between that check and the
 //! install.
 
-use crate::service::{pkg_layout, PlistError, AGENT_LABEL, DAEMON_LABEL, FIRST_REGULAR_UID};
+use crate::service::{pkg_layout, PlistError, AGENT_LABEL, DAEMON_LABEL};
 use plist::{Dictionary, Value};
 use std::path::Path;
 
@@ -48,7 +48,8 @@ if ! launchctl print "system/@DAEMON@" >/dev/null 2>&1; then
     echo "faro-update: starting the service again"
     launchctl bootstrap system "@DAEMON_PLIST@"
 fi
-for uid in $(ps -axo uid=,comm= | awk '$2 ~ /\/loginwindow$/ && $1 >= @FIRST_UID@ { print $1 }' | sort -un); do
+skip=$(id -u _mbsetupuser 2>/dev/null || echo 0)
+for uid in $(ps -axo uid=,comm= | awk -v skip="$skip" '$2 ~ /\/loginwindow$/ && $1 != 0 && $1 != skip { print $1 }' | sort -un); do
     if ! launchctl print "gui/$uid/@AGENT@" >/dev/null 2>&1; then
         echo "faro-update: starting the agent for uid $uid again"
         launchctl bootstrap "gui/$uid" "@AGENT_PLIST@"
@@ -64,7 +65,6 @@ pub fn update_script() -> String {
         .replace("@DAEMON_PLIST@", pkg_layout::DAEMON_PLIST)
         .replace("@AGENT@", AGENT_LABEL)
         .replace("@AGENT_PLIST@", pkg_layout::AGENT_PLIST)
-        .replace("@FIRST_UID@", &FIRST_REGULAR_UID.to_string())
 }
 
 /// The plist for [`UPDATE_LABEL`]: run once at load, installing `pkg`, with
@@ -170,6 +170,7 @@ mod tests {
             "ps",
             "echo '    0 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow'\n\
              echo '  501 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow'\n\
+             echo '  201 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow'\n\
              echo '  502 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow'\n\
              echo '  501 /usr/bin/other'",
         );
@@ -198,7 +199,7 @@ mod tests {
             "launchctl bootstrap system {}",
             pkg_layout::DAEMON_PLIST
         )));
-        for uid in [501, 502] {
+        for uid in [201, 501, 502] {
             assert!(
                 calls.contains(&format!(
                     "launchctl bootstrap gui/{uid} {}",
@@ -217,6 +218,7 @@ mod tests {
             0,
             &[
                 "system/org.faro.service",
+                "gui/201/org.faro.agent",
                 "gui/501/org.faro.agent",
                 "gui/502/org.faro.agent",
             ],
