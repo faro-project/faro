@@ -1,7 +1,8 @@
 //! # faro-core
 //!
-//! The portable client core shared by every desktop platform: everything the
-//! Faro service does that is not OS-specific and not ML.
+//! The portable client core shared by every client platform (the desktop
+//! service and the iOS core, `faro-mobile`): everything a Faro client does
+//! that is not OS-specific, not ML and not network.
 //!
 //! | Module | Role (ARCHITECTURE.md) |
 //! |---|---|
