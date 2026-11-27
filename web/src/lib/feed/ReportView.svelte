@@ -51,6 +51,10 @@
 			: '';
 	}
 
+	function protectionWord(on: boolean | null): string {
+		return on === null ? 'unknown' : on ? 'on' : 'off';
+	}
+
 	function minutes(secs: number) {
 		const m = Math.round(secs / 60);
 		return m < 60 ? `${m} min` : `${Math.round((m / 60) * 10) / 10} h`;
@@ -103,8 +107,8 @@
 			<ul class="small plain">
 				{#each ios.protection as p, i (i)}
 					<li>
-						{time(p.start_ms)} to {time(p.end_ms)}: Screen Time {p.screen_time ? 'on' : 'off'}, web
-						filter {p.filter ? 'on' : 'off'}
+						{time(p.start_ms)} to {time(p.end_ms)}: Screen Time {protectionWord(p.screen_time)}, web
+						filter {protectionWord(p.filter)}
 					</li>
 				{/each}
 			</ul>

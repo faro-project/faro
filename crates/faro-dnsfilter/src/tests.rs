@@ -1068,6 +1068,50 @@ fn registrable_domains() {
 }
 
 #[test]
+fn closed_buckets_can_be_read_then_forgotten() {
+    let mut c = Counters::new();
+    c.record(T0 + 1, "a.test", ADULT);
+    c.record(T0 + 600_001, "b.test", ADULT);
+    c.record(T0 + 1_200_001, "c.test", ADULT);
+    // Reading removes nothing, and the open bucket is never offered.
+    let now = T0 + 1_200_100;
+    let closed = c.closed(now);
+    assert_eq!(closed.len(), 2);
+    assert_eq!(c.closed(now).len(), 2);
+    assert_eq!(c.len(), 3);
+    // Forgetting through the last one read keeps the open bucket.
+    c.forget_through(closed[1].bucket_start);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c.summaries()[0].bucket_start, T0 + 1_200_000);
+    c.forget_through(i64::MAX);
+    assert!(c.is_empty());
+}
+
+#[test]
+fn lower_burst_thresholds_make_a_burst_sooner() {
+    use crate::burst::BurstThresholds;
+    let t = BurstThresholds {
+        min_lookups: 2,
+        min_domains: 1,
+        cooldown_secs: 30,
+    };
+    let mut b = BurstDetector::with_thresholds(t);
+    assert!(b.observe(T0, "a.one.test", ADULT, true).is_none());
+    let c = b.observe(T0 + 1_000, "a.one.test", ADULT, true).unwrap();
+    assert_eq!((c.lookups, c.domains), (2, 1));
+    // The shorter cooldown ends after 30 s.
+    assert!(b.observe(T0 + 2_000, "a.one.test", ADULT, true).is_none());
+    assert!(b.observe(T0 + 32_000, "a.one.test", ADULT, true).is_none());
+    assert!(b.observe(T0 + 33_000, "a.one.test", ADULT, true).is_some());
+    // The defaults are the constants.
+    let d = BurstThresholds::default();
+    assert_eq!(
+        (d.min_lookups, d.min_domains, d.cooldown_secs),
+        (BURST_MIN_LOOKUPS, 3, BURST_COOLDOWN_SECS)
+    );
+}
+
+#[test]
 fn burst_needs_six_lookups_across_three_domains() {
     let mut b = BurstDetector::new();
     let hosts = [

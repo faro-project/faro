@@ -594,6 +594,7 @@ fn daily_report() -> DailyReport {
             count: 4,
         }]),
         top_apps: None,
+        ios: None,
         health: HealthSummary {
             tamper: vec![tamper],
             context: vec![TamperRecord {

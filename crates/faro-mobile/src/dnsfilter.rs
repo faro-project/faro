@@ -26,6 +26,7 @@ use crate::core::{lock, FaroCore};
 use crate::error::FaroError;
 use crate::types::{BlockedHostRecord, BlockedSummaryRecord, MAX_SUMMARY_HOSTS};
 use faro_detect::{load_domains, DomainCategorizer, DomainCategorizerBuilder};
+use faro_dnsfilter::dev::{self, DevBurstThresholds, DevThresholdsUse};
 use faro_dnsfilter::session::Step;
 use faro_dnsfilter::{tunnel, BlockedSummary, Counters, Engine, Filter, FilterConfig, Session};
 use faro_update::Version;
@@ -157,6 +158,10 @@ pub struct DnsFilterStatus {
     pub upstreams: u32,
     pub pending: u32,
     pub counter_buckets: u32,
+    /// What the burst thresholds are: `default`, `LOWERED FOR TESTING (...)`
+    /// (a development build with a `dev_thresholds.json`) or `ignored
+    /// (release build)`.
+    pub thresholds: String,
 }
 
 struct Inner {
@@ -168,6 +173,7 @@ struct Inner {
     source: &'static str,
     domains_error: Option<String>,
     config_error: Option<String>,
+    thresholds: DevThresholdsUse,
 }
 
 impl Inner {
@@ -304,6 +310,7 @@ impl DnsFilter {
             source,
             domains_error,
             config_error: None,
+            thresholds: DevThresholdsUse::Default,
         };
         inner.rebuild();
         if inner.config_error.is_none() {
@@ -434,6 +441,73 @@ impl DnsFilter {
             .unwrap_or_else(|_| "[]".to_owned())
     }
 
+    /// Record the bursts seen so far as `flag` events (rated `medium`, one
+    /// `dns` reason; see [`FaroCore::record_burst_flag`]). Call it about
+    /// once a minute from the core's queue, so an alert is not held for the
+    /// ten-minute flush. A burst is dropped from the filter only after its
+    /// event is in the chain, so a locked key store (`KeysLocked`) loses
+    /// nothing. Returns how many were recorded.
+    pub fn flush_bursts(&self, core: Arc<FaroCore>) -> Result<u32, FaroError> {
+        let mut recorded = 0;
+        loop {
+            // The filter's lock is not held across the database.
+            let next = lock(&self.inner).session.bursts().first().cloned();
+            let Some(burst) = next else {
+                return Ok(recorded);
+            };
+            core.record_burst_flag(&burst)?;
+            lock(&self.inner).session.discard_bursts(1);
+            recorded += 1;
+        }
+    }
+
+    /// Record the counter buckets that have ended as `blocked_summary`
+    /// events, each once (see [`FaroCore::record_blocked_summary_once`]),
+    /// and drop them from the counters. The tunnel saves the counters again
+    /// afterwards; if it dies before, the next run offers the same buckets
+    /// and the core skips them. A bucket the event can't carry is dropped
+    /// rather than retried for ever. Returns how many were recorded.
+    pub fn flush_summaries(&self, core: Arc<FaroCore>, now_ms: i64) -> Result<u32, FaroError> {
+        let closed = lock(&self.inner).session.engine().closed(now_ms);
+        let mut recorded = 0;
+        for bucket in closed {
+            let start = bucket.bucket_start;
+            match core.record_blocked_summary_once(BlockedSummaryRecord::from(bucket)) {
+                Ok(Some(_)) => recorded += 1,
+                Ok(None) | Err(FaroError::InvalidArgument { .. }) => {}
+                Err(e) => return Err(e),
+            }
+            lock(&self.inner).session.engine_mut().forget_through(start);
+        }
+        Ok(recorded)
+    }
+
+    /// Apply a `dev_thresholds.json` (docs/DEVELOPMENT.md, "lower only"),
+    /// or none (`None`). Only a build with the `dev` feature lowers the
+    /// burst thresholds; a release build ignores the file. A file that
+    /// doesn't parse or would raise a threshold is refused and the
+    /// defaults stay. Returns what the filter does now, as
+    /// [`DnsFilterStatus::thresholds`] says it.
+    pub fn set_dev_thresholds(&self, json: Option<String>) -> Result<String, FaroError> {
+        let section = match json.as_deref() {
+            None => None,
+            Some(j) => {
+                let t: DevBurstThresholds = serde_json::from_str(j)
+                    .map_err(|e| FaroError::invalid(format!("dev_thresholds.json: {e}")))?;
+                t.validate().map_err(FaroError::invalid)?;
+                Some(t)
+            }
+        };
+        let using = dev::build_use(section.as_ref());
+        let mut inner = lock(&self.inner);
+        inner
+            .session
+            .engine_mut()
+            .set_burst_thresholds(dev::burst_thresholds(&using));
+        inner.thresholds = using;
+        Ok(using.to_string())
+    }
+
     pub fn status(&self) -> DnsFilterStatus {
         let inner = lock(&self.inner);
         let engine = inner.session.engine();
@@ -451,6 +525,7 @@ impl DnsFilter {
             upstreams: inner.session.upstreams().len() as u32,
             pending: inner.session.pending() as u32,
             counter_buckets: engine.counters().len() as u32,
+            thresholds: inner.thresholds.to_string(),
         }
     }
 }

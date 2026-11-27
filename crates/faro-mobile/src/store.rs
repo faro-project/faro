@@ -9,6 +9,7 @@
 //! |---|---|
 //! | `mobile_state` | small JSON records by key: the enrollment (without its token, which is in the key store), the verified endorsement, the update trust state, the installed domain bundle |
 //! | `mobile_context` | context signals for the daily report (§10.2 "context"), oldest first |
+//! | `mobile_report_log` | the facts the daily report is built from (`crate::reports`): blocked and shield summaries, protection samples, flags, loosenings. Kept a few days, then dropped |
 //!
 //! Every process (the app, the tunnel) opens its own connections, in WAL
 //! mode with a busy timeout, so readers never block and writers queue for
@@ -37,6 +38,12 @@ pub(crate) const ENROLLMENT: &str = "enrollment";
 pub(crate) const ENDORSEMENT: &str = "endorsement";
 pub(crate) const UPDATE_TRUST: &str = "update_trust";
 pub(crate) const DOMAINS: &str = "domains";
+/// Bucket starts already turned into `blocked_summary` events.
+pub(crate) const BLOCKED_REPORTED: &str = "blocked_reported";
+/// The shield counters' totals at the last flush.
+pub(crate) const SHIELD_BASELINE: &str = "shield_baseline";
+/// The end of the last period a report was queued for.
+pub(crate) const REPORT_QUEUED_THROUGH: &str = "report_queued_through";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS mobile_state (
@@ -48,10 +55,17 @@ CREATE TABLE IF NOT EXISTS mobile_context (
     ts_ms INTEGER NOT NULL,
     json  TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS mobile_report_log (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms INTEGER NOT NULL,
+    json  TEXT NOT NULL
+) STRICT;
 ";
 
 /// Context records kept at most; the oldest go first.
 const MAX_CONTEXT: i64 = 10_000;
+/// Report-log rows kept at most; the oldest go first.
+const MAX_REPORT_LOG: i64 = 20_000;
 
 /// This crate's tables. See the module docs.
 pub(crate) struct Store {
@@ -148,6 +162,87 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(n == 1)
+    }
+
+    /// Read `key`, let `f` change it, and store the result, in one
+    /// immediate transaction, so two processes never both act on the same
+    /// old value. `f` returns the new value (`None` leaves the record as
+    /// it is) and whatever it wants handed back.
+    pub(crate) fn update<T, R>(
+        &mut self,
+        key: &str,
+        f: impl FnOnce(Option<T>) -> (Option<T>, R),
+    ) -> Result<R, FaroError>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT value FROM mobile_state WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let old = raw
+            .map(|s| {
+                serde_json::from_str(&s)
+                    .map_err(|e| FaroError::storage(format!("stored {key} is corrupt: {e}")))
+            })
+            .transpose()?;
+        let (new, out) = f(old);
+        if let Some(new) = new {
+            let json = serde_json::to_string(&new).map_err(FaroError::storage)?;
+            tx.execute(
+                "INSERT INTO mobile_state (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, json],
+            )?;
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Add one fact for the daily report.
+    pub(crate) fn add_fact(&mut self, ts_ms: i64, json: &str) -> Result<(), FaroError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO mobile_report_log (ts_ms, json) VALUES (?1, ?2)",
+            params![ts_ms, json],
+        )?;
+        tx.execute(
+            "DELETE FROM mobile_report_log WHERE id <= (SELECT MAX(id) FROM mobile_report_log) - ?1",
+            [MAX_REPORT_LOG],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Facts with `since_ms <= ts < until_ms`, oldest first.
+    pub(crate) fn facts_between(
+        &self,
+        since_ms: i64,
+        until_ms: i64,
+    ) -> Result<Vec<(i64, String)>, FaroError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ts_ms, json FROM mobile_report_log
+             WHERE ts_ms >= ?1 AND ts_ms < ?2 ORDER BY ts_ms ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([since_ms, until_ms], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Drop facts older than `before_ms`.
+    pub(crate) fn prune_facts(&self, before_ms: i64) -> Result<(), FaroError> {
+        self.conn.execute(
+            "DELETE FROM mobile_report_log WHERE ts_ms < ?1",
+            [before_ms],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn add_context(&mut self, ts_ms: i64, json: &str) -> Result<(), FaroError> {

@@ -66,6 +66,7 @@
 
 pub mod burst;
 pub mod counters;
+pub mod dev;
 pub mod dns;
 pub mod filter;
 pub mod packet;
@@ -80,7 +81,7 @@ mod privacy_tests;
 #[cfg(test)]
 mod tests;
 
-pub use burst::{BurstCandidate, BurstDetector};
+pub use burst::{BurstCandidate, BurstDetector, BurstThresholds};
 pub use counters::{BlockedSummary, Counters, HostCount};
 pub use dns::{DnsError, DnsName, DnsQuery};
 pub use filter::{
@@ -261,6 +262,14 @@ impl Engine {
         }
     }
 
+    /// Use other burst thresholds (development builds only, see [`dev`]).
+    /// The window held so far is dropped.
+    pub fn set_burst_thresholds(&mut self, t: BurstThresholds) {
+        if self.burst.thresholds() != t {
+            self.burst = BurstDetector::with_thresholds(t);
+        }
+    }
+
     /// Swap in a new filter (the member changed their choices, or a newer
     /// bundle arrived). The counters are kept.
     pub fn set_filter(&mut self, filter: Filter) {
@@ -273,6 +282,16 @@ impl Engine {
 
     pub fn counters(&self) -> &Counters {
         &self.counters
+    }
+
+    /// The counter buckets that ended by `now_ms`, left in place.
+    pub fn closed(&self, now_ms: i64) -> Vec<BlockedSummary> {
+        self.counters.closed(now_ms)
+    }
+
+    /// Drop every counter bucket that starts at or before `start`.
+    pub fn forget_through(&mut self, start: i64) {
+        self.counters.forget_through(start);
     }
 
     /// Remove and return the counter buckets that ended by `now_ms`.

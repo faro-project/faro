@@ -147,6 +147,29 @@ impl Counters {
         closed.into_iter().map(summary).collect()
     }
 
+    /// The buckets that have ended by `now_ms`, oldest first, without
+    /// removing them. Pair with [`Counters::forget_through`] once they are
+    /// safely recorded, so a failure in between loses nothing.
+    pub fn closed(&self, now_ms: i64) -> Vec<BlockedSummary> {
+        let open = bucket_start(now_ms);
+        self.buckets
+            .range(..open)
+            .map(|(s, b)| summary((*s, b.clone())))
+            .collect()
+    }
+
+    /// Remove every bucket that starts at or before `start`.
+    pub fn forget_through(&mut self, start: i64) {
+        let keep = match start.checked_add(1) {
+            Some(k) => self.buckets.split_off(&k),
+            None => BTreeMap::new(),
+        };
+        let gone = std::mem::replace(&mut self.buckets, keep);
+        for b in gone.values() {
+            self.host_entries = self.host_entries.saturating_sub(b.host_entries);
+        }
+    }
+
     /// Every bucket, oldest first, without removing them.
     pub fn summaries(&self) -> Vec<BlockedSummary> {
         self.buckets
