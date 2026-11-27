@@ -8,12 +8,13 @@
 	import { dateTime } from '../format.ts';
 	import { instance } from '../instance.svelte.ts';
 	import { keyring } from '../keys/keyring.svelte.ts';
-	import type { FeedEntry, User } from '../types.ts';
+	import type { FeedEntry, Platform, User } from '../types.ts';
 	import UnlockKeys from '../ui/UnlockKeys.svelte';
 	import {
 		bodyTitle,
 		describeBody,
 		describeEntry,
+		isIosBody,
 		reportSummary,
 		type NameOf
 	} from './describe.ts';
@@ -34,13 +35,16 @@
 		viewer,
 		keyKind,
 		nameOf = () => undefined,
-		deviceNames = {}
+		deviceNames = {},
+		devicePlatforms = {}
 	}: {
 		memberId: string;
 		viewer: User;
 		keyKind: 'member' | 'ally';
 		nameOf?: NameOf;
 		deviceNames?: Record<string, string>;
+		/** What each device is, where the page knows (the member's own device list). */
+		devicePlatforms?: Record<string, Platform>;
 	} = $props();
 
 	const WINDOWS = [
@@ -59,6 +63,7 @@
 	let opened = $state<Record<string, Opened | OpenFailure | 'loading'>>({});
 	let expanded = $state<Record<string, boolean>>({});
 	let learnedNames = $state<Record<string, string>>({});
+	let learnedIos = $state<Record<string, true>>({});
 	let loadedKey = '';
 
 	async function load() {
@@ -124,7 +129,10 @@
 					opened[k] = o;
 					if (o.kind === 'report' && e.type === 'report') {
 						learnedNames[e.device_id] = o.report.device_name;
+						if (o.report.ios) learnedIos[e.device_id] = true;
 					}
+					if (o.kind === 'event' && e.device_id && isIosBody(o.body))
+						learnedIos[e.device_id] = true;
 				} catch (err) {
 					opened[k] = typeof err === 'string' ? (err as OpenFailure) : 'broken';
 				}
@@ -132,6 +140,12 @@
 		};
 		void Promise.all([worker(), worker(), worker(), worker()]);
 	});
+
+	/** An iPhone, if the page knows: from the device list, or from what an iPhone sent. */
+	function platform(id: string | null): Platform | undefined {
+		if (!id) return undefined;
+		return devicePlatforms[id] ?? (learnedIos[id] ? 'ios' : undefined);
+	}
 
 	function device(id: string | null): string {
 		if (!id) return 'A computer';
@@ -257,10 +271,12 @@
 		<ul class="rows feed">
 			{#each g.entries as e (entryKey(e))}
 				{@const k = entryKey(e)}
-				{@const d = describeEntry(e, nameOf, device(e.device_id))}
+				{@const d = describeEntry(e, nameOf, device(e.device_id), platform(e.device_id))}
 				{@const o = opened[k]}
 				{@const title =
-					(typeof o === 'object' && o.kind === 'event' && bodyTitle(o.body, device(e.device_id))) ||
+					(typeof o === 'object' &&
+						o.kind === 'event' &&
+						bodyTitle(o.body, device(e.device_id), platform(e.device_id))) ||
 					d.title}
 				<li class="tone-{d.tone}">
 					<div class="entry">
@@ -297,7 +313,7 @@
 										<p class="muted small">{FAILURE_TEXT[o]}</p>
 									{:else if o.kind === 'event'}
 										<ul class="details small">
-											{#each describeBody(o.body, device(e.device_id)) as line, i (i)}<li>
+											{#each describeBody(o.body, device(e.device_id), Date.now(), platform(e.device_id)) as line, i (i)}<li>
 													{line}
 												</li>{/each}
 										</ul>

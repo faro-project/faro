@@ -176,15 +176,15 @@ Setup can't be finished without the Screen Time step and the VPN step. There is 
 
 ### 1. Get an enrollment link
 
-In the Faro web app, open **Computers**, click **Add a computer**, unlock your key if the page asks, and click **Create an enrollment code**. The page shows a link that starts with `faro://enroll`. It works once, for 10 minutes.
+In the Faro web app, open **Computers**, click **Add an iPhone**, unlock your key if the page asks, and click **Create an enrollment code**. The page shows the enrollment link as a **QR code** and as text. The link starts with `faro://enroll`. It works once, for 10 minutes.
 
-[Maintainer: the web app on `ios-client` has no separate "add a phone" screen and no QR code yet, although the app's own screen says it shows one. Confirm these steps once the web app has them.]
+The page makes the QR code in your browser. The link is never sent to another service to draw it.
 
 ### 2. Open the link on the iPhone
 
-- **If the web app is open on the iPhone,** tap **Open in Faro**.
+- **Scan the QR code.** In the Faro app, on the **Add this phone** screen, tap **Scan the QR code** and point the phone's camera at the code on your screen.
+- **If the web app is open on the iPhone,** tap **Open in Faro** instead.
 - **Otherwise,** copy the link and send it to the phone, for example by email to yourself. Then, in the Faro app, paste it into the box on the **Add this phone** screen and tap **Use this link**.
-- **Scan the QR code** reads a code with the phone's camera, if you have one to scan.
 
 If Faro says **That isn't a Faro enrollment link**, check that the link starts with `faro://enroll`, and copy it again.
 

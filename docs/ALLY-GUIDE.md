@@ -116,8 +116,8 @@ You only see things from after the member approved you. Older items say **"Not s
 
 ### Urgent, normal and daily items
 
-- **Urgent** items have an **Urgent** label. They are things you'd probably want to hear about soon: something on screen rated **high**, signs that Faro was switched off or interfered with, a computer that stopped checking in, or Faro being uninstalled.
-- **Normal** items have no label. They are worth knowing but not pressing: something rated **medium**, a change to Faro's settings, monitoring being paused or resumed, an ally being added or removed, or the member keeping their history for less time.
+- **Urgent** items have an **Urgent** label. They are things you'd probably want to hear about soon: something on screen rated **high** (or **medium**, which is urgent unless the member lowered it), signs that Faro was switched off or interfered with, a computer that stopped checking in, or Faro being uninstalled.
+- **Normal** items have no label. They are worth knowing but not pressing: a change to Faro's settings, monitoring being paused or resumed, an ally being added or removed, or the member keeping their history for less time.
 - **Daily reports** are titled **Daily report**. Once a day the member's computer sums up the day: how many times it checked the screen and how many were flagged. Click **Show the report** to see:
   - **Activity**: a bar showing when the computer was in use, idle, locked, asleep, paused or off, and any time it was **Not monitored**;
   - **Screen checks**: how many checks were **clean**, **low**, **medium** or **high**;
@@ -185,8 +185,8 @@ For each kind of item, choose **Right away**, **Hourly digest** or **Off**:
 
 | Row | What it covers | Starts as |
 |---|---|---|
-| **Urgent** | Tamper, missed check-ins, high flags | Right away |
-| **Normal** | Medium flags, settings and ally changes | Hourly digest |
+| **Urgent** | Tamper, missed check-ins, high flags, medium flags (unless the member lowered them) | Right away |
+| **Normal** | Settings and ally changes, and medium flags if the member lowered them | Hourly digest |
 | **Everything else** | Low-rated items | Off |
 
 The **hourly digest** is one email that gathers up everything waiting, sent an hour after the first item in it.
@@ -293,8 +293,10 @@ An iPhone's alerts use the phone's name, such as **iPhone-X**. They are the ones
 | **Faro settings changed** | The member blocked more, or a change took effect. It takes effect at once. | Nothing urgent. You might ask what prompted it. |
 | **A change to *iPhone-X* was cancelled** | The member cancelled an unblocking before it took effect. Nothing changed. | Nothing to act on. |
 | **Something was flagged** | A burst of blocked lookups came in a short time. The details say how many, and whether the phone's screen was on. Adverts and link previews can cause some of these. | "Your phone tried to reach a lot of blocked sites in a short time. What was happening?" |
-| **Faro stopped on a computer** | On an iPhone this means Faro was removed from the phone. The words say "Faro was uninstalled from this computer", because the alert is worded for computers. This one is urgent. | "Did you remove Faro from your phone?" |
-| ***iPhone-X* stopped checking in** | The phone has been silent for longer than the instance allows. Its last report said what it was doing. A phone that is switched off or out of signal looks like this. | Ask what happened, as you would for a computer ([missed check-ins](#missed-check-ins)). |
+| **Faro was removed from *iPhone-X*** | The member chose **Leave Faro** on the phone, so Faro was removed from it. This one is urgent. | "Did you remove Faro from your phone?" |
+| ***iPhone-X* hasn't checked in for 3 hours** | The phone has been silent for longer than the instance allows. The alert says how long, and what the phone last reported. A phone that is switched off or out of signal looks like this. | Ask what happened, as you would for a computer ([missed check-ins](#missed-check-ins)). |
+
+Faro knows a device is an iPhone once it has sent a report or an iPhone-only alert. Until then, an alert about it may use the computer's wording ("Faro stopped on a computer", "*Name* stopped checking in"). Read the phone's name to tell.
 
 Some things are only context and don't come as alerts. An example is a VPN that is connected while Faro is on, or a phone that looks jailbroken. They appear in the daily report.
 

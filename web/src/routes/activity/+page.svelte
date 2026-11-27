@@ -6,10 +6,11 @@
 	import { api } from '#lib/api.ts';
 	import FeedView from '#lib/feed/FeedView.svelte';
 	import { session } from '#lib/session.svelte.ts';
-	import type { DeviceSummary, MyAllies } from '#lib/types.ts';
+	import type { DeviceSummary, MyAllies, Platform } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
 
 	let deviceNames = $state<Record<string, string>>({});
+	let devicePlatforms = $state<Record<string, Platform>>({});
 	let allyNames = $state<Record<string, string>>({});
 	let loadedFor = '';
 
@@ -19,7 +20,10 @@
 		loadedFor = u.id;
 		api
 			.get<DeviceSummary[]>('/v1/me/devices')
-			.then((ds) => (deviceNames = Object.fromEntries(ds.map((d) => [d.device_id, d.name]))))
+			.then((ds) => {
+				deviceNames = Object.fromEntries(ds.map((d) => [d.device_id, d.name]));
+				devicePlatforms = Object.fromEntries(ds.map((d) => [d.device_id, d.platform]));
+			})
 			.catch(() => {});
 		api
 			.get<MyAllies>('/v1/me/allies')
@@ -57,6 +61,7 @@
 				viewer={user}
 				keyKind="member"
 				{deviceNames}
+				{devicePlatforms}
 				nameOf={(id) => allyNames[id]}
 			/>
 		{/if}

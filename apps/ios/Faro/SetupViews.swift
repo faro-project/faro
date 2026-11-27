@@ -106,7 +106,7 @@ struct LinkView: View {
 
     var body: some View {
         StepPage(title: "Add this phone") {
-            Text("Open the Faro web app and add a phone. It shows a QR code and a link. Scan the code here, or paste the link.")
+            Text("Open the Faro web app, go to Computers and choose Add an iPhone. It shows a QR code and a link. Scan the code here, or paste the link.")
             ErrorText(message: model.flow.error)
             Button {
                 scanning = true

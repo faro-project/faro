@@ -11,6 +11,7 @@ import type {
 	EventKind,
 	FilterOffCause,
 	FeedEntry,
+	Platform,
 	Rating,
 	Reason,
 	ServerAlertKind,
@@ -80,28 +81,66 @@ export interface Described {
 }
 
 /** A one-line description of a feed entry from its metadata alone. */
-export function describeEntry(e: FeedEntry, nameOf: NameOf, device: string): Described {
-	const d = describeMeta(e, nameOf, device);
-	return { ...d, title: d.title.charAt(0).toUpperCase() + d.title.slice(1) };
+export function describeEntry(
+	e: FeedEntry,
+	nameOf: NameOf,
+	device: string,
+	platform?: Platform
+): Described {
+	const d = describeMeta(e, nameOf, device, platform);
+	// "iPhone-X" keeps its small i.
+	const title = /^i[A-Z]/.test(d.title)
+		? d.title
+		: d.title.charAt(0).toUpperCase() + d.title.slice(1);
+	return { ...d, title };
 }
 
-function describeMeta(e: FeedEntry, nameOf: NameOf, device: string): Described {
+function describeMeta(
+	e: FeedEntry,
+	nameOf: NameOf,
+	device: string,
+	platform: Platform | undefined
+): Described {
 	const tone: Tone = e.type !== 'report' && e.urgency === 'urgent' ? 'urgent' : 'normal';
 	if (e.type === 'report') {
 		return { title: 'Daily report', text: device, tone: 'info' };
 	}
 	if (e.type === 'event') {
-		return { title: EVENT_TITLE[e.kind] ?? e.kind, text: device, tone };
+		const title =
+			platform === 'ios' && e.kind === 'goodbye'
+				? 'Faro stopped on an iPhone'
+				: (EVENT_TITLE[e.kind] ?? e.kind);
+		return { title, text: device, tone };
 	}
-	return describeAlert(e.kind, e.detail, nameOf, device, tone);
+	return describeAlert(e, e.kind, e.detail, nameOf, device, tone, platform);
+}
+
+/**
+ * Whether a decrypted body can only come from an iPhone. The instance can't
+ * say what kind of device a feed entry is about (and an ally has no device
+ * list), so the page learns it from what it has decrypted.
+ */
+export function isIosBody(b: EventBody): boolean {
+	if (b.type === 'blocked_summary' || b.type === 'shield_summary') return true;
+	if (b.type === 'tamper') {
+		return (
+			b.signal.signal === 'screen_time_revoked' ||
+			b.signal.signal === 'filter_off' ||
+			b.signal.signal === 'settings_cleared' ||
+			b.signal.signal === 'jailbreak_suspected'
+		);
+	}
+	return false;
 }
 
 function describeAlert(
+	e: Extract<FeedEntry, { type: 'alert' }>,
 	kind: ServerAlertKind,
 	detail: string | null,
 	nameOf: NameOf,
 	device: string,
-	tone: Tone
+	tone: Tone,
+	platform: Platform | undefined
 ): Described {
 	const d = kv(detail);
 	const who = (id: string | undefined) => (id ? nameOf(id) : undefined);
@@ -114,6 +153,18 @@ function describeAlert(
 					title: `${device} is back online`,
 					text: d.silent_ms ? `It was silent for ${duration(Number(d.silent_ms))}.` : undefined,
 					tone: 'good'
+				};
+			}
+			if (platform === 'ios') {
+				// `since_ms` is when the silence began: the alert comes after the grace period.
+				const since = Number(d.since_ms);
+				const silent = since > 0 && e.ts_ms > since ? e.ts_ms - since : 0;
+				return {
+					title: silent
+						? `${device} hasn't checked in for ${duration(silent)}`
+						: `${device} hasn't checked in`,
+					text: `Its last report said it was ${STATE_TEXT[d.last_state] ?? 'in an unknown state'}. The phone may be switched off or out of signal, or Faro may have been removed.`,
+					tone
 				};
 			}
 			return {
@@ -304,7 +355,9 @@ function screenRecordingOff(s: TamperSignal): boolean {
  * A title for a decrypted event that says more than its kind's, or
  * `undefined` to keep the kind's ("Possible tampering").
  */
-export function bodyTitle(b: EventBody, device: string): string | undefined {
+export function bodyTitle(b: EventBody, device: string, platform?: Platform): string | undefined {
+	if (b.type === 'goodbye' && b.reason === 'uninstalled' && platform === 'ios')
+		return `Faro was removed from ${device}`;
 	if (b.type === 'tamper') {
 		const s = b.signal;
 		if (s.signal === 'screen_time_revoked') return `Screen Time protection is off on ${device}`;
@@ -443,7 +496,12 @@ export function describeReason(r: Reason): string {
 }
 
 /** Sentences for a decrypted event body. */
-export function describeBody(b: EventBody, device = 'this device', now = Date.now()): string[] {
+export function describeBody(
+	b: EventBody,
+	device = 'this device',
+	now = Date.now(),
+	platform?: Platform
+): string[] {
 	switch (b.type) {
 		case 'flag': {
 			const out = [
@@ -524,7 +582,12 @@ export function describeBody(b: EventBody, device = 'this device', now = Date.no
 		case 'resumed':
 			return ['Monitoring is running again.'];
 		case 'goodbye':
-			if (b.reason === 'uninstalled') return ['Faro was uninstalled from this computer.'];
+			if (b.reason === 'uninstalled')
+				return [
+					platform === 'ios'
+						? `Faro was removed from ${device}.`
+						: 'Faro was uninstalled from this computer.'
+				];
 			if (b.reason === 'account_deleted') return ['The member deleted their account.'];
 			return [`Faro moved to another instance (${b.reason.moved_instance.new_instance_host}).`];
 		case 'boot':
