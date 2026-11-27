@@ -43,6 +43,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "answer"
+path = "fuzz_targets/answer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "state"
 path = "fuzz_targets/state.rs"
 test = false

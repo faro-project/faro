@@ -1,5 +1,6 @@
 import XCTest
 @testable import FaroKit
+@testable import FaroKitApp
 
 final class FaroKitTests: XCTestCase {
     private var root: URL!
@@ -26,6 +27,11 @@ final class FaroKitTests: XCTestCase {
             XCTAssertTrue(isDir.boolValue)
             XCTAssertTrue(dir.path.hasPrefix(root.path))
         }
+        // The DNS filter's files: its counters next to the others.
+        XCTAssertEqual(group.filterConfigFile.deletingLastPathComponent().path, root.path)
+        XCTAssertEqual(group.dnsCountersFile.deletingLastPathComponent().path, group.countersDirectory.path)
+        XCTAssertEqual(group.devThresholdsFile.lastPathComponent, "dev_thresholds.json")
+        XCTAssertNoThrow(try Markers.check(MarkerName.tunnelAlive))
     }
 
     func testSettingsDefaultsFollowTheSpec() {
@@ -82,6 +88,79 @@ final class FaroKitTests: XCTestCase {
         XCTAssertNil(markers.read("a/b"))
     }
 
+    func testPlanDefaultsFollowTheSpec() {
+        let p = ScreenTimePlan(.default)
+        XCTAssertTrue(p.denyAppRemoval)
+        XCTAssertTrue(p.denyExplicitContent)
+        XCTAssertTrue(p.requireAutomaticDateAndTime)
+        XCTAssertNil(p.maximumAppRating)
+        XCTAssertTrue(p.extraBlockedDomains.isEmpty)
+        XCTAssertTrue(p.allowedDomains.isEmpty)
+    }
+
+    func testPlanCleansDomains() {
+        let s = FaroSettings(
+            extraBlockedDomains: [" Example.COM ", "https://bad.example/path?q=1", ".dup.test", "dup.test",
+                                  "nodots", "", "has space.com", "a..b.com", "trailing.dot."],
+            allowedDomains: ["Ok.example", "example.com"])
+        let p = ScreenTimePlan(s)
+        XCTAssertEqual(p.extraBlockedDomains, ["bad.example", "dup.test", "example.com", "trailing.dot"])
+        // example.com is blocked, so it can't also be allowed.
+        XCTAssertEqual(p.allowedDomains, ["ok.example"])
+    }
+
+    func testPlanCapsDomains() {
+        let many = (0..<200).map { "site\($0).example" }
+        XCTAssertEqual(ScreenTimePlan(FaroSettings(extraBlockedDomains: many)).extraBlockedDomains.count,
+                       ScreenTimePlan.maxDomains)
+    }
+
+    func testPlanRoundsRatingsUpToAValidOne() {
+        func rating(_ r: Int?) -> Int? { ScreenTimePlan(FaroSettings(maximumAppRating: r)).maximumAppRating }
+        XCTAssertEqual(rating(4), 4)
+        XCTAssertEqual(rating(10), 12)
+        XCTAssertEqual(rating(17), 17)
+        XCTAssertEqual(rating(500), 1000)
+        XCTAssertEqual(rating(5000), nil)
+        XCTAssertNil(rating(nil))
+    }
+
+    func testPlanSurvivesTheSettingsFile() throws {
+        let store = SettingsStore(group: AppGroup(root: root))
+        try store.save(FaroSettings(extraBlockedDomains: ["b.example", "a.example"], denyExplicitContent: false))
+        let p = ScreenTimePlan(try XCTUnwrap(try store.load()))
+        XCTAssertEqual(p.extraBlockedDomains, ["a.example", "b.example"])
+        XCTAssertFalse(p.denyExplicitContent)
+    }
+
+    func testMonitorWindowIsFifteenMinutes() throws {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let start = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 10, minute: 50, second: 7)))
+        let w = MonitorSchedule.window(from: start, calendar: cal)
+        XCTAssertEqual([w.start.hour, w.start.minute, w.start.second], [10, 50, 7])
+        XCTAssertEqual([w.end.hour, w.end.minute, w.end.second], [11, 5, 7])
+        // Across midnight the end wraps to the next day's clock time.
+        let late = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 23, minute: 55)))
+        let wrapped = MonitorSchedule.window(from: late, calendar: cal)
+        XCTAssertEqual([wrapped.end.hour, wrapped.end.minute], [0, 10])
+    }
+
+    func testMarkerAndCounterNamesAreValid() throws {
+        XCTAssertNoThrow(try Markers.check(MarkerName.monitorAlive))
+        XCTAssertNoThrow(try Counter(group: AppGroup(root: root), name: CounterName.shieldShown))
+        XCTAssertNoThrow(try Counter(group: AppGroup(root: root), name: CounterName.shieldClosed))
+        XCTAssertNotEqual(CounterName.shieldShown, CounterName.shieldClosed)
+    }
+
+    func testShieldWording() {
+        XCTAssertEqual("\(ShieldText.title). \(ShieldText.subtitle)", "Blocked by Faro. You chose to block this.")
+        XCTAssertEqual(ShieldText.closeButton, "Close")
+        for text in [ShieldText.title, ShieldText.subtitle, ShieldText.closeButton] {
+            XCTAssertFalse(text.contains("\u{2014}"))
+        }
+    }
+
     func testCounterAddsUp() throws {
         let counter = try Counter(group: AppGroup(root: root), name: "shield_shown")
         XCTAssertEqual(counter.value(), 0)
@@ -97,5 +176,25 @@ final class FaroKitTests: XCTestCase {
             for _ in 0..<rounds { _ = try? counter.increment() }
         }
         XCTAssertEqual(counter.value(), UInt64(8 * rounds))
+    }
+}
+
+final class DomainUpdateScheduleTests: XCTestCase {
+    func testDueWhenNeverCheckedOldOrClockMovedBack() {
+        let now: Int64 = 1_800_000_000_000
+        XCTAssertTrue(DomainUpdateSchedule.isDue(lastCheckMs: nil, nowMs: now))
+        XCTAssertFalse(DomainUpdateSchedule.isDue(lastCheckMs: now - 5 * 3600 * 1000, nowMs: now))
+        XCTAssertTrue(DomainUpdateSchedule.isDue(lastCheckMs: now - 6 * 3600 * 1000, nowMs: now))
+        XCTAssertTrue(DomainUpdateSchedule.isDue(lastCheckMs: now + 1000, nowMs: now))
+    }
+
+    func testNextBeginIsSixHoursAfterTheLastCheck() {
+        let now: Int64 = 1_800_000_000_000
+        XCTAssertEqual(
+            DomainUpdateSchedule.nextBegin(lastCheckMs: now - 3_600_000, nowMs: now).timeIntervalSince1970,
+            Double(now) / 1000 - 3600 + 6 * 3600)
+        XCTAssertEqual(
+            DomainUpdateSchedule.nextBegin(lastCheckMs: nil, nowMs: now).timeIntervalSince1970,
+            Double(now) / 1000 + 6 * 3600)
     }
 }

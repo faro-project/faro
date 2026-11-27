@@ -33,7 +33,26 @@ pub const BURST_COOLDOWN_SECS: i64 = 600;
 pub const MAX_BURST_EVENTS: usize = 64;
 
 const WINDOW_MS: i64 = BURST_WINDOW_SECS * 1000;
-const COOLDOWN_MS: i64 = BURST_COOLDOWN_SECS * 1000;
+
+/// The thresholds a detector uses. [`Default`] is the constants above.
+/// Only a development build ever makes anything else, and only lower
+/// (more sensitive) values: see [`crate::dev`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BurstThresholds {
+    pub min_lookups: usize,
+    pub min_domains: usize,
+    pub cooldown_secs: i64,
+}
+
+impl Default for BurstThresholds {
+    fn default() -> Self {
+        BurstThresholds {
+            min_lookups: BURST_MIN_LOOKUPS,
+            min_domains: BURST_MIN_DOMAINS,
+            cooldown_secs: BURST_COOLDOWN_SECS,
+        }
+    }
+}
 
 /// Second-level labels under which a country-code TLD sells names
 /// (`example.co.uk`). Without the Public Suffix List the registrable domain
@@ -133,11 +152,25 @@ impl Lookup {
 pub struct BurstDetector {
     window: VecDeque<Lookup>,
     quiet_until_ms: Option<i64>,
+    thresholds: BurstThresholds,
 }
 
 impl BurstDetector {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A detector with other thresholds (development builds only; see
+    /// [`crate::dev`]).
+    pub fn with_thresholds(thresholds: BurstThresholds) -> Self {
+        BurstDetector {
+            thresholds,
+            ..Self::default()
+        }
+    }
+
+    pub fn thresholds(&self) -> BurstThresholds {
+        self.thresholds
     }
 
     /// Note a blocked lookup of `host` at `now_ms` (Unix milliseconds).
@@ -152,9 +185,10 @@ impl BurstDetector {
         if category != BlockCategory::Bundle(BURST_CATEGORY) || !screen_on {
             return None;
         }
+        let cooldown_ms = self.thresholds.cooldown_secs.saturating_mul(1000);
         if let Some(until) = self.quiet_until_ms {
             // A clock set back by more than the cooldown ends it too.
-            if now_ms < until && until.saturating_sub(now_ms) <= COOLDOWN_MS {
+            if now_ms < until && until.saturating_sub(now_ms) <= cooldown_ms {
                 return None;
             }
             self.quiet_until_ms = None;
@@ -178,7 +212,7 @@ impl BurstDetector {
         }
 
         let lookups = self.window.len();
-        if lookups < BURST_MIN_LOOKUPS {
+        if lookups < self.thresholds.min_lookups {
             return None;
         }
         let domains = self
@@ -187,7 +221,7 @@ impl BurstDetector {
             .map(Lookup::domain)
             .collect::<BTreeSet<_>>()
             .len();
-        if domains < BURST_MIN_DOMAINS {
+        if domains < self.thresholds.min_domains {
             return None;
         }
         let hosts = self
@@ -207,7 +241,7 @@ impl BurstDetector {
             at_ms: now_ms,
         };
         self.window.clear();
-        self.quiet_until_ms = Some(now_ms.saturating_add(COOLDOWN_MS));
+        self.quiet_until_ms = Some(now_ms.saturating_add(cooldown_ms));
         Some(candidate)
     }
 

@@ -41,12 +41,21 @@ Tags in use:
 | `faro/ally-endorsement/v1` | Member-signed ally key |
 | `faro/device-endorsement/v2` | Member-signed device key, with the `min_manifest` anchor |
 | `faro/member-enc-key/v1` | Member's own encryption key binding |
-| `faro/recipient-manifest/v1` | Member-signed, versioned recipient list (§5.1) |
+| `faro/recipient-manifest/v1` | Member-signed, versioned recipient list, format 1 (§5.1) |
+| `faro/recipient-manifest/v2` | The same list in format 2, with the allies' names (§5.1) |
 | `faro/key-id/v1` | Key identifier |
 | `faro/safety-code/v1` | Safety code |
 | `faro/wrapped-secret/v1` | AAD for passphrase-wrapped secrets |
 | `faro/key-rewrap/v1` | Member-signed replacement of their wrapped keys (§4.3) |
 | `faro/ally-key-rewrap/v1` | Challenge-proven replacement of an ally's wrapped key (§4.3) |
+| `faro/group-roster/v1` | Facilitator-signed group roster entry (§10.2) |
+| `faro/group-roster-genesis/v1` | `prev_hash` of a group's first roster entry (§10.2) |
+| `faro/group-roster-snapshot/v1` | Facilitator-signed roster snapshot (§10.5) |
+| `faro/group-epoch-key/v1` | Commitment to a group epoch key (§10.3) |
+| `faro/group-safety-code/v1` | Group safety code (§10.8) |
+| `faro/group-message/v1` | Author-signed group message: a reach out, a note, a check-in or a reply (§11) |
+| `faro/group-message-epoch/v1` | AAD under which an epoch key wraps a whole-group message's content key (§11.2) |
+| `faro/group-message-body/v1` | Group message body AAD (§11) |
 
 ## 3. Events and the hash chain
 
@@ -132,7 +141,20 @@ Three new context-only signals, `doh_dropped`, `other_vpn` and `jailbreak_suspec
 
 **Flags from DNS bursts.** A burst of blocked lookups is an ordinary `flag`. Its reason has source `dns`, and the label carries the explanation, for example `dns:adult ×6, 4 hosts, 3 min, screen on`.
 
-**Pending loosening.** A `settings_change` body gains optional `requested_at`, `takes_effect_at` and `cancelled_at` (ms since the epoch) and `delay_secs`. They are left out when not set.
+**Pending loosening.** A `settings_change` body gains optional `requested_at`, `takes_effect_at` and `cancelled_at` (ms since the epoch) and `delay_secs`. They are left out when not set. A change that blocks more carries none of them. A loosening is sent when it is asked for (`requested_at`, `takes_effect_at`, `delay_secs`), again when it takes effect (the same fields) and, if the member cancels it, with `cancelled_at`.
+
+**iPhone setting keys.** An iPhone's `settings_change` entries (`key`, `old`, `new`) use this vocabulary, which the web app renders in words ("Gambling sites will be unblocked on iPhone-X tomorrow at 21:04"). The code is `apps/ios/FaroKit/Sources/FaroKit/Choices.swift` and `web/src/lib/feed/ios-settings.ts`.
+
+| Key | Values |
+|---|---|
+| `ios.category.<name>` (`gambling`, `violence`, `proxy_vpn`) | `blocked` or `allowed` |
+| `ios.site` | `old` is the domain when it was unblocked, `new` when it was blocked |
+| `ios.apps`, `ios.app_categories`, `ios.web_domains`, `ios.web_domain_categories` | how many are blocked, as a number. Which ones is never sent: Screen Time hides them |
+| `ios.explicit_media`, `ios.app_removal_protection`, `ios.automatic_time` | `on` or `off` |
+| `ios.app_rating` | `4`, `9`, `12`, `17` or `off` |
+| `ios.delay_hours` | the loosening delay in hours, `0` to `72` |
+
+A reader that doesn't know a key shows it as `key: old → new`.
 
 **Allies see** these in the web app and reports, which render them from the decrypted body: "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed on iPhone-X". Alert emails stay content-free (the instance cannot tell which signal it was).
 
@@ -245,16 +267,34 @@ A device **pins the member's signing key at enrollment**, and everything it trus
 
 | Field | Type | Notes |
 |---|---|---|
+| `format` | u16 | `1` or `2`. Left out of format 1 JSON, and a missing `format` reads as `1` |
 | `instance_id` | string | |
 | `member_id` | string | |
-| `version` | u64 | Starts at 1 and goes up by exactly 1 with every change |
+| `version` | u64 | Starts at 1 and goes up by exactly 1 with every change, whatever the format |
 | `issued_at_ms` | i64 | |
 | `member_enc_pubkey` | 32 bytes | The member's own X25519 key |
-| `allies` | list | `{ally_id, enc_pubkey}` entries, at most 32, sorted strictly ascending by `ally_id` |
+| `allies` | list | `{ally_id, enc_pubkey}` entries in format 1, `{ally_id, enc_pubkey, name}` in format 2. At most 32, sorted strictly ascending by `ally_id` |
 
-- **Encoding:** `signing_bytes = Canonical("faro/recipient-manifest/v1").str(instance_id).str(member_id).u64(version).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, followed by `.str(ally_id).fixed(enc_pubkey)` for each ally in order.
+- **Encoding, format 1:** `signing_bytes = Canonical("faro/recipient-manifest/v1").str(instance_id).str(member_id).u64(version).i64(issued_at_ms).fixed(member_enc_pubkey).u64(len(allies))`, followed by `.str(ally_id).fixed(enc_pubkey)` for each ally in order.
+- **Encoding, format 2:** the same fields under the tag `faro/recipient-manifest/v2`, followed by `.str(ally_id).fixed(enc_pubkey).str(name)` for each ally in order. `format` itself isn't encoded: the tag carries it.
 - **Identity:** a manifest's identity is `hash = BLAKE3(signing_bytes)`. A `ManifestRef` is `{version, hash}`.
 - **Uploads:** the member signs a new version whenever they approve or remove an ally, an ally's key rotates, or their own encryption key rotates. The instance stores the latest version and serves it at `GET /v1/members/{id}/recipient-manifest`.
+
+**Ally names (format 2).** Devices show the allies by name (the monthly notice, ARCHITECTURE.md §12), and the only ally list a device trusts is this one. So the names are inside the member's signature: an instance can't put a false name next to a real key, swap two names, or name anyone the member didn't sign.
+
+- **Where they come from.** The member's web app signs each ally's display name as the instance gives it to that page, which shows the same names (the member approves "*name*", and sees them on the **Allies** page). The web app signs every new version in format 2.
+- **Renames** don't force a new version: the instance never compares the names with its own. The next version the member signs, for any reason, carries the current names.
+- **Sanitizing.** Names are text people typed, so `sanitize_ally_name` (Rust, `faro_proto::keys`) and `sanitizeAllyName` (the web app) make them safe, the same way byte for byte. The web app applies it before signing, and devices apply it again before showing a name. In order:
+  1. remove C0 controls (other than the ones in the next item), `DEL`, C1 controls (other than `NEL`), `U+061C`, `U+200E`, `U+200F`, `U+202A` to `U+202E`, `U+2066` to `U+2069`, `U+FEFF` and `U+FFF9` to `U+FFFB`; turn tab, line feed, vertical tab, form feed, carriage return, `NEL` (`U+0085`), `U+2028` and `U+2029` into a space;
+  2. normalize to NFC;
+  3. collapse runs of spaces (`U+0020`) into one, and trim them from both ends;
+  4. keep at most 64 code points, then trim a trailing space again.
+
+  The removed characters are an explicit list, not a Unicode property, so implementations agree whatever their Unicode version. The joiners (`U+200C`, `U+200D`) stay, because emoji and some scripts need them. The test vectors' `ally_names` section has inputs and outputs, and `from_web.manifest_v2` is a manifest the web app signed from raw names.
+- **Verifying.** `validate()` refuses a format 1 manifest whose allies carry a `name` (it isn't signed), a format 2 manifest with an ally without one, a name longer than 256 bytes, and any other `format`. It doesn't refuse a name that isn't in sanitized form: a device sanitizes it before showing it. Refusing would make every recipient change, removals included, depend on two Unicode implementations agreeing. An empty name (after sanitizing) is no name: the device shows that ally by safety code only.
+- **The instance** stores and serves format 2 like format 1. It checks names for length only (`validate()`), and compares ally sets by id and key, never by name.
+
+**Compatibility.** Format 1 manifests keep their exact JSON, bytes and hashes, and still verify everywhere, so a `min_manifest` anchor or a checkpoint that names one stays valid. A device holding a format 1 manifest shows its allies by count and safety code, as before. A version may change format either way; a format 2 document and a format 1 document at the same version are different documents (equivocation). A client built before format 2 can't verify a format 2 manifest: it rejects it as a bad signature and keeps its last accepted list (the device rules below), so clients must understand format 2 before the member's web app signs it.
 
 **Device rules.** The device keeps a persisted checkpoint: the highest `ManifestRef` it has accepted, **together with that signed manifest itself**. Both are stored atomically in the outbox database. Storing the document, not just its ref, is what lets a device that restarts while offline, or whose instance withholds manifests, keep using its last accepted manifest.
 
@@ -262,7 +302,7 @@ A device **pins the member's signing key at enrollment**, and everything it trus
 
 A fetched manifest is accepted only if all of the following hold:
 
-1. It passes `validate()`: version ≥ 1, at most 32 allies, ids well formed, sorted and unique, and the member not listed as their own ally. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
+1. It passes `validate()`: a known format, version ≥ 1, at most 32 allies, ids well formed, sorted and unique, the member not listed as their own ally, and names only in format 2, at most 256 bytes each. This check runs **before** the signature, because it needs no keys and bounds the encoding and hashing work a hostile document can cause. The result for a bad document is the same rejection either way.
 2. Its signature verifies against the **pinned** member signing key.
 3. `instance_id` and `member_id` match the enrollment.
 4. No key in it is a small-order X25519 point.
@@ -276,7 +316,7 @@ On any rejection the device keeps using its last accepted manifest and surfaces 
 
 **Recipients:** for every new item, the recipients are the member plus exactly the allies in the accepted manifest. The device refuses to queue anything sealed to a manifest other than its current checkpoint, so a stale recipient set held in memory can't keep encrypting to a removed ally.
 
-**Fetch limits:** clients cap the response body of `GET /v1/members/{id}/recipient-manifest` at 64 KiB before JSON parsing. A maximal manifest (32 allies, bounded ids) is a few KiB.
+**Fetch limits:** clients cap the response body of `GET /v1/members/{id}/recipient-manifest` at 64 KiB before JSON parsing. A maximal manifest (32 allies, bounded ids and names) is under 20 KiB.
 
 **Limits** (documented, not solved by v1):
 
@@ -408,3 +448,199 @@ The mirror is configured with the same root of trust (`updates.root`) and runs t
 | Hash chain input | header + ciphertext | header only, which commits to `body_hash` | Chain stays verifiable after body blobs expire |
 | `heartbeat` kind | An event kind | A separate signed message | Keeps the chain small, and liveness doesn't depend on upload order |
 | Context signals | Listed in the tamper table | Daily report only | The `tamper` kind is floored to `urgent` |
+
+## 10. Group roster log
+
+**Status:** Phase C of [GROUPS.md](GROUPS.md) (§10.3, §10.5). Needs maintainer sign-off before it reaches `main`. Reference implementation: `faro_proto::roster` (structure) and `faro_crypto::roster` (signatures and epoch keys); the web app's port is `web/src/lib/crypto/roster.ts`, and both check the `roster` sections of the shared vectors.
+
+Sending to "the whole group" means sealing to keys the instance hands out, and an instance could slip in a key of its own. The roster log closes that the way recipient manifests do for devices (§5.1): the instance stores and serves a signed, versioned record of who may read, but can't add a reader, roll it back or fork it without clients noticing.
+
+### 10.1 Keys
+
+Every participant needs an X25519 encryption key, and every facilitator an Ed25519 signing key:
+
+| Who | Encryption key | Signing key |
+|---|---|---|
+| Member | Their member encryption key | Their member signing key |
+| Ally (no member keys) | Their ally key | Made when they become a facilitator (`PUT /v1/me/group-sign-key`) |
+| Neither | Made when they first open a group (`PUT /v1/me/ally-key`), stored as an ally key in the §4.3 format: passphrase copy plus `recovery` | As for an ally |
+
+An ally-only person's signing key is a fresh Ed25519 seed, sealed (`crypto_box_seal`) to their own encryption key and stored with its public half and the encryption key it is sealed to. Their passphrase or recovery code unlocks the encryption key, which opens the seed, so a passphrase change (§4.3) keeps it working. The browser checks that the opened seed has the stored public key, and signs only once the roster lists that key for them.
+
+### 10.2 Entries
+
+A `RosterEntry` is one facilitator-signed change set:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `group_id` | string | 1 to 64 of `[A-Za-z0-9_-]` |
+| `seq` | u64 | 0 for the first entry, then +1 each |
+| `prev_hash` | 32 bytes | The previous entry's hash, or the genesis hash for `seq = 0` |
+| `at_ms` | i64 | The signer's clock; informational, not checked for order |
+| `signer` | string | `usr_…` |
+| `changes` | list | At most 256, sorted strictly by `user_id` (one change per person per entry) |
+| `epoch` | `{epoch, key_check}` or null | A new epoch key (§10.3) |
+
+A change is one of:
+
+| `kind` | Fields | Encoding after `.str(kind).str(user_id)` |
+|---|---|---|
+| `join` | `role`, `enc_pubkey`, `sign_pubkey` (or null) | `.str(role).fixed(enc_pubkey).bytes(sign_pubkey or empty)` |
+| `leave` | | (nothing) |
+| `remove` | | (nothing); also used when the person's account was deleted |
+| `role` | `role` | `.str(role)` |
+| `keys` | `enc_pubkey`, `sign_pubkey` (or null) | `.fixed(enc_pubkey).bytes(sign_pubkey or empty)` |
+
+`role` is `facilitator` or `participant`. An optional key is a length-prefixed byte string of 0 or 32 bytes.
+
+- **Encoding:** `signing_bytes = Canonical("faro/group-roster/v1").str(instance_id).str(group_id).u64(seq).fixed(prev_hash).i64(at_ms).str(signer).u64(len(changes))`, then each change, then the epoch as an `Option<u64>` (`0`, or `epoch + 1` followed by `.fixed(key_check)`).
+- **Identity:** `hash = BLAKE3(signing_bytes)`. The next entry's `prev_hash` must equal it. A `RosterHead` is `{seq, hash}`.
+- **Genesis hash:** `BLAKE3(Canonical("faro/group-roster-genesis/v1").str(instance_id).str(group_id))`.
+- **On the wire:** the entry's JSON fields flattened with `sig` (base64url Ed25519), like an endorsement.
+
+**Structure** (`validate()`, before any key work): well-formed ids, at most 256 changes, sorted and unique by user, not empty unless it starts an epoch, and **every `join`, `leave`, `remove` and `keys` change comes with a new epoch** in the same entry. A `role` change alone doesn't rotate.
+
+**Against the roster as of the previous entry** (`RosterState::check`):
+
+1. same instance and group;
+2. `seq` is the next one (lower: **rollback**; higher: an entry is **missing**) and `prev_hash` is the head (otherwise a **fork**);
+3. the signer was a **facilitator with a signing key** in that roster, and the signature verifies with that key. For the first entry, the signer joins in it as a facilitator with the signing key it is signed with, and the entry may only add people;
+4. a `join` names someone not in the roster; every other change someone who is; a `role` or `keys` change changes something;
+5. a new epoch is the current epoch + 1 (the first entry starts epoch 1);
+6. no key is a small-order X25519 point or an unusable Ed25519 key.
+
+Applying it adds, removes and updates the people it names, sets the epoch, and moves the head.
+
+### 10.3 Epoch keys
+
+Whole-group content is sealed with the group's current **epoch key**, a random 32 bytes, so each item costs one envelope whatever the group's size (GROUPS.md §10.5).
+
+- The entry that starts epoch `e` carries `key_check = BLAKE3(Canonical("faro/group-epoch-key/v1").str(instance_id).str(group_id).u64(e).fixed(key))`, never the key.
+- The facilitator's browser seals the key (`crypto_box_seal`, 80 bytes) to the encryption key of **everyone in the roster after the entry**, the facilitator included, and uploads the sealed copies with the entry.
+- A participant opens their copy and **checks it against `key_check`** from the entry they verified. A key the instance made up, or one moved from another epoch or group, fails.
+- Joiners get a copy of the new epoch only, so they can't read what came before. Someone who leaves gets no copy of the epoch their departure starts.
+
+### 10.4 Client rules
+
+Each browser persists a checkpoint per user and group: the head it last accepted, with the roster as of that entry (in `localStorage`; if the roster doesn't fit, the head alone, and the roster is rebuilt from the latest snapshot at or below it and replayed up to the head, which must match exactly).
+
+On every visit it fetches `GET /v1/groups/{id}/roster?after_seq=<checkpoint seq>`:
+
+- a reported head below the checkpoint is a **rollback**, and one at the checkpoint's `seq` with another hash a **fork**;
+- each entry is checked as in §10.2, in order;
+- entries that end before the reported head mean the instance is **withholding** some.
+
+On any refusal the browser keeps every entry it accepted before it, keeps using that roster, stops, and shows a warning. It never moves its checkpoint back or sideways. Page bodies and snapshots are capped at 8 MiB before parsing.
+
+**Bootstrapping.** A browser with no checkpoint (a first visit, another browser) has nothing to compare with. It starts from the latest facilitator-signed snapshot (or from the first entry when there is none) and checks everything after it. That is trust on first use, as for a device without an anchor (§5.1): an instance could serve a whole parallel log signed by a facilitator key of its own. The group safety code (§10.8) is how people find out.
+
+### 10.5 Snapshots
+
+A `RosterSnapshot` is the full roster at one entry: `{instance_id, group_id, seq, head, at_ms, signer, epoch, epoch_key_check, members}`, members sorted strictly by `user_id`, each `{user_id, role, enc_pubkey, sign_pubkey}`, at most 100,000. `signing_bytes = Canonical("faro/group-roster-snapshot/v1").str(instance_id).str(group_id).u64(seq).fixed(head).i64(at_ms).str(signer).u64(epoch).fixed(epoch_key_check).u64(len(members))`, then `.str(user_id).str(role).fixed(enc_pubkey).bytes(sign_pubkey or empty)` for each. It is signed by a facilitator with a signing key **listed in it**.
+
+A facilitator's browser signs one at the head whenever the head is 256 or more entries past the last one. A browser with a checkpoint never jumps to a snapshot above it; it replays entries.
+
+### 10.6 What the instance stores and checks
+
+| Route | |
+|---|---|
+| `GET /v1/groups/{id}/roster?after_seq=` | `{head, epoch, latest_snapshot_seq, entries, more}`, 100 entries per page |
+| `GET /v1/groups/{id}/roster/snapshot?max_seq=` | The latest snapshot at or below `max_seq`, byte for byte |
+| `GET /v1/groups/{id}/roster/pending` | `{head, epoch, changes, waiting_for_keys, posting_paused, snapshot_due, latest_snapshot_seq}` |
+| `POST /v1/groups/{id}/roster` | `{entry, epoch_keys: [{user_id, sealed_key}]}`, facilitators |
+| `POST /v1/groups/{id}/roster/snapshot` | A signed snapshot, facilitators |
+| `GET /v1/groups/{id}/epoch-key?epoch=` | `{epoch, seq, key_check, sealed_key}`: the caller's copy |
+| `PUT /v1/me/ally-key` | `{enc_pubkey, wrapped_privkey}`: an encryption key for someone with none |
+| `GET`, `PUT /v1/me/group-sign-key` | `{sign_pubkey, enc_pubkey, sealed_seed}` |
+
+The instance runs the §10.2 checks on uploads against its own copy of the roster, but only to keep garbage out: clients don't rely on it. It also ties the roster to the group: a `join` or `keys` change must carry the keys the instance holds for that person and their current role, a `leave` or `remove` must name someone no longer active, and a new epoch must come with exactly one sealed copy for each person in the roster after the entry, **all of them active participants**. Everything here answers `404` to anyone who isn't an active participant, from the moment they leave or are removed, before any facilitator has signed anything.
+
+### 10.7 Facilitators' pending work
+
+`/roster/pending` compares the roster with who is in the group and lists the changes to sign. A facilitator's browser checks them against the roster it verified, and when it opens the group with the facilitator's keys unlocked:
+
+- **signs on its own** leaves, removals and role changes, and changes to the facilitator's own keys (checked against the keys it holds), departures in the first entries so no new epoch is ever sealed to someone who left;
+- **asks first** before joins and other people's key changes, showing names and key ids: they add a reader, with a key the instance supplied;
+- never signs a change that gives the facilitator keys that aren't theirs.
+
+While `posting_paused` (someone who left is still in the roster, or someone's keys changed), clients pause whole-group posting: "Waiting for a facilitator to update the group". Nothing is escalated to admins (GROUPS.md decision 9).
+
+### 10.8 Group safety code
+
+`h = BLAKE3(Canonical("faro/group-safety-code/v1").str(instance_id).str(group_id).u64(seq).fixed(hash))` of the roster head, printed like a safety code (§4.2): 60 bytes of BLAKE3 XOF output from `h`, each byte mod 10, in 12 groups of 5 digits. Two people whose browsers show the same code hold the same roster history. The web app shows it on the group page, computed from the head of the roster the browser itself verified (never from a head the instance reports), for comparison with any facilitator.
+
+### 10.9 Limits
+
+- **Facilitators choose who reads.** A facilitator can add anyone; every addition is in the signed log, which every participant's browser holds.
+- **Keys come from the instance the first time.** A facilitator adds someone with the key the instance holds for them, and a new browser starts from whatever signed history it is served. Approving joins in the browser and comparing the group safety code are the checks; neither is automatic.
+- **Withholding.** The instance can delay entries (clients report a short log) or stop serving the group, but can't forge, reorder or roll back entries for a browser that has a checkpoint.
+- **Removal is forward-only.** Someone who leaves keeps the epoch keys they already had. The instance stops serving them group items at once; the next epoch is never sealed to them.
+- **Checkpoints are per browser.** Clearing site data or using another browser starts again from §10.4's bootstrapping.
+
+## 11. Group messages: reach outs, notes, check-ins and replies
+
+Reach outs, the notes on alliance proposals and join requests, check-ins and replies to them (GROUPS.md §8.3, §8.6, §10.2) are written by one person for specific people, or for a whole group. The instance stores and routes them but can neither read nor forge them. They are made and read only by the web app (`web/src/lib/crypto/group.ts`); the Rust reference is `faro_proto::group` and `faro_crypto::{seal,verify,open}_group_message`.
+
+**Status: new in this version, awaiting maintainer sign-off** before it reaches `main`.
+
+### 11.1 Header
+
+`GroupMessage`, signed by the author's **member signing key** and flattened with `sig` like an endorsement:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `group_id` | string or null | 32 lowercase hex. `null` only for a reach out outside any group; notes always name their group |
+| `item_id` | string | 32 lowercase hex, chosen at random by the author's browser. The instance files the message under it |
+| `kind` | string | `reach_out`, `proposal_note`, `join_request_note`, `check_in` or `check_in_reply`. A check-in names its group like a note does |
+| `author_id` | string | |
+| `issued_at_ms` | i64 | Within 5 minutes of the instance's clock on upload |
+| `recipients` | list | `{user_id, enc_pubkey}`: 1 to 32 entries, sorted strictly ascending by `user_id`, never the author. A proposal note and a reply have exactly one. **Empty** in whole-group mode (`epoch` set) |
+| `body_hash` | 32 bytes | `BLAKE3(nonce ‖ ciphertext)` of the body, or 32 zero bytes when there is none (a signed, content-free reach out) |
+| `epoch` | u64, optional | **Whole-group mode:** the group epoch (§10.3) whose key seals the body. Only a `reach_out` or a `check_in`, with a group, no recipients, and an epoch of at least 1. Omitted from the JSON otherwise |
+| `parent_id` | string, optional | 32 lowercase hex: the check-in a `check_in_reply` answers. Required for a reply, and for nothing else; not the reply's own id. Omitted from the JSON otherwise |
+
+`signing_bytes = Canonical("faro/group-message/v1").str(instance_id).str(group_id or "").str(item_id).str(kind).str(author_id).i64(issued_at_ms).u64(len(recipients))`, then `.str(user_id).fixed(enc_pubkey)` for each recipient in order, then `.fixed(body_hash)`, then, **only when present**, `.str("epoch").u64(epoch)` and then `.str("parent").str(parent_id)`. A message without them signs exactly the bytes it always did (the vectors for reach outs and notes are unchanged), and the tags keep the optional parts apart. The empty string is never a valid group id, so "no group" can't collide with one.
+
+The signature covers who it is for and the exact keys it was sealed to, so the instance can't add a reader, drop one, move a message to another group or item, or pass off one kind as another. `author_id` and `issued_at_ms` go beyond GROUPS.md §10.2's list: the first binds the message to its author independently of which key verifies it, the second lets readers show a time the instance can't change.
+
+### 11.2 Body
+
+The item construction of §4.1, with:
+
+- `aad = Canonical("faro/group-message-body/v1").str(instance_id).str(item_id)`;
+- plaintext: UTF-8 JSON, at most 500 characters per text (Unicode scalar values), not blank. Readers ignore other fields. A reach out, a note and a reply: `{"text": "…"}`. A **check-in**: `{"scale": 1..5, "went_well"?: "…", "was_hard"?: "…", "ask"?: "…"}`, the three texts optional ("What went well", "What was hard", "What I'd like from the group"), each not blank when present;
+- envelopes: exactly one per recipient, with `key_id` of the signed `enc_pubkey`, and exactly one for the author, sealed to the author's own member encryption key so they can read what they sent. At most 33, inside the instance's 64;
+- ciphertext at most 4096 bytes (8192 for a check-in, which has three texts).
+
+**Whole-group mode** (`epoch` set). The content key `CK` is wrapped once with the epoch key `EK` (32 bytes, §10.3) instead of being sealed to each person, so the item costs one envelope whatever the group's size. The body has **exactly one envelope**: `recipient` is the author, `key_id` is `"epoch:<epoch>"`, and `wrapped_key = wrap_nonce(24) ‖ XChaCha20-Poly1305(EK, wrap_nonce, CK, aad = Canonical("faro/group-message-epoch/v1").str(instance_id).str(group_id).str(item_id).u64(epoch))`, 72 bytes. The author needs no copy of their own: they hold `EK` like every participant. Whoever has the epoch key can read the message; the instance serves it only to people who are active participants now and were when it arrived (GROUPS.md §10.5). A reach out in whole-group mode is offered only in groups of 32 or fewer, but the format has no such limit; a check-in has none.
+
+On the wire, upload and download alike: `{"message": Signed<GroupMessage>, "body": EncryptedItem | null}`.
+
+### 11.3 Readers
+
+A browser shows a message only after all of these, in order:
+
+1. The structure checks above (`validate`), before any signature: they bound the work a hostile document causes.
+2. The body against the header: present exactly when `body_hash` isn't zero, hashing to it, and with the envelope set above.
+3. Strict Ed25519 verification against the author's member signing key.
+4. The context: `item_id` is the message asked for, `author_id` is the author the instance names, `instance_id` is this instance, and the reader is the author or a recipient. In whole-group mode there are no recipients: the reader opens it with the epoch key (§10.3) of `epoch`, which they checked against the signed roster, and the group is the one they asked for. A reply also names the check-in it answers: the reader checks the parent the instance reports against the signed `parent_id`.
+
+A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*, as are the keys a sender seals to other than their own manifest's allies, until participants have signed keys (GROUPS.md §10.3).
+
+### 11.4 What the instance checks
+
+On upload the instance runs steps 1 to 3 with the author's stored key, and also checks the kind and group for the route, the author's own copy (sealed to their member key), that every recipient is someone this message may go to, and that each signed key is one it knows for that person. It gains nothing by skipping these, since every reader checks again, but they keep junk out of the database.
+
+For a check-in or a reply, the instance also checks the group: the author is an active participant, the group isn't archived, and a whole-group post names the group's **current** epoch and is refused while whole-group posting is paused (`posting_paused`, §10.7). A reply goes only to the author of a check-in the replier can read, once each. A check-in to "my allies in this group" goes to the author's active allies who are also participants. Check-ins are filed in the group's feed (`POST` and `GET /v1/groups/{id}/posts`), never notify anyone, and follow blob retention (GROUPS.md §18).
+
+People without a member signing key (ally-only participants) can't write messages. They can still send a **content-free reach out**, which is not a group message at all: no signature and no body. Readers mark it *"Sent through the server. Can't be verified."* A member who hasn't unlocked their keys can send the same kind.
+
+## 12. Format changes
+
+Signed structures change by getting a new format and a new domain-separation tag, never by changing an existing encoding.
+
+| Structure | Change | Old format |
+|---|---|---|
+| Recipient manifest (§5.1) | Format 2 (`faro/recipient-manifest/v2`) adds each ally's display name inside the signed bytes, so devices can name allies without trusting the instance | Format 1 (`faro/recipient-manifest/v1`) still verifies and is still accepted everywhere |

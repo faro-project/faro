@@ -76,8 +76,17 @@ if [[ -z "$v_core" || "$v_core" != "$v_bindgen" ]]; then
     exit 1
 fi
 
+# FARO_DEV=1 builds a development core: a dev_thresholds.json in the app group
+# may then lower the burst thresholds (docs/DEVELOPMENT.md, "lower only").
+# Never set it for a build that monitors a real person.
+features=()
+if [[ "${FARO_DEV:-}" == "1" ]]; then
+    features=(--features dev)
+    echo "DEVELOPMENT CORE: dev_thresholds.json can lower the burst thresholds"
+fi
+
 for t in "${targets[@]}"; do
-    "${cargo_cmd[@]}" build --release --locked -p faro-mobile --target "$t"
+    "${cargo_cmd[@]}" build --release --locked -p faro-mobile ${features[@]+"${features[@]}"} --target "$t"
 done
 
 "${cargo_cmd[@]}" build --release --manifest-path "$here/uniffi-bindgen/Cargo.toml" --locked
@@ -106,3 +115,6 @@ rm -rf "$here/FaroCore.xcframework"
 xcodebuild -create-xcframework "${args[@]}" -output "$here/FaroCore.xcframework"
 
 echo "built $here/FaroCore.xcframework and $gen"
+
+# The project's update root, which the app bundles for domain list updates.
+"$here/build-update-root.sh"

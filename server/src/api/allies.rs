@@ -75,6 +75,8 @@ pub struct AllyLink {
     /// When the ally's account will be deleted, if they asked for that
     /// (§12): they stop being an ally then.
     pub deletion_purge_after_ms: Option<i64>,
+    /// The group the link was proposed in, if any (a label only).
+    pub origin_group_id: Option<String>,
 }
 
 /// `GET /v1/me/allies` response.
@@ -100,6 +102,7 @@ impl From<LinkView> for AllyLink {
             ally_enc_pubkey: v.ally_enc_pubkey,
             member_sign_pubkey: v.member_sign_pubkey,
             deletion_purge_after_ms: v.other_deletion_purge_after_ms,
+            origin_group_id: v.origin_group_id,
         }
     }
 }
@@ -382,6 +385,8 @@ pub struct SupportedMember {
     /// When the member's account will be deleted, if they asked for that
     /// (§12). Their items can be opened until then.
     pub deletion_purge_after_ms: Option<i64>,
+    /// The group the link was proposed in, if any (a label only).
+    pub origin_group_id: Option<String>,
 }
 
 /// `GET /v1/ally/members`
@@ -401,6 +406,7 @@ pub async fn list_my_members(
                 member_sign_pubkey: v.member_sign_pubkey,
                 ally_enc_pubkey: v.ally_enc_pubkey,
                 deletion_purge_after_ms: v.other_deletion_purge_after_ms,
+                origin_group_id: v.origin_group_id,
             })
             .collect(),
     ))

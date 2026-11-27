@@ -237,7 +237,12 @@ pub fn core_at(dir: &Path, keys: Arc<dyn KeyStore>) -> Arc<FaroCore> {
 /// Enroll `phone` with a link naming the member key, approve it, and
 /// return its core and device id.
 pub async fn approved_phone(w: &World, phone: &Phone) -> (Arc<FaroCore>, String) {
-    let core = phone.core();
+    approve(w, phone.core()).await
+}
+
+/// Enroll `core` with a link naming the member key, approve it, and
+/// return it with its device id.
+pub async fn approve(w: &World, core: Arc<FaroCore>) -> (Arc<FaroCore>, String) {
     let link = w.link(Some(&w.member_key_id())).await;
     let c = core.clone();
     let preview = blocking(move || c.preview_enrollment(link.clone()).map(|p| (p, link)))

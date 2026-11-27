@@ -43,7 +43,7 @@ jobs:
   # No secrets: reads what is published, which is public.
   check:
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     outputs:
       published: ${{ steps.check.outputs.published }}
       renew: ${{ steps.check.outputs.renew }}
@@ -193,7 +193,7 @@ jobs:
   alert:
     needs: [check, timestamp, renew-targets]
     if: failure()
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
     env:

@@ -121,7 +121,7 @@ Faro doesn't touch account, passcode, cellular, Siri or Game Center settings. Th
 
 ### 6.3 Re-applying
 
-A `DeviceActivityMonitor` extension is scheduled on a repeating 15-minute interval, the shortest Apple allows. On each `intervalDidStart` it re-writes the "faro" store from the settings file in the app group, in case anything was cleared. The app does the same each time it comes to the foreground. The monitor extension also does the cross-checks in §10.2. Its 6 MB memory limit means it does nothing else: no Rust core, no crypto, just file reads and ManagedSettings writes.
+A `DeviceActivityMonitor` extension runs on a 15-minute interval, the shortest Apple allows. A schedule repeats daily at the same times, so the 15 minutes are a chain: each window runs from now to 15 minutes on, and the extension starts the next one when it ends. One dropped callback would stop the chain, so under it runs a backbone of 18 daily-repeating windows of 80 minutes, end to end around the clock, whose starts and ends also run the checks and restart the chain: a dropped callback costs at most one backbone window. That is 19 monitored activities, inside Apple's limit of about 20. On each callback the extension re-writes the "faro" store from the settings file in the app group, in case anything was cleared. The app does the same each time it comes to the foreground. The monitor extension also does the cross-checks in §10.2. Its 6 MB memory limit means it does nothing else: no Rust core, no crypto, just file reads and ManagedSettings writes.
 
 ### 6.4 Shields
 
@@ -135,9 +135,9 @@ A `ShieldConfigurationDataSource` gives the block screen Faro's look and wording
 
 A `NEPacketTunnelProvider` that is a VPN in name only:
 
-- **Tunnel network settings:** a private address for the tunnel interface, and DNS servers set to one tunnel-local address (for example `198.18.0.53`) with `matchDomains = [""]`, so every lookup goes to it.
+- **Tunnel network settings:** a private address for the tunnel interface, and DNS servers set to one tunnel-local address (`198.18.0.53` and `2001:2::53`, in the benchmarking ranges no real network uses) with `matchDomains = [""]`, so every lookup goes to it.
 - **Included routes:** only that address, plus the known DNS-over-HTTPS and DNS-over-TLS resolver addresses (§7.4). **No other traffic enters the tunnel**, so Faro never sees page contents, connections or anything beyond DNS, and battery and latency costs stay small.
-- **Resolution:** queries for allowed names are forwarded to the resolver the phone would otherwise use (taken from the active network path) over a socket the provider opens outside the tunnel. Responses go back unchanged.
+- **Resolution:** queries for allowed names are forwarded to the resolver the phone would otherwise use (read from the system before the tunnel's DNS settings apply, and again when the network changes) over a socket the provider opens outside the tunnel. There is no fallback: if no resolver can be found, allowed names fail at once (`SERVFAIL`) until one is, and blocked names are still blocked. Responses go back unchanged, unless they alias the name to a blocked one (`innocent.example CNAME blocked.example`, or a DNAME, SVCB or HTTPS target), which gets `NXDOMAIN` like the blocked name itself. A truncated response is fetched again over TCP by the provider, so clients never need DNS over TCP to the tunnel.
 - **Blocking:** a blocked name gets a well-formed `NXDOMAIN` response. Safari's Screen Time page usually wins first for adult sites. Other browsers show their own "can't find the server" page.
 - **On-demand:** an `NEOnDemandRuleConnect` for every interface, so iOS reconnects the tunnel after reboots, network changes and crashes without the app running.
 
@@ -161,10 +161,13 @@ The bundle ships in the app and updates through the instance's update mirror as 
 | Turning the VPN off, or Connect On Demand off, in Settings | Detected and reported (§10). |
 | IP-literal URLs, or sites on brand-new domains | Not covered by DNS. Layer 1 still covers them in WebKit. |
 | Cached DNS answers from before the filter started | They expire within minutes. The tunnel starts at boot through on-demand. |
+| Lookups while the tunnel re-reads the network's resolvers after a network change | iOS only reports the network's resolvers while the tunnel's own DNS settings are off, so the tunnel lifts them for a moment (well under a second) on each network change and puts them back. Lookups in that moment are not filtered. Layer 1 still covers WebKit. |
 
 ### 7.5 Recording what it blocks
 
 The provider counts blocked lookups per category, and per host for adult and gambling, in 10-minute buckets in the app group. It never writes allowed lookups anywhere. Every few minutes it turns the counts into chain events (§11) through the Rust core.
+
+Each bucket becomes one `blocked_summary` event when it has ended, and only once: the core remembers which bucket starts it has reported, so a flush repeated, run from the app as well as the tunnel, or offered again after the tunnel died before saving its counters, never counts a lookup twice. The shields' two counter files (shown and closed, never which app) become a `shield_summary` the same way: the core keeps the totals it last reported and records the difference. Both are `capture`-class events with header urgency `none`, so the instance learns nothing it didn't know.
 
 ---
 
@@ -184,9 +187,11 @@ It would add full-URL matching (`reddit.com/r/…`, not just `reddit.com`), whic
 
 ## 9. Choosing what is blocked
 
-- **At setup**, the defaults are: adult (both layers), Faro protected from deletion, explicit media blocked, automatic time. Each optional extra is one screen: gambling, chosen apps or categories, chosen sites, App Store rating.
+- **At setup**, the defaults are: adult (both layers), Faro protected from deletion, explicit media blocked, automatic time. Setup doesn't ask about the optional extras. They are on the **Choices** screen, one tap from the status screen: gambling, chosen apps or categories, chosen sites, App Store rating.
 - **Tightening** takes effect at once and is a normal-urgency `settings_change`. Allies can switch these notifications off.
 - **Loosening** (removing a category, app or site, or switching a default off) takes effect **after a delay**, 24 hours by default. Allies are told when it is asked for and again when it takes effect, and the member can cancel in between. The delay is the member's own setting (0 to 72 hours). Changing it is itself a loosening when it gets shorter. Desktop has no equivalent, because desktop doesn't block. On a phone, a short pause between the urge and the setting is most of what makes blocking work.
+- **How it is kept.** A loosening is stored as pending with its `takes_effect_at`, in the app group. Whichever of the app, the monitor and the tunnel runs first after that time applies it. The monitor can't link the core, so it leaves a request that the app or the tunnel turns into the `settings_change` event. Waiting loosenings are applied to the settings as they are by then, and asking for something else on the same setting cancels the waiting one (with an event). A cancel that comes after the time is too late. A delay of 0 applies at once and is still an event allies see. Setting the clock back keeps a loosening waiting. Setting it forward is for the automatic date and time requirement (§6.2) and the instance's clock-skew alert to catch.
+- **The tunnel's copy.** The choices are also written into the tunnel's `providerConfiguration`, which it can read before the first unlock, so an opted-in gambling block holds from the first lookup. A copy only changes when the app runs, so each carries a generation number and the tunnel takes the newer one (the configuration when they tie).
 - **Allies can't change anything** (§4 principle 5). They can only see it.
 
 ---
@@ -208,8 +213,8 @@ The instance's liveness monitor is the backstop, exactly as on desktop. iOS hear
 | Signal | Detected by | Urgency | Ally sees |
 |---|---|---|---|
 | No heartbeat for longer than the grace period | Instance | urgent | "iPhone-X hasn't checked in for 3h", with the last state |
-| Screen Time access revoked (`authorizationStatus` no longer `.approved`) | Tunnel provider on each wake and every few minutes; the app on launch (spike S6: readable from the extension?) | urgent | "Screen Time protection is off on iPhone-X". Faro can now be deleted |
-| DNS filter off: the VPN switched off, On Demand off, another VPN connected, or the profile deleted | Monitor extension: the tunnel's "alive" timestamp in the app group is older than 20 min while the phone is in use. The app: `NEVPNManager` status on launch | urgent | "Faro's web filter is off on iPhone-X" |
+| Screen Time access revoked (`authorizationStatus` no longer `.approved`) | Tunnel provider on each wake and every minute; the monitor extension on each callback; the app on launch (spike S6: readable from the tunnel?) | urgent | "Screen Time protection is off on iPhone-X". Faro can now be deleted |
+| DNS filter off: the VPN switched off, On Demand off, another VPN connected, or the profile deleted | The tunnel, when it is stopped: the stop reason gives the cause. Monitor extension: the tunnel's "alive" timestamp in the app group is older than 20 min while the phone is in use (`unknown`). The app: `NEVPNManager` status on launch | urgent | "Faro's web filter is off on iPhone-X" |
 | The "faro" ManagedSettings store found cleared or changed while authorization stands | Monitor extension or app, when re-applying | urgent | "Faro's Screen Time settings were changed" |
 | Protection loosened through Faro (§9) | App | normal (when asked for and when applied) | "Gambling sites will be unblocked on iPhone-X tomorrow at 21:04" |
 | Leaving Faro on purpose (§12) | App | urgent (`goodbye`) | "Faro was removed from iPhone-X" |
@@ -220,9 +225,20 @@ The instance's liveness monitor is the backstop, exactly as on desktop. iOS hear
 
 Each layer is watched by another (§4 principle 2): the tunnel watches Screen Time, the monitor extension and the app watch the tunnel, and the instance watches the phone as a whole. **Deleting Faro** takes revoking Screen Time first (because of `denyAppRemoval`), which the tunnel reports before it disappears with the app.
 
+How the watchers work together:
+
+- **One book.** The monitor extension can't link the Rust core, so no watcher records an event itself. Each one writes what it saw to a small file in the app group (`tamper.json`, FaroKit's `TamperLedger`, changed under a `flock`), and the app or the tunnel, the two that link the core, turn the queued requests into urgent `tamper` events and upload them. Before the first unlock, or before approval, the requests wait in the file.
+- **One cause, one signal** (ARCHITECTURE.md §3.7). A layer reported off is not reported again, whatever the cause seen later, until a watcher has seen it on again: the tunnel running, Screen Time read as approved, the store read back intact.
+- **Screen Time readings.** A reading of "not approved" is believed only after a second one a few seconds later (a process that has just started can read a status that hasn't loaded yet), and only from a process that has read it approved before. If the tunnel can't read the status at all (spike S6), it reads "not determined" from the start and never reports; the monitor extension and the app, which can, report instead.
+- **The tunnel's markers.** The tunnel touches `tunnel_alive` every minute, and `tunnel_resting` when the phone goes to sleep or the tunnel stops for a reason that isn't the member's (no network, an app update). A quiet `tunnel_alive` after `tunnel_resting` isn't the filter being off. The 20-minute threshold is against the marker, which is written every minute, so it doesn't depend on how often the monitor runs; what a dropped monitor callback changes is how late the check runs, at most one backbone window (§6.3).
+- **Causes.** A stop the tunnel sees gives the cause directly: switched off in Settings is `vpn_disconnected`, another VPN taking over is `other_vpn`, the configuration deleted is `profile_removed`. The app reads Faro's VPN configuration on launch: missing is `profile_removed`, another VPN connected is `other_vpn`, disabled is `vpn_disconnected`, Connect On Demand off is `on_demand_off`. Enabled with On Demand but not connected is a phone waiting for a network, not tamper. The monitor extension can't see the configuration and says `unknown`.
+- **Context.** `doh_dropped` (the tunnel counts packets to the known encrypted-DNS resolvers that it drops), `other_vpn` (from the interfaces the system's proxy settings list) and `jailbreak_suspected` (well-known files, and whether the app can write outside its sandbox) are recorded for the daily report, at most once an hour each. They are never alerts.
+- **Clock.** The core compares the phone's clock with the instance's on each heartbeat and with the `Date` header of its uploads, as the desktop service does (ARCHITECTURE.md §3.6), and records one `clock_manipulation` per skew.
+
 ### 10.3 Known gaps
 
-- **Throttled Screen Time callbacks.** Monitor callbacks can be late or dropped. The 20-minute staleness check tolerates one miss, and the instance's heartbeat check doesn't depend on it.
+- **Throttled Screen Time callbacks.** Monitor callbacks can be late or dropped. The backbone (§6.3) means a dropped callback delays the checks by at most one 80-minute window, and the instance's heartbeat check doesn't depend on them.
+- **A tunnel that dies asleep.** If the tunnel is killed while the phone sleeps and On Demand doesn't bring it back, its last marker says "resting", so the monitor doesn't report it. The app does on its next launch, and the tunnel's heartbeats stop, so the instance reports a missed check-in.
 - **Revoking and deleting while offline.** If the member goes offline (airplane mode), revokes Screen Time, then deletes Faro, the tamper event never leaves the phone. Allies get a missed check-in after the grace period instead. Same as unplugging a laptop's network on desktop.
 - **Power.** A switched-off phone looks like a silent one, with the last state attached.
 
@@ -236,6 +252,10 @@ An iPhone appears in the member's reports next to their computers, marked as blo
 - **Blocked lookups by category per day**, from layer 2. Adult and gambling hosts are listed (only the host, like desktop's `scheme://host/`), grouped and counted.
 - **Blocked apps opened:** a count from the shields, with no app names (§2).
 - **Flags.** One blocked lookup isn't intent: link previews, ads and prefetching make lookups the member never saw. A **burst** is, so `blocked_burst` becomes a `flag` event with explainable reasons (`dns:adult ×6, 4 hosts, 3 min, screen on`), rated `medium`, which maps to `urgent` by default (ARCHITECTURE.md §14). The thresholds go next to the desktop ones and follow the same "lower only" rule for development builds.
+  - **Screen on** comes from the tunnel's view of the device: it is true from `wake` and false from `sleep`, the only two things a packet tunnel is told. A phone that is awake counts as having its screen on, so lookups made while it sleeps (background refreshes) never count toward a burst. The label says "screen on" because of that.
+  - **Development builds** can lower the thresholds (6 lookups, 3 domains, a 10 minute cooldown) with a `dev_thresholds.json`: each value must be at least 1 and at most its default, and the window can't be touched. A release build ignores the file, and a refused file changes nothing (docs/DEVELOPMENT.md).
+  - **The reason holds counts only**, never a host. Hosts are in the blocked summaries.
+- **The daily report** has an iPhone section built on the device from the same facts: when each layer was on (Screen Time can be `unknown` when the tunnel can't read it), blocked lookups per day with the adult and gambling hosts, shield counts per day, and loosenings asked for, applied or cancelled. There is no activity timeline and no screen checks, and bursts appear as flagged moments.
 - **Limits, stated plainly in the report:** "Faro on iPhone blocks; it doesn't see the screen. It can't block sites reached through some private DNS services or apps."
 - **No thumbnails, ever.** There are none to send.
 
@@ -248,7 +268,8 @@ The instance's view is unchanged: ciphertext, signed headers with urgency, and h
 - **Visible on the phone:** the VPN indicator in the status bar while the filter runs, Faro under Settings → Screen Time, and Faro's shield wording on every block.
 - **The monthly notice** (ARCHITECTURE.md §12) is a local notification that opens a screen listing the allies and the instance. iOS has one user per phone, so there are no other accounts to tell.
 - **Setup explains the cost** in plain words: other apps can't be deleted while Faro is protecting itself, the phone can't run another VPN at the same time, Private Relay is turned off.
-- **Leaving is allowed and never silent.** Settings → **Leave Faro** sends `goodbye` (urgent, tamper-class), lifts `denyAppRemoval`, clears the store, removes the VPN profile and tells the member they can now delete the app. Revoking Screen Time in Settings works too, and gets reported (§10).
+- **Leaving is allowed and never silent.** Settings → **Leave Faro** sends `goodbye` (urgent, tamper-class), lifts `denyAppRemoval`, clears the store, removes the VPN profile and tells the member they can now delete the app. Revoking Screen Time in Settings works too, and gets reported (§10). The order keeps it visible: the app first checks that the instance can be reached, and if it can't (offline), nothing changes and the member is told so and can try again. Once the goodbye is written, the phone records and sends nothing else (a heartbeat after a goodbye would tell the instance the phone is back), and only when the instance has acknowledged it does the app lift anything. The device keys are deleted from the Keychain at that point.
+- **Who Faro reports to.** The notice screen lists the allies from the recipient manifest the member signed, so the instance can't add anyone to it. Each ally is shown by the name the member signed into the manifest (format 2, PROTOCOL.md §5.1), so the instance can't change what an ally is called either, and by the safety code of the member's key and theirs, the code the member's web app shows next to that ally's name. A manifest signed before names were added (format 1) holds keys only: those allies are shown as "Ally 1", "Ally 2" and so on, with their codes, until the member's next change to their allies. The monthly notification itself says how many allies and which instance, not their names, because it can show on the lock screen.
 - **Optional: an ally holds the Screen Time passcode.** Some accountability partners do this. It makes Screen Time settings changes need the ally, and it may make revoking Faro's access need the ally too (spike S1). Faro doesn't set it up, ask for it or rely on it. It conflicts with "members can always leave", so it stays the member's and ally's own arrangement, and the ally guide describes it with that caveat.
 
 ---
@@ -319,7 +340,7 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 | S5 | With Private Relay on, do the `mask.icloud.com` answers reliably turn it off for Safari lookups while the tunnel runs? | Ask the member to turn Private Relay off at setup and report it as context. |
 | S6 | Can the tunnel extension read `AuthorizationCenter.shared.authorizationStatus` and the "faro" store? | Fall back to the app on launch plus a monitor-extension marker file. Detection gets slower. |
 | S7 | `NEURLFilter`: can the member switch it off, and is that visible to the app? | Only matters for Phase C. |
-| S8 | How reliably does the 15-minute DeviceActivity schedule fire on iOS 27 under normal use? | Lengthen the staleness threshold in §10.2. |
+| S8 | How reliably does the 15-minute DeviceActivity schedule fire on iOS 27 under normal use? Does the 80-minute backbone (§6.3) fire when the chain doesn't? | Shorten the backbone windows, or lengthen the staleness threshold in §10.2. |
 
 ---
 
@@ -342,6 +363,15 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **No server-side filtering of any kind**, and no APNs.
 - **Loosening waits 24 hours by default.** The member can set it from 0 to 72 hours, and allies see the setting.
 - **Faro doesn't set up or rely on an ally-held Screen Time passcode.**
+- **Setup can't be finished without both layers.** There is no skip for Screen Time access or the VPN configuration: a phone with only one layer would be enrolled and look protected while half of §5's design is missing. Turning a layer off later is allowed and reported (§10.2).
+- **Optional extras live on the Choices screen, not in setup** (§9), so setup stays short.
+- **The resolver-reading gap is accepted.** On each network change the tunnel turns its DNS settings off for well under a second to read the network's resolvers (§7.4). Layer 1 still covers WebKit during that moment.
+- **No resolver means `SERVFAIL`, never a public one.** Allowed names fail at once until the network's resolvers are found again. No lookup goes to a third party.
+- **Leave Faro needs the instance to confirm the goodbye.** There is no silent way out inside Faro. A member whose instance is gone for good leaves by revoking Screen Time access in Settings and deleting the app, and the member guide says so.
+- **Allies are named on the phone from the member-signed list.** The member's client puts each ally's display name inside the recipient manifest it signs (format 2, PROTOCOL.md §5.1), so the instance can't change the names shown in the monthly notice (§12). A phone holding an older, format 1 list shows the ally count and safety codes.
+- **The web app signs format 2 from the start.** A client too old to read format 2 keeps its last list, so it would miss an ally removal until it updates. Every enrolled client must be updated before an instance gets this web app.
+- **Names are checked leniently.** Verifiers refuse only names over 256 bytes, and devices sanitize again before showing a name, so a name can never make a valid list invalid.
+- **The desktop login notice keeps the ally count.** Everyone who signs in to the computer sees it, so it doesn't name the allies.
 
 ### Open
 

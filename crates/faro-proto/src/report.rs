@@ -1,10 +1,11 @@
 //! Daily (or weekly) reports, built **on the device** (§6) and uploaded encrypted.
 
-use crate::body::{AppInfo, BlurredThumbnail, Rating, Reason, TamperSignal};
+use crate::body::{AppInfo, BlockedHost, BlurredThumbnail, Rating, Reason, TamperSignal};
 use crate::encoding::{Canonical, Hash32, Signature};
 use crate::event::EncryptedItem;
 use crate::ids::{DeviceId, InstanceId, UserId};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 const TAG_REPORT_HEADER: &str = "faro/report-header/v1";
 
@@ -113,6 +114,64 @@ pub struct CountedItem {
     pub count: u32,
 }
 
+/// A stretch of time during which the iPhone's two layers were in one
+/// state (docs/IOS.md §11). Time with no span is time the device did not
+/// say (the phone was off, or Faro was not running).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionSpan {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// Whether Screen Time protection was on. `None` when the device could
+    /// not tell (the tunnel can't always read the authorization).
+    pub screen_time: Option<bool>,
+    /// Whether the DNS filter was running.
+    pub filter: bool,
+}
+
+/// Blocked lookups on one day, from the DNS filter's summaries. Adult and
+/// gambling hosts are listed (the host only, never a path); everything else
+/// is a count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedDay {
+    pub day_start_ms: i64,
+    pub by_category: BTreeMap<String, u32>,
+    pub hosts: Vec<BlockedHost>,
+    pub other_hosts: u32,
+}
+
+/// How often a Screen Time shield was shown or closed on one day. Counts
+/// only, never app names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShieldDay {
+    pub day_start_ms: i64,
+    pub shown: u32,
+    pub closed: u32,
+}
+
+/// A loosening that was asked for, applied or cancelled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LooseningRecord {
+    pub ts_ms: i64,
+    pub text: String,
+}
+
+/// The iPhone part of a daily report (docs/IOS.md §11): present only in an
+/// iPhone's report, which has no screen checks. Built on the device from
+/// the same facts as the `blocked_summary`, `shield_summary` and
+/// `settings_change` events.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IosReport {
+    /// When each layer was on, in order.
+    pub protection: Vec<ProtectionSpan>,
+    /// Blocked lookups, one entry per day with any.
+    pub blocked: Vec<BlockedDay>,
+    /// Blocked apps opened, one entry per day with any.
+    pub shields: Vec<ShieldDay>,
+    /// Loosenings asked for, applied or cancelled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loosenings: Vec<LooseningRecord>,
+}
+
 /// The decrypted daily report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DailyReport {
@@ -132,6 +191,10 @@ pub struct DailyReport {
     pub top_domains: Option<Vec<CountedItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_apps: Option<Vec<CountedItem>>,
+    /// iPhone only (docs/IOS.md §11). Older reports and other platforms
+    /// leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ios: Option<IosReport>,
     pub health: HealthSummary,
 }
 

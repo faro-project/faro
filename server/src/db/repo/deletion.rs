@@ -43,10 +43,52 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("member_manifests", "member_id", Clears::Rows),
     ("admin_log", "user_id", Clears::SetNull),
     ("admin_log", "actor_id", Clears::SetNull),
+    ("accountability_groups", "created_by", Clears::SetNull),
+    ("accountability_groups", "archived_by", Clears::SetNull),
+    (
+        "accountability_groups",
+        "facilitator_offer_user_id",
+        Clears::SetNull,
+    ),
+    ("group_participants", "user_id", Clears::Rows),
+    ("group_participants", "invited_by", Clears::SetNull),
+    ("group_history", "subject_id", Clears::SetNull),
+    ("group_history", "actor_id", Clears::SetNull),
+    ("group_invites", "inviter_id", Clears::Rows),
+    ("group_invites", "user_id", Clears::Rows),
+    ("group_invites", "used_by", Clears::SetNull),
+    ("group_notices", "recipient_id", Clears::Rows),
+    ("group_notices", "actor_id", Clears::SetNull),
+    ("group_join_requests", "user_id", Clears::Rows),
+    ("group_join_requests", "decided_by", Clears::SetNull),
+    ("group_meeting_prefs", "user_id", Clears::Rows),
+    ("alliance_proposals", "from_id", Clears::Rows),
+    ("alliance_proposals", "to_id", Clears::Rows),
+    ("proposal_blocks", "user_id", Clears::Rows),
+    ("proposal_blocks", "blocked_id", Clears::Rows),
+    ("pairing_suggestions", "facilitator_id", Clears::SetNull),
+    ("pairing_suggestions", "user_a", Clears::Rows),
+    ("pairing_suggestions", "user_b", Clears::Rows),
+    ("participant_sign_keys", "user_id", Clears::Rows),
+    ("group_epoch_keys", "user_id", Clears::Rows),
+    ("group_messages", "author_id", Clears::Rows),
+    ("group_message_recipients", "recipient_id", Clears::Rows),
+    ("reach_outs", "sender_id", Clears::Rows),
+    ("reach_out_recipients", "recipient_id", Clears::Rows),
+    ("quiet_hours_bypass", "user_id", Clears::Rows),
+    ("quiet_hours_bypass", "sender_id", Clears::Rows),
+    ("reach_out_prefs", "user_id", Clears::Rows),
+    ("reach_out_prefs", "sender_id", Clears::Rows),
+    ("group_posts", "author_id", Clears::Rows),
+    ("group_post_recipients", "recipient_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
-pub const EMAIL_COLUMNS: &[(&str, &str)] = &[("invites", "email"), ("magic_links", "email")];
+pub const EMAIL_COLUMNS: &[(&str, &str)] = &[
+    ("invites", "email"),
+    ("magic_links", "email"),
+    ("group_invites", "email"),
+];
 
 /// What happens to rows naming the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +137,52 @@ pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM invites WHERE inviter_id = $1",
     "DELETE FROM magic_links WHERE user_id = $1",
     "DELETE FROM sessions WHERE user_id = $1",
+    // Groups (GROUPS.md §18). Alliances formed in a group are ally links,
+    // removed above; history keeps its entries without the person
+    // ("Someone left").
+    "UPDATE accountability_groups SET created_by = NULL WHERE created_by = $1",
+    "UPDATE accountability_groups SET archived_by = NULL WHERE archived_by = $1",
+    "UPDATE accountability_groups SET facilitator_offer_user_id = NULL WHERE facilitator_offer_user_id = $1",
+    "UPDATE group_history SET subject_id = NULL WHERE subject_id = $1",
+    "UPDATE group_history SET actor_id = NULL WHERE actor_id = $1",
+    "UPDATE group_participants SET invited_by = NULL WHERE invited_by = $1",
+    "DELETE FROM group_participants WHERE user_id = $1",
+    "UPDATE group_invites SET used_by = NULL WHERE used_by = $1",
+    "DELETE FROM group_invites WHERE inviter_id = $1",
+    "DELETE FROM group_invites WHERE user_id = $1",
+    "UPDATE group_notices SET actor_id = NULL WHERE actor_id = $1",
+    "DELETE FROM group_notices WHERE recipient_id = $1",
+    "UPDATE group_join_requests SET decided_by = NULL WHERE decided_by = $1",
+    "DELETE FROM group_join_requests WHERE user_id = $1",
+    "DELETE FROM group_meeting_prefs WHERE user_id = $1",
+    // Their proposals, sent and received, and blocks either way (§18).
+    // Links started from a proposal are ally links, removed above.
+    "DELETE FROM alliance_proposals WHERE from_id = $1 OR to_id = $1",
+    "DELETE FROM proposal_blocks WHERE user_id = $1 OR blocked_id = $1",
+    // Pairing suggestions naming them (§8.5).
+    "UPDATE pairing_suggestions SET facilitator_id = NULL WHERE facilitator_id = $1",
+    "DELETE FROM pairing_suggestions WHERE user_a = $1",
+    "DELETE FROM pairing_suggestions WHERE user_b = $1",
+    // Phase C: their sealed copies of group epoch keys and their group
+    // signing key. Signed roster entries keep their opaque id and public
+    // keys until a facilitator signs their removal.
+    "DELETE FROM group_epoch_keys WHERE user_id = $1",
+    "DELETE FROM participant_sign_keys WHERE user_id = $1",
+    // Reach outs and signed notes (GROUPS.md §18): the person's own reach
+    // outs and messages, their copies of others', their answers and their
+    // reach-out settings either way. Notes on other people's proposals and
+    // join requests that went with the person go in the retention pass's
+    // sweep of unused messages (`group_messages::sweep_unused`).
+    "DELETE FROM reach_out_recipients WHERE recipient_id = $1",
+    "DELETE FROM reach_outs WHERE sender_id = $1",
+    "DELETE FROM group_message_recipients WHERE recipient_id = $1",
+    "DELETE FROM group_messages WHERE author_id = $1",
+    "DELETE FROM quiet_hours_bypass WHERE user_id = $1 OR sender_id = $1",
+    "DELETE FROM reach_out_prefs WHERE user_id = $1 OR sender_id = $1",
+    // Check-ins and replies (§18): their copies of others' posts, then
+    // their own posts (replies to them go with them).
+    "DELETE FROM group_post_recipients WHERE recipient_id = $1",
+    "DELETE FROM group_posts WHERE author_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations
@@ -102,6 +190,7 @@ pub const PURGE_BY_ID: &[&str] = &[
 pub const PURGE_BY_EMAIL: &[&str] = &[
     "DELETE FROM invites WHERE email = $1",
     "DELETE FROM magic_links WHERE email = $1",
+    "DELETE FROM group_invites WHERE email = $1",
 ];
 
 /// The notice kinds the purge waits for (see [`notices_final`]).
@@ -236,6 +325,11 @@ pub async fn delete_rows(
     // A device enrolled in a race with the start of the purge is refused
     // like the others.
     insert_device_tombstones(&mut *conn, user, now_ms).await?;
+    // Groups first: a group the person was the last facilitator of is
+    // offered to its earliest participant (GROUPS.md §9), who is told.
+    for (_, offered) in super::groups::before_user_purge(&mut *conn, user, now_ms).await? {
+        crate::groups::tell_offered(&mut *conn, &offered, now_ms).await?;
+    }
     for &sql in PURGE_BY_ID {
         sqlx::query(sql)
             .bind(user.as_str())

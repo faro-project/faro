@@ -56,16 +56,30 @@ targets:
       - path: Generated/Notices
         optional: true
         buildPhase: resources
+      # The project's update root of trust, made by build-update-root.sh:
+      # what domain list updates are verified against (docs/IOS.md §7.2).
+      # Optional so a development build works without it; it then checks
+      # no updates. A release build must have it.
+      - path: Generated/Update
+        optional: true
+        buildPhase: resources
       - path: Shared
+      - path: ScreenTime
       - path: Generated/FaroCore
         optional: true
     dependencies:
       - package: FaroKit
+      - package: FaroKit
+        product: FaroKitApp
       - framework: FaroCore.xcframework
         embed: false
+      - sdk: DeviceActivity.framework
+      - sdk: ManagedSettings.framework
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: libresolv.tbd
+      - sdk: FamilyControls.framework
+      - sdk: NetworkExtension.framework
       - target: FaroTunnel
       - target: FaroMonitor
       - target: FaroShield
@@ -97,6 +111,11 @@ targets:
             CFBundleURLSchemes:
               - faro
         NSCameraUsageDescription: Faro uses the camera only to scan the QR code that enrolls this phone.
+        # The background refresh that looks for a newer domain list (docs/IOS.md §7.2).
+        BGTaskSchedulerPermittedIdentifiers:
+          - org.faro.ios.refresh-domains
+        UIBackgroundModes:
+          - fetch
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.faro.ios
@@ -112,14 +131,26 @@ targets:
       - path: Shared
       - path: Generated/FaroCore
         optional: true
+      # The packaged domain list (domains.bin and its manifest), made by
+      # build-notices.sh. Optional so the project builds without it; the
+      # tunnel then blocks only the always-blocked names and the member's
+      # list, and logs why. A release build must have it.
+      - path: Generated/Domains
+        optional: true
+        buildPhase: resources
     dependencies:
       - package: FaroKit
+      - package: FaroKit
+        product: FaroKitApp
       - framework: FaroCore.xcframework
         embed: false
       - sdk: NetworkExtension.framework
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: libresolv.tbd
+      # AuthorizationCenter: the tunnel watches Screen Time (docs/IOS.md
+      # §10.2; spike S6 says whether it can read it).
+      - sdk: FamilyControls.framework
     entitlements:
       path: FaroTunnel/FaroTunnel.entitlements
       properties:
@@ -143,6 +174,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.faro.ios.tunnel
+        # libresolv's resolver configuration, which Swift can't import.
+        SWIFT_OBJC_BRIDGING_HEADER: FaroTunnel/FaroTunnel-Bridging-Header.h
 
   FaroMonitor:
     type: app-extension
@@ -152,10 +185,12 @@ targets:
         excludes:
           - "*.entitlements"
           - Info.plist
+      - path: ScreenTime
     dependencies:
       - package: FaroKit
       - sdk: DeviceActivity.framework
       - sdk: ManagedSettings.framework
+      - sdk: FamilyControls.framework
     entitlements:
       path: FaroMonitor/FaroMonitor.entitlements
       properties:

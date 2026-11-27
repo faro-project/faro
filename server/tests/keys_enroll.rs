@@ -264,7 +264,7 @@ async fn an_iphone_enrolls_and_is_listed_as_ios() {
         .post(
             "/v1/devices/enroll",
             json!({"enroll_code": code, "sign_pubkey": SigningKey::generate().public(),
-                   "platform": "symbian", "device_name": "N95", "client_version": "0.1.0"}),
+                   "platform": "plan9", "device_name": "Box", "client_version": "0.1.0"}),
             None,
         )
         .await;

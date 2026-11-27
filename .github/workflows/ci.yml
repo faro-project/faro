@@ -7,8 +7,8 @@ on:
   # Manual runs, for example of the model gate (model-eval) on main.
   workflow_dispatch:
 
-# Each self-hosted runner takes one job at a time, so a new push to a pull
-# request cancels its older run instead of queueing behind it.
+# A new push to a pull request cancels its older run, so superseded runs
+# don't use up Actions minutes (macOS minutes count ten times).
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -19,7 +19,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -34,15 +34,15 @@ jobs:
       matrix:
         include:
           - os: macos
-            runner: [self-hosted, macOS, ARM64]
+            runner: macos-15
           # Intel Macs are supported in the beta, so the whole workspace
           # also builds and tests natively on x86_64.
           - os: macos-intel
-            runner: [self-hosted, macOS, X64]
+            runner: macos-15-intel
           - os: windows
-            runner: [self-hosted, Windows, X64]
+            runner: windows-2025
           - os: linux
-            runner: [self-hosted, Linux, ARM64]
+            runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -108,7 +108,7 @@ jobs:
   # faro-server built with that bundle embedded (FARO_REQUIRE_WEB=1 fails
   # the build if a page is missing) and its web-serving tests.
   web:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -135,7 +135,7 @@ jobs:
   # run on the ARM64 runner; install the native cargo-deny instead. Same
   # check as the action ran (it passes --all-features by default).
   deny:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -158,7 +158,7 @@ jobs:
   # end: throwaway keys, fake artifacts and a local git repository standing
   # in for the publishing location. No secrets.
   release-scripts:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -175,9 +175,12 @@ jobs:
   # Nothing here runs the tunnel, Screen Time or the extensions: they only
   # compile (they can't run in the Simulator and the build is unsigned).
   ios:
-    runs-on: [self-hosted, macOS, ARM64]
+    # Xcode 27 and the iOS 27 SDK (GitHub's Xcode 27 image, Apple Silicon only).
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v5
+      - name: Install xcodegen
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
       - name: Check for Xcode
         id: xcode
         run: |
@@ -194,7 +197,7 @@ jobs:
       - if: steps.xcode.outputs.enabled == 'true'
         uses: Swatinem/rust-cache@v2
       - if: steps.xcode.outputs.enabled == 'true'
-        name: Rust core, bindings and notices
+        name: Rust core, bindings, notices and the domain list
         run: |
           apps/ios/build-rust.sh
           release/notices/third-party.sh --install-cargo-about
@@ -226,9 +229,9 @@ jobs:
   # The macOS installer: build the unsigned, universal (arm64 + x86_64)
   # development package (a release package needs the project's Developer ID)
   # and check its payload, scripts and installer options without installing
-  # it. `macos-pkg-intel` then checks the same package on the Intel Mac.
+  # it. `macos-pkg-intel` then checks the same package on an Intel Mac.
   macos-pkg:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -249,14 +252,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # The universal package on the Intel Mac: check it (check-pkg.sh runs the
+  # The universal package on an Intel Mac: check it (check-pkg.sh runs the
   # x86_64 faro-service's model-check, so the packaged model is classified
   # with ONNX Runtime on Intel too), then expand it (never install it) and
   # start the x86_64 slice of each program with `--version`, which shows
   # the Intel slices load and run.
   macos-pkg-intel:
     needs: macos-pkg
-    runs-on: [self-hosted, macOS, X64]
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
@@ -289,14 +292,15 @@ jobs:
   # the MSI here is the one without the classifier. The release job ships
   # the model (-ModelDir) and the classifier.
   #
-  # Not for pull requests from forks: the job runs the PR's own code, and
-  # `check-msi.ps1` installs and uninstalls a service as SYSTEM on a shared,
-  # unsandboxed runner. The install half also runs only where the runner sets
-  # FARO_CHECK_MSI_INSTALL=1 (docs/DEVELOPMENT.md "CI runners").
+  # GitHub's Windows runners are elevated, throwaway VMs, so the install
+  # half always runs here (FARO_CHECK_MSI_INSTALL=1). Not for pull requests
+  # from forks, which run the PR's own code as an administrator.
   windows-msi:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-2025
     timeout-minutes: 90
+    env:
+      FARO_CHECK_MSI_INSTALL: "1"
     steps:
       - uses: actions/checkout@v5
       # The toolchain action's steps use `shell: bash`; see `test`.
@@ -338,15 +342,17 @@ jobs:
 
   # The model regression gate on the real, maintainer-curated test set
   # (docs/DEVELOPMENT.md "Model benchmark"). The set holds explicit imagery
-  # and lives only on the macOS runner, outside the repository: the job is
-  # skipped unless the runner's .env sets FARO_MODEL_EVAL_SET (the set) and
-  # FARO_MODEL_EVAL_MANIFEST (the model under test). Only the metrics JSON
+  # and never goes in the repository or an Actions cache, so GitHub's
+  # runners don't have it: the job is skipped unless the runner's
+  # environment sets FARO_MODEL_EVAL_SET (the set) and
+  # FARO_MODEL_EVAL_MANIFEST (the model under test), which today means it
+  # always skips. Only the metrics JSON
   # is uploaded, never an image or a per-image result. It runs on main only
   # (pushes and manual runs), never on a pull request, so changes to the
   # harness are reviewed before they run against the real set.
   model-eval:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     steps:
       - id: check
         run: |

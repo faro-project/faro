@@ -288,3 +288,137 @@ async fn an_installed_bundle_that_changed_is_removed_and_reported() {
         "{again:?}"
     );
 }
+
+/// A query for `name` as the tunnel reads it, and the reply's rcode.
+fn tunnel_rcode(f: &faro_mobile::DnsFilter, name: &str) -> u8 {
+    let mut m = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for l in name.split('.') {
+        m.push(l.len() as u8);
+        m.extend_from_slice(l.as_bytes());
+    }
+    m.extend_from_slice(&[0, 0, 1, 0, 1]);
+    let p = faro_dnsfilter::packet::build_udp(
+        "10.0.0.2:5000".parse().unwrap(),
+        "198.18.0.53:53".parse().unwrap(),
+        &m,
+    )
+    .unwrap();
+    match f.handle_packet(p, now(), true) {
+        faro_mobile::DnsStep::Reply { packets } => packets[0][28 + 3] & 0x0f,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tunnel_switches_to_a_newer_installed_bundle() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    // The packaged list: version 0.9.0, which doesn't list 1.0.0's host.
+    let dir = tempfile::tempdir().unwrap();
+    let packaged = {
+        let mut b = DomainCategorizerBuilder::new();
+        b.add_domain(&host("0.9.0"), Category::Adult).unwrap();
+        let bytes = b.build().unwrap().to_bytes();
+        std::fs::write(dir.path().join("domains.bin"), &bytes).unwrap();
+        let path = dir.path().join("domains.manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&domains_manifest("0.9.0", &bytes)).unwrap(),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let f = faro_mobile::DnsFilter::new(Some(packaged), None, None).unwrap();
+    // No upstream: an allowed name gets SERVFAIL (2), a blocked one 3.
+    assert_eq!(tunnel_rcode(&f, &host("1.0.0")), 2);
+    let c = core.clone();
+    let none_yet = blocking(move || f.refresh_domains(c).map(|v| (v, f))).await;
+    let (v, f) = none_yet.unwrap();
+    assert_eq!(v, None, "nothing installed");
+
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    blocking(move || c.update_domains(root).unwrap()).await;
+    let c = core.clone();
+    let (switched, again, f) = blocking(move || {
+        let s = f.refresh_domains(c.clone()).unwrap();
+        let a = f.refresh_domains(c).unwrap();
+        (s, a, f)
+    })
+    .await;
+    assert_eq!(switched.as_deref(), Some("1.0.0"));
+    assert_eq!(again, None, "already in use");
+    assert_eq!(f.status().domains_source, "installed");
+    assert_eq!(tunnel_rcode(&f, &host("1.0.0")), 3);
+    assert_eq!(tunnel_rcode(&f, &host("0.9.0")), 2);
+
+    // A packaged list newer than the installed one stays in use.
+    let dir2 = tempfile::tempdir().unwrap();
+    let newer = {
+        let mut b = DomainCategorizerBuilder::new();
+        b.add_domain(&host("2.0.0"), Category::Adult).unwrap();
+        let bytes = b.build().unwrap().to_bytes();
+        std::fs::write(dir2.path().join("domains.bin"), &bytes).unwrap();
+        let path = dir2.path().join("domains.manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&domains_manifest("2.0.0", &bytes)).unwrap(),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let f2 = faro_mobile::DnsFilter::new(Some(newer), None, None).unwrap();
+    let c = core.clone();
+    let (kept, f2) = blocking(move || (f2.refresh_domains(c).unwrap(), f2)).await;
+    assert_eq!(kept, None);
+    assert_eq!(f2.status().domains_version.as_deref(), Some("2.0.0"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn never_goes_below_the_installed_version() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.1.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let up = blocking(move || c.update_domains(root).unwrap()).await;
+    assert!(matches!(up, DomainsUpdate::Installed { .. }), "{up:?}");
+
+    // The mirror now lists only an older bundle (a stale or rolled back
+    // instance): older, and then equal, are both left alone.
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let (older, equal, installed) = blocking(move || {
+        let older = c.update_domains(root.clone());
+        let equal = c.update_domains(root);
+        (older, equal, c.installed_domains().unwrap())
+    })
+    .await;
+    assert!(matches!(older, Ok(DomainsUpdate::UpToDate)), "{older:?}");
+    assert!(matches!(equal, Ok(DomainsUpdate::UpToDate)), "{equal:?}");
+    assert_eq!(installed.unwrap().version, "1.1.0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bundle_the_instance_altered_is_never_installed() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.0.0")]).await;
+    // The instance swaps the stored bundle for its own bytes; the signed
+    // metadata still names the project's length and BLAKE3.
+    let mut swapped = 0;
+    let artifacts = ch.w.t.dir.path().join("data/updates/artifacts");
+    for e in std::fs::read_dir(&artifacts).unwrap().flatten() {
+        let len = e.metadata().unwrap().len() as usize;
+        std::fs::write(e.path(), vec![0u8; len]).unwrap();
+        swapped += 1;
+    }
+    assert!(swapped > 0, "found no stored bundle to alter");
+    let (c, root) = (core.clone(), ch.root());
+    let (got, installed) =
+        blocking(move || (c.update_domains(root), c.installed_domains().unwrap())).await;
+    assert!(got.is_err(), "{got:?}");
+    assert_eq!(installed, None);
+}

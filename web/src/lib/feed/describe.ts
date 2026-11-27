@@ -11,12 +11,14 @@ import type {
 	EventKind,
 	FilterOffCause,
 	FeedEntry,
+	Platform,
 	Rating,
 	Reason,
 	ServerAlertKind,
 	TamperSignal
 } from '../types.ts';
 import { date } from '../format.ts';
+import { describeIosSetting, type Tense } from './ios-settings.ts';
 
 export type Tone = 'urgent' | 'normal' | 'info' | 'good';
 
@@ -79,28 +81,76 @@ export interface Described {
 }
 
 /** A one-line description of a feed entry from its metadata alone. */
-export function describeEntry(e: FeedEntry, nameOf: NameOf, device: string): Described {
-	const d = describeMeta(e, nameOf, device);
-	return { ...d, title: d.title.charAt(0).toUpperCase() + d.title.slice(1) };
+export function describeEntry(
+	e: FeedEntry,
+	nameOf: NameOf,
+	device: string,
+	platform?: Platform
+): Described {
+	const d = describeMeta(e, nameOf, device, platform);
+	// "iPhone-X" keeps its small i.
+	const title = /^i[A-Z]/.test(d.title)
+		? d.title
+		: d.title.charAt(0).toUpperCase() + d.title.slice(1);
+	return { ...d, title };
 }
 
-function describeMeta(e: FeedEntry, nameOf: NameOf, device: string): Described {
+function describeMeta(
+	e: FeedEntry,
+	nameOf: NameOf,
+	device: string,
+	platform: Platform | undefined
+): Described {
 	const tone: Tone = e.type !== 'report' && e.urgency === 'urgent' ? 'urgent' : 'normal';
 	if (e.type === 'report') {
 		return { title: 'Daily report', text: device, tone: 'info' };
 	}
 	if (e.type === 'event') {
-		return { title: EVENT_TITLE[e.kind] ?? e.kind, text: device, tone };
+		const title =
+			platform === 'ios' && e.kind === 'goodbye'
+				? 'Faro stopped on an iPhone'
+				: (EVENT_TITLE[e.kind] ?? e.kind);
+		return { title, text: device, tone };
 	}
-	return describeAlert(e.kind, e.detail, nameOf, device, tone);
+	return describeAlert(e, e.kind, e.detail, nameOf, device, tone, platform);
+}
+
+/** The first platform any of the maps knows for a device, in order of trust. */
+export function platformOf(
+	id: string | null,
+	...maps: (Record<string, Platform> | undefined)[]
+): Platform | undefined {
+	if (!id) return undefined;
+	for (const m of maps) if (m && Object.hasOwn(m, id)) return m[id];
+	return undefined;
+}
+
+/**
+ * Whether a decrypted body can only come from an iPhone. The instance can't
+ * say what kind of device a feed entry is about (and an ally has no device
+ * list), so the page learns it from what it has decrypted.
+ */
+export function isIosBody(b: EventBody): boolean {
+	if (b.type === 'blocked_summary' || b.type === 'shield_summary') return true;
+	if (b.type === 'tamper') {
+		return (
+			b.signal.signal === 'screen_time_revoked' ||
+			b.signal.signal === 'filter_off' ||
+			b.signal.signal === 'settings_cleared' ||
+			b.signal.signal === 'jailbreak_suspected'
+		);
+	}
+	return false;
 }
 
 function describeAlert(
+	e: Extract<FeedEntry, { type: 'alert' }>,
 	kind: ServerAlertKind,
 	detail: string | null,
 	nameOf: NameOf,
 	device: string,
-	tone: Tone
+	tone: Tone,
+	platform: Platform | undefined
 ): Described {
 	const d = kv(detail);
 	const who = (id: string | undefined) => (id ? nameOf(id) : undefined);
@@ -113,6 +163,18 @@ function describeAlert(
 					title: `${device} is back online`,
 					text: d.silent_ms ? `It was silent for ${duration(Number(d.silent_ms))}.` : undefined,
 					tone: 'good'
+				};
+			}
+			if (platform === 'ios') {
+				// `since_ms` is when the silence began: the alert comes after the grace period.
+				const since = Number(d.since_ms);
+				const silent = since > 0 && e.ts_ms > since ? e.ts_ms - since : 0;
+				return {
+					title: silent
+						? `${device} hasn't checked in for ${duration(silent)}`
+						: `${device} hasn't checked in`,
+					text: `Its last report said it was ${STATE_TEXT[d.last_state] ?? 'in an unknown state'}. The phone may be switched off or out of signal, or Faro may have been removed.`,
+					tone
 				};
 			}
 			return {
@@ -303,7 +365,9 @@ function screenRecordingOff(s: TamperSignal): boolean {
  * A title for a decrypted event that says more than its kind's, or
  * `undefined` to keep the kind's ("Possible tampering").
  */
-export function bodyTitle(b: EventBody, device: string): string | undefined {
+export function bodyTitle(b: EventBody, device: string, platform?: Platform): string | undefined {
+	if (b.type === 'goodbye' && b.reason === 'uninstalled' && platform === 'ios')
+		return `Faro was removed from ${device}`;
 	if (b.type === 'tamper') {
 		const s = b.signal;
 		if (s.signal === 'screen_time_revoked') return `Screen Time protection is off on ${device}`;
@@ -458,7 +522,12 @@ export function describeReason(r: Reason): string {
 }
 
 /** Sentences for a decrypted event body. */
-export function describeBody(b: EventBody, device = 'this device', now = Date.now()): string[] {
+export function describeBody(
+	b: EventBody,
+	device = 'this device',
+	now = Date.now(),
+	platform?: Platform
+): string[] {
 	switch (b.type) {
 		case 'flag': {
 			const out = [
@@ -480,24 +549,37 @@ export function describeBody(b: EventBody, device = 'this device', now = Date.no
 				...(b.signal.signal === 'window_hidden_from_capture' ? [HIDDEN_WINDOW_CONTEXT] : [])
 			];
 		case 'settings_change': {
-			const lines = b.changes.map(settingChange);
-			if (b.requested_at === undefined && b.takes_effect_at === undefined) return lines;
+			const words = (tense: Tense) =>
+				b.changes.map((c) => describeIosSetting(c, device, tense) ?? settingChange(c));
+			if (b.requested_at === undefined && b.takes_effect_at === undefined)
+				return words({ when: 'done' });
 			const asked =
 				b.requested_at !== undefined ? ` (asked for ${whenText(b.requested_at, now)})` : '';
-			if (b.cancelled_at !== undefined)
-				return [
-					`The member cancelled this before it took effect, on ${whenText(b.cancelled_at, now)}. Nothing changed on ${device}.${asked}`,
-					...lines
-				];
-			if (b.takes_effect_at === undefined) return lines;
+			// iPhone settings read as sentences with the time in them; the
+			// plain "key: old → new" lines still need a sentence to say when.
+			const allWords = b.changes.every((c) => describeIosSetting(c, device) !== undefined);
+			if (b.cancelled_at !== undefined) {
+				const lead = `The member cancelled this before it took effect, on ${whenText(b.cancelled_at, now)}. Nothing changed on ${device}.${asked}`;
+				return [lead, ...words({ when: 'cancelled' })];
+			}
+			if (b.takes_effect_at === undefined) return words({ when: 'done' });
 			const delay = b.delay_secs
 				? ` after the member's ${duration(b.delay_secs * 1000)} delay`
 				: '';
+			const future = b.takes_effect_at > now;
+			const at = whenText(b.takes_effect_at, now);
+			if (allWords)
+				return [
+					...words({ when: future ? 'future' : 'past', at }),
+					future
+						? `${delay ? `That is${delay}. ` : ''}The member can still cancel it.${asked}`
+						: `${delay ? `That was${delay}.` : ''}${asked}`.trim()
+				].filter(Boolean);
 			return [
-				b.takes_effect_at > now
-					? `This will take effect on ${device} ${whenText(b.takes_effect_at, now)}${delay}. The member can still cancel it.${asked}`
-					: `This took effect on ${device} ${whenText(b.takes_effect_at, now)}${delay}.${asked}`,
-				...lines
+				future
+					? `This will take effect on ${device} ${at}${delay}. The member can still cancel it.${asked}`
+					: `This took effect on ${device} ${at}${delay}.${asked}`,
+				...words({ when: 'done' })
 			];
 		}
 		case 'blocked_summary': {
@@ -526,7 +608,12 @@ export function describeBody(b: EventBody, device = 'this device', now = Date.no
 		case 'resumed':
 			return ['Monitoring is running again.'];
 		case 'goodbye':
-			if (b.reason === 'uninstalled') return ['Faro was uninstalled from this computer.'];
+			if (b.reason === 'uninstalled')
+				return [
+					platform === 'ios'
+						? `Faro was removed from ${device}.`
+						: 'Faro was uninstalled from this computer.'
+				];
 			if (b.reason === 'account_deleted') return ['The member deleted their account.'];
 			return [`Faro moved to another instance (${b.reason.moved_instance.new_instance_host}).`];
 		case 'boot':
@@ -540,10 +627,24 @@ export function describeBody(b: EventBody, device = 'this device', now = Date.no
 
 /** Highlights of a daily report for its summary line. */
 export function reportSummary(r: DailyReport): string {
-	const total = r.counts.clean + r.counts.low + r.counts.medium + r.counts.high;
-	const parts = [`${total} screen check${total === 1 ? '' : 's'}`];
-	const flagged = r.counts.medium + r.counts.high;
-	parts.push(flagged ? `${flagged} flagged` : 'nothing flagged');
+	const parts: string[] = [];
+	if (r.ios) {
+		// An iPhone blocks; it has no screen checks to count.
+		const blocked = r.ios.blocked.reduce(
+			(n, d) => n + Object.values(d.by_category).reduce((a, b) => a + b, 0),
+			0
+		);
+		const opened = r.ios.shields.reduce((n, d) => n + d.shown, 0);
+		parts.push(`${blocked} blocked lookup${blocked === 1 ? '' : 's'}`);
+		parts.push(`${opened} blocked app${opened === 1 ? '' : 's'} opened`);
+		const bursts = r.flagged.length;
+		parts.push(bursts ? `${bursts} burst${bursts === 1 ? '' : 's'} flagged` : 'nothing flagged');
+	} else {
+		const total = r.counts.clean + r.counts.low + r.counts.medium + r.counts.high;
+		parts.push(`${total} screen check${total === 1 ? '' : 's'}`);
+		const flagged = r.counts.medium + r.counts.high;
+		parts.push(flagged ? `${flagged} flagged` : 'nothing flagged');
+	}
 	if (r.health.tamper.length)
 		parts.push(`${r.health.tamper.length} tamper signal${r.health.tamper.length === 1 ? '' : 's'}`);
 	return parts.join(' · ');

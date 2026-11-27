@@ -9,6 +9,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# A development build: a `dev_thresholds.json` may lower the burst
+# thresholds (docs/DEVELOPMENT.md, "lower only"). Never in a release build.
+dev = ["faro-dnsfilter/dev"]
+
 [lib]
 # `staticlib` for the XCFramework the app links (docs/IOS.md §13); `lib`
 # for the tests and for Rust callers such as the DNS filter.
@@ -20,6 +25,8 @@ faro-crypto.workspace = true
 faro-core.workspace = true
 faro-client.workspace = true
 faro-update.workspace = true
+# The packet tunnel's DNS filter engine (docs/IOS.md §7).
+faro-dnsfilter.workspace = true
 # Only the domain categorizer is used (`load_domains`); the `onnx` feature
 # stays off, so no ONNX Runtime is linked.
 faro-detect.workspace = true

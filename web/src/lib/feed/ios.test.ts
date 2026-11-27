@@ -2,15 +2,20 @@
 // Run with `npm test`.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
 	bodyTitle,
+	categoryCounts,
 	describeBody,
 	describeReason,
 	describeTamper,
-	IOS_LIMITS_NOTICE
+	hostsByCategory,
+	IOS_LIMITS_NOTICE,
+	reportSummary
 } from './describe.ts';
-import type { EventBody } from '../types.ts';
+import type { DailyReport, EventBody } from '../types.ts';
 
 const IPHONE = 'iPhone-X';
 
@@ -129,4 +134,92 @@ test('pending loosening: asked for, applied and cancelled', () => {
 	assert.deepEqual(describeBody({ type: 'settings_change', changes }, IPHONE, now), [
 		'gambling: blocked → allowed'
 	]);
+});
+
+// ---- the real shapes ------------------------------------------------------
+// `crates/faro-core/tests/data/ios-reports.json` is written by the device's
+// own report builder and event bodies (a Rust test checks it is current), so
+// these tests read what an iPhone really sends.
+
+const FIXTURE = JSON.parse(
+	readFileSync(
+		join(import.meta.dirname, '../../../../crates/faro-core/tests/data/ios-reports.json'),
+		'utf8'
+	)
+) as { report: DailyReport; events: EventBody[] };
+
+test('the device writes the iPhone section the web app reads', () => {
+	const ios = FIXTURE.report.ios;
+	assert.ok(ios, 'an iPhone report has the ios section');
+	assert.deepEqual(
+		ios.protection.map((p) => [p.screen_time, p.filter]),
+		[
+			[true, true],
+			[null, false]
+		]
+	);
+	assert.equal(ios.blocked.length, 1);
+	assert.equal(categoryCounts(ios.blocked[0].by_category), 'adult 6, gambling 2, encrypted dns 1');
+	assert.deepEqual(
+		hostsByCategory(ios.blocked[0].hosts).map((g) => [
+			g.category,
+			g.hosts.map((h) => `${h.host} ${h.count}`)
+		]),
+		[
+			['adult', ['a.example 5', 'b.example 1']],
+			['gambling', ['casino.example 2']]
+		]
+	);
+	assert.equal(ios.blocked[0].other_hosts, 3);
+	assert.deepEqual(
+		ios.shields.map((s) => [s.shown, s.closed]),
+		[[3, 2]]
+	);
+	assert.match(ios.loosenings?.[0].text ?? '', /^Asked for \(after a delay of 24 hours\)/);
+	// An iPhone report has no screen checks and no activity timeline.
+	assert.deepEqual(FIXTURE.report.timeline, []);
+});
+
+test('an iPhone report summary counts what it blocks, not screen checks', () => {
+	assert.equal(
+		reportSummary(FIXTURE.report),
+		'9 blocked lookups · 3 blocked apps opened · 1 burst flagged · 1 tamper signal'
+	);
+	const quiet: DailyReport = {
+		...FIXTURE.report,
+		flagged: [],
+		health: { ...FIXTURE.report.health, tamper: [] },
+		ios: { protection: [], blocked: [], shields: [] }
+	};
+	assert.equal(reportSummary(quiet), '0 blocked lookups · 0 blocked apps opened · nothing flagged');
+});
+
+test('the real event bodies read as the spec says', () => {
+	const [blocked, shield, flag, loosening] = FIXTURE.events;
+	assert.deepEqual(describeBody(blocked), [
+		'7 blocked lookups in 10 minutes: adult 5, gambling 2.',
+		'Adult: a.example (4), b.example (1).',
+		'Gambling: casino.example (2).',
+		'3 more lookups of other sites, not listed.'
+	]);
+	assert.deepEqual(describeBody(shield), [
+		'A blocked app was opened 3 times and the block screen was closed 2 times. Which apps is never recorded.'
+	]);
+	assert.equal(flag.type, 'flag');
+	assert.equal(
+		describeBody(flag)[0],
+		'Rated medium: dns:adult ×6, 4 hosts, 3 min, screen on (from blocked lookups).'
+	);
+	assert.ok(describeBody(flag).includes('Part of a burst of similar moments.'));
+	assert.equal(describeBody(loosening, IPHONE, 0)[1], 'blocking.gambling: on → off');
+});
+
+test('the flagged burst in the report carries the dns reason', () => {
+	const [moment] = FIXTURE.report.flagged;
+	assert.equal(moment.rating, 'medium');
+	assert.deepEqual(
+		moment.reasons.map((r) => r.source),
+		['dns']
+	);
+	assert.equal(moment.thumbnail, undefined);
 });

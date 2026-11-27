@@ -13,14 +13,15 @@ use crate::recipients::RecipientSet;
 use crate::urgency::{route_signal, SignalRoute};
 use faro_crypto::Zeroizing;
 use faro_crypto::{open_item, seal_item, verify_item, CryptoError, EncryptionKeypair, SigningKey};
-use faro_proto::body::{AppInfo, FlagBody, Rating, TamperSignal};
+use faro_proto::body::{AppInfo, BlockedHost, FlagBody, Rating, TamperSignal};
 use faro_proto::keys::ManifestRef;
 use faro_proto::report::{
-    ActivityState, CountedItem, DailyReport, FlaggedMoment, HealthSummary, RatingCounts,
-    ReportHeader, ReportUpload, TamperRecord, TimelineSpan,
+    ActivityState, BlockedDay, CountedItem, DailyReport, FlaggedMoment, HealthSummary, IosReport,
+    LooseningRecord, ProtectionSpan, RatingCounts, ReportHeader, ReportUpload, ShieldDay,
+    TamperRecord, TimelineSpan,
 };
 use faro_proto::{DeviceId, EncryptedItem, Hash32, InstanceId, SignPublicKey, UserId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// `DailyReport::v` / `ReportHeader::v` written by this crate.
 pub const REPORT_VERSION: u16 = 1;
@@ -91,6 +92,7 @@ pub struct ReportBuilder {
     capture_failures: u32,
     domains: HashMap<String, u32>,
     apps: HashMap<String, u32>,
+    ios: Option<IosReport>,
 }
 
 impl ReportBuilder {
@@ -125,7 +127,14 @@ impl ReportBuilder {
             capture_failures: 0,
             domains: HashMap::new(),
             apps: HashMap::new(),
+            ios: None,
         })
+    }
+
+    /// Add the iPhone section (docs/IOS.md §11), built by
+    /// [`IosReportBuilder`] for the same period.
+    pub fn set_ios(&mut self, ios: IosReport) {
+        self.ios = Some(ios);
     }
 
     pub fn period(&self) -> (i64, i64) {
@@ -301,7 +310,14 @@ impl ReportBuilder {
 
     /// Produce the report.
     pub fn finish(mut self) -> DailyReport {
-        let timeline = self.timeline();
+        // An iPhone blocks; it has no activity timeline. Its protection
+        // timeline is in the iPhone section, and an `off` span here would
+        // claim the phone was off.
+        let timeline = if self.ios.is_some() {
+            Vec::new()
+        } else {
+            self.timeline()
+        };
         let unmonitored_ms: i64 = timeline
             .iter()
             .filter(|s| s.state == ActivityState::Unmonitored)
@@ -335,6 +351,7 @@ impl ReportBuilder {
             flagged: self.flagged,
             top_domains: self.opts.share_top_domains.then(|| top_n(self.domains)),
             top_apps: self.opts.share_top_apps.then(|| top_n(self.apps)),
+            ios: self.ios,
             health: HealthSummary {
                 tamper: self.tamper,
                 context: self.context,
@@ -342,6 +359,213 @@ impl ReportBuilder {
                 capture_failures: self.capture_failures,
                 unmonitored_secs: u64::try_from(unmonitored_ms / 1000).unwrap_or(0),
             },
+        }
+    }
+}
+
+const DAY_MS: i64 = 86_400_000;
+/// A protection sample the tunnel records every 10 minutes covers at most
+/// this long: if the next one is later, the time between is not claimed.
+pub const PROTECTION_SAMPLE_COVER_MS: i64 = 25 * 60 * 1000;
+/// Most hosts listed for one day. Lookups of the rest still count in the
+/// day's categories and in `other_hosts`.
+pub const MAX_REPORT_HOSTS_PER_DAY: usize = 500;
+/// Cap on loosening lines kept per report.
+pub const MAX_REPORT_LOOSENINGS: usize = 100;
+
+/// Builds the iPhone section of a report (docs/IOS.md §11) from what the
+/// device logged: the same blocked and shield summaries it sent as events,
+/// protection samples from the tunnel, and loosenings. Pure: no clock, no
+/// storage.
+///
+/// "Day" is the report's own day: entries start at the period's start and
+/// step a day at a time, so a normal daily report has one entry of each.
+#[derive(Debug, Clone)]
+pub struct IosReportBuilder {
+    start_ms: i64,
+    end_ms: i64,
+    samples: Vec<(i64, Option<bool>, bool)>,
+    blocked: BTreeMap<i64, DayBlocked>,
+    shields: BTreeMap<i64, (u32, u32)>,
+    loosenings: Vec<LooseningRecord>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DayBlocked {
+    by_category: BTreeMap<String, u32>,
+    hosts: BTreeMap<(String, String), u32>,
+    other_hosts: u32,
+}
+
+impl IosReportBuilder {
+    pub fn new(period_start_ms: i64, period_end_ms: i64) -> Self {
+        IosReportBuilder {
+            start_ms: period_start_ms,
+            end_ms: period_end_ms,
+            samples: Vec::new(),
+            blocked: BTreeMap::new(),
+            shields: BTreeMap::new(),
+            loosenings: Vec::new(),
+        }
+    }
+
+    fn in_period(&self, ts: i64) -> bool {
+        ts >= self.start_ms && ts < self.end_ms
+    }
+
+    fn day_of(&self, ts: i64) -> i64 {
+        self.start_ms + (ts - self.start_ms).div_euclid(DAY_MS) * DAY_MS
+    }
+
+    /// Add one blocked-lookup bucket (a `blocked_summary` body), filed under
+    /// the day its bucket starts in. Returns whether it is in the period.
+    pub fn record_blocked(
+        &mut self,
+        bucket_start: i64,
+        by_category: &BTreeMap<String, u32>,
+        hosts: &[BlockedHost],
+        other_hosts: u32,
+    ) -> bool {
+        if !self.in_period(bucket_start) {
+            return false;
+        }
+        let day = self.day_of(bucket_start);
+        let d = self.blocked.entry(day).or_default();
+        for (c, n) in by_category {
+            let e = d.by_category.entry(c.clone()).or_insert(0);
+            *e = e.saturating_add(*n);
+        }
+        d.other_hosts = d.other_hosts.saturating_add(other_hosts);
+        for h in hosts {
+            let e = d
+                .hosts
+                .entry((h.category.clone(), h.host.clone()))
+                .or_insert(0);
+            *e = e.saturating_add(h.count);
+        }
+        true
+    }
+
+    /// Add one shield bucket (a `shield_summary` body).
+    pub fn record_shield(&mut self, bucket_start: i64, shown: u32, closed: u32) -> bool {
+        if !self.in_period(bucket_start) {
+            return false;
+        }
+        let e = self.shields.entry(self.day_of(bucket_start)).or_default();
+        e.0 = e.0.saturating_add(shown);
+        e.1 = e.1.saturating_add(closed);
+        true
+    }
+
+    /// A protection sample: at `ts_ms` the filter was `filter` and Screen
+    /// Time `screen_time` (`None` when not known). Samples before the period
+    /// count too (the last one before it says how the period opened).
+    pub fn record_protection(&mut self, ts_ms: i64, screen_time: Option<bool>, filter: bool) {
+        if ts_ms < self.end_ms {
+            self.samples.push((ts_ms, screen_time, filter));
+        }
+    }
+
+    /// A loosening asked for, applied or cancelled, in words.
+    pub fn record_loosening(&mut self, ts_ms: i64, text: &str) -> bool {
+        if !self.in_period(ts_ms) || self.loosenings.len() >= MAX_REPORT_LOOSENINGS {
+            return false;
+        }
+        self.loosenings.push(LooseningRecord {
+            ts_ms,
+            text: text.to_owned(),
+        });
+        true
+    }
+
+    /// The protection timeline. Each sample runs to the next one, but a
+    /// sample that says the filter is on claims at most
+    /// [`PROTECTION_SAMPLE_COVER_MS`]: after that the tunnel simply didn't
+    /// say, and the report doesn't pretend it did. A sample that says it is
+    /// off runs until the next, whatever the gap: that is the state it was
+    /// left in. Spans are clipped to the period and merged.
+    fn spans(&mut self) -> Vec<ProtectionSpan> {
+        self.samples.sort_by_key(|s| s.0);
+        let mut out: Vec<ProtectionSpan> = Vec::new();
+        for (i, &(ts, screen_time, filter)) in self.samples.iter().enumerate() {
+            let next = self.samples.get(i + 1).map(|s| s.0);
+            let mut end = next.unwrap_or(self.end_ms).min(self.end_ms);
+            if filter {
+                end = end.min(ts.saturating_add(PROTECTION_SAMPLE_COVER_MS));
+            }
+            let start = ts.max(self.start_ms);
+            if end <= start {
+                continue;
+            }
+            match out.last_mut() {
+                Some(l)
+                    if l.end_ms == start && l.screen_time == screen_time && l.filter == filter =>
+                {
+                    l.end_ms = end;
+                }
+                _ => out.push(ProtectionSpan {
+                    start_ms: start,
+                    end_ms: end,
+                    screen_time,
+                    filter,
+                }),
+            }
+        }
+        out
+    }
+
+    pub fn finish(mut self) -> IosReport {
+        let protection = self.spans();
+        let blocked = self
+            .blocked
+            .into_iter()
+            .map(|(day_start_ms, d)| {
+                let mut hosts: Vec<BlockedHost> = d
+                    .hosts
+                    .into_iter()
+                    .map(|((category, host), count)| BlockedHost {
+                        host,
+                        category,
+                        count,
+                    })
+                    .collect();
+                let mut other_hosts = d.other_hosts;
+                if hosts.len() > MAX_REPORT_HOSTS_PER_DAY {
+                    hosts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.host.cmp(&b.host)));
+                    for h in hosts.split_off(MAX_REPORT_HOSTS_PER_DAY) {
+                        other_hosts = other_hosts.saturating_add(h.count);
+                    }
+                }
+                hosts.sort_by(|a, b| {
+                    (a.category.as_str(), b.count, a.host.as_str()).cmp(&(
+                        b.category.as_str(),
+                        a.count,
+                        b.host.as_str(),
+                    ))
+                });
+                BlockedDay {
+                    day_start_ms,
+                    by_category: d.by_category,
+                    hosts,
+                    other_hosts,
+                }
+            })
+            .collect();
+        let shields = self
+            .shields
+            .into_iter()
+            .map(|(day_start_ms, (shown, closed))| ShieldDay {
+                day_start_ms,
+                shown,
+                closed,
+            })
+            .collect();
+        self.loosenings.sort_by_key(|l| l.ts_ms);
+        IosReport {
+            protection,
+            blocked,
+            shields,
+            loosenings: self.loosenings,
         }
     }
 }
@@ -836,6 +1060,251 @@ mod tests {
             ),
             Err(ReportError::RecipientMismatch { .. })
         ));
+    }
+
+    fn host(h: &str, c: &str, n: u32) -> BlockedHost {
+        BlockedHost {
+            host: h.into(),
+            category: c.into(),
+            count: n,
+        }
+    }
+
+    #[test]
+    fn ios_section_sums_buckets_per_day_and_lists_hosts() {
+        let mut b = IosReportBuilder::new(T0, T0 + 2 * DAY);
+        let cats = |a: u32, g: u32| -> BTreeMap<String, u32> {
+            [("adult".to_owned(), a), ("gambling".to_owned(), g)].into()
+        };
+        assert!(b.record_blocked(
+            T0 + 600_000,
+            &cats(3, 1),
+            &[host("a.test", "adult", 2), host("b.test", "adult", 1)],
+            1
+        ));
+        assert!(b.record_blocked(
+            T0 + 1_200_000,
+            &cats(2, 0),
+            &[host("a.test", "adult", 2), host("g.test", "gambling", 1)],
+            0
+        ));
+        assert!(b.record_blocked(T0 + DAY + 5, &cats(1, 0), &[host("a.test", "adult", 1)], 0));
+        assert!(!b.record_blocked(T0 - 1, &cats(9, 9), &[], 0), "before");
+        assert!(
+            !b.record_blocked(T0 + 2 * DAY, &cats(9, 9), &[], 0),
+            "after"
+        );
+        assert!(b.record_shield(T0 + 5, 2, 1));
+        assert!(b.record_shield(T0 + 700_000, 1, 1));
+        assert!(!b.record_shield(T0 + 3 * DAY, 1, 1));
+        assert!(b.record_loosening(T0 + 9, "Gambling will be unblocked"));
+        let r = b.finish();
+        assert_eq!(r.blocked.len(), 2);
+        assert_eq!(r.blocked[0].day_start_ms, T0);
+        assert_eq!(r.blocked[0].by_category["adult"], 5);
+        assert_eq!(r.blocked[0].other_hosts, 1);
+        let listed: Vec<(&str, u32)> = r.blocked[0]
+            .hosts
+            .iter()
+            .map(|h| (h.host.as_str(), h.count))
+            .collect();
+        assert_eq!(listed, [("a.test", 4), ("b.test", 1), ("g.test", 1)]);
+        assert_eq!(r.blocked[1].day_start_ms, T0 + DAY);
+        assert_eq!(
+            r.shields,
+            [ShieldDay {
+                day_start_ms: T0,
+                shown: 3,
+                closed: 2
+            }]
+        );
+        assert_eq!(r.loosenings.len(), 1);
+    }
+
+    #[test]
+    fn ios_hosts_over_the_cap_fold_into_other_hosts() {
+        let mut b = IosReportBuilder::new(T0, T0 + DAY);
+        let hosts: Vec<_> = (0..MAX_REPORT_HOSTS_PER_DAY + 3)
+            .map(|i| host(&format!("h{i:04}.test"), "adult", 1))
+            .collect();
+        b.record_blocked(T0, &BTreeMap::new(), &hosts, 2);
+        let d = &b.finish().blocked[0];
+        assert_eq!(d.hosts.len(), MAX_REPORT_HOSTS_PER_DAY);
+        assert_eq!(d.other_hosts, 5);
+    }
+
+    #[test]
+    fn ios_protection_samples_become_spans_without_claiming_gaps() {
+        let m = 60_000;
+        let mut b = IosReportBuilder::new(T0, T0 + DAY);
+        // Before the period: the filter was off and stays off until T0+10m.
+        b.record_protection(T0 - 5 * m, Some(true), false);
+        b.record_protection(T0 + 10 * m, Some(true), true);
+        b.record_protection(T0 + 20 * m, Some(true), true);
+        // Silence for hours: the last "on" claims only its cover time.
+        b.record_protection(T0 + 5 * 3600 * 1000, None, true);
+        b.record_protection(T0 + 5 * 3600 * 1000 + 10 * m, None, false);
+        let r = b.finish().protection;
+        let s = |a: i64, e: i64, st: Option<bool>, f: bool| ProtectionSpan {
+            start_ms: a,
+            end_ms: e,
+            screen_time: st,
+            filter: f,
+        };
+        let h5 = 5 * 3600 * 1000;
+        assert_eq!(
+            r,
+            [
+                s(T0, T0 + 10 * m, Some(true), false),
+                s(T0 + 10 * m, T0 + 20 * m + 25 * m, Some(true), true),
+                s(T0 + h5, T0 + h5 + 10 * m, None, true),
+                s(T0 + h5 + 10 * m, T0 + DAY, None, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_ios_section_rides_in_the_report_and_older_reports_still_parse() {
+        let mut rb = builder(ReportOptions::default());
+        let mut ib = IosReportBuilder::new(T0, T0 + DAY);
+        ib.record_shield(T0, 1, 0);
+        rb.set_ios(ib.finish());
+        let r = rb.finish();
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["ios"]["shields"][0]["shown"], 1);
+        assert!(
+            json["ios"].get("loosenings").is_none(),
+            "left out when empty"
+        );
+        // A report without the section (any platform before this) parses.
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("ios");
+        let back: DailyReport = serde_json::from_value(old).unwrap();
+        assert!(back.ios.is_none());
+        assert!(serde_json::to_value(&back).unwrap().get("ios").is_none());
+    }
+
+    /// The iPhone report and event bodies, as the device writes them. The web
+    /// app's tests read the same file (`web/src/lib/feed/ios.test.ts`), so
+    /// the shapes can't drift apart. After changing a shape, rewrite it with
+    /// `FARO_UPDATE_FIXTURES=1 cargo test -p faro-core ios_fixture`.
+    #[test]
+    fn ios_fixture_is_what_the_device_writes() {
+        use faro_proto::body::{
+            EventBody, FilterOffCause, Reason, ReasonSource, SettingChange, TamperSignal,
+        };
+        use faro_proto::report::TamperRecord;
+        let m = 60_000;
+        let mut ib = IosReportBuilder::new(T0, T0 + DAY);
+        ib.record_protection(T0, Some(true), true);
+        ib.record_protection(T0 + 10 * m, Some(true), true);
+        ib.record_protection(T0 + 20 * m, None, false);
+        ib.record_blocked(
+            T0 + 10 * m,
+            &[("adult".to_owned(), 5), ("gambling".to_owned(), 2)].into(),
+            &[
+                host("a.example", "adult", 4),
+                host("b.example", "adult", 1),
+                host("casino.example", "gambling", 2),
+            ],
+            3,
+        );
+        ib.record_blocked(
+            T0 + 20 * m,
+            &[("adult".to_owned(), 1), ("encrypted_dns".to_owned(), 1)].into(),
+            &[host("a.example", "adult", 1)],
+            0,
+        );
+        ib.record_shield(T0 + 15 * m, 3, 2);
+        ib.record_loosening(
+            T0 + 30 * m,
+            "Asked for (after a delay of 24 hours): blocking.gambling: on → off",
+        );
+        let dns_flag = FlagBody {
+            rating: Rating::Medium,
+            reasons: vec![Reason {
+                source: ReasonSource::Dns,
+                label: "dns:adult ×6, 4 hosts, 3 min, screen on".into(),
+                score: None,
+            }],
+            app: None,
+            window_title: None,
+            browser: None,
+            thumbnail: None,
+            burst: true,
+            account: None,
+        };
+        let mut rb = builder(ReportOptions::default());
+        rb.record_flag(7, T0 + 12 * m, &dns_flag);
+        rb.record_tamper(TamperRecord {
+            seq: Some(9),
+            ts_ms: T0 + 20 * m,
+            signal: TamperSignal::FilterOff {
+                cause: FilterOffCause::VpnDisconnected,
+            },
+            account: None,
+        });
+        rb.record_context(TamperRecord {
+            seq: None,
+            ts_ms: T0 + 40 * m,
+            signal: TamperSignal::DohDropped,
+            account: None,
+        });
+        rb.record_seq(11);
+        rb.set_ios(ib.finish());
+        let report = serde_json::to_value(rb.finish()).unwrap();
+        let events = serde_json::json!([
+            serde_json::to_value(EventBody::BlockedSummary {
+                bucket_start: T0 + 10 * m,
+                bucket_secs: 600,
+                by_category: [("adult".to_owned(), 5), ("gambling".to_owned(), 2)].into(),
+                hosts: vec![
+                    host("a.example", "adult", 4),
+                    host("b.example", "adult", 1),
+                    host("casino.example", "gambling", 2)
+                ],
+                other_hosts: 3,
+            })
+            .unwrap(),
+            serde_json::to_value(EventBody::ShieldSummary {
+                bucket_start: T0 + 5 * m,
+                bucket_secs: 600,
+                shown: 3,
+                closed: 2,
+            })
+            .unwrap(),
+            serde_json::to_value(EventBody::Flag(dns_flag)).unwrap(),
+            serde_json::to_value(EventBody::SettingsChange {
+                changes: vec![SettingChange {
+                    key: "blocking.gambling".into(),
+                    old: Some("on".into()),
+                    new: Some("off".into()),
+                }],
+                requested_at: Some(T0),
+                takes_effect_at: Some(T0 + DAY),
+                cancelled_at: None,
+                delay_secs: Some(86_400),
+            })
+            .unwrap(),
+        ]);
+        let fixture = serde_json::json!({ "report": report, "events": events });
+
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ios-reports.json");
+        if std::env::var_os("FARO_UPDATE_FIXTURES").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let text = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+            std::fs::write(&path, text).unwrap();
+        }
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect(
+                "tests/data/ios-reports.json is missing: FARO_UPDATE_FIXTURES=1 cargo test -p faro-core ios_fixture",
+            ))
+            .unwrap();
+        assert_eq!(
+            on_disk, fixture,
+            "the iPhone fixture is out of date: FARO_UPDATE_FIXTURES=1 cargo test -p faro-core ios_fixture"
+        );
     }
 
     fn state() -> impl Strategy<Value = ActivityState> {

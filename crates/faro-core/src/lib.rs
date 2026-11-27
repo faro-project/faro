@@ -47,7 +47,8 @@ pub use clock::{Clock, ClockGuard, ClockGuardConfig, ClockObservation, ManualClo
 pub use outbox::{ManifestAnchor, Outbox, OutboxError, PruneOutcome, PrunePolicy, PrunedRange};
 pub use recipients::{ManifestDecision, RecipientError, RecipientSet};
 pub use report::{
-    open_report, seal_report, ReportBuilder, ReportError, ReportOptions, SealedReport,
+    open_report, seal_report, IosReportBuilder, ReportBuilder, ReportError, ReportOptions,
+    SealedReport,
 };
 pub use request::sign_request;
 pub use scheduler::{

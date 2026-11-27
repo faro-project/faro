@@ -16,6 +16,7 @@ base64.workspace = true
 hex.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -28,8 +28,9 @@
 //!
 
 use crate::api::{
-    account, admin, allies, auth, branding, devices, events, feed, heartbeat, invites, keys,
-    manifests, prefs, privacy, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, group_listing, group_posts,
+    group_roster, group_sharing, groups, heartbeat, invites, keys, manifests, prefs, privacy,
+    proposals, reach_outs, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -118,9 +119,12 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/v1/invites/{token}/accept",
-            post(invites::accept.layer(limited)),
+            post(invites::accept.layer(limited.clone())),
         )
-        .route("/v1/me/ally-key", get(invites::get_my_ally_key))
+        .route(
+            "/v1/me/ally-key",
+            get(invites::get_my_ally_key).put(group_roster::put_my_enc_key),
+        )
         .route(
             "/v1/me/ally-key/challenge",
             post(invites::ally_key_challenge),
@@ -136,6 +140,153 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/v1/ally/members/{member_id}", delete(allies::leave))
         .route("/v1/ally/feed", get(feed::get_feed))
         .route("/v1/blobs/{id}", get(feed::get_blob))
+        // Groups (docs/GROUPS.md).
+        .route("/v1/groups", get(groups::list_mine).post(groups::create))
+        .route(
+            "/v1/groups/{id}",
+            get(groups::get)
+                .patch(groups::patch)
+                .delete(groups::archive),
+        )
+        .route("/v1/groups/{id}/participants", get(groups::roster))
+        .route("/v1/groups/{id}/history", get(groups::history))
+        .route("/v1/groups/{id}/me/allies", get(groups::my_allies_here))
+        .route("/v1/groups/{id}/user-search", get(groups::user_search))
+        // Opt-in sharing and pairing suggestions (GROUPS.md §8.2, §8.5).
+        .route(
+            "/v1/groups/{id}/me/sharing",
+            put(group_sharing::set_sharing),
+        )
+        .route(
+            "/v1/groups/{id}/participants/{user_id}/allies",
+            get(group_sharing::shared_allies),
+        )
+        .route(
+            "/v1/groups/{id}/suggestions",
+            get(group_sharing::posted).post(group_sharing::suggest),
+        )
+        .route(
+            "/v1/groups/{id}/suggestions/{suggestion_id}",
+            delete(group_sharing::withdraw),
+        )
+        .route(
+            "/v1/groups/{id}/me/suggestions",
+            get(group_sharing::my_cards),
+        )
+        .route(
+            "/v1/groups/{id}/me/suggestions/{suggestion_id}/dismiss",
+            post(group_sharing::dismiss),
+        )
+        .route(
+            "/v1/groups/{id}/invites",
+            get(groups::list_invites).post(groups::create_invites),
+        )
+        .route("/v1/groups/{id}/me", delete(groups::leave))
+        .route(
+            "/v1/groups/{id}/participants/{user_id}",
+            delete(groups::remove),
+        )
+        .route(
+            "/v1/groups/{id}/participants/{user_id}/role",
+            put(groups::set_role),
+        )
+        .route(
+            "/v1/groups/{id}/facilitator-offer/accept",
+            post(groups::accept_facilitator_offer),
+        )
+        .route(
+            "/v1/groups/{id}/facilitator-offer/decline",
+            post(groups::decline_facilitator_offer),
+        )
+        // Alliance proposals (GROUPS.md §7). None of these activates a
+        // link: only `POST /v1/me/allies/{ally_id}/approve` does.
+        .route("/v1/groups/{id}/proposals", post(proposals::create))
+        .route("/v1/me/proposals", get(proposals::list_mine))
+        .route("/v1/proposals/{id}", delete(proposals::withdraw))
+        .route("/v1/proposals/{id}/accept", post(proposals::accept))
+        .route("/v1/proposals/{id}/decline", post(proposals::decline))
+        .route("/v1/me/proposal-blocks", get(proposals::list_blocks))
+        .route(
+            "/v1/me/proposal-blocks/{user_id}",
+            put(proposals::put_block).delete(proposals::delete_block),
+        )
+        // Reach out and signed, encrypted messages (GROUPS.md §8.3, §10.2).
+        .route(
+            "/v1/groups/{id}/posts",
+            get(group_posts::feed).post(group_posts::create),
+        )
+        .route("/v1/me/message-recipients", get(reach_outs::recipients))
+        .route(
+            "/v1/me/reach-outs",
+            get(reach_outs::list_mine).post(reach_outs::create),
+        )
+        .route("/v1/reach-outs/{id}/answer", post(reach_outs::answer))
+        .route("/v1/group-messages/{id}", get(reach_outs::get_message))
+        .route("/v1/me/reach-out-settings", get(reach_outs::settings))
+        .route(
+            "/v1/me/quiet-hours-bypass/{user_id}",
+            put(reach_outs::put_bypass).delete(reach_outs::delete_bypass),
+        )
+        .route(
+            "/v1/me/reach-out-prefs/{user_id}",
+            put(reach_outs::put_prefs),
+        )
+        .route("/v1/group-directory", get(group_listing::directory))
+        .route(
+            "/v1/groups/{id}/join-requests",
+            get(group_listing::list_requests).post(group_listing::create_request),
+        )
+        .route(
+            "/v1/groups/{id}/join-requests/me",
+            delete(group_listing::withdraw_request),
+        )
+        .route("/v1/me/join-requests", get(group_listing::my_requests))
+        .route(
+            "/v1/join-requests/{id}/accept",
+            post(group_listing::accept_request),
+        )
+        .route(
+            "/v1/join-requests/{id}/decline",
+            post(group_listing::decline_request),
+        )
+        .route(
+            "/v1/groups/{id}/me/meeting-reminders",
+            put(group_listing::set_reminders),
+        )
+        .route("/v1/me/group-invites", get(groups::my_invites))
+        .route(
+            "/v1/group-invites/{token}",
+            get(groups::get_invite.layer(limited.clone())),
+        )
+        .route(
+            "/v1/group-invites/{token}/accept",
+            post(groups::accept_invite.layer(limited.clone())),
+        )
+        .route(
+            "/v1/group-invites/{token}/decline",
+            post(groups::decline_invite.layer(limited)),
+        )
+        // Group roster log and epoch keys (GROUPS.md §10.3, Phase C).
+        .route(
+            "/v1/groups/{id}/roster",
+            get(group_roster::get_roster).post(group_roster::post_entry),
+        )
+        .route(
+            "/v1/groups/{id}/roster/snapshot",
+            get(group_roster::get_snapshot).post(group_roster::post_snapshot),
+        )
+        .route(
+            "/v1/groups/{id}/roster/pending",
+            get(group_roster::get_pending),
+        )
+        .route(
+            "/v1/groups/{id}/epoch-key",
+            get(group_roster::get_epoch_key),
+        )
+        .route(
+            "/v1/me/group-sign-key",
+            get(group_roster::get_my_sign_key).put(group_roster::put_my_sign_key),
+        )
         // Preferences.
         .route(
             "/v1/me/notification-prefs",
@@ -179,6 +330,12 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route("/admin/api/users/{id}/admin", put(admin::set_admin_role))
         .route("/admin/api/log", get(admin::log))
+        .route("/admin/api/groups", get(admin::list_groups))
+        .route("/admin/api/groups/{id}", delete(admin::archive_group))
+        .route(
+            "/admin/api/groups/{id}/listed",
+            put(admin::set_group_listed),
+        )
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),
