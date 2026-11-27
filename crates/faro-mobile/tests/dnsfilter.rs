@@ -323,3 +323,47 @@ fn the_tunnel_routes_only_its_dns_address_and_the_resolver_list() {
     listed.sort();
     assert_eq!(routed, listed, "nothing but the resolver list");
 }
+
+/// A TCP SYN from `src` to `dst`: what DNS over HTTPS or TLS to a
+/// hard-coded resolver looks like in the tunnel.
+fn tcp_syn(src: std::net::Ipv4Addr, dst: std::net::Ipv4Addr, port: u16) -> Vec<u8> {
+    let mut p = vec![0u8; 40];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&40u16.to_be_bytes());
+    p[8] = 64;
+    p[9] = 6; // TCP
+    p[12..16].copy_from_slice(&src.octets());
+    p[16..20].copy_from_slice(&dst.octets());
+    p[20..22].copy_from_slice(&50_000u16.to_be_bytes());
+    p[22..24].copy_from_slice(&port.to_be_bytes());
+    p[32] = 0x50;
+    p[33] = 0x02; // SYN
+    p
+}
+
+#[test]
+fn drops_to_the_known_resolvers_are_counted_and_nothing_else() {
+    let f = DnsFilter::new(None, None, None).unwrap();
+    let resolver = RESOLVER_ADDRS
+        .iter()
+        .find_map(|a| match a {
+            std::net::IpAddr::V4(v4) => Some(*v4),
+            std::net::IpAddr::V6(_) => None,
+        })
+        .expect("an IPv4 resolver");
+    let me = std::net::Ipv4Addr::new(10, 0, 0, 2);
+    assert_eq!(f.take_doh_dropped(), 0);
+    for port in [443, 853] {
+        assert_eq!(
+            f.handle_packet(tcp_syn(me, resolver, port), T0, true),
+            DnsStep::Nothing
+        );
+    }
+    // A query to the tunnel's DNS address, even one dropped as malformed,
+    // is not a resolver bypass.
+    let tunnel_dns: SocketAddr = format!("{}:53", tunnel_network().ipv4_dns).parse().unwrap();
+    let junk = build_udp(client(), tunnel_dns, &[0u8; 3]).unwrap();
+    assert_eq!(f.handle_packet(junk, T0, true), DnsStep::Nothing);
+    assert_eq!(f.take_doh_dropped(), 2);
+    assert_eq!(f.take_doh_dropped(), 0, "taking resets the count");
+}

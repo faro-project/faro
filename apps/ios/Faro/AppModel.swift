@@ -19,6 +19,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var onDemandOn = false
     @Published private(set) var notificationsOn = true
     @Published private(set) var loaded = false
+    /// Who this phone reports to, from the recipient list the member signed.
+    @Published private(set) var recipients: RecipientsInfo?
+    /// Leave Faro, once the member has started it.
+    @Published private(set) var leave: LeaveFlow?
 
     let notices = NoticeTapHandler()
     private var group: AppGroup?
@@ -66,12 +70,18 @@ final class AppModel: ObservableObject {
             flow = SetupFlow.resume(
                 enrolled: s.enrolled, approved: s.approved,
                 progress: progressStore?.load() ?? SetupProgress())
+            leave = LeaveFlow.resume(leaving: s.leaving, goodbyeDelivered: s.goodbyeDelivered)
         case .failure(let e):
             flow = SetupFlow()
             flow.apply(.failed(describe(e)))
         }
         loaded = true
+        if leave?.mayLift == true {
+            await lift()
+            return
+        }
         await refreshPlatformState()
+        await watch()
     }
 
     func refreshPlatformState() async {
@@ -84,6 +94,171 @@ final class AppModel: ObservableObject {
     func refreshStatus() async {
         guard let core = try? openCore() else { return }
         if let s = try? await Task.detached(operation: { try core.status() }).value { status = s }
+        await refreshPlatformState()
+    }
+
+    // MARK: Watching (docs/IOS.md §10.2)
+
+    /// Each time the app comes forward (after the first load).
+    func foreground() async {
+        guard loaded else { return }
+        if leave != nil { return }
+        if flow.step == .done {
+            await refreshStatus()
+            await watch()
+        } else if progressStore?.load().screenTimeDone == true, ScreenTime.isAuthorized {
+            // Mid-setup: keep the settings applied (docs/IOS.md §6.3).
+            ScreenTimeEnforcer.reapplySavedSettings(group: group)
+        }
+    }
+
+    /// What the app checks each time it comes forward, once setup is done:
+    /// Screen Time authorization, the "faro" store (re-applied), Faro's VPN
+    /// configuration (`NEVPNManager` status, with the best cause if the
+    /// filter is off), and the context signals. What it finds goes into the
+    /// tamper ledger with what the monitor and the tunnel found, and is
+    /// recorded and uploaded from here, with a heartbeat (§10.1: the app
+    /// checks in whenever it runs, so a phone whose tunnel is off still
+    /// does).
+    func watch() async {
+        guard leave == nil, flow.step == .done, let group, let s = status, s.approved, !s.leaving,
+              let core = try? openCore()
+        else { return }
+        let ledger = TamperLedger(group: group)
+        let progress = progressStore?.load() ?? SetupProgress()
+
+        if progress.screenTimeDone {
+            var verdict = try? ledger.update {
+                $0.sawScreenTime(approved: ScreenTime.isAuthorized, source: .app, nowMs: Self.nowMs())
+            }
+            if verdict == .recheck {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                verdict = try? ledger.update {
+                    $0.sawScreenTime(approved: ScreenTime.isAuthorized, source: .app, nowMs: Self.nowMs())
+                }
+            }
+            if ScreenTimeEnforcer.reapplyAndCheck(group: group, ledger: ledger, nowMs: Self.nowMs()) {
+                ScreenTimeEnforcer.startMonitoring()
+            }
+        }
+
+        var otherVPN = false
+        if progress.tunnelDone, let vpn = await TunnelInstaller.snapshot() {
+            otherVPN = vpn.otherVPN
+            let now = Self.nowMs()
+            switch FilterVerdict.of(vpn) {
+            case .on: try? ledger.update { $0.sawOn(.filter) }
+            case .off(let cause): try? ledger.update { $0.sawOff(.filterOff(cause), nowMs: now) }
+            case .waiting: break
+            }
+        }
+
+        let jailbroken = DeviceContext.jailbreakSuspected()
+        let info: RecipientsInfo? = await Task.detached {
+            TamperLink.drain(ledger, into: core)
+            let now = TamperLink.nowMs()
+            if otherVPN {
+                TamperLink.context(.otherVpn, named: ContextName.otherVPN, ledger: ledger, core: core, nowMs: now)
+            }
+            if jailbroken {
+                TamperLink.context(
+                    .jailbreakSuspected, named: ContextName.jailbreakSuspected, ledger: ledger, core: core,
+                    nowMs: now)
+            }
+            _ = try? core.heartbeat(state: .active)
+            _ = try? core.uploadPending()
+            return try? core.allies()
+        }.value
+        if let info { await useRecipients(info) }
+        await refreshStatus()
+    }
+
+    /// Who Faro reports to, fresh from the instance if it can be reached
+    /// (a newer list the member signed is adopted), else as stored.
+    func refreshRecipients() async {
+        guard let core = try? openCore(), status?.approved == true, status?.leaving != true else { return }
+        let info = await Task.detached { () -> RecipientsInfo? in
+            _ = try? core.uploadPending()
+            return try? core.allies()
+        }.value
+        if let info { await useRecipients(info) }
+    }
+
+    private func useRecipients(_ info: RecipientsInfo) async {
+        let changed = recipients != info
+        recipients = info
+        // The monthly notice names them too, so it is rescheduled with the
+        // current list.
+        if changed, leave == nil, flow.step == .done { await scheduleNotice() }
+    }
+
+    // MARK: Leave Faro (docs/IOS.md §12)
+
+    func beginLeave() {
+        guard leave == nil, status?.enrolled == true else { return }
+        leave = LeaveFlow()
+    }
+
+    /// Back out, while nothing has been sent.
+    func cancelLeave() {
+        if leave?.canCancel == true { leave = nil }
+    }
+
+    func confirmLeave() async {
+        guard leave?.step == .confirm else { return }
+        leave?.apply(.confirmed)
+        await sayGoodbye()
+    }
+
+    func retryLeave() async {
+        guard case .notDelivered = leave?.step else { return }
+        leave?.apply(.retry)
+        await sayGoodbye()
+    }
+
+    /// Sends the goodbye and waits for the instance to have it. Nothing is
+    /// lifted unless it does: offline, the member is told and can try again.
+    private func sayGoodbye() async {
+        guard let group, let core = try? openCore() else {
+            leave?.apply(.unreachable("Faro can't open its files on this phone."))
+            return
+        }
+        let ledger = TamperLedger(group: group)
+        let result = await Task.detached { () -> Result<GoodbyeOutcome, Error> in
+            // What the watchers found goes before the goodbye.
+            TamperLink.drain(ledger, into: core)
+            return Result { try core.goodbye(deliverWithinSecs: 30) }
+        }.value
+        switch result {
+        case .success(.delivered), .success(.alreadyRetired), .success(.notActivated), .success(.notEnrolled):
+            leave?.apply(.delivered)
+            await lift()
+        case .success(.queued(_, let error)):
+            leave?.apply(.queued(
+                "Faro couldn't confirm that your allies were told. Check your connection and try again. (\(error))"))
+        case .failure(let e):
+            leave?.apply(.unreachable(describe(e)))
+        }
+        await refreshStatus()
+    }
+
+    /// Lifts the protection, only once the goodbye is delivered: the
+    /// watchers stand down, the monitor stops, the store is emptied (which
+    /// lifts `denyAppRemoval`), the VPN configuration is removed. Safe to
+    /// run again after a relaunch.
+    private func lift() async {
+        guard leave?.mayLift == true, let group else { return }
+        try? TamperLedger(group: group).update { $0.standDown() }
+        ScreenTimeEnforcer.liftEverything()
+        try? FileManager.default.removeItem(at: group.settingsFile)
+        NoticeScheduler.cancel()
+        var leftovers: [String] = []
+        do {
+            try await TunnelInstaller.remove()
+        } catch {
+            leftovers.append("Faro's VPN is still listed. Remove it in Settings, General, VPN & Device Management.")
+        }
+        leave?.apply(.lifted(leftovers: leftovers))
         await refreshPlatformState()
     }
 
@@ -135,6 +310,8 @@ final class AppModel: ObservableObject {
             }.value
             self.enrolledDevice = device
             try? self.progressStore?.update { $0.enrolledAtMs = Int64(Date().timeIntervalSince1970 * 1000) }
+            // A new enrollment starts a new book of what was reported.
+            if let group = self.group { try? TamperLedger(group: group).reset() }
             self.flow.apply(.enrolled)
         } onError: { message in
             self.flow.apply(.failed(message))
@@ -164,6 +341,12 @@ final class AppModel: ObservableObject {
         await run {
             try await ScreenTime.authorize(settingsStore: self.settingsStore)
             try self.progressStore?.update { $0.screenTimeDone = true }
+            // The app has now read it approved, so it can tell a revocation.
+            if let group = self.group {
+                try? TamperLedger(group: group).update {
+                    $0.sawScreenTime(approved: true, source: .app, nowMs: Self.nowMs())
+                }
+            }
             self.flow.apply(.screenTimeAuthorized)
         } onError: { message in
             self.flow.apply(.failed(message))
@@ -188,7 +371,7 @@ final class AppModel: ObservableObject {
     func scheduleNotice() async {
         let ms = progressStore?.load().enrolledAtMs
         let enrolled = ms.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? Date()
-        notificationsOn = await NoticeScheduler.schedule(enrolledAt: enrolled)
+        notificationsOn = await NoticeScheduler.schedule(enrolledAt: enrolled, recipients: recipients)
     }
 
     /// When the next monthly notice is due, for the status screen.
@@ -209,6 +392,10 @@ final class AppModel: ObservableObject {
 
     // MARK: Helpers
 
+    nonisolated static func nowMs() -> Int64 {
+        Int64((Date().timeIntervalSince1970 * 1000).rounded())
+    }
+
     private func run(_ work: () async throws -> Void, onError: (String) -> Void) async {
         busy = true
         defer { busy = false }
@@ -223,6 +410,7 @@ final class AppModel: ObservableObject {
             return "This phone is already enrolled with \(instance)."
         case FaroError.Network(let m): return "Couldn't reach the instance. Check your connection and try again. (\(m))"
         case FaroError.KeysLocked: return "Unlock the phone once and try again."
+        case FaroError.Left: return "Faro is leaving this phone."
         case FaroError.InvalidLink(let m), FaroError.Instance(let m), FaroError.Integrity(let m),
              FaroError.Retired(let m), FaroError.KeyStore(let m), FaroError.Storage(let m),
              FaroError.Update(let m), FaroError.InvalidArgument(let m):

@@ -21,9 +21,9 @@ struct FaroApp: App {
                 }
         }
         .onChange(of: scenePhase) { phase in
-            // docs/IOS.md §6.3: re-apply the Screen Time settings each time
-            // the app comes forward. Does nothing before setup.
-            if phase == .active { ScreenTimeEnforcer.refreshOnForeground() }
+            // docs/IOS.md §6.3, §10.2: re-apply the Screen Time settings and
+            // check every layer each time the app comes forward.
+            if phase == .active { Task { await model.foreground() } }
         }
     }
 }
@@ -36,6 +36,8 @@ struct RootView: View {
             Group {
                 if !model.loaded {
                     ProgressView()
+                } else if let leave = model.leave {
+                    LeaveView(flow: leave)
                 } else if model.flow.step == .done {
                     StatusView()
                 } else {

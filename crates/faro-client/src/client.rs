@@ -285,6 +285,15 @@ impl InstanceClient {
         self
     }
 
+    /// Keep the clock offset in `cell`, shared with every client given the
+    /// same one. A platform that makes a client per call (the iOS core)
+    /// passes one cell to all of them, so what an answer's `Date` header
+    /// taught is not forgotten by the next call's client.
+    pub fn with_shared_clock_offset(mut self, cell: Arc<AtomicI64>) -> Self {
+        self.offset_ms = cell;
+        self
+    }
+
     pub fn base_url(&self) -> &Url {
         &self.base
     }

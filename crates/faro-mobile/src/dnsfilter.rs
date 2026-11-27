@@ -27,7 +27,10 @@ use crate::error::FaroError;
 use crate::types::{BlockedHostRecord, BlockedSummaryRecord, MAX_SUMMARY_HOSTS};
 use faro_detect::{load_domains, DomainCategorizer, DomainCategorizerBuilder};
 use faro_dnsfilter::session::Step;
-use faro_dnsfilter::{tunnel, BlockedSummary, Counters, Engine, Filter, FilterConfig, Session};
+use faro_dnsfilter::{
+    is_resolver_addr, tunnel, BlockedSummary, Counters, Engine, Filter, FilterConfig, Session,
+    Skipped,
+};
 use faro_update::Version;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::{Arc, Mutex};
@@ -168,6 +171,26 @@ struct Inner {
     source: &'static str,
     domains_error: Option<String>,
     config_error: Option<String>,
+    /// Packets to a known encrypted-DNS resolver dropped since the last
+    /// [`DnsFilter::take_doh_dropped`].
+    doh_dropped: u64,
+}
+
+/// Whether an IP packet is addressed to one of the known encrypted-DNS
+/// resolvers routed into the tunnel. Reads the destination address only.
+fn to_resolver(packet: &[u8]) -> bool {
+    let dst = match packet.first().map(|b| b >> 4) {
+        Some(4) if packet.len() >= 20 => {
+            let b: [u8; 4] = packet[16..20].try_into().expect("4 bytes");
+            IpAddr::from(b)
+        }
+        Some(6) if packet.len() >= 40 => {
+            let b: [u8; 16] = packet[24..40].try_into().expect("16 bytes");
+            IpAddr::from(b)
+        }
+        _ => return false,
+    };
+    is_resolver_addr(dst)
 }
 
 impl Inner {
@@ -304,6 +327,7 @@ impl DnsFilter {
             source,
             domains_error,
             config_error: None,
+            doh_dropped: 0,
         };
         inner.rebuild();
         if inner.config_error.is_none() {
@@ -317,10 +341,21 @@ impl DnsFilter {
     /// One packet read from the tunnel. `now_ms` is the wall clock (Unix
     /// ms), `screen_on` whether the phone is awake.
     pub fn handle_packet(&self, packet: Vec<u8>, now_ms: i64, screen_on: bool) -> DnsStep {
-        lock(&self.inner)
-            .session
-            .packet(&packet, now_ms, screen_on)
-            .into()
+        let mut inner = lock(&self.inner);
+        let step = inner.session.packet(&packet, now_ms, screen_on);
+        if matches!(step, Step::Nothing(Skipped::Dropped(_))) && to_resolver(&packet) {
+            inner.doh_dropped = inner.doh_dropped.saturating_add(1);
+        }
+        step.into()
+    }
+
+    /// How many packets to the known encrypted-DNS resolvers
+    /// (`RESOLVER_ADDRS`: DNS over HTTPS, TLS or QUIC) were dropped since
+    /// the last call, which resets the count. A count only, never an
+    /// address or a name: for the `doh_dropped` context signal
+    /// (docs/IOS.md §10.2).
+    pub fn take_doh_dropped(&self) -> u64 {
+        std::mem::take(&mut lock(&self.inner).doh_dropped)
     }
 
     /// An answer from upstream `server` (a [`UpstreamServer::key`]), over
