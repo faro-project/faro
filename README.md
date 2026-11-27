@@ -21,6 +21,7 @@ There is no central Faro service. A church, a college, a small group or one pers
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md): the full design, threat model and roadmap.
+- [Status](docs/STATUS.md): what is built, partly built and only planned, dated. Read it alongside the architecture.
 - [Wire protocol](docs/PROTOCOL.md): byte-level signing, hashing and encryption formats.
 - [Development](docs/DEVELOPMENT.md): building, testing, crate map and the invariants every change must keep.
 - [iOS client](docs/IOS.md): the design of the iPhone client, which blocks rather than watches, and what it can and can't do.

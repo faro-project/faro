@@ -49,7 +49,7 @@ Report to a hotline or the police in your country. You don't need to be sure. Ho
 | **United Kingdom** | The **Internet Watch Foundation (IWF)**: <https://www.iwf.org.uk/en/uk-report/>. Reports can be anonymous. If a child is at risk, also contact the police. |
 | **Anywhere else** | Your country's national hotline. Most belong to **INHOPE**, the international network of hotlines: on <https://www.inhope.org>, find your country with the drop-down list or the map. You can also contact your local police. |
 
-*The Faro project checked these addresses and the NCMEC phone number on 25 November 2026, on the organisations' own websites (missingkids.org, iwf.org.uk and inhope.org). If one doesn't work, search for the organisation's name and use its official website. Operators: [FILL IN: add any local hotline, police contact or safeguarding contact your people should use].*
+*[NEEDS A PERSON TO CONFIRM before this guide goes to allies: someone must check these addresses and the NCMEC phone number against the organisations' own websites (missingkids.org, iwf.org.uk and inhope.org), and record the date here.] If one doesn't work, search for the organisation's name and use its official website. Operators: [FILL IN: add any local hotline, police contact or safeguarding contact your people should use].*
 
 **What to tell them:** what you wrote down in section 2. Tell them it came from Faro, an accountability app; that the picture is heavily blurred; and who runs the Faro instance (the operator's name and contact). Section 5 below describes what Faro keeps. You can point them to it.
 
@@ -73,7 +73,7 @@ This section explains what evidence exists, so that you, the hotline or the poli
 
 Faro never saves a clear screenshot. Not on the member's computer, not on the server, not anywhere. The full picture exists only in the computer's memory for a moment, while Faro checks it and makes a blurred copy, and is then wiped. What Faro keeps of a flagged moment is a **small blurred picture**: about 320 pixels wide, strongly blurred and then pixelated, on the member's computer, before anything is saved or sent. It is made to show the general idea ("a video with a person in it") without the explicit detail. **Nobody can un-blur it**, and there is no setting that keeps clear pictures.
 
-So an ally will usually suspect CSAM from the **context** (a website name, an app, a window title) rather than from the picture itself. Faro's flags rate content as explicit or suggestive. They say nothing about anyone's age, and Faro doesn't look for child abuse material specifically.
+So an ally will usually suspect CSAM from the **context** (a website name, an app, a window title) rather than from the picture itself. Faro's image check rates a screen as explicit or not; it has no "suggestive" rating ([BETA.md §4.2](../BETA.md#42-what-faro-doesnt-flag)), so it misses much borderline content. Its flags say nothing about anyone's age, and Faro doesn't look for child abuse material specifically.
 
 ### What a flagged item contains
 
@@ -90,7 +90,7 @@ Each flagged moment, and each daily report, is **encrypted on the member's compu
 
 Only the **member** and the **allies the member approved**, each with their own passphrase or recovery code, in their own web browser. An ally can only unlock items from after the member approved them.
 
-**The operator can't.** The server stores these items, but it never has the keys, and nothing in Faro lets an operator or admin decrypt them. The Faro project can't either: it runs no central service and has no access to any instance.
+**The operator can't, with one limit.** The server stores these items, but it never has the keys, and nothing in Faro's server or admin console lets an operator or admin decrypt them. The limit: allies and members unlock items in the Faro web app, which the instance serves. An operator who changed the code the instance sends to browsers could in principle capture a passphrase as it is typed ([ARCHITECTURE.md §5.3](../ARCHITECTURE.md#53-trusting-the-instance-operator)). Don't do that. The Faro project can't either: it runs no central service and has no access to any instance.
 
 What the operator *can* see is metadata: the member's name and email address, their computers' names, who their allies are, and *when* something happened on a computer, what kind of thing it was (for example a flag) and how urgent it was. Not what it was about.
 
@@ -119,16 +119,17 @@ So **time matters**. Encrypted items may be deleted within days or weeks. Tell t
 - **Don't ask to see it,** and don't accept a copy if one is offered. Say why (section 1).
 - **Point them to this guide** and to the hotline for your country (section 3). You may report too. [FILL IN: your organisation's process, and who decides.]
 - **Write down** what the ally told you, when, and what you did.
-- **Remember what you can and can't see.** You can't decrypt anything. Don't try, and don't claim you can.
+- **Remember what you can and can't see.** Faro gives you no way to decrypt anything (see the limit in section 5). Don't try, and don't claim you can.
 
 ### Don't tip anyone off, and don't destroy anything
 
 Several actions in Faro **always email the member and their allies**. That is by design, so Faro can never be used to monitor anyone secretly. In this situation it matters:
 
 - **Disabling the member's account** emails the member and every ally straight away. Those emails can't be switched off. It also doesn't stop monitoring: the member's computers keep reporting to their allies.
+- **Requesting the account's deletion** is the other thing an admin can do to a member's account. It emails the member and everyone in a partnership with them, and after 7 days it **destroys all of the member's encrypted items** on the server. This is the most damaging thing you could do here. **Do not do it** while a report is open.
 - Admins have no other way to act on a member's account: they can't remove allies or computers, and they can't see content.
 
-Before you disable an account, change settings, delete backups, or do anything else that touches the member's data, **ask the police or the hotline, and your lawyer**. Don't delete or change anything once you know about a report.
+Before you disable an account, request or confirm a deletion, change settings, delete backups, or do anything else that touches the member's data, **ask the police or the hotline, and your lawyer**. Don't delete or change anything once you know about a report.
 
 ### What you can give investigators
 
@@ -143,7 +144,7 @@ If the police or a court ask you for information, get legal advice first. [ASK Y
 
 Faro doesn't store network (IP) addresses. [FILL IN: if a proxy or tunnel in front of Faro logs them, say so and for how long.]
 
-**Keeping data longer.** Faro deletes encrypted items on the schedule in section 5. It has no way to hold one person's data back from deletion. [ASK YOUR LAWYER: whether, and how, you should preserve data if investigators ask you to, for example by keeping a backup or by changing the instance's retention settings, and what that means for everyone else on your instance.]
+**Keeping data longer.** Faro deletes encrypted items on the schedule in section 5. It has no way to hold one person's data back from deletion. Lengthening the instance's retention settings does **not** preserve a member's items: a member's own shorter window (as little as 7 days) still applies to what they upload, and it can't be overridden. **Only a backup preserves them.** A backup holds items still encrypted, so keep it safe and unaltered, and remember it also holds everyone else's data on your instance. [ASK YOUR LAWYER: whether, and how, you should keep a backup if investigators ask you to, how long, and what that means for everyone else on your instance.]
 
 ### Prevention
 

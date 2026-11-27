@@ -2,13 +2,56 @@
 
 **Who this is for:** a **member**: someone who chose to use Faro on their own computer. You need your Faro web app, the computer, and someone who knows an administrator name and password for it. That can be you.
 
-If you use an iPhone, read the last section, [Adding your iPhone](#adding-your-iphone). It works differently from the computer steps.
+If you use an iPhone, read the last section, [Adding your iPhone](#adding-your-iphone). It works differently from the computer steps. There is no Android app in the beta.
+
+Two words you'll see: your **instance** is the Faro server your account lives on, run by a church, a college, a small group or one person, and its name is at the top of each page. Your **member key** is the key that Faro makes for you in the web app: it approves your allies and your computers, and nobody else can use it.
+
+If someone made you install Faro, read [If this wasn't your choice](#if-this-wasnt-your-choice) first.
+
+## What your allies see
+
+Once an ally is approved, they can read what your computer reports, in their web browser, after they type their own passphrase. They see:
+
+- **Flagged moments.** When Faro rates what is on your screen as worth a look, your allies see how it was rated and why, the app you were in, the window's title, the website (only the site's name, such as `https://example.com/`, never the page or anything you typed), and the name of the computer account you were using. You can add a note to a flag.
+- **A blurred picture** for each flagged moment. It is blurred heavily on your computer before anything is saved or sent, and the clear picture is thrown away. Nobody can un-blur it.
+- **A daily report.** A bar for the day showing when the computer was in use, idle, locked, asleep, paused or off, with the account used, and any time it wasn't monitored. It also counts the screen checks that were clean, low, medium or high, and says if anything went wrong. **Most used apps** and **Most visited sites** are in it only if you chose to share them. They are off unless you switched them on.
+- **Alerts** when Faro is switched off, interfered with, stops checking in, is uninstalled, a computer is removed, your settings change, or you delete your account.
+
+They don't see everyday screen checks that found nothing, one by one, only the counts. They see nothing from before you approved them. You see exactly what they see, on your own **Activity** page. The people who run your instance see only that something happened and when, not what it was ([the ally guide](ALLY-GUIDE.md#8-what-the-people-running-the-server-can-and-cant-see) says more).
+
+## What other people who use this computer see
+
+Faro monitors **every account** on the computer, including ones added later and the guest account. There is no way to leave one out. Everyone who uses the computer sees:
+
+- **The Faro icon**: in the menu bar on a Mac, in the notification area on Windows. Its menu says what Faro is doing. Nothing on its menu switches Faro off or hides it.
+- **A notice when they sign in**, saying that the computer is monitored by Faro for a member of your instance (it names the instance, not you), that screenshots are blurred and shared only with the member and their allies, and how many allies there are. It doesn't name you or your allies, and says that switching to another account doesn't turn monitoring off.
+
+If other people use the computer, tell them before you install Faro. Only install it on a computer that is yours, not on a shared one such as a lab or office computer.
+
+## The web app and your passphrase
+
+The web page you use to unlock your keys comes from your instance. If the person running it changed that page on purpose, they could in principle capture your passphrase. For you that matters more than for an ally, because your member key approves your allies and your computers, so someone with it could add themselves as an ally or approve a computer you didn't enroll. So use an instance run by someone you trust. **What this instance can see**, at the bottom of every Faro page, says what its operator can and can't see. A separate app for members and allies, which wouldn't depend on the server for this, is planned.
+
+## If this wasn't your choice
+
+Faro is for people who choose it for themselves. If someone pressured you to install it, you are using it because you were made to, or you no longer want it and are afraid to say so, this is for you.
+
+- **What Faro is.** It looks at your screen on this computer, checks what it finds there, and sends the allies you chose a report with blurred pictures. It tells them if it is switched off or tampered with. The people who run your instance can't see your reports.
+- **Everyone who uses the computer is told.** See [what other people who use this computer see](#what-other-people-who-use-this-computer-see).
+- **There is no quiet way out.** Every exit tells your allies first. Faro can't hide that, and that is by design. If leaving openly isn't safe for you, your safety comes first: talk to someone you trust, or, in an emergency, the emergency services.
+- **Two ways out need no administrator password:**
+  - **Computers → Remove…** in the web app. The computer stops reporting at once. Your allies get an urgent alert that a computer was removed. Faro stays installed on that computer until an administrator uninstalls it, but it sends nothing more.
+  - **Settings → Delete your account** in the web app. You need to have signed in within the last 10 minutes and you type your email address to confirm. Your allies are emailed straight away. For 7 days nothing else changes: the computer is still monitored and you can cancel. After that, everything about you is removed from the instance and it stops accepting your computers.
+- **Uninstalling Faro needs an administrator's name and password** on the computer, on a Mac and on Windows. If someone else keeps that password, you can't uninstall it yourself. The two exits above still work. Don't hand anyone the password to hold if that would leave you unable to leave: [the ally guide](ALLY-GUIDE.md#an-ally-holding-the-administrator-password) tells allies the same.
+- **Your allies are told in every case**: uninstalling, removing a computer, and deleting your account.
+
+If you can't use the web app, the person who runs your instance can start the account deletion for you, with the same 7 days and the same notices.
 
 ## Before you start
 
 - **In the closed beta,** read [BETA.md](BETA.md) first: where to download Faro, the permissions to grant, and the alerts your allies may see while you set up.
 - **Faro is installed** on the computer, from the official installer. After installing, the Faro icon is in the menu bar on a Mac (a lighthouse) or in the notification area on Windows (the tray icon). Faro monitors nothing until you finish the steps below.
-- **Your member key is set up** in the web app (the **Keys** page).
+- **Your member key is set up** in the web app: on Home, choose **Set up keys**. Read [If you lose your passphrase and recovery code](#if-you-lose-your-passphrase-and-recovery-code) first, because Faro can't create your member key a second time.
 
 ## 1. Get an enrollment link
 
@@ -70,7 +113,7 @@ If something doesn't work and you want to see why, or someone helping you asks f
 - **On Windows, the service:** `C:\ProgramData\Faro\logs\faro-service.log`. Administrators can read it.
 - **On Windows, the agent, for each account:** `%LOCALAPPDATA%\Faro\Logs\faro-agent.log`.
 
-Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. On Windows, logs rotate at 5 MiB, and 3 old files are kept. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.
+Open them in the Console app (under **Log Reports**), or follow them in Terminal with `tail -F /Library/Logs/Faro/faro-service.log`. Older entries are in the same folder, in files ending `.1`, `.2` and `.3`. On Windows, a log file is replaced by a new one when it reaches about 5 megabytes, and 3 old files are kept. At their usual level, the logs never contain the web addresses or window titles Faro sees, or anything from your screen.
 
 ## Checking that Faro is working
 
@@ -110,6 +153,27 @@ It shows what Faro is doing, never what was on the screen. The lines to look at:
 
 On Windows, run `& "C:\Program Files\Faro\faro-service.exe" status` in a terminal opened as administrator. It shows the same details.
 
+## If you lose your passphrase and recovery code
+
+Your passphrase and your recovery code are the only two things that unlock your member key. Faro can't reset either, and neither can the people who run your instance.
+
+- **Lost only one?** You're fine. Unlock with the other, then open **Settings**, under **Your keys**. **Change my passphrase…** sets a new passphrase, and **Get a new recovery code…** replaces the recovery code (the old one stops working, and the new one is shown once, so save it). On an unlock screen, **Forgot it? Use the recovery code** unlocks with the recovery code.
+- **Lost both?** Faro can't get your key back, and it can't create your member keys again: the web app refuses, saying your keys are already set up. The only way forward is to delete your account and start again:
+  1. Tell your allies, so it isn't a surprise.
+  2. Open **Settings**, choose **Delete your account** at the bottom, and follow the steps. It waits 7 days. Your allies are emailed straight away.
+  3. After 7 days your account is deleted, including your reports, keys and allies. From then on the instance refuses your computers, so uninstall Faro on each ([a new, replaced, wiped or lost computer](#a-new-replaced-wiped-or-lost-computer)).
+  4. Sign up again with the same address, if your instance allows it, set up new keys, and invite your allies again. They see only what happens after they approve you again. What was sent before can't be read by anyone any more.
+- **In those 7 days** your computers keep reporting to the allies you had approved, and your allies keep seeing alerts. You can't approve new allies or computers, and you can't add a computer, without your key.
+
+## A new, replaced, wiped or lost computer
+
+Every computer has its own enrollment. Your allies are told about each change.
+
+- **A new computer.** Install Faro on it and enroll it ([step 1](#1-get-an-enrollment-link)). You need your key unlocked to make the enrollment code. Approve it in the web app after comparing the code.
+- **A replaced computer you still have.** Uninstall Faro on the old one first ([BETA.md](BETA.md#38-uninstalling) has the command). Your allies are told **"Faro stopped on a computer"**, which is expected. Then enroll the new one. If the old one can't be reached, remove it in the web app instead (below).
+- **A wiped or reinstalled computer.** Faro is gone from it, and it can't tell your allies. They will see **"*Computer* stopped checking in"** after a few hours. Remove the old entry on the **Computers** page (**Remove…**; your allies get **"*Computer* was removed"**), then install Faro and enroll again with a new code. A computer where Faro is still installed says it is already enrolled, and won't enroll again until Faro is uninstalled.
+- **A lost or stolen computer.** Open **Computers** and choose **Remove…** for it. Its key stops working on the instance, so it can't report. Tell your allies why, so the alerts don't alarm them.
+
 ## Groups
 
 A **group** is a place for people doing this together, such as a recovery group or a small group at church. Groups are in the web app under **Groups**. Being in one shares nothing about your Mac or your reports, and nobody in a group sees them.
@@ -135,7 +199,7 @@ sudo /Library/Faro/bin/faro-service diagnose
 1. Faro gathers the report and lists the files in it, with what each one is. Nothing is written yet.
 2. Type **s** to read everything in it first, **y** to write it, or **n** to stop.
 3. It writes **`faro-report-`*date*`-`*time*`Z.zip`** to your **Desktop** (for example `faro-report-20261125-101500Z.zip`; the time is in UTC). The file is yours, and only your account can open it.
-4. Send that file to **[where to send problem reports: to be added]**. Say what went wrong and when.
+4. Send that file to **[TO FILL IN: where to send problem reports]**. Say what went wrong and when.
 
 The zip holds one folder of plain-text files, so you can open any of them before you send it:
 
@@ -244,7 +308,7 @@ After setup, the **Faro** screen shows what is on and what isn't. Your allies ar
 | **Starts by itself: Connect On Demand is off** | Tap **Turn the filter back on**. |
 | **Waiting to send** | Nothing. Faro keeps what it records and sends it once your instance answers. |
 
-Under **Never out of sight**, **Who Faro reports to** lists your allies. It shows how many there are, and a safety code for each. Your web app shows each ally's name next to the same code. **Next monthly notice** shows when the next reminder is due. If notifications for Faro are off, the reminder can't appear. You can still open the same list from this screen.
+Under **Never out of sight**, **Who Faro reports to** lists your allies. It shows each ally by the name you signed and a safety code, and says how many there are. Your web app shows the same code next to each ally's name. **Next monthly notice** shows when the next reminder is due. If notifications for Faro are off, the reminder can't appear. You can still open the same list from this screen.
 
 ### 8. Choose what is blocked
 

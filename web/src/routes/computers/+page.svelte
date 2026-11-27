@@ -18,6 +18,7 @@
 	import { keyId } from '#lib/crypto/keys.ts';
 	import { deviceEndorsementSigningBytes, manifestRef, signWith } from '#lib/crypto/proto.ts';
 	import { ago, date, dateTime } from '#lib/format.ts';
+	import { buildEnrollLink } from '#lib/enroll-link.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
 	import { ensureManifest, latestManifest } from '#lib/keys/member.ts';
@@ -121,11 +122,21 @@
 	}
 
 	/** The link with the member key fingerprint, from the unlocked key. */
-	let link = $derived.by(() => {
+	let linkState = $derived.by(() => {
 		const keys = keyring.member;
-		if (!code || !keys) return '';
-		return `${code.enroll_url}&m=${keyId(keys.signPk)}`;
+		if (!code || !keys) return { link: '', error: '' };
+		try {
+			// Built here, not from the server's `enroll_url`: the server must not
+			// be able to choose the fingerprint the device checks (#179).
+			return {
+				link: buildEnrollLink(window.location.origin, code.enroll_url, keyId(keys.signPk)),
+				error: ''
+			};
+		} catch (e) {
+			return { link: '', error: e instanceof Error ? e.message : 'Could not build the link.' };
+		}
 	});
+	let link = $derived(linkState.link);
 
 	let remaining = $derived(code ? Math.max(0, code.expires_at_ms - now) : 0);
 	let remainingText = $derived(
@@ -397,6 +408,9 @@
 										{#if code}<p class="muted small">The last code expired.</p>{/if}
 									{:else}
 										<p class="muted small">Works once, for the next {remainingText}.</p>
+										{#if linkState.error}<div class="notice error" role="alert">
+												<p>{linkState.error}</p>
+											</div>{/if}
 										<p>In Faro on the iPhone, scan this code with the camera on the link screen:</p>
 										<QrCode text={link} label="QR code for the iPhone enrollment link" />
 										<p class="muted small">
@@ -449,6 +463,9 @@
 									{:else}
 										<p class="code-display big">{code.code}</p>
 										<p class="muted small">Works once, for the next {remainingText}.</p>
+										{#if linkState.error}<div class="notice error" role="alert">
+												<p>{linkState.error}</p>
+											</div>{/if}
 										<p>On the computer, with Faro installed, open the enrollment link:</p>
 										<div class="actions inline">
 											<a class="button primary small" href={link}>Open in Faro</a>
