@@ -230,6 +230,7 @@ impl EnrollService {
         let client = ClientOptions {
             timeout: config.network.request_timeout(),
             ca_file: config.network.ca_file.clone(),
+            ..ClientOptions::default()
         };
         Self::new(config.state_dir.clone(), client, approver)
     }

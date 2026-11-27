@@ -63,7 +63,8 @@ pub enum RecipientError {
     #[error("recipient manifest is for member {got}, expected {expected}")]
     WrongMember { expected: UserId, got: UserId },
     /// Structurally invalid (version 0, too many allies, unsorted or
-    /// duplicate ids, member listed as their own ally, malformed id).
+    /// duplicate ids, member listed as their own ally, malformed id, unknown
+    /// format, a name in format 1 (not signed), a missing or oversized name).
     #[error("recipient manifest is malformed: {0}")]
     Invalid(#[from] ManifestError),
     /// The member's own key is a small-order X25519 point.
@@ -280,7 +281,9 @@ pub(crate) mod tests {
     use crate::writer::{open_event_body, EventWriter};
     use faro_crypto::{ChainHead, EncryptionKeypair, SigningKey};
     use faro_proto::body::EventBody;
-    use faro_proto::keys::{RecipientManifest, Signed, MAX_MANIFEST_ALLIES};
+    use faro_proto::keys::{
+        RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MAX_MANIFEST_ALLIES,
+    };
     use faro_proto::{DeviceId, Signature, SignedEvent, Urgency};
 
     pub(crate) struct Fixture {
@@ -313,6 +316,7 @@ pub(crate) mod tests {
         /// An unsigned manifest listing the fixture's member key and allies.
         pub fn body(&self, version: u64) -> RecipientManifest {
             RecipientManifest {
+                format: MANIFEST_FORMAT_V1,
                 instance_id: self.inst.clone(),
                 member_id: self.member.clone(),
                 version,
@@ -324,9 +328,20 @@ pub(crate) mod tests {
                     .map(|(id, k)| ManifestAlly {
                         ally_id: id.clone(),
                         enc_pubkey: k.public(),
+                        name: None,
                     })
                     .collect(),
             }
+        }
+
+        /// `body` in format 2, each ally named "Ally <n>".
+        pub fn named_body(&self, version: u64) -> RecipientManifest {
+            let mut b = self.body(version);
+            b.format = MANIFEST_FORMAT_V2;
+            for (i, a) in b.allies.iter_mut().enumerate() {
+                a.name = Some(format!("Ally {i}"));
+            }
+            b
         }
 
         /// Sign with the genuine member key.
@@ -362,6 +377,7 @@ pub(crate) mod tests {
         ManifestAlly {
             ally_id: UserId::new(id),
             enc_pubkey: k.public(),
+            name: None,
         }
     }
 
@@ -411,6 +427,72 @@ pub(crate) mod tests {
             f.accept(&m, Some(m.body.reference())).unwrap(),
             (set, ManifestDecision::Unchanged)
         );
+    }
+
+    #[test]
+    fn format_2_names_are_signed() {
+        let f = Fixture::new(2);
+        let m = f.sign(f.named_body(1));
+        let (set, _) = f.accept(&m, None).unwrap();
+        let names: Vec<_> = set.allies().iter().map(|a| a.display_name()).collect();
+        assert_eq!(
+            names,
+            [Some("Ally 0".to_owned()), Some("Ally 1".to_owned())]
+        );
+        // Same keys, same recipients: names change nothing about who reads.
+        assert_eq!(set.recipients(), f.set().recipients());
+
+        // The instance puts a false name next to a real key, swaps two
+        // names, or drops one: none of it verifies.
+        let mut forged = m.clone();
+        forged.body.allies[0].name = Some("Someone trusted".into());
+        assert_eq!(f.accept(&forged, None), Err(RecipientError::BadSignature));
+        let mut swapped = m.clone();
+        swapped.body.allies[0].name = m.body.allies[1].name.clone();
+        swapped.body.allies[1].name = m.body.allies[0].name.clone();
+        assert_eq!(f.accept(&swapped, None), Err(RecipientError::BadSignature));
+        // Relabelled as format 1 with the names dropped: the v1 bytes were
+        // never signed.
+        let mut downgraded = m.clone();
+        downgraded.body.format = MANIFEST_FORMAT_V1;
+        for a in &mut downgraded.body.allies {
+            a.name = None;
+        }
+        assert_eq!(
+            f.accept(&downgraded, None),
+            Err(RecipientError::BadSignature)
+        );
+        // Names added to a genuine format 1 manifest aren't signed.
+        let mut added = f.manifest(1);
+        added.body.allies[0].name = Some("Ally 0".into());
+        assert!(matches!(
+            f.accept(&added, None),
+            Err(RecipientError::Invalid(ManifestError::UnsignedName(_)))
+        ));
+    }
+
+    #[test]
+    fn formats_follow_the_checkpoint_rules() {
+        let f = Fixture::new(1);
+        let v1 = f.manifest(1);
+        let (set, _) = f.accept(&v1, None).unwrap();
+        assert_eq!(set.allies()[0].display_name(), None);
+        // The member's next re-sign moves the device to format 2.
+        let v2 = f.sign(f.named_body(2));
+        assert_eq!(
+            f.accept(&v2, Some(v1.body.reference())).unwrap().1,
+            ManifestDecision::Advanced(v2.body.reference())
+        );
+        // The other format at the same version is a different document.
+        let other = f.sign(f.named_body(1));
+        assert!(matches!(
+            f.accept(&other, Some(v1.body.reference())),
+            Err(RecipientError::Equivocation { version: 1, .. })
+        ));
+        // Back to format 1 at a later version is allowed (it only loses the
+        // names).
+        let v3 = f.manifest(3);
+        assert!(f.accept(&v3, Some(v2.body.reference())).is_ok());
     }
 
     #[test]
@@ -760,6 +842,7 @@ pub(crate) mod tests {
             ManifestAlly {
                 ally_id: UserId::new("usr_b"),
                 enc_pubkey: EncPublicKey(one_high_bit),
+                name: None,
             },
         ];
         assert_eq!(

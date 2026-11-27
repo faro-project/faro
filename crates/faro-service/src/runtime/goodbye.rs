@@ -158,6 +158,7 @@ pub async fn say_goodbye(
         &ClientOptions {
             timeout: config.network.request_timeout(),
             ca_file: config.network.ca_file.clone(),
+            ..ClientOptions::default()
         },
         opts.base_url.clone(),
     )?;

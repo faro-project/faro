@@ -151,6 +151,7 @@ jobs:
           release/notices/third-party.sh --install-cargo-about
           release/notices/third-party.sh server "$RUNNER_TEMP/notices/server.txt"
           release/notices/third-party.sh macos "$RUNNER_TEMP/notices/macos.txt"
+          release/notices/third-party.sh ios "$RUNNER_TEMP/notices/ios.txt"
           rm -rf "$RUNNER_TEMP/notices"
 
   # The release scripts (release/, docs/DEVELOPMENT.md "Releasing"), end to
@@ -164,6 +165,66 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p faro-update --example faro-release
       - run: release/test-release.sh
+
+  # The iOS app (apps/ios, docs/DEVELOPMENT.md "The iOS app"): the Rust core
+  # as an XCFramework with its Swift bindings, the Xcode project from
+  # project.yml, an unsigned build for the Simulator and for a device, the
+  # size budget of the 6 MB extensions and the FaroKit tests on the
+  # Simulator. It needs Xcode (not only the Command Line Tools) and
+  # xcodegen, so it skips with a notice on a runner that has neither.
+  # Nothing here runs the tunnel, Screen Time or the extensions: they only
+  # compile (they can't run in the Simulator and the build is unsigned).
+  ios:
+    # Xcode 27 and the iOS 27 SDK (GitHub's Xcode 27 image, Apple Silicon only).
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install xcodegen
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+      - name: Check for Xcode
+        id: xcode
+        run: |
+          if xcodebuild -version >/dev/null 2>&1 && command -v xcodegen >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping the iOS build: this runner has no Xcode or no xcodegen."
+          fi
+      - if: steps.xcode.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - if: steps.xcode.outputs.enabled == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.xcode.outputs.enabled == 'true'
+        name: Rust core, bindings, notices and the domain list
+        run: |
+          apps/ios/build-rust.sh
+          release/notices/third-party.sh --install-cargo-about
+          apps/ios/build-notices.sh
+      - if: steps.xcode.outputs.enabled == 'true'
+        name: Build (Simulator and device, unsigned)
+        working-directory: apps/ios
+        run: |
+          xcodegen generate
+          # The entitlements and Info.plist files are generated and checked in.
+          git diff --exit-code -- . ':!Faro.xcodeproj'
+          xcodebuild build -project Faro.xcodeproj -scheme Faro -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/sim \
+            CODE_SIGNING_ALLOWED=NO
+          xcodebuild build -project Faro.xcodeproj -scheme Faro -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build/device \
+            CODE_SIGNING_ALLOWED=NO
+      - if: steps.xcode.outputs.enabled == 'true'
+        name: Extension size budget
+        run: apps/ios/check-extension-sizes.sh apps/ios/build/device/Build/Products/Release-iphoneos/Faro.app
+      - if: steps.xcode.outputs.enabled == 'true'
+        name: FaroKit tests (Simulator)
+        working-directory: apps/ios/FaroKit
+        run: |
+          id="$(xcrun simctl list devices available | grep -m1 iPhone | grep -Eo '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}')"
+          xcodebuild test -scheme FaroKit -destination "platform=iOS Simulator,id=$id" \
+            -derivedDataPath ../build/kit CODE_SIGNING_ALLOWED=NO
 
   # The macOS installer: build the unsigned, universal (arm64 + x86_64)
   # development package (a release package needs the project's Developer ID)

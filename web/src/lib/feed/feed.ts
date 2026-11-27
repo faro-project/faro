@@ -15,7 +15,8 @@ import type {
 	DailyReport,
 	EventBody,
 	FeedEntry,
-	FeedResponse
+	FeedResponse,
+	Platform
 } from '../types.ts';
 
 export const PAGE = 500;
@@ -27,11 +28,14 @@ export interface Loaded {
 	items: FeedEntry[];
 	/** True if the window holds more than MAX_PAGES pages. */
 	truncated: boolean;
+	/** What the instance says each device in `items` is (older instances: none). */
+	platforms: Record<string, Platform>;
 }
 
 /** Everything received since `sinceMs`, newest first. */
 export async function loadFeed(memberId: string, sinceMs: number): Promise<Loaded> {
 	const items: FeedEntry[] = [];
+	const platforms: Record<string, Platform> = {};
 	let cursor: string | null = null;
 	for (let page = 0; page < MAX_PAGES; page++) {
 		const q = new URLSearchParams({ member_id: memberId, limit: String(PAGE) });
@@ -39,10 +43,12 @@ export async function loadFeed(memberId: string, sinceMs: number): Promise<Loade
 		else q.set('since_ms', String(sinceMs));
 		const r: FeedResponse = await api.get<FeedResponse>(`/v1/ally/feed?${q}`);
 		items.push(...r.items);
-		if (!r.has_more || !r.next_cursor) return { items: items.reverse(), truncated: false };
+		Object.assign(platforms, r.device_platforms);
+		if (!r.has_more || !r.next_cursor)
+			return { items: items.reverse(), truncated: false, platforms };
 		cursor = r.next_cursor;
 	}
-	return { items: items.reverse(), truncated: true };
+	return { items: items.reverse(), truncated: true, platforms };
 }
 
 export type Opened = { kind: 'event'; body: EventBody } | { kind: 'report'; report: DailyReport };

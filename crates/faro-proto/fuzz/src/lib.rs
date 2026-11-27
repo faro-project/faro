@@ -22,7 +22,7 @@ use faro_proto::event::{EventHeader, EVENT_HEADER_VERSION};
 use faro_proto::keys::{
     key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
     ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
-    MAX_MANIFEST_ALLIES,
+    MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MAX_ALLY_NAME_BYTES, MAX_MANIFEST_ALLIES,
 };
 use faro_proto::report::{
     ActivityState, CountedItem, DailyReport, FlaggedMoment, HealthSummary, RatingCounts,
@@ -272,13 +272,27 @@ pub fn report(data: &[u8]) -> usize {
 
 fn check_manifest(m: &RecipientManifest) {
     let sb = m.signing_bytes();
-    assert!(sb.starts_with(b"faro/recipient-manifest/v1\0"));
+    let tag = format!("faro/recipient-manifest/v{}\0", m.format);
+    assert!(sb.starts_with(tag.as_bytes()));
     assert_eq!(m.hash(), Hash32::of(&sb));
     assert_eq!(m.reference().version, m.version);
     if m.validate().is_ok() {
         assert!(m.version >= 1 && m.allies.len() <= MAX_MANIFEST_ALLIES);
         assert!(m.allies.windows(2).all(|w| w[0].ally_id < w[1].ally_id));
         assert!(m.allies.iter().all(|a| a.ally_id != m.member_id));
+        // A name only where it is signed, and bounded.
+        assert!(m.format == MANIFEST_FORMAT_V1 || m.format == MANIFEST_FORMAT_V2);
+        for a in &m.allies {
+            assert_eq!(a.name.is_some(), m.format == MANIFEST_FORMAT_V2);
+            assert!(a
+                .name
+                .as_ref()
+                .is_none_or(|n| n.len() <= MAX_ALLY_NAME_BYTES));
+            if let Some(shown) = a.display_name() {
+                assert!(shown.len() <= MAX_ALLY_NAME_BYTES);
+                assert_eq!(faro_proto::keys::sanitize_ally_name(&shown), shown);
+            }
+        }
     }
 }
 
@@ -497,6 +511,30 @@ fn bodies() -> Vec<EventBody> {
                 old: Some("60".into()),
                 new: None,
             }],
+            requested_at: Some(1),
+            takes_effect_at: Some(2),
+            cancelled_at: None,
+            delay_secs: Some(86_400),
+        },
+        EventBody::tamper(TamperSignal::FilterOff {
+            cause: faro_proto::body::FilterOffCause::OnDemandOff,
+        }),
+        EventBody::BlockedSummary {
+            bucket_start: 0,
+            bucket_secs: 300,
+            by_category: [("adult".to_owned(), 2)].into(),
+            hosts: vec![faro_proto::body::BlockedHost {
+                host: "example.test".into(),
+                category: "adult".into(),
+                count: 2,
+            }],
+            other_hosts: 0,
+        },
+        EventBody::ShieldSummary {
+            bucket_start: 0,
+            bucket_secs: 300,
+            shown: 1,
+            closed: 1,
         },
         EventBody::AgentRestarted { count_last_hour: 3 },
         EventBody::Paused {
@@ -570,6 +608,7 @@ fn daily_report() -> DailyReport {
             count: 4,
         }]),
         top_apps: None,
+        ios: None,
         health: HealthSummary {
             tamper: vec![tamper],
             context: vec![TamperRecord {
@@ -609,6 +648,7 @@ fn report_upload() -> ReportUpload {
 
 fn manifest() -> RecipientManifest {
     RecipientManifest {
+        format: MANIFEST_FORMAT_V1,
         instance_id: inst(),
         member_id: member(),
         version: 3,
@@ -618,13 +658,24 @@ fn manifest() -> RecipientManifest {
             ManifestAlly {
                 ally_id: UserId::new("usr_a"),
                 enc_pubkey: EncPublicKey([2; 32]),
+                name: None,
             },
             ManifestAlly {
                 ally_id: UserId::new("usr_b"),
                 enc_pubkey: EncPublicKey([3; 32]),
+                name: None,
             },
         ],
     }
+}
+
+/// `manifest()` in format 2, with ally names.
+fn manifest_v2() -> RecipientManifest {
+    let mut m = manifest();
+    m.format = MANIFEST_FORMAT_V2;
+    m.allies[0].name = Some("Zoë 🙏".into());
+    m.allies[1].name = Some(String::new());
+    m
 }
 
 fn signed<T>(body: T) -> Signed<T> {
@@ -909,6 +960,11 @@ pub fn seeds() -> Vec<(&'static str, String, Vec<u8>)> {
         blob_id: None,
     };
     add("api", "FeedItem-event", with_selector("FeedItem", &feed));
+    add(
+        "api",
+        "SignedRecipientManifest-v2",
+        with_selector("SignedRecipientManifest", &signed(manifest_v2())),
+    );
     out
 }
 

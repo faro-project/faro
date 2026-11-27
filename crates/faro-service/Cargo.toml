@@ -37,6 +37,7 @@ faro-detect.workspace = true
 faro-ipc.workspace = true
 faro-platform.workspace = true
 faro-update.workspace = true
+faro-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

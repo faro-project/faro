@@ -164,6 +164,7 @@ async fn signatures_identity_and_keys_are_checked() {
     weak_ally.allies = vec![ManifestAlly {
         ally_id: UserId::new("usr_x"),
         enc_pubkey: EncPublicKey([0; 32]),
+        name: Some("X".into()),
     }];
     let r = t.put_manifest(&s, &keys.sign.endorse(weak_ally)).await;
     assert_eq!(r.error_code(), "weak_manifest_key");
@@ -173,6 +174,7 @@ async fn signatures_identity_and_keys_are_checked() {
     let ally = |id: &str| ManifestAlly {
         ally_id: UserId::new(id),
         enc_pubkey: AllyKeys::generate().enc.public(),
+        name: Some(id.into()),
     };
     for allies in [
         vec![ally("usr_b"), ally("usr_a")],
@@ -180,6 +182,7 @@ async fn signatures_identity_and_keys_are_checked() {
         vec![ManifestAlly {
             ally_id: m.clone(),
             enc_pubkey: keys.enc.public(),
+            name: Some("Me".into()),
         }],
         (0..33).map(|i| ally(&format!("usr_{i:03}"))).collect(),
         vec![ally("dev_notauser")],
@@ -242,6 +245,92 @@ async fn put_cannot_add_an_ally_or_silently_drop_one() {
     let same = keys.next_manifest(&v2, |_| {});
     assert_eq!(t.put_manifest(&s, &same).await.status, StatusCode::CREATED);
     assert_eq!(latest(&t, &m, &s).await.body.version, 3);
+}
+
+/// Format 2 manifests carry the allies' names. The instance stores and
+/// serves them exactly as signed, never compares them with its own display
+/// names, and keeps accepting format 1.
+#[tokio::test]
+async fn both_formats_are_stored_and_served_as_signed() {
+    let t = TestApp::new().await;
+    let (m, s, keys) = member(&t, "sam@example.org").await;
+    let pat = t.link_ally(&m, &keys, &s, "pat@elsewhere.net").await;
+    let v2 = latest(&t, &m, &s).await;
+    assert_eq!(v2.body.format, 2);
+    assert_eq!(
+        v2.body.allies[0].name.as_deref(),
+        Some(ally_name(&pat.id).as_str())
+    );
+    let entries = [(pat.id.clone(), pat.keys.enc.public())];
+
+    // A name the instance has never seen (the member's own choice) is
+    // stored and served byte for byte, to the member and to devices.
+    let mut body = keys.next_manifest(&v2, |_| {}).body;
+    body.allies[0].name = Some("Pat \u{1f64f} (Zoë)".into());
+    let v3 = keys.sign.endorse(body);
+    assert_eq!(t.put_manifest(&s, &v3).await.status, StatusCode::CREATED);
+    assert_eq!(latest(&t, &m, &s).await, v3);
+    let r = t
+        .get(
+            &format!("/v1/members/{m}/recipient-manifest"),
+            Some(s.as_str()),
+        )
+        .await;
+    assert_eq!(r.body["format"], 2);
+    assert_eq!(r.body["allies"][0]["name"], "Pat \u{1f64f} (Zoë)");
+
+    // Format 1 is still accepted, and back again.
+    let v4 = keys.manifest_in(1, &v3.body.instance_id, &m, 4, &entries, 10);
+    assert_eq!(t.put_manifest(&s, &v4).await.status, StatusCode::CREATED);
+    let served = latest(&t, &m, &s).await;
+    assert_eq!(served, v4);
+    assert!(served.body.allies[0].name.is_none());
+    let v5 = keys.manifest(&v3.body.instance_id, &m, 5, &entries, 11);
+    assert_eq!(t.put_manifest(&s, &v5).await.status, StatusCode::CREATED);
+
+    // A name the member didn't sign, a name in format 1, a missing or
+    // oversized name, or an unknown format: all refused.
+    let mut forged = keys.next_manifest(&v5, |_| {});
+    forged.body.allies[0].name = Some("Someone else".into());
+    assert_eq!(
+        t.put_manifest(&s, &forged).await.error_code(),
+        "bad_manifest_signature"
+    );
+    let next = keys.next_manifest(&v5, |_| {}).body;
+    let mut unsigned_name = next.clone();
+    unsigned_name.format = 1;
+    let mut missing = next.clone();
+    missing.allies[0].name = None;
+    let mut long = next.clone();
+    long.allies[0].name = Some("x".repeat(257));
+    let mut unknown = next.clone();
+    unknown.format = 3;
+    for body in [unsigned_name, missing, long, unknown] {
+        let r = t.put_manifest(&s, &keys.sign.endorse(body)).await;
+        assert_eq!(r.error_code(), "invalid_manifest", "{:?}", r.body);
+    }
+    assert_eq!(latest(&t, &m, &s).await, v5);
+
+    // Approving compares ids and keys, not names: the same upload may
+    // rename an ally who is already listed.
+    let kim = pending_ally(&t, &s, "kim@elsewhere.net").await;
+    let mut body = keys
+        .next_manifest(&v5, |a| a.push((kim.id.clone(), kim.keys.enc.public())))
+        .body;
+    let pat_entry = body
+        .allies
+        .iter_mut()
+        .find(|a| a.ally_id == pat.id)
+        .unwrap();
+    pat_entry.name = Some("Patricia".into());
+    let approval = keys.sign.endorse(body);
+    let e = t.ally_endorsement(&m, &keys, &kim.id, kim.keys.enc.public());
+    let r = t.approve_with(&s, &kim.id, &e, &approval).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(latest(&t, &m, &s).await, approval);
+    // And so does removing one.
+    let r = t.remove_ally(&m, &keys, &s, &kim.id).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
 }
 
 #[tokio::test]

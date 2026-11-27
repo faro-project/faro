@@ -252,6 +252,18 @@ impl TestApp {
 
     /// Enroll a fresh device with `code` (device stays pending).
     pub async fn enroll(&self, code: &str, member_enc: &EncryptionKeypair) -> TestDevice {
+        self.enroll_as(code, member_enc, "macos", "Sam's MacBook")
+            .await
+    }
+
+    /// Enroll a fresh device of any platform (device stays pending).
+    pub async fn enroll_as(
+        &self,
+        code: &str,
+        member_enc: &EncryptionKeypair,
+        platform: &str,
+        name: &str,
+    ) -> TestDevice {
         let key = SigningKey::generate();
         let r = self
             .post(
@@ -259,8 +271,8 @@ impl TestApp {
                 json!({
                     "enroll_code": code,
                     "sign_pubkey": key.public(),
-                    "platform": "macos",
-                    "device_name": "Sam's MacBook",
+                    "platform": platform,
+                    "device_name": name,
                     "client_version": "0.1.0",
                 }),
                 None,
@@ -380,6 +392,11 @@ pub struct MemberKeys {
     pub binding: faro_proto::keys::Signed<MemberEncKeyBinding>,
 }
 
+/// The name [`MemberKeys::manifest`] signs for an ally.
+pub fn ally_name(id: &UserId) -> String {
+    format!("Ally {id}")
+}
+
 impl MemberKeys {
     pub fn generate(instance: &InstanceId, member: &UserId, now_ms: i64) -> Self {
         let sign = SigningKey::generate();
@@ -393,9 +410,30 @@ impl MemberKeys {
         MemberKeys { sign, enc, binding }
     }
 
-    /// Sign a recipient manifest (allies are sorted here, as a browser must).
+    /// Sign a recipient manifest (allies are sorted here, as a browser must)
+    /// in format 2, as the web app does, each ally named [`ally_name`].
     pub fn manifest(
         &self,
+        instance: &InstanceId,
+        member: &UserId,
+        version: u64,
+        allies: &[(UserId, faro_proto::EncPublicKey)],
+        issued_at_ms: i64,
+    ) -> SignedRecipientManifest {
+        self.manifest_in(
+            faro_proto::keys::MANIFEST_FORMAT_V2,
+            instance,
+            member,
+            version,
+            allies,
+            issued_at_ms,
+        )
+    }
+
+    /// [`MemberKeys::manifest`] in a given format (format 1: no names).
+    pub fn manifest_in(
+        &self,
+        format: u16,
         instance: &InstanceId,
         member: &UserId,
         version: u64,
@@ -407,10 +445,12 @@ impl MemberKeys {
             .map(|(id, k)| ManifestAlly {
                 ally_id: id.clone(),
                 enc_pubkey: *k,
+                name: (format != faro_proto::keys::MANIFEST_FORMAT_V1).then(|| ally_name(id)),
             })
             .collect();
         allies.sort_by(|a, b| a.ally_id.cmp(&b.ally_id));
         self.sign.endorse(RecipientManifest {
+            format,
             instance_id: instance.clone(),
             member_id: member.clone(),
             version,

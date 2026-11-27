@@ -9,18 +9,17 @@ use super::status::StatusTx;
 use crate::backoff::Backoff;
 use crate::client::{ClientError, InstanceClient};
 use crate::state::Enrollment;
+use faro_client::uplink::{self, EventsDrained, OutboxAccess, UplinkError};
 use faro_core::clock::Clock;
+use faro_core::outbox::PendingReport;
 use faro_core::{ManifestDecision, Outbox, OutboxError, PrunePolicy, RecipientSet};
-use faro_crypto::SigningKey;
-use faro_proto::api::{DeviceState, EventResult, EventsBatchRequest, Heartbeat, HeartbeatResponse};
-use faro_proto::Hash32;
-use reqwest::StatusCode;
+use faro_crypto::{ChainHead, SigningKey};
+use faro_proto::api::{DeviceState, HeartbeatResponse};
+use faro_proto::SignedEvent;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-
-/// Events per upload batch (the instance accepts up to 500).
-pub const UPLOAD_BATCH: usize = 200;
 
 /// The outbox, shared between the core and the network tasks. Every call
 /// runs on Tokio's blocking pool: SQLite with `synchronous=FULL` fsyncs.
@@ -51,6 +50,31 @@ impl OutboxHandle {
         let key = e.member_sign_pubkey;
         let member = e.member_id.clone();
         self.run(move |o| o.current_recipients(&key, &member)).await
+    }
+}
+
+/// Uploads and heartbeats go through `faro_client::uplink`, shared with the
+/// iOS core.
+impl OutboxAccess for OutboxHandle {
+    fn head(&self) -> impl Future<Output = Result<ChainHead, OutboxError>> + Send {
+        self.run(|o| o.head())
+    }
+    fn pending(
+        &self,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<SignedEvent>, OutboxError>> + Send {
+        self.run(move |o| o.pending(limit))
+    }
+    fn ack_through(&self, acked: u64) -> impl Future<Output = Result<u64, OutboxError>> + Send {
+        self.run(move |o| o.ack_through(acked))
+    }
+    fn pending_reports(
+        &self,
+    ) -> impl Future<Output = Result<Vec<PendingReport>, OutboxError>> + Send {
+        self.run(|o| o.pending_reports())
+    }
+    fn ack_report(&self, id: i64) -> impl Future<Output = Result<bool, OutboxError>> + Send {
+        self.run(move |o| o.ack_report(id))
     }
 }
 
@@ -90,6 +114,15 @@ pub enum UploadStop {
     Gated,
 }
 
+impl From<UplinkError> for UploadStop {
+    fn from(e: UplinkError) -> Self {
+        match e {
+            UplinkError::Client(e) => UploadStop::Client(e),
+            UplinkError::Outbox(e) => UploadStop::Outbox(e),
+        }
+    }
+}
+
 impl Uploader {
     /// Upload everything pending: events in `seq` order, then reports.
     pub async fn drain(&self) -> Result<(), UploadStop> {
@@ -101,98 +134,30 @@ impl Uploader {
     }
 
     async fn drain_events(&self) -> Result<(), UploadStop> {
-        let mut last_acked: Option<u64> = None;
-        loop {
-            let pending = self
-                .outbox
-                .run(|o| o.pending(UPLOAD_BATCH))
-                .await
-                .map_err(UploadStop::Outbox)?;
-            let Some(first) = pending.first().map(|e| e.header.seq) else {
-                return Ok(());
-            };
-            let n = pending.len();
-            let resp = self
-                .client
-                .post_events(&EventsBatchRequest { events: pending })
-                .await
-                .map_err(UploadStop::Client)?;
-            for r in &resp.results {
-                if let EventResult::Rejected { seq, reason } = r {
-                    if reason == "retry_later" {
-                        continue;
-                    }
-                    tracing::warn!(seq, %reason, "instance rejected an event");
-                }
-            }
-            let Some(acked) = resp.acked_through else {
-                tracing::warn!(first, n, "instance acknowledged nothing; will retry later");
-                return Ok(());
-            };
-            match self.outbox.run(move |o| o.ack_through(acked)).await {
-                Ok(_) => {}
-                Err(OutboxError::AckBeyondHead { acked, next_seq }) => {
-                    // The instance claims events this device never wrote:
-                    // keep everything and say so loudly.
-                    tracing::error!(
-                        acked,
-                        next_seq,
-                        "instance acknowledged beyond our chain head"
-                    );
-                    self.status.update(|s| {
-                        s.last_error = Some(format!(
-                            "instance acknowledged seq {acked} beyond the local head"
-                        ));
-                    });
-                    return Ok(());
-                }
-                Err(e) => return Err(UploadStop::Outbox(e)),
-            }
+        let drained = uplink::drain_events(&self.client, &self.outbox, |acked| {
             self.status.update(|s| s.acked_through = Some(acked));
-            if last_acked.is_some_and(|l| l >= acked) || acked < first {
-                // No progress (e.g. the oldest pending event keeps being
-                // rejected); try again on the next pass instead of spinning.
-                return Ok(());
-            }
-            last_acked = Some(acked);
-            if n < UPLOAD_BATCH {
-                return Ok(());
-            }
+        })
+        .await?;
+        if let EventsDrained::AckBeyondHead { acked, .. } = drained {
+            // The instance claims events this device never wrote: keep
+            // everything and say so loudly (logged by `drain_events`).
+            self.status.update(|s| {
+                s.last_error = Some(format!(
+                    "instance acknowledged seq {acked} beyond the local head"
+                ));
+            });
         }
+        Ok(())
     }
 
     async fn drain_reports(&self) -> Result<(), UploadStop> {
-        let reports = self
-            .outbox
-            .run(|o| o.pending_reports())
-            .await
-            .map_err(UploadStop::Outbox)?;
-        for r in reports {
-            match self.client.post_report(&r.upload).await {
-                Ok(acc) => {
-                    let id = r.id;
-                    self.outbox
-                        .run(move |o| o.ack_report(id))
-                        .await
-                        .map_err(UploadStop::Outbox)?;
-                    self.status.update(|s| s.reports_uploaded += 1);
-                    tracing::info!(report = %acc.report_id, duplicate = acc.duplicate, "report uploaded");
-                }
-                Err(e) if is_permanent_report_error(&e) => {
-                    // Retrying a report the instance will never accept would
-                    // block every later one; drop it and record why.
-                    tracing::error!(error = %e, period_start = r.upload.header.period_start_ms,
-                        "instance permanently rejected a report; dropping it");
-                    let id = r.id;
-                    self.outbox
-                        .run(move |o| o.ack_report(id))
-                        .await
-                        .map_err(UploadStop::Outbox)?;
-                    self.status.update(|s| s.last_error = Some(e.to_string()));
-                }
-                Err(e) => return Err(UploadStop::Client(e)),
-            }
-        }
+        uplink::drain_reports(
+            &self.client,
+            &self.outbox,
+            |_| self.status.update(|s| s.reports_uploaded += 1),
+            |e| self.status.update(|s| s.last_error = Some(e.to_string())),
+        )
+        .await?;
         Ok(())
     }
 
@@ -214,27 +179,10 @@ impl Uploader {
     }
 }
 
-/// A heartbeat failure that means the instance can't be reached: no
-/// answer at all, or a server error (a proxy in front of a stopped
-/// instance answers 502). The status menu shows it as "Can't reach …".
+/// A heartbeat failure that means the instance can't be reached. The
+/// status menu shows it as "Can't reach …".
 fn unreachable(e: &ClientError) -> bool {
-    match e {
-        ClientError::Transport(_) => true,
-        ClientError::Api { status, .. } => status.is_server_error(),
-        _ => false,
-    }
-}
-
-fn is_permanent_report_error(e: &ClientError) -> bool {
-    match e.status() {
-        Some(s) => {
-            s == StatusCode::BAD_REQUEST
-                || s == StatusCode::CONFLICT
-                || s == StatusCode::PAYLOAD_TOO_LARGE
-                || s == StatusCode::UNPROCESSABLE_ENTITY
-        }
-        None => matches!(e, ClientError::Encode(_)),
-    }
+    uplink::unreachable(e)
 }
 
 /// Builds, signs and sends heartbeats (PROTOCOL.md §7).
@@ -249,58 +197,36 @@ pub struct Heartbeater {
 }
 
 impl Heartbeater {
-    /// The heartbeat for `state`. `last_seq`/`last_hash` name the newest
-    /// committed event: the outbox head's `prev_hash` *is* the chain hash of
-    /// the event at `next_seq - 1`, which the instance compares with what it
-    /// holds to detect forks.
-    pub async fn build(&self, state: DeviceState) -> Result<Heartbeat, OutboxError> {
-        let head = self.outbox.run(|o| o.head()).await?;
-        let (last_seq, last_hash): (Option<u64>, Option<Hash32>) = match head.next_seq {
-            0 => (None, None),
-            n => (Some(n - 1), Some(head.prev_hash)),
-        };
-        Ok(Heartbeat {
-            instance_id: self.enrollment.instance_id.clone(),
-            device_id: self.enrollment.device_id.clone(),
-            ts_ms: self.client.corrected_wall_ms(),
-            mono_ms: self.clock.mono_ms(),
-            boot_id: self.clock.boot_id(),
-            state,
-            last_seq,
-            last_hash,
-        })
-    }
-
     /// Send one heartbeat. On success the instance's `acked_through` also
     /// prunes the outbox.
     pub async fn send(&self, state: DeviceState) -> Result<HeartbeatResponse, UploadStop> {
         if !self.gate.is_open() {
             return Err(UploadStop::Gated);
         }
-        let hb = self.build(state).await.map_err(UploadStop::Outbox)?;
-        let signed = self.key.sign_heartbeat(hb);
-        let answer = self.client.heartbeat(&signed).await;
+        let answer = uplink::send_heartbeat(
+            &self.client,
+            &self.outbox,
+            &self.key,
+            &self.enrollment,
+            self.clock.as_ref(),
+            state,
+        )
+        .await;
         let now = self.clock.wall_ms();
         match &answer {
-            Err(e) if unreachable(e) => self.status.update_if(|s| {
+            Err(UplinkError::Client(e)) if unreachable(e) => self.status.update_if(|s| {
                 let first = s.unreachable_since_ms.is_none();
                 s.unreachable_since_ms.get_or_insert(now);
                 first
             }),
             // An answer, even a refusal: the instance is there.
-            Ok(_) | Err(ClientError::Api { .. }) => self.status.update(|s| {
+            Ok(_) | Err(UplinkError::Client(ClientError::Api { .. })) => self.status.update(|s| {
                 s.last_contact_ms = Some(now);
                 s.unreachable_since_ms = None;
             }),
             Err(_) => {}
         }
-        let resp = answer.map_err(UploadStop::Client)?;
-        if let Some(acked) = resp.acked_through {
-            match self.outbox.run(move |o| o.ack_through(acked)).await {
-                Ok(_) | Err(OutboxError::AckBeyondHead { .. }) => {}
-                Err(e) => tracing::warn!(error = %e, "ack from heartbeat failed"),
-            }
-        }
+        let resp = answer?;
         self.status.update(|s| {
             s.heartbeats_sent += 1;
             s.last_heartbeat_state = Some(state);
@@ -427,27 +353,5 @@ pub async fn periodic<F, Fut>(
         } else {
             wait = backoff.next_delay().min(every);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn api(status: u16) -> ClientError {
-        ClientError::Api {
-            status: StatusCode::from_u16(status).unwrap(),
-            code: "x".into(),
-            message: "y".into(),
-        }
-    }
-
-    #[test]
-    fn server_errors_are_unreachable_and_refusals_are_not() {
-        assert!(unreachable(&api(502)));
-        assert!(unreachable(&api(503)));
-        assert!(!unreachable(&api(403)));
-        assert!(!unreachable(&api(401)));
-        assert!(!unreachable(&ClientError::NoCredentials));
     }
 }

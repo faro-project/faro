@@ -12,9 +12,9 @@
 //! |---|---|
 //! | [`config`] | `service.toml` with platform defaults |
 //! | [`state`] | the 0700 state directory, 0600 secrets, the enrollment record |
-//! | [`link`] | `faro://enroll` links and enrollment codes |
-//! | [`client`] | the signed, size-bounded instance API client |
-//! | [`enroll`] | enrollment, endorsement verification, manifest bootstrap |
+//! | [`link`] | `faro://enroll` links and enrollment codes (from `faro-client`) |
+//! | [`client`] | the signed, size-bounded instance API client (from `faro-client`) |
+//! | [`enroll`] | enrollment into the state directory; the checks are `faro_client::enroll`'s |
 //! | [`enroll_server`] | enrolling from the agent: the enroll socket, an administrator's approval |
 //! | [`source`] | the capture side: the agent over IPC, or an in-process platform |
 //! | [`model`] | the image classifier: the packaged model, its checks, `model-check` |
@@ -56,16 +56,13 @@
 //!    identity key is pinned and re-checked; redirects are not followed.
 
 pub mod accounts;
-pub mod backoff;
 pub mod cli;
-pub mod client;
 pub mod config;
 pub mod diagnose;
 pub mod enroll;
 #[cfg(windows)]
 pub mod enroll_approval;
 pub mod enroll_server;
-pub mod link;
 pub mod logging;
 pub mod model;
 pub mod runtime;
@@ -76,6 +73,10 @@ pub mod thresholds;
 pub mod update;
 #[cfg(windows)]
 pub mod win;
+
+// Shared with the iOS core: the instance API client, enrollment links and
+// backoff live in `faro-client` and keep their paths here.
+pub use faro_client::{backoff, client, link};
 
 pub use config::Config;
 pub use runtime::{

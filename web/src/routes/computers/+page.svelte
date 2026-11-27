@@ -24,13 +24,15 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { DeviceSummary, EnrollCode, MyAllies, Platform } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
+	import QrCode from '#lib/ui/QrCode.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
 
 	let devices = $state<DeviceSummary[] | null>(null);
 	let loadError = $state('');
 	let loadedFor = '';
 
-	let adding = $state(false);
+	// What is being added: a computer, or an iPhone (docs/IOS.md §14).
+	let adding = $state<'computer' | 'iphone' | null>(null);
 	let code = $state<EnrollCode | null>(null);
 	let codeBusy = $state(false);
 	let codeError = $state('');
@@ -47,7 +49,13 @@
 	let removeBusy = $state(false);
 	let removeError = $state('');
 
-	const PLATFORM: Record<Platform, string> = { macos: 'Mac', windows: 'Windows', linux: 'Linux' };
+	const PLATFORM: Record<Platform, string> = {
+		macos: 'Mac',
+		windows: 'Windows',
+		linux: 'Linux',
+		ios: 'iPhone',
+		android: 'Android'
+	};
 
 	async function load() {
 		loadError = '';
@@ -338,11 +346,16 @@
 
 		<section class="section" aria-labelledby="add">
 			<div class="section-head">
-				<h2 id="add">Add a computer</h2>
+				<h2 id="add">Add a computer or an iPhone</h2>
 				{#if !adding && session.hasMemberKeys && !deleting}
-					<button class="primary small" type="button" onclick={() => (adding = true)}>
-						Add a computer
-					</button>
+					<div class="actions inline">
+						<button class="primary small" type="button" onclick={() => (adding = 'computer')}>
+							Add a computer
+						</button>
+						<button class="primary small" type="button" onclick={() => (adding = 'iphone')}>
+							Add an iPhone
+						</button>
+					</div>
 				{/if}
 			</div>
 			{#if adding && !deleting}
@@ -352,102 +365,158 @@
 							{#snippet intro()}
 								<h3>Unlock your keys</h3>
 								<p class="muted">
-									The enrollment link carries your key's fingerprint, so the computer can check it
-									is joining your account. It is read from your unlocked key.
+									The enrollment link carries your key's fingerprint, so the {adding === 'iphone'
+										? 'iPhone'
+										: 'computer'} can check it is joining your account. It is read from your unlocked
+									key.
 								</p>
 							{/snippet}
 						</UnlockKeys>
 					{:else}
-						<ol class="steps">
-							<li>
-								<strong>Install Faro</strong> on the computer from the official, project-signed installer.
-								The installer explains what is monitored.
-							</li>
-							<li>
-								<strong>Enroll it</strong> with a one-time code.
-								{#if !code || remaining === 0}
-									{#if codeError}<div class="notice error" role="alert">
-											<p>{codeError}</p>
-										</div>{/if}
-									<div class="actions inline">
-										<button class="primary" type="button" onclick={newCode} disabled={codeBusy}>
-											{codeBusy
-												? 'Creating…'
-												: code
-													? 'Create a new code'
-													: 'Create an enrollment code'}
-										</button>
-									</div>
-									{#if code}<p class="muted small">The last code expired.</p>{/if}
-								{:else}
-									<p class="code-display big">{code.code}</p>
-									<p class="muted small">Works once, for the next {remainingText}.</p>
-									<p>On the computer, with Faro installed, open the enrollment link:</p>
-									<div class="actions inline">
-										<a class="button primary small" href={link}>Open in Faro</a>
-										<button
-											class="secondary small"
-											type="button"
-											onclick={() => copy(link, 'link')}
-										>
-											{copied === 'link' ? '✓ Copied' : 'Copy link'}
-										</button>
-									</div>
-									<p class="muted small">
-										Using another device? Copy the link and send it to the computer. There, choose
-										<strong>Enroll this computer…</strong> from the Faro icon (in the menu bar on a Mac,
-										the tray icon in the notification area on Windows) and paste it. An administrator
-										of the computer approves: on a Mac with their name and password, on Windows in the
-										administrator prompt.
-									</p>
-									<details>
-										<summary>Or use a terminal</summary>
-										<p>On a Mac, run this in Terminal:</p>
-										<pre class="command"><code
-												>sudo /Library/Faro/bin/faro-service enroll --link '{link}'</code
-											></pre>
+						{#if adding === 'iphone'}
+							<ol class="steps">
+								<li>
+									<strong>Install Faro</strong> on the iPhone from the App Store (or TestFlight in the
+									beta), open it and read the first page.
+								</li>
+								<li>
+									<strong>Get the enrollment link to the iPhone</strong> with a one-time code.
+									{#if !code || remaining === 0}
+										{#if codeError}<div class="notice error" role="alert">
+												<p>{codeError}</p>
+											</div>{/if}
 										<div class="actions inline">
+											<button class="primary" type="button" onclick={newCode} disabled={codeBusy}>
+												{codeBusy
+													? 'Creating…'
+													: code
+														? 'Create a new code'
+														: 'Create an enrollment code'}
+											</button>
+										</div>
+										{#if code}<p class="muted small">The last code expired.</p>{/if}
+									{:else}
+										<p class="muted small">Works once, for the next {remainingText}.</p>
+										<p>In Faro on the iPhone, scan this code with the camera on the link screen:</p>
+										<QrCode text={link} label="QR code for the iPhone enrollment link" />
+										<p class="muted small">
+											The code is made in this browser. The link is never sent anywhere to make it.
+										</p>
+										<p>Or copy the link and paste it into Faro on the iPhone:</p>
+										<pre class="command"><code>{link}</code></pre>
+										<div class="actions inline">
+											<a class="button primary small" href={link}>Open in Faro</a>
 											<button
 												class="secondary small"
 												type="button"
-												onclick={() =>
-													copy(
-														`sudo /Library/Faro/bin/faro-service enroll --link '${link}'`,
-														'command'
-													)}
+												onclick={() => copy(link, 'link')}
 											>
-												{copied === 'command' ? '✓ Copied' : 'Copy command'}
+												{copied === 'link' ? '✓ Copied' : 'Copy link'}
 											</button>
 										</div>
-										<p>On Windows, run this in a terminal opened as administrator:</p>
-										<pre class="command"><code
-												>&amp; "C:\Program Files\Faro\faro-service.exe" enroll --link '{link}'</code
-											></pre>
+										<p class="muted small">
+											"Open in Faro" works when this page is open on the iPhone itself.
+										</p>
+									{/if}
+								</li>
+								<li>
+									<strong>Approve it here.</strong> It appears above as waiting, with a fingerprint to
+									compare.
+								</li>
+							</ol>
+						{:else}
+							<ol class="steps">
+								<li>
+									<strong>Install Faro</strong> on the computer from the official, project-signed installer.
+									The installer explains what is monitored.
+								</li>
+								<li>
+									<strong>Enroll it</strong> with a one-time code.
+									{#if !code || remaining === 0}
+										{#if codeError}<div class="notice error" role="alert">
+												<p>{codeError}</p>
+											</div>{/if}
 										<div class="actions inline">
+											<button class="primary" type="button" onclick={newCode} disabled={codeBusy}>
+												{codeBusy
+													? 'Creating…'
+													: code
+														? 'Create a new code'
+														: 'Create an enrollment code'}
+											</button>
+										</div>
+										{#if code}<p class="muted small">The last code expired.</p>{/if}
+									{:else}
+										<p class="code-display big">{code.code}</p>
+										<p class="muted small">Works once, for the next {remainingText}.</p>
+										<p>On the computer, with Faro installed, open the enrollment link:</p>
+										<div class="actions inline">
+											<a class="button primary small" href={link}>Open in Faro</a>
 											<button
 												class="secondary small"
 												type="button"
-												onclick={() =>
-													copy(
-														`& "C:\\Program Files\\Faro\\faro-service.exe" enroll --link '${link}'`,
-														'command-windows'
-													)}
+												onclick={() => copy(link, 'link')}
 											>
-												{copied === 'command-windows' ? '✓ Copied' : 'Copy command'}
+												{copied === 'link' ? '✓ Copied' : 'Copy link'}
 											</button>
 										</div>
-									</details>
-								{/if}
-							</li>
-							<li>
-								<strong>Approve it here.</strong> It appears above as waiting, with a fingerprint to compare.
-							</li>
-						</ol>
+										<p class="muted small">
+											Using another device? Copy the link and send it to the computer. There, choose
+											<strong>Enroll this computer…</strong> from the Faro icon (in the menu bar on a
+											Mac, the tray icon in the notification area on Windows) and paste it. An administrator
+											of the computer approves: on a Mac with their name and password, on Windows in the
+											administrator prompt.
+										</p>
+										<details>
+											<summary>Or use a terminal</summary>
+											<p>On a Mac, run this in Terminal:</p>
+											<pre class="command"><code
+													>sudo /Library/Faro/bin/faro-service enroll --link '{link}'</code
+												></pre>
+											<div class="actions inline">
+												<button
+													class="secondary small"
+													type="button"
+													onclick={() =>
+														copy(
+															`sudo /Library/Faro/bin/faro-service enroll --link '${link}'`,
+															'command'
+														)}
+												>
+													{copied === 'command' ? '✓ Copied' : 'Copy command'}
+												</button>
+											</div>
+											<p>On Windows, run this in a terminal opened as administrator:</p>
+											<pre class="command"><code
+													>&amp; "C:\Program Files\Faro\faro-service.exe" enroll --link '{link}'</code
+												></pre>
+											<div class="actions inline">
+												<button
+													class="secondary small"
+													type="button"
+													onclick={() =>
+														copy(
+															`& "C:\\Program Files\\Faro\\faro-service.exe" enroll --link '${link}'`,
+															'command-windows'
+														)}
+												>
+													{copied === 'command-windows' ? '✓ Copied' : 'Copy command'}
+												</button>
+											</div>
+										</details>
+									{/if}
+								</li>
+								<li>
+									<strong>Approve it here.</strong> It appears above as waiting, with a fingerprint to
+									compare.
+								</li>
+							</ol>
+						{/if}
 						<button
 							class="link"
 							type="button"
 							onclick={() => {
-								adding = false;
+								adding = null;
 								code = null;
 							}}
 						>
@@ -477,6 +546,12 @@
 									<div class="row-title">
 										<strong>{d.name}</strong>
 										<span class="chip">{PLATFORM[d.platform]}</span>
+										{#if d.platform === 'ios'}<span
+												class="chip"
+												title="It blocks sites and apps. It can't see the screen."
+											>
+												Blocks, doesn't watch
+											</span>{/if}
 										{#if s.stale}<span class="chip normal">Quiet</span>{:else}<span
 												class="chip good"
 											>

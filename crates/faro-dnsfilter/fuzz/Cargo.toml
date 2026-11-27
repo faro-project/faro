@@ -1,0 +1,57 @@
+# cargo-fuzz harness for the faro-dnsfilter packet parser (ARCHITECTURE.md §9,
+# IOS.md §7). See docs/DEVELOPMENT.md "Fuzzing".
+#
+# Requires a nightly toolchain and cargo-fuzz:
+#   cargo run --example seed_corpus      # writes corpus/<target>/seed-*
+#   cargo +nightly fuzz run packet
+# The empty [workspace] table keeps this crate out of the main workspace so
+# stable `cargo build`/`cargo test` never try to build it.
+
+[package]
+name = "faro-dnsfilter-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+faro-dnsfilter = { path = ".." }
+faro-detect = { path = "../../faro-detect" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[[example]]
+name = "seed_corpus"
+path = "examples/seed_corpus.rs"
+
+[[bin]]
+name = "packet"
+path = "fuzz_targets/packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response"
+path = "fuzz_targets/response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "answer"
+path = "fuzz_targets/answer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state"
+path = "fuzz_targets/state.rs"
+test = false
+doc = false
+bench = false

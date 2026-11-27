@@ -540,11 +540,14 @@ mod compat {
         },
     }
 
-    impl From<&TamperSignal> for WireTamperSignal {
-        fn from(t: &TamperSignal) -> Self {
+    /// The iPhone-only signals have no wire form: an agent never sends them.
+    impl TryFrom<&TamperSignal> for WireTamperSignal {
+        type Error = &'static str;
+
+        fn try_from(t: &TamperSignal) -> std::result::Result<Self, Self::Error> {
             use TamperSignal as T;
             use WireTamperSignal as W;
-            match t.clone() {
+            Ok(match t.clone() {
                 T::PermissionRevoked { permission, .. } => W::PermissionRevoked { permission },
                 T::AgentKilledRepeatedly { count, window_secs } => {
                     W::AgentKilledRepeatedly { count, window_secs }
@@ -569,7 +572,13 @@ mod compat {
                 T::RemoteDesktop => W::RemoteDesktop,
                 T::UnmonitoredUserSession { user } => W::UnmonitoredUserSession { user },
                 T::WindowHiddenFromCapture { app } => W::WindowHiddenFromCapture { app },
-            }
+                T::ScreenTimeRevoked
+                | T::FilterOff { .. }
+                | T::SettingsCleared
+                | T::DohDropped
+                | T::OtherVpn
+                | T::JailbreakSuspected => return Err("iPhone-only tamper signal"),
+            })
         }
     }
 
@@ -616,7 +625,9 @@ mod compat {
             v: &TamperSignal,
             s: S,
         ) -> std::result::Result<S::Ok, S::Error> {
-            WireTamperSignal::from(v).serialize(s)
+            WireTamperSignal::try_from(v)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(s)
         }
 
         pub fn deserialize<'de, D: serde::Deserializer<'de>>(

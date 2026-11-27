@@ -38,6 +38,8 @@ jobs:
             targets: encoding event report api
           - crate: faro-ipc
             targets: decode_agent_msg decode_service_msg stream_decoder decode_enroll_msg
+          - crate: faro-dnsfilter
+            targets: packet response answer state
     defaults:
       run:
         working-directory: crates/${{ matrix.crate }}/fuzz

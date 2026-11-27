@@ -49,13 +49,15 @@
 use super::{CheckError, ClientUpdater};
 use crate::model::{ModelLoad, ModelRuntime};
 use crate::state::StateDir;
+use faro_client::bundle::{
+    create_private_dir, is_plain_file_name, sync_dir, unpack_bundle, UnpackError,
+};
 use faro_detect::{
     load_domains, load_model, Classifier, DetectError, DomainCategorizer, DomainsManifest,
     ModelInfo, PolicyConfig,
 };
 use faro_proto::body::TamperSignal;
 use faro_proto::Hash32;
-use faro_update::bundle::{read_bundle_manifest, BundleError};
 use faro_update::{Channel, Selection, TargetInfo, TargetKind, VerifiedTargets, Version};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -350,15 +352,6 @@ enum Refusal {
     Local(CheckError),
 }
 
-fn local(path: &Path) -> impl FnOnce(std::io::Error) -> Refusal + '_ {
-    move |source| {
-        Refusal::Local(CheckError::Io {
-            path: path.to_owned(),
-            source,
-        })
-    }
-}
-
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> CheckError + '_ {
     move |source| CheckError::Io {
         path: path.to_owned(),
@@ -643,14 +636,6 @@ fn check_labels(info: &ModelInfo) -> Result<(), Refusal> {
     }
 }
 
-/// A plain file name: no directories, not hidden.
-fn is_plain_file_name(name: &str) -> bool {
-    let mut b = name.bytes();
-    (1..=128).contains(&name.len())
-        && matches!(b.next(), Some(c) if c.is_ascii_alphanumeric())
-        && b.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
-}
-
 /// The payload's file name, from the manifest. Only a plain file name that
 /// isn't the manifest's own.
 fn payload_name(kind: TargetKind, manifest: &[u8]) -> Result<String, Refusal> {
@@ -670,58 +655,19 @@ fn payload_name(kind: TargetKind, manifest: &[u8]) -> Result<String, Refusal> {
     Ok(name)
 }
 
-/// Unpack a verified bundle into a new `staging` directory. Returns the
+/// Unpack a verified bundle into a new `staging` directory
+/// ([`unpack_bundle`], which checks the payload's name again). Returns the
 /// manifest's path and BLAKE3.
 fn unpack(kind: TargetKind, bundle: &Path, staging: &Path) -> Result<(PathBuf, Hash32), Refusal> {
-    let mut r = std::io::BufReader::new(std::fs::File::open(bundle).map_err(local(bundle))?);
-    let manifest = read_bundle_manifest(&mut r).map_err(|e| match e {
-        BundleError::Io(source) => Refusal::Local(CheckError::Io {
-            path: bundle.to_owned(),
-            source,
-        }),
-        e => Refusal::Rejected(e.to_string()),
-    })?;
-    let payload = payload_name(kind, &manifest)?;
-    if staging.exists() {
-        std::fs::remove_dir_all(staging).map_err(local(staging))?;
-    }
-    create_private_dir(staging).map_err(local(staging))?;
-    let manifest_path = staging.join(manifest_file(kind));
-    write_synced(&manifest_path, &mut &manifest[..])?;
-    let payload_path = staging.join(&payload);
-    write_synced(&payload_path, &mut r)?;
-    sync_dir(staging).map_err(local(staging))?;
-    Ok((manifest_path, Hash32::of(&manifest)))
-}
-
-fn write_synced(path: &Path, from: &mut impl std::io::Read) -> Result<(), Refusal> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    let mut f = opts.open(path).map_err(local(path))?;
-    std::io::copy(from, &mut f).map_err(local(path))?;
-    f.sync_all().map_err(local(path))
-}
-
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    let mut b = std::fs::DirBuilder::new();
-    b.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(dir)
-}
-
-fn sync_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(dir)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(())
-    }
+    let name = |m: &[u8]| match payload_name(kind, m) {
+        Ok(n) => Ok(n),
+        Err(Refusal::Rejected(r)) => Err(r),
+        Err(Refusal::Local(e)) => Err(e.to_string()),
+    };
+    unpack_bundle(bundle, staging, manifest_file(kind), name).map_err(|e| match e {
+        UnpackError::Io { path, source } => Refusal::Local(CheckError::Io { path, source }),
+        UnpackError::Rejected(reason) => Refusal::Rejected(reason),
+    })
 }
 
 /// Remove every entry of `store` but `keep`.

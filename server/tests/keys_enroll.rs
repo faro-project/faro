@@ -238,6 +238,41 @@ async fn enrollment_validates_input_without_burning_the_code() {
 }
 
 #[tokio::test]
+async fn an_iphone_enrolls_and_is_listed_as_ios() {
+    let t = TestApp::new().await;
+    let (member, s) = t.sign_in("sam@example.org").await;
+    let keys = t.create_member_keys(&member, &s).await;
+    let code = t.enroll_code(&s).await;
+    let key = SigningKey::generate();
+    let r = t
+        .post(
+            "/v1/devices/enroll",
+            json!({"enroll_code": code, "sign_pubkey": key.public(),
+                   "platform": "ios", "device_name": "iPhone-X", "client_version": "0.1.0"}),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{:?}", r.body);
+    let list = t.get("/v1/me/devices", Some(&s)).await;
+    assert_eq!(list.body[0]["platform"], "ios");
+    assert_eq!(list.body[0]["name"], "iPhone-X");
+    assert_eq!(list.body[0]["status"], "pending_endorsement");
+
+    // An unknown platform is still refused.
+    let code = t.enroll_code(&s).await;
+    let r = t
+        .post(
+            "/v1/devices/enroll",
+            json!({"enroll_code": code, "sign_pubkey": SigningKey::generate().public(),
+                   "platform": "plan9", "device_name": "Box", "client_version": "0.1.0"}),
+            None,
+        )
+        .await;
+    assert!(r.status.is_client_error(), "{:?}", r.body);
+    let _ = keys;
+}
+
+#[tokio::test]
 async fn enroll_then_endorse() {
     let t = TestApp::new().await;
     let (member, s) = t.sign_in("sam@example.org").await;

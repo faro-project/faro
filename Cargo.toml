@@ -5,11 +5,14 @@ members = [
     "crates/faro-crypto",
     "crates/faro-core",
     "crates/faro-detect",
+    "crates/faro-dnsfilter",
     "crates/faro-ipc",
     "crates/faro-platform",
     "crates/faro-platform-macos",
     "crates/faro-platform-windows",
     "crates/faro-update",
+    "crates/faro-client",
+    "crates/faro-mobile",
     "crates/faro-service",
     "crates/faro-agent",
     "server",
@@ -27,11 +30,13 @@ faro-proto = { path = "crates/faro-proto", version = "0.1.0-beta.1" }
 faro-crypto = { path = "crates/faro-crypto", version = "0.1.0-beta.1" }
 faro-core = { path = "crates/faro-core", version = "0.1.0-beta.1" }
 faro-detect = { path = "crates/faro-detect", version = "0.1.0-beta.1" }
+faro-dnsfilter = { path = "crates/faro-dnsfilter", version = "0.1.0-beta.1" }
 faro-ipc = { path = "crates/faro-ipc", version = "0.1.0-beta.1" }
 faro-platform = { path = "crates/faro-platform", version = "0.1.0-beta.1" }
 faro-platform-macos = { path = "crates/faro-platform-macos", version = "0.1.0-beta.1" }
 faro-platform-windows = { path = "crates/faro-platform-windows", version = "0.1.0-beta.1" }
 faro-update = { path = "crates/faro-update", version = "0.1.0-beta.1" }
+faro-client = { path = "crates/faro-client", version = "0.1.0-beta.1" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +48,8 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 toml = "0.8"
 base64 = "0.22"
 hex = "0.4"
+# NFC for the ally names in recipient manifests (faro-proto).
+unicode-normalization = "0.1.24"
 
 # Crypto (pinned to the rand_core 0.6 generation so every primitive shares one RNG trait set;
 # see docs/DEVELOPMENT.md "Dependency notes" before upgrading)

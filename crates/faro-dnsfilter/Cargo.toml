@@ -1,0 +1,31 @@
+[package]
+name = "faro-dnsfilter"
+description = "Faro's on-device DNS filter engine for iOS: packet parsing, block decisions, replies and counters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Lets a `dev_thresholds.json` lower the burst thresholds (src/dev.rs). Off
+# in every release build; docs/DEVELOPMENT.md, "lower only".
+dev = []
+
+[dependencies]
+# Only the domain category bundle is used. The `onnx` feature stays off.
+faro-detect.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+
+# Memory and time per query against a real bundle (docs/DEVELOPMENT.md
+# "The DNS filter"). A project tool, never part of a shipped client.
+[[example]]
+name = "dnsfilter-measure"
+path = "examples/dnsfilter-measure.rs"

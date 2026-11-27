@@ -28,8 +28,9 @@ use faro_proto::group::{
     SealedGroupMessage,
 };
 use faro_proto::keys::{
-    key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
-    ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
+    key_id, safety_code, sanitize_ally_name, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement,
+    KeyRewrap, ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap,
+    RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2,
 };
 use faro_proto::roster::{
     epoch_key_check, genesis_prev_hash, group_safety_code, EpochRotation, GroupRole, RosterChange,
@@ -76,6 +77,7 @@ fn device_sign() -> SigningKey {
 
 fn manifest() -> RecipientManifest {
     RecipientManifest {
+        format: MANIFEST_FORMAT_V1,
         instance_id: InstanceId::new(INSTANCE),
         member_id: UserId::new(MEMBER),
         version: 3,
@@ -85,14 +87,54 @@ fn manifest() -> RecipientManifest {
             ManifestAlly {
                 ally_id: UserId::new(ALLY_A),
                 enc_pubkey: ally_a().public(),
+                name: None,
             },
             ManifestAlly {
                 ally_id: UserId::new(ALLY_B),
                 enc_pubkey: ally_b().public(),
+                name: None,
             },
         ],
     }
 }
+
+/// `manifest()` in format 2, with names that need no sanitizing (the
+/// sanitizer has its own vectors, `ALLY_NAMES`).
+fn manifest_v2() -> RecipientManifest {
+    let mut m = manifest();
+    m.format = MANIFEST_FORMAT_V2;
+    m.version = 4;
+    m.allies[0].name = Some("Zoë Ångström 🙏".into());
+    m.allies[1].name = Some(String::new());
+    m
+}
+
+/// Inputs for `sanitize_ally_name`: the web app's `sanitizeAllyName` must
+/// produce exactly what Rust does for each.
+const ALLY_NAMES: &[&str] = &[
+    "Sam",
+    "  Sam   Smith  ",
+    "Sam\tSmith\r\nJr",
+    "a\u{2028}b\u{2029}c\u{85}d\u{b}e\u{c}f",
+    "e\u{301}",
+    "Zoe\u{308} A\u{30a}ngstro\u{308}m",
+    "\u{212b}\u{2126}",
+    "\u{1100}\u{1161}\u{11a8}",
+    "Sam\u{202e}evil\u{202c}",
+    "\u{202a}\u{202b}\u{202d}x\u{2066}\u{2067}\u{2068}\u{2069}\u{200e}\u{200f}\u{61c}",
+    "\u{0}\u{1}\u{8}\u{e}\u{1f}\u{1b}[31mred\u{7f}\u{80}\u{84}\u{86}\u{9b}\u{9f}",
+    "zero\u{feff}width\u{fff9}\u{fffa}\u{fffb}",
+    "\u{1f469}\u{200d}\u{1f467} \u{645}\u{200c}\u{646}",
+    "e\u{0}\u{301}",
+    "ﬁ ① Ｓａｍ",
+    "",
+    " \u{202e} ",
+    "\u{a0}Sam\u{a0}",
+    "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b",
+    "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+    "e\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}x",
+];
 
 fn device_endorsement() -> DeviceEndorsement {
     DeviceEndorsement {
@@ -306,6 +348,7 @@ fn signed_json<T: serde::Serialize>(body: T, sig: Signature) -> Value {
 fn generate() -> Value {
     let ms = member_sign();
     let m = manifest();
+    let m2 = manifest_v2();
     let de = device_endorsement();
     let ae = ally_endorsement();
     let mb = member_binding();
@@ -427,6 +470,15 @@ fn generate() -> Value {
             "signing_bytes_hex": hex::encode(m.signing_bytes()),
             "hash": m.hash(),
         },
+        "manifest_v2": {
+            "signed": signed_json(m2.clone(), ms.sign(&m2)),
+            "signing_bytes_hex": hex::encode(m2.signing_bytes()),
+            "hash": m2.hash(),
+        },
+        "ally_names": ALLY_NAMES
+            .iter()
+            .map(|n| json!({ "input_hex": hex::encode(n), "output": sanitize_ally_name(n) }))
+            .collect::<Vec<_>>(),
         "device_endorsement": {
             "signed": signed_json(de.clone(), ms.sign(&de)),
             "signing_bytes_hex": hex::encode(de.signing_bytes()),
@@ -547,6 +599,8 @@ fn web_vectors() {
         "/safety_code",
         "/ed25519",
         "/manifest",
+        "/manifest_v2",
+        "/ally_names",
         "/device_endorsement",
         "/ally_endorsement",
         "/member_binding",
@@ -649,6 +703,38 @@ fn web_vectors() {
         serde_json::from_value(web["manifest"].clone()).expect("web manifest parses");
     m.body.validate().unwrap();
     verify_signed(&pk, &m).unwrap();
+    // A format 2 manifest the web app signed, with names its sanitizer
+    // made: Rust verifies it and would show exactly those names.
+    let m2: Signed<RecipientManifest> =
+        serde_json::from_value(web["manifest_v2"].clone()).expect("web v2 manifest parses");
+    assert_eq!(m2.body.format, MANIFEST_FORMAT_V2);
+    m2.body.validate().unwrap();
+    verify_signed(&pk, &m2).unwrap();
+    for a in &m2.body.allies {
+        let name = a.name.as_deref().unwrap();
+        assert_eq!(sanitize_ally_name(name), name, "{name:?}");
+    }
+    // The display names the web app was given, as UTF-8 hex (they hold
+    // bidi controls, which have no place in a file people review).
+    let signed: Vec<String> = web["manifest_v2_raw_names_hex"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            let raw = String::from_utf8(hex::decode(v.as_str().unwrap()).unwrap()).unwrap();
+            sanitize_ally_name(&raw)
+        })
+        .collect();
+    let got: Vec<String> = m2
+        .body
+        .allies
+        .iter()
+        .map(|a| a.name.clone().unwrap())
+        .collect();
+    assert_eq!(
+        got, signed,
+        "the web app signed what Rust's sanitizer makes"
+    );
     let de: Signed<DeviceEndorsement> =
         serde_json::from_value(web["device_endorsement"].clone()).unwrap();
     verify_signed(&pk, &de).unwrap();

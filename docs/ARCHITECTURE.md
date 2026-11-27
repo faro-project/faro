@@ -23,8 +23,8 @@ There is **no central Faro service.** A church, a college, a ministry, a small g
 
 ### Non-goals for v1
 
-- Mobile (iOS and Android).
-- Content **blocking** or filtering.
+- Mobile (iOS and Android). The iOS client is specified in [IOS.md](IOS.md).
+- Content **blocking** or filtering. iOS blocks: an iPhone's client is the one exception, and [IOS.md](IOS.md#1-summary) (§1) says what it does. The desktop clients still don't block.
 - Live viewing of the screen. That will never be built.
 - Any ML on the server.
 - **Storing unblurred images anywhere.** That includes the member's own device (§3.5).
@@ -269,6 +269,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Clock manipulation | Service | urgent | Alert |
 | Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
+| Screen Time access revoked, web filter off or Screen Time settings cleared (iPhone: `screen_time_revoked`, `filter_off`, `settings_cleared`; docs/IOS.md §10.2) | iPhone app and tunnel | urgent | "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed" |
 | Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
 
 Every urgent signal in this table, and removing an ally, reaches people as a tamper-class alert: it can be moved to the digest but not switched off (§5.4). Settings changes and pauses can be switched off.
@@ -394,7 +395,7 @@ GET  /v1/members/{id}/allies/keys member-signed ally pubkeys
 POST /v1/events:batch             signed headers (incl. urgency) + ciphertext
 POST /v1/heartbeat                signed {seq, ts, state}
 POST /v1/reports                  encrypted report blob + envelopes
-GET  /v1/ally/feed                metadata list of reports and alerts
+GET  /v1/ally/feed                metadata list of reports and alerts, and each device's platform
 GET  /v1/blobs/{id}               ciphertext (served directly or via presigned S3 URL)
 GET  /v1/updates/...              mirrored, project-signed update metadata + artifacts
 POST /v1/invites, /accept         ally invitations
@@ -452,7 +453,7 @@ Device auth uses a device token **plus** an Ed25519 signature on every request.
 ### 5.2 Key lifecycle
 
 1. The ally accepts an invite. Their browser generates an X25519 keypair, wraps the private key with a passphrase-derived key and uploads the wrapped blob, so they can use it on several devices. The ally also receives a **recovery code**.
-2. The member approves the ally, and the member key **signs** `{instance_id, ally_id, ally_pubkey}`. Devices only encrypt to member-signed keys, so neither the instance operator nor someone who breaks into the server can add an eavesdropping key.
+2. The member approves the ally, and the member key **signs** `{instance_id, ally_id, ally_pubkey}`. Devices only encrypt to member-signed keys, so neither the instance operator nor someone who breaks into the server can add an eavesdropping key. The member-signed recipient list devices use also carries each ally's display name (PROTOCOL.md §5.1), so a device names allies without trusting the instance.
 3. Device enrollment: the member key signs the device's public key.
 4. An optional **safety code** (a key fingerprint) lets a member and ally compare keys in person, which suits a church small-group setting.
 
@@ -486,7 +487,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
   | Kind | Source | Urgency | Why it can't be switched off |
   |---|---|---|---|
-  | `tamper` | device | urgent (floor) | Something interfered with Faro: a permission revoked, the agent killed repeatedly, an integrity failure, the clock changed, an account in use with no agent, a window hidden from capture, and the other §3.7 signals. Context-only signals (VPN, VM, remote desktop, browser without the extension) never become `tamper` events. |
+  | `tamper` | device | urgent (floor) | Something interfered with Faro: a permission revoked, the agent killed repeatedly, an integrity failure, the clock changed, an account in use with no agent, a window hidden from capture, an iPhone's Screen Time access revoked, its web filter turned off or its Screen Time settings cleared, and the other §3.7 signals. Context-only signals (VPN, VM, remote desktop, browser without the extension) never become `tamper` events. |
   | `goodbye` | device | urgent (floor) | Faro was uninstalled or moved to another instance. |
   | `chain_gap` | server | urgent | Events are missing, were rewritten, or the device's history forked (§3.6, PROTOCOL.md §7). |
   | `invalid_signature` | server | urgent | An event or report arrived that the device's key didn't sign. |
@@ -591,7 +592,7 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 Institutions running instances (churches, colleges) make consent even more important. The architecture enforces it:
 
-- **Never invisible**: a persistent tray icon that can't be hidden, plus a monthly on-device notice listing the current allies and the instance name and operator. The icon and the notices belong to the session agent, not the optional tray app, because the agent is the process that is always running in every session (§3.1): if it is killed, launchd restarts it and the service raises tamper. *Status (macOS): a menu-bar icon with no Quit item that can't be dragged out of the menu bar. macOS 26 and later let the user turn menu-bar items off in System Settings, and the agent doesn't detect that yet.* *Status (Windows): a tray icon with no Exit item. The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications. Hiding the icon in the notification area's overflow isn't detected: it is a display preference, and the agent and monitoring keep running.*
+- **Never invisible**: a persistent tray icon that can't be hidden, plus a monthly on-device notice listing the current allies (by the names the member signed, PROTOCOL.md §5.1) and the instance name and operator. The icon and the notices belong to the session agent, not the optional tray app, because the agent is the process that is always running in every session (§3.1): if it is killed, launchd restarts it and the service raises tamper. *Status (macOS): a menu-bar icon with no Quit item that can't be dragged out of the menu bar. macOS 26 and later let the user turn menu-bar items off in System Settings, and the agent doesn't detect that yet.* *Status (Windows): a tray icon with no Exit item. The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications. Hiding the icon in the notification area's overflow isn't detected: it is a display preference, and the agent and monitoring keep running.*
 - **Everyone who uses the computer is told.** Monitoring covers every OS account (§3.1), so the tray icon and a login notice appear in every account's session: "This computer is monitored by Faro for *member*. Screenshots are blurred and shared with *allies*." Faro is meant for a computer the member controls. On a shared computer, everyone is monitored and everyone is told; the installer warns about this up front.
 - **The monitored person holds the account and keys.** Instance admins **cannot** enroll devices for someone else, become someone's ally on their own, or read content. A college or church can host the service but can't use it to monitor people who haven't opted in themselves.
 - **Full transparency**: the member sees everything allies see.
@@ -626,7 +627,7 @@ Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash ch
 Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups ([GROUPS.md §20](GROUPS.md#20-rollout) for the phases), `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
 
 **Phase 3: Beyond**
-Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter), Helm chart, and possibly federation between instances.
+Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter, specified in [IOS.md](IOS.md)), Helm chart, and possibly federation between instances.
 
 ---
 
