@@ -47,7 +47,12 @@
 	let removeBusy = $state(false);
 	let removeError = $state('');
 
-	const PLATFORM: Record<Platform, string> = { macos: 'Mac', windows: 'Windows', linux: 'Linux' };
+	const PLATFORM: Record<Platform, string> = {
+		macos: 'Mac',
+		windows: 'Windows',
+		linux: 'Linux',
+		ios: 'iPhone'
+	};
 
 	async function load() {
 		loadError = '';
@@ -477,6 +482,12 @@
 									<div class="row-title">
 										<strong>{d.name}</strong>
 										<span class="chip">{PLATFORM[d.platform]}</span>
+										{#if d.platform === 'ios'}<span
+												class="chip"
+												title="It blocks sites and apps. It can't see the screen."
+											>
+												Blocks, doesn't watch
+											</span>{/if}
 										{#if s.stale}<span class="chip normal">Quiet</span>{:else}<span
 												class="chip good"
 											>

@@ -297,7 +297,9 @@
 										<p class="muted small">{FAILURE_TEXT[o]}</p>
 									{:else if o.kind === 'event'}
 										<ul class="details small">
-											{#each describeBody(o.body) as line, i (i)}<li>{line}</li>{/each}
+											{#each describeBody(o.body, device(e.device_id)) as line, i (i)}<li>
+													{line}
+												</li>{/each}
 										</ul>
 										{#if o.body.type === 'flag' && o.body.thumbnail}
 											{@const url = thumbnailUrl(o.body.thumbnail)}
