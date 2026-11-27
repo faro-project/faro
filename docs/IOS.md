@@ -367,6 +367,8 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **Optional extras live on the Choices screen, not in setup** (§9), so setup stays short.
 - **The resolver-reading gap is accepted.** On each network change the tunnel turns its DNS settings off for well under a second to read the network's resolvers (§7.4). Layer 1 still covers WebKit during that moment.
 - **No resolver means `SERVFAIL`, never a public one.** Allowed names fail at once until the network's resolvers are found again. No lookup goes to a third party.
+- **Leave Faro needs the instance to confirm the goodbye.** There is no silent way out inside Faro. A member whose instance is gone for good leaves by revoking Screen Time access in Settings and deleting the app, and the member guide says so.
+- **Allies are named on the phone from the member-signed list.** The member's client puts each ally's display name inside the recipient manifest it signs, so the instance can't change the names shown in the monthly notice (§12). Until that protocol change lands, the phone shows the ally count and safety codes.
 
 ### Open
 
