@@ -427,7 +427,7 @@ async fn the_capture_permission_is_the_sources() {
     dev.script.with(|s| s.permission = PermissionState::Denied);
     let source =
         faro_service::InProcessFrameSource::new(dev.script.platform(), Duration::from_millis(10))
-            .with_capture_permission("accessibility");
+            .with_capture_permission("accessibility_service");
     dev.start_with(quiet_classifier(), Box::new(source));
     dev.wait("awaiting endorsement", |s| {
         s.phase == Phase::AwaitingEndorsement
@@ -439,7 +439,7 @@ async fn the_capture_permission_is_the_sources() {
     assert_eq!(
         tamper_signals(&w, &dev).await,
         vec![TamperSignal::PermissionRevoked {
-            permission: "accessibility".into(),
+            permission: "accessibility_service".into(),
             never_granted: true,
         }]
     );

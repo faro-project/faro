@@ -40,7 +40,7 @@ use std::time::Instant;
 use zeroize::Zeroize;
 
 /// The permission Android captures need, as `permission_revoked` names it.
-pub const ACCESSIBILITY: &str = "accessibility";
+pub const ACCESSIBILITY: &str = "accessibility_service";
 /// The device admin permission, as `permission_revoked` names it.
 pub const DEVICE_ADMIN: &str = "device_admin";
 /// An app is reported again only after this long without a secure window of
@@ -729,7 +729,7 @@ mod tests {
             got,
             vec![
                 TamperSignal::PermissionRevoked {
-                    permission: "accessibility".into(),
+                    permission: "accessibility_service".into(),
                     never_granted: false
                 },
                 TamperSignal::PermissionRevoked {

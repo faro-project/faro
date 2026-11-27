@@ -321,6 +321,11 @@ export function bodyTitle(b: EventBody, device: string): string | undefined {
 		return `Screen Recording is off on ${device}`;
 	if (b.type === 'tamper' && b.signal.signal === 'window_hidden_from_capture')
 		return `A window was hidden from Faro on ${device}`;
+	if (b.type === 'tamper' && b.signal.signal === 'permission_revoked') {
+		if (b.signal.permission === 'accessibility_service') return `Accessibility is off on ${device}`;
+		if (b.signal.permission === 'device_admin')
+			return `Faro's uninstall protection is being turned off on ${device}`;
+	}
 	return undefined;
 }
 
@@ -331,6 +336,13 @@ export function describeTamper(s: TamperSignal): string {
 				return s.never_granted
 					? "Faro doesn't have Screen Recording permission on this computer, so it can't see the screen."
 					: "Screen Recording was turned off for Faro, so it can't see the screen.";
+			// Android (docs/ANDROID.md §8).
+			if (s.permission === 'accessibility_service')
+				return s.never_granted
+					? "Faro's accessibility service isn't on on this phone, so it can't see the screen."
+					: "Faro's accessibility service was turned off, so it can't see the screen.";
+			if (s.permission === 'device_admin')
+				return "Someone asked to turn off Faro's uninstall protection, so the app can now be removed from the phone.";
 			return `A permission Faro needs was turned off (${s.permission.replaceAll('_', ' ')}).`;
 		case 'agent_killed_repeatedly':
 			return `Faro was stopped ${s.count} times in ${duration(s.window_secs * 1000)}.`;
@@ -366,6 +378,10 @@ export function describeTamper(s: TamperSignal): string {
 			return 'Another VPN was connected.';
 		case 'jailbreak_suspected':
 			return 'The iPhone looks jailbroken, so Faro may not be able to protect it.';
+		case 'battery_optimization_on':
+			return 'Battery optimisation was on for Faro, so the phone could stop it in the background.';
+		case 'usb_debugging_on':
+			return 'USB debugging was on.';
 	}
 }
 

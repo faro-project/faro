@@ -270,7 +270,7 @@ frame ─▶ dHash dedupe ─▶ preprocess
 | Settings change, ally removed, pause | Service / instance | normal | Notification. **Removing an ally notifies that ally** |
 | Device moved to a different instance | Old instance (`goodbye` + reason) | urgent | Alert to the old instance's allies |
 | Screen Time access revoked, web filter off or Screen Time settings cleared (iPhone: `screen_time_revoked`, `filter_off`, `settings_cleared`; docs/IOS.md §10.2) | iPhone app and tunnel | urgent | "Screen Time protection is off on iPhone-X", "Faro's web filter is off on iPhone-X", "Faro's Screen Time settings were changed" |
-| Accessibility service turned off, a `FLAG_SECURE` window kept in front, or Device Admin deactivation requested (Android: `permission_revoked` for `accessibility` and `device_admin`, `window_hidden_from_capture`; docs/ANDROID.md §8) | Android app | urgent | "Accessibility is off on Phone-X", "A window was hidden from Faro on Phone-X", "Faro's uninstall protection is being turned off on Phone-X" |
+| Accessibility service turned off, a `FLAG_SECURE` window kept in front, or Device Admin deactivation requested (Android: `permission_revoked` for `accessibility_service` and `device_admin`, `window_hidden_from_capture`; docs/ANDROID.md §8) | Android app | urgent | "Accessibility is off on Phone-X", "A window was hidden from Faro on Phone-X", "Faro's uninstall protection is being turned off on Phone-X" |
 | Browser without extension, VPN, VM, RDP | Agent / service | none (context) | Listed in the report |
 
 Every urgent signal in this table, and removing an ally, reaches people as a tamper-class alert: it can be moved to the digest but not switched off (§5.4). Settings changes and pauses can be switched off.

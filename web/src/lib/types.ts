@@ -607,7 +607,12 @@ export type TamperSignal =
 	// iPhone, context only: listed in the daily report.
 	| { signal: 'doh_dropped' }
 	| { signal: 'other_vpn' }
-	| { signal: 'jailbreak_suspected' };
+	| { signal: 'jailbreak_suspected' }
+	// Android, context only (docs/ANDROID.md §8). Android's tamper events reuse
+	// `permission_revoked` (`accessibility_service`, `device_admin`) and
+	// `window_hidden_from_capture`.
+	| { signal: 'battery_optimization_on' }
+	| { signal: 'usb_debugging_on' };
 
 /** Why an iPhone's DNS filter is off, as far as the phone could tell. */
 export type FilterOffCause =

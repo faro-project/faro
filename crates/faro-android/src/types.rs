@@ -117,7 +117,7 @@ impl fmt::Debug for BrowserTab {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum AndroidTamper {
     /// The accessibility service was turned off or lost its connection:
-    /// `permission_revoked` (`accessibility`), urgent.
+    /// `permission_revoked` (`accessibility_service`), urgent.
     AccessibilityDisabled,
     /// Device admin `onDisableRequested` / `onDisabled`:
     /// `permission_revoked` (`device_admin`), urgent.

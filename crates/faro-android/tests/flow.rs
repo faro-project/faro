@@ -232,7 +232,7 @@ async fn accessibility_turned_off_is_one_urgent_permission_revoked() {
     assert!(matches!(
         &revoked[0].3,
         EventBody::Tamper { signal: TamperSignal::PermissionRevoked { permission, .. }, .. }
-            if permission == "accessibility"
+            if permission == "accessibility_service"
     ));
     assert_eq!(revoked[0].2, Urgency::Urgent);
     let s = eventually("the status says so", async || {

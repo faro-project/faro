@@ -348,9 +348,9 @@ mod tests {
         let shown = Arc::new(Mutex::new(Vec::new()));
         let s2 = shown.clone();
         let src = InProcessFrameSource::new(platform, Duration::from_millis(5))
-            .with_capture_permission("accessibility")
+            .with_capture_permission("accessibility_service")
             .with_notice(move |t, b| s2.lock().unwrap().push(format!("{t}|{b}")));
-        assert_eq!(src.capture_permission(), "accessibility");
+        assert_eq!(src.capture_permission(), "accessibility_service");
         let (cmd_tx, cmd_rx) = mpsc::channel(4);
         let (ev_tx, mut ev_rx) = mpsc::channel(16);
         let task = tokio::spawn(Box::new(src).run(SourceIo::new(cmd_rx, ev_tx)));
