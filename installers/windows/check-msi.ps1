@@ -447,6 +447,11 @@ try {
         Say 'uninstall: ok'
     }
 } finally {
+    # Keep the Windows Installer logs where CI can upload them.
+    if ($env:FARO_CHECK_MSI_LOGS) {
+        New-Item -ItemType Directory -Force $env:FARO_CHECK_MSI_LOGS | Out-Null
+        Copy-Item (Join-Path $work '*.log') $env:FARO_CHECK_MSI_LOGS -ErrorAction SilentlyContinue
+    }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
 Say "$leaf is well-formed"

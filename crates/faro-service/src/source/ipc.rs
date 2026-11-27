@@ -2161,11 +2161,22 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // An agent's messages are handled in order: once this tamper signal
+        // is out, so is the second late batch, which must be settled before
+        // the next request (or it would count as a late answer to it).
+        agent
+            .send(&AgentMsg::Tamper(faro_proto::body::TamperSignal::VpnActive))
+            .await
+            .unwrap();
         match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
             SourceEvent::CaptureFailed { reason } => {
                 assert_eq!(reason, "capture taken 6 s after the request")
             }
             other => panic!("{other:?}"),
+        }
+        match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+            SourceEvent::Tamper { .. } => {}
+            other => panic!("only the first late batch fails the capture: {other:?}"),
         }
 
         // A prompt answer is forwarded, up to MAX_FRAMES_PER_CAPTURE frames.
