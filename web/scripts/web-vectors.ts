@@ -19,6 +19,14 @@ import {
 	proveAllyKeyRewrap,
 	signWith
 } from '../src/lib/crypto/proto.ts';
+import {
+	emptyRoster,
+	groupSafetyCode,
+	prepareEntries,
+	sealEpochKey,
+	signSnapshot,
+	type RosterChange
+} from '../src/lib/crypto/roster.ts';
 
 const path = join(import.meta.dirname, '../../crates/faro-crypto/tests/data/web-vectors.json');
 const v = JSON.parse(readFileSync(path, 'utf8'));
@@ -157,5 +165,69 @@ v.from_web = {
 		plaintext: JSON.stringify({ text: messageText })
 	}
 };
+// A roster log signed by the web app: its creator (the web seed) and ally A
+// join, then ally B joins and ally A leaves, then a pure rotation; its
+// snapshot; and the last epoch key sealed to ally A.
+const webGroup = 'web-group-01';
+let roster = emptyRoster(ids.instance, webGroup);
+const steps: RosterChange[][] = [
+	[
+		{
+			kind: 'join',
+			user_id: ids.ally_a,
+			role: 'participant',
+			enc_pubkey: v.keys.ally_a_pubkey,
+			sign_pubkey: null
+		},
+		{
+			kind: 'join',
+			user_id: 'usr_web01',
+			role: 'facilitator',
+			enc_pubkey: memberEnc,
+			sign_pubkey: b64(pk)
+		}
+	],
+	[
+		{ kind: 'leave', user_id: ids.ally_a },
+		{
+			kind: 'join',
+			user_id: ids.ally_b,
+			role: 'participant',
+			enc_pubkey: v.keys.ally_b_pubkey,
+			sign_pubkey: null
+		}
+	],
+	[]
+];
+const rosterEntries = [];
+let lastKey: Uint8Array | null = null;
+for (const [i, changes] of steps.entries()) {
+	const r = prepareEntries(roster, changes, 'usr_web01', seed, {
+		now: 1_790_000_700_000 + i,
+		rotate: true
+	});
+	roster = r.state;
+	for (const e of r.entries) {
+		rosterEntries.push(e.entry);
+		lastKey = e.epochKey;
+	}
+}
+// Ally A left, so seal the last key to them by hand: the vector only needs
+// a box Rust can open.
+const sealedForA = sealEpochKey(lastKey!, [
+	{ user_id: ids.ally_a, role: 'participant', enc_pubkey: v.keys.ally_a_pubkey, sign_pubkey: null }
+])[0].sealed_key;
+v.from_web.roster = {
+	group_id: webGroup,
+	entries: rosterEntries,
+	snapshot: signSnapshot(roster, 'usr_web01', seed, 1_790_000_800_000),
+	epoch_key_hex: hex(lastKey!),
+	sealed_epoch_key: sealedForA,
+	safety_code: groupSafetyCode(ids.instance, webGroup, {
+		seq: roster.next_seq - 1,
+		hash: roster.head
+	})
+};
+
 writeFileSync(path, JSON.stringify(v, null, 2) + '\n');
 console.log(`wrote from_web to ${path}`);

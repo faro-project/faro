@@ -66,6 +66,11 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("alliance_proposals", "to_id", Clears::Rows),
     ("proposal_blocks", "user_id", Clears::Rows),
     ("proposal_blocks", "blocked_id", Clears::Rows),
+    ("pairing_suggestions", "facilitator_id", Clears::SetNull),
+    ("pairing_suggestions", "user_a", Clears::Rows),
+    ("pairing_suggestions", "user_b", Clears::Rows),
+    ("participant_sign_keys", "user_id", Clears::Rows),
+    ("group_epoch_keys", "user_id", Clears::Rows),
     ("group_messages", "author_id", Clears::Rows),
     ("group_message_recipients", "recipient_id", Clears::Rows),
     ("reach_outs", "sender_id", Clears::Rows),
@@ -152,6 +157,15 @@ pub const PURGE_BY_ID: &[&str] = &[
     // Links started from a proposal are ally links, removed above.
     "DELETE FROM alliance_proposals WHERE from_id = $1 OR to_id = $1",
     "DELETE FROM proposal_blocks WHERE user_id = $1 OR blocked_id = $1",
+    // Pairing suggestions naming them (§8.5).
+    "UPDATE pairing_suggestions SET facilitator_id = NULL WHERE facilitator_id = $1",
+    "DELETE FROM pairing_suggestions WHERE user_a = $1",
+    "DELETE FROM pairing_suggestions WHERE user_b = $1",
+    // Phase C: their sealed copies of group epoch keys and their group
+    // signing key. Signed roster entries keep their opaque id and public
+    // keys until a facilitator signs their removal.
+    "DELETE FROM group_epoch_keys WHERE user_id = $1",
+    "DELETE FROM participant_sign_keys WHERE user_id = $1",
     // Reach outs and signed notes (GROUPS.md §18): the person's own reach
     // outs and messages, their copies of others', their answers and their
     // reach-out settings either way. Notes on other people's proposals and

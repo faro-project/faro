@@ -10,9 +10,9 @@
 	import type { Snippet } from 'svelte';
 	import { api, seg } from '#lib/api.ts';
 	import { date } from '#lib/format.ts';
-	import { RELATIONSHIP_LABEL } from '#lib/groups.ts';
+	import { joinNames, RELATIONSHIP_LABEL, STATUS_LABEL } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
-	import type { Page, RosterEntry } from '#lib/types.ts';
+	import type { Page, RosterEntry, SharedAllies, StatusDot } from '#lib/types.ts';
 
 	let {
 		groupId,
@@ -65,6 +65,36 @@
 		}
 	}
 
+	// Someone's allies in this group, loaded when asked for. They show only
+	// if that person chose to show them (§8.2).
+	let allies = $state<Record<string, SharedAllies | 'loading' | 'error'>>({});
+
+	async function toggleAllies(userId: string) {
+		if (allies[userId]) {
+			const rest = { ...allies };
+			delete rest[userId];
+			allies = rest;
+			return;
+		}
+		allies = { ...allies, [userId]: 'loading' };
+		try {
+			const r = await api.get<SharedAllies>(
+				`/v1/groups/${seg(groupId)}/participants/${seg(userId)}/allies`
+			);
+			allies = { ...allies, [userId]: r };
+		} catch {
+			allies = { ...allies, [userId]: 'error' };
+		}
+	}
+
+	const DOT_CLASS: Record<StatusDot, string> = {
+		monitoring_on: 'good',
+		paused: 'pending',
+		not_checked_in: 'normal',
+		no_computer: 'off',
+		not_shared: 'off'
+	};
+
 	// Reload on a new search (after a short pause) or a new `version`.
 	$effect(() => {
 		const key = `${query.trim()}|${version}`;
@@ -105,8 +135,39 @@
 							{#if p.role === 'facilitator'}<span class="chip good">Facilitator</span>{/if}
 							{#if p.unavailable}<span class="chip off">Unavailable</span>{/if}
 							{#if rel}<span class="chip pending">{RELATIONSHIP_LABEL[rel]}</span>{/if}
+							{#if p.status}
+								<span class="chip {DOT_CLASS[p.status]}">{STATUS_LABEL[p.status]}</span>
+							{/if}
 						</div>
-						<div class="row-meta">Joined {date(p.joined_at_ms)}</div>
+						<div class="row-meta">
+							Joined {date(p.joined_at_ms)} ·
+							<button class="link small" type="button" onclick={() => toggleAllies(p.user_id)}>
+								{allies[p.user_id] ? 'Hide allies' : 'Allies in this group'}
+							</button>
+						</div>
+						{#if allies[p.user_id]}
+							{@const a = allies[p.user_id]}
+							<div class="row-meta" role="status">
+								{#if a === 'loading'}
+									Loading…
+								{:else if a === 'error'}
+									Couldn't load that. Try again.
+								{:else if !a.shared}
+									Not shared
+								{:else if a.allies.length === 0}
+									No allies in this group.
+								{:else}
+									{@const theirs = a.allies.filter((x) => x.side === 'ally')}
+									{@const supports = a.allies.filter((x) => x.side === 'supports')}
+									{#if theirs.length}
+										Their allies: {joinNames(theirs.map((x) => x.display_name))}.
+									{/if}
+									{#if supports.length}
+										They are an ally for: {joinNames(supports.map((x) => x.display_name))}.
+									{/if}
+								{/if}
+							</div>
+						{/if}
 					</div>
 					{#if p.user_id !== myId}
 						<div class="row-actions">

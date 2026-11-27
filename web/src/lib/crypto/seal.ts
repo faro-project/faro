@@ -2,8 +2,9 @@
 // `faro_crypto::seal::{open_item, seal_item, seal_to}`.
 //
 // Devices seal reports and events, and members and allies read them. The
-// web app seals only group messages (reach outs and notes, §9). A sealed
-// box is libsodium's `crypto_box_seal`:
+// web app seals only a group's epoch keys (`sealTo`) and group messages
+// (reach outs and notes, `sealItem`, PROTOCOL.md §11). A sealed box is
+// libsodium's `crypto_box_seal`:
 //
 //   epk ‖ crypto_box(m, nonce = BLAKE2b-192(epk ‖ pk), pk, esk)
 //
@@ -14,7 +15,7 @@ import { hsalsa, xsalsa20poly1305 } from '@noble/ciphers/salsa.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake2b } from '@noble/hashes/blake2.js';
 import { b64, concat, randomBytes, unb64, unb64Fixed, wipe, type Bytes } from './bytes.ts';
-import { encPublicKey, isWeakX25519, keyId, newEncryptionSecret } from './keys.ts';
+import { encPublicKey, isWeakX25519, keyId } from './keys.ts';
 
 /** `faro_proto::EncryptedItem` as JSON. */
 export interface EncryptedItem {
@@ -77,6 +78,23 @@ export function sealOpen(sealed: Uint8Array, secret: Uint8Array): Bytes {
 }
 
 /**
+ * libsodium `crypto_box_seal`: what the web app seals is an epoch key to
+ * each participant of a group (PROTOCOL.md §10.3). Refuses small-order keys.
+ */
+export function sealTo(pub: Uint8Array, msg: Uint8Array): Bytes {
+	if (pub.length !== 32 || isWeakX25519(pub)) throw new Error('unusable encryption key');
+	const esk = randomBytes(32);
+	const epk = encPublicKey(esk);
+	const nonce = blake2b(concat(epk, pub), { dkLen: 24 });
+	const key = boxKey(esk, pub);
+	try {
+		return concat(epk, xsalsa20poly1305(key, nonce).encrypt(msg));
+	} finally {
+		wipe(key, esk);
+	}
+}
+
+/**
  * Decrypt an item as `me` with the X25519 `secret`. Tries the envelope
  * whose key id matches first, then any other envelope addressed to `me`.
  * Wrong keys, a tampered ciphertext and the wrong `aad` all fail alike.
@@ -121,23 +139,6 @@ export function openItem(
 		}
 	}
 	throw new DecryptError('decrypt');
-}
-
-/** libsodium `crypto_box_seal`: `msg` for the holder of the X25519 key `pub`. */
-export function sealTo(pub: Uint8Array, msg: Uint8Array): Bytes {
-	if (pub.length !== 32 || isWeakX25519(pub)) throw new Error('cannot seal to this key');
-	const esk = newEncryptionSecret();
-	const epk = encPublicKey(esk);
-	const nonce = blake2b(concat(epk, pub), { dkLen: 24 });
-	const shared = x25519.getSharedSecret(esk, pub);
-	const out = new Uint32Array(8);
-	hsalsa(SIGMA, le32(shared), new Uint32Array(4), out);
-	const key = fromLe32(out);
-	try {
-		return concat(epk, xsalsa20poly1305(key, nonce).encrypt(msg));
-	} finally {
-		wipe(esk, shared, key);
-	}
 }
 
 export interface SealRecipient {

@@ -89,7 +89,66 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 	return data as T;
 }
 
+/**
+ * GET a JSON response, refusing to read more than `maxBytes` of it: for
+ * documents a hostile instance could make arbitrarily large (a group's
+ * roster snapshot), the cap applies before parsing.
+ */
+async function getCapped<T>(path: string, maxBytes: number): Promise<T> {
+	let res: Response;
+	try {
+		res = await fetch(`${apiBase()}${path}`, { credentials: 'same-origin' });
+	} catch {
+		throw new ApiError(0, 'network', 'Could not reach the Faro server.');
+	}
+	const declared = Number(res.headers.get('content-length'));
+	if (Number.isFinite(declared) && declared > maxBytes) {
+		await res.body?.cancel();
+		throw new ApiError(res.status, 'too_large', 'The server sent more than this page accepts.');
+	}
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	const reader = res.body?.getReader();
+	if (reader) {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.length;
+			if (total > maxBytes) {
+				await reader.cancel();
+				throw new ApiError(res.status, 'too_large', 'The server sent more than this page accepts.');
+			}
+			chunks.push(value);
+		}
+	}
+	const bytes = new Uint8Array(total);
+	let o = 0;
+	for (const c of chunks) {
+		bytes.set(c, o);
+		o += c.length;
+	}
+	let data: unknown = null;
+	try {
+		data = JSON.parse(new TextDecoder().decode(bytes));
+	} catch {
+		data = null;
+	}
+	if (!res.ok) {
+		const err = data as Partial<ApiErrorBody> | null;
+		throw new ApiError(
+			res.status,
+			err?.error ?? `http_${res.status}`,
+			err?.message ?? (res.statusText || `HTTP ${res.status}`)
+		);
+	}
+	if (data === null) {
+		throw new ApiError(res.status, 'bad_response', 'The server sent an unexpected response.');
+	}
+	return data as T;
+}
+
 export const api = {
+	getCapped,
 	get: <T>(path: string) => request<T>('GET', path),
 	/** For a `204 No Content` answer, use `T = void`. */
 	post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),

@@ -1,5 +1,5 @@
 //! Reach out and signed, encrypted notes (docs/GROUPS.md §8.3, §10.2, §14;
-//! PROTOCOL.md §9): a signed reach out that recipients verify and open
+//! PROTOCOL.md §11): a signed reach out that recipients verify and open
 //! while the instance can't; forged and misdirected messages refused;
 //! ally-only senders' unverifiable reach outs; the 3-an-hour limit; quiet
 //! hours and the per-person bypass; answers; audiences; notes on proposals

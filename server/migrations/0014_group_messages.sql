@@ -1,6 +1,6 @@
 -- Faro instance schema v14: reach outs, and signed, encrypted notes on
 -- proposals and join requests (docs/GROUPS.md §8.3, §10.2, §15;
--- PROTOCOL.md §9).
+-- PROTOCOL.md §11).
 --
 -- Same portability rules as 0001. Every column that references `users`
 -- must be in `db::repo::deletion::USER_COLUMNS` (DEVELOPMENT.md invariant 6).

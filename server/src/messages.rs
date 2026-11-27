@@ -1,5 +1,5 @@
 //! Reach outs and signed, encrypted notes: the rules the routes share
-//! (GROUPS.md §8.3, §10.2; PROTOCOL.md §9).
+//! (GROUPS.md §8.3, §10.2; PROTOCOL.md §11).
 //!
 //! * **Who a message may go to** ([`resolve_audience`]): the sender's own
 //!   allies, a group's facilitators, or up to 32 named people (active

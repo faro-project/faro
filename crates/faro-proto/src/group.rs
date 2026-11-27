@@ -1,5 +1,5 @@
 //! Signed, encrypted **group messages**: reach outs and the notes on
-//! alliance proposals and join requests (GROUPS.md §10.2, PROTOCOL.md §9).
+//! alliance proposals and join requests (GROUPS.md §10.2, PROTOCOL.md §11).
 //!
 //! One person writes a message for specific people. The instance stores and
 //! routes it, but can neither read it nor forge it:

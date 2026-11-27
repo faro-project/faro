@@ -260,7 +260,7 @@ test('recovery codes', () => {
 test('sealing round trips, and Rust opens what the web app sealed', () => {
 	const ck = new Uint8Array(32).fill(9);
 	assert.deepEqual(sealOpen(sealTo(unb64(K.ally_a_pubkey), ck), unb64(K.ally_a_secret)), ck);
-	assert.throws(() => sealTo(new Uint8Array(32), ck), /cannot seal/);
+	assert.throws(() => sealTo(new Uint8Array(32), ck), /unusable/);
 	const aad = new Uint8Array([1, 2]);
 	const item = sealItem(new Uint8Array([7, 7]), aad, [
 		{ user_id: V.ids.ally_a, pubkey: unb64(K.ally_a_pubkey) },

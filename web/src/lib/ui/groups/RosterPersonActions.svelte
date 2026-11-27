@@ -23,8 +23,15 @@
 	let {
 		groupId,
 		person,
-		readOnly = false
-	}: { groupId: string; person: RosterEntry; readOnly?: boolean } = $props();
+		readOnly = false,
+		onsent
+	}: {
+		groupId: string;
+		person: Pick<RosterEntry, 'user_id' | 'display_name' | 'unavailable'>;
+		readOnly?: boolean;
+		/** Called after a proposal was sent (a pairing card dismisses itself). */
+		onsent?: () => void;
+	} = $props();
 
 	let actions = $derived(
 		rowActions({
@@ -80,6 +87,16 @@
 		dialog = null;
 	}
 
+	/** Open the proposal dialog for `kind` (a pairing card's prefilled proposal). */
+	export function start(kind: ProposalKind) {
+		open(kind);
+	}
+
+	/** Whether `kind` can be proposed to this person now. */
+	export function can(kind: ProposalKind): boolean {
+		return kind === 'partnership' ? actions.partner : actions[kind];
+	}
+
 	let needsAllyKey = $derived(dialog === 'offer' || dialog === 'partnership');
 
 	async function send() {
@@ -115,6 +132,7 @@
 				...(message ? { note: message } : {})
 			});
 			sent = true;
+			onsent?.();
 			setup?.commit();
 			await session.refresh().catch(() => {});
 			if (session.user) await proposals.refresh(session.user.roles);

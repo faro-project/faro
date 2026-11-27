@@ -16,6 +16,8 @@ pub mod feed;
 pub mod group_listing;
 pub mod group_messages;
 pub mod group_notices;
+pub mod group_roster;
+pub mod group_sharing;
 pub mod groups;
 pub mod instance;
 pub mod invites;

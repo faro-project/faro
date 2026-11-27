@@ -6,7 +6,7 @@
 	// here is your own: the list of codes is built from your own alliances,
 	// so it is visible only to the two people in each pair (§7.5).
 	//
-	// Pairing suggestions (§8.5) are not built yet; they will join this list.
+	// Pairing suggestions (§8.5) are separate cards: see PairingCards.svelte.
 	import { api, seg } from '#lib/api.ts';
 	import { date } from '#lib/format.ts';
 	import { groupError } from '#lib/groups-api.ts';

@@ -1,5 +1,5 @@
 //! Sealing, signing, verifying and opening group messages (GROUPS.md §10.2,
-//! PROTOCOL.md §9): reach outs and notes on proposals and join requests.
+//! PROTOCOL.md §11): reach outs and notes on proposals and join requests.
 //!
 //! A receiving client must call [`verify_group_message`] with the author's
 //! member signing key before it shows anything: structure first (cheap, and

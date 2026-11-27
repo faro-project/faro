@@ -1,5 +1,5 @@
 // Signed, encrypted group messages: reach outs and the notes on proposals
-// and join requests (docs/PROTOCOL.md §9, GROUPS.md §10.2). A port of
+// and join requests (docs/PROTOCOL.md §11, GROUPS.md §10.2). A port of
 // `faro_proto::group` and `faro_crypto::{seal,verify,open}_group_message`.
 //
 // The author seals the text to every recipient and to themself, and signs

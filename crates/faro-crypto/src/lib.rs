@@ -20,6 +20,7 @@ pub mod chain;
 mod group;
 mod keycheck;
 mod passphrase;
+pub mod roster;
 mod seal;
 mod sign;
 

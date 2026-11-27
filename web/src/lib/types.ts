@@ -770,6 +770,7 @@ export interface GroupView {
 	no_facilitator: boolean;
 	facilitator_offer_until_ms: number | null;
 	groups_disabled: boolean;
+	my_sharing: MySharing;
 }
 
 /** A meeting schedule (GROUPS.md §8.4); the weekday counts from Monday as 0. */
@@ -810,6 +811,40 @@ export interface RosterEntry {
 	unavailable: boolean;
 	/** People you are linked with come first, whatever page they are on. */
 	relationship: RosterRelationship | null;
+	/** What they show the group; `not_shared` unless they chose to (GROUPS.md §8.2). */
+	status: StatusDot;
+}
+
+/** The dot beside a name: only what the person chose to show. */
+export type StatusDot =
+	'monitoring_on' | 'paused' | 'not_checked_in' | 'no_computer' | 'not_shared';
+
+/** What you show a group (`PUT /v1/groups/{id}/me/sharing`). */
+export interface MySharing {
+	share_status: boolean;
+	share_allies: boolean;
+}
+
+/** `GET /v1/groups/{id}/participants/{user_id}/allies`. */
+export interface SharedAllies {
+	/** False when they don't show their allies to the group. */
+	shared: boolean;
+	allies: { user_id: string; display_name: string; side: 'ally' | 'supports' }[];
+}
+
+/** One pairing suggestion as you see it: your own card. */
+export interface SuggestionCard {
+	id: string;
+	other: { user_id: string; display_name: string };
+	created_at_ms: number;
+}
+
+/** A pairing a facilitator posted: never whether anyone acted on it. */
+export interface PostedSuggestion {
+	id: string;
+	a: { user_id: string; display_name: string };
+	b: { user_id: string; display_name: string };
+	created_at_ms: number;
 }
 
 /** `GET /v1/groups/{id}/me/allies`: the people here you are linked with. */
@@ -902,6 +937,8 @@ export interface GroupInviteInfo {
 	meeting: Meeting | null;
 	instance_name: string;
 	expires_at_ms: number;
+	/** People in the group now: who would see what you choose to share. */
+	participant_count: number;
 }
 
 // ---- Alliance proposals (GROUPS.md §7; server/src/api/proposals.rs) ---------
