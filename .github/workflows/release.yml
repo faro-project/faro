@@ -370,7 +370,9 @@ jobs:
           $msi = (Get-Item target\msi\Faro-*.msi).FullName
           installers\windows\check-msi.ps1 $msi
           New-Item -ItemType Directory -Force dist | Out-Null
-          Move-Item $msi dist\
+          # Copied, not moved: check-msi's Windows Installer database
+          # handle keeps the file open until this shell exits.
+          Copy-Item $msi dist\
       - name: The domain list the package ships
         id: domains
         if: steps.mode.outputs.mode != 'skip'
