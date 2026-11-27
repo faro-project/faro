@@ -151,7 +151,11 @@ pub async fn last_immediate_sent<'e>(
          LEFT JOIN alerts a ON a.id = n.alert_id
          LEFT JOIN reports rp ON rp.id = n.report_id
          WHERE n.recipient_id = $1 AND n.status = 'sent' AND n.mode = 'immediate'
-           AND COALESCE(a.member_id, rp.member_id) = $2",
+           AND COALESCE(a.member_id, rp.member_id) = $2
+           AND (a.extra_recipient_id IS NULL OR a.extra_recipient_id <> n.recipient_id)
+           AND NOT (a.source = 'server' AND a.kind IN (
+                'account_disabled', 'account_enabled', 'ally_disabled', 'ally_enabled',
+                'account_deleted', 'ally_deleted', 'account_deletion_cancelled'))",
     )
     .bind(recipient.as_str())
     .bind(member.as_str())

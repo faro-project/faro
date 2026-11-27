@@ -892,6 +892,7 @@ fn coalescible(n: &DueNotification) -> bool {
 
 /// One unit of immediate sending: a single notification, or everything due
 /// for one (recipient, member) combined into one email.
+#[allow(clippy::large_enum_variant)]
 enum SendItem {
     Single(DueNotification),
     Group(Vec<DueNotification>),
@@ -930,7 +931,7 @@ pub async fn send_immediate(state: &AppState) -> Result<SendSummary, AppError> {
             s.deferred += 1;
             continue;
         }
-        if coalescible(&n) {
+        if interval_ms > 0 && coalescible(&n) {
             let key = (
                 n.recipient_id.as_str().to_owned(),
                 n.member_id.as_str().to_owned(),

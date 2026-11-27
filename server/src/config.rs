@@ -254,6 +254,7 @@ pub struct DeviceLimitsConfig {
     pub alert_coalesce_secs: u64,
     /// At most one immediate email per recipient and member per this many
     /// seconds; whatever arrives meanwhile is sent together afterwards.
+    /// 0 turns coalescing off: every alert is its own email.
     pub email_interval_secs: u64,
     /// Ciphertext a device may have stored (event bodies and reports), in
     /// MiB. Over it, new event bodies are not stored and new reports are
