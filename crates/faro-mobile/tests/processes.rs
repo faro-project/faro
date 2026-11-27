@@ -82,11 +82,14 @@ fn append_events(core: &faro_mobile::FaroCore, who: &str, n: u64) {
             })
             .expect("tamper appended");
         } else {
-            core.record_settings_change(vec![SettingChangeRecord {
-                key: "test.counter".into(),
-                old_value: Some(who.into()),
-                new_value: Some(i.to_string()),
-            }])
+            core.record_settings_change(
+                vec![SettingChangeRecord {
+                    key: "test.counter".into(),
+                    old_value: Some(who.into()),
+                    new_value: Some(i.to_string()),
+                }],
+                None,
+            )
             .expect("settings change appended");
         }
     }
@@ -164,7 +167,7 @@ async fn several_processes_append_to_one_strict_chain() {
                     signal: faro_proto::body::TamperSignal::IntegrityFailure { component },
                     ..
                 } => component.rsplit_once(' ').unwrap().0.to_owned(),
-                faro_proto::body::EventBody::SettingsChange { changes } => {
+                faro_proto::body::EventBody::SettingsChange { changes, .. } => {
                     changes[0].old.clone().unwrap()
                 }
                 other => panic!("unexpected body {other:?}"),

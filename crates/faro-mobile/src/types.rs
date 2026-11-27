@@ -1,19 +1,12 @@
-//! The records and enums Swift sees, and their mapping to `faro-proto`.
-//!
-//! These use only the protocol's existing types. The iPhone tamper signals
-//! (`screen_time_revoked`, `filter_off`, `settings_cleared`), the iOS
-//! context items and the `ios` platform come from the protocol issue
-//! (#140); whichever of the two lands second adds them here.
+//! The records and enums Swift sees, and their mapping to `faro-proto`
+//! (PROTOCOL.md §3, including the iPhone signals and bodies).
 
 use faro_proto::api::{DeviceState, Platform};
-use faro_proto::body::{SettingChange, TamperSignal};
+use faro_proto::body::{BlockedHost, EventBody, FilterOffCause, SettingChange, TamperSignal};
+use std::collections::BTreeMap;
 
 /// The platform this crate enrolls as.
-///
-/// `Platform::Ios` comes with the protocol issue (#140). Until then an
-/// iPhone enrolls as `macos`, the nearest platform the instance accepts
-/// today. Nothing on the device depends on it.
-pub const PLATFORM: Platform = Platform::Macos;
+pub const PLATFORM: Platform = Platform::Ios;
 
 /// The platform string for update selection (`faro_update::Selection`).
 /// Data bundles are listed for platform `any`, which matches it.
@@ -76,10 +69,18 @@ pub struct CoreStatus {
     pub manifest_version: Option<u64>,
 }
 
-/// An active tamper signal (an urgent `tamper` event), from the signals
-/// the protocol has today.
+/// An active tamper signal: an urgent `tamper` event, tamper-class on the
+/// instance (docs/IOS.md §10.2).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Tamper {
+    /// Screen Time authorization is no longer approved: the shields and
+    /// `denyAppRemoval` are gone, and Faro can be deleted.
+    ScreenTimeRevoked,
+    /// The DNS filter is off.
+    FilterOff { cause: FilterCause },
+    /// Faro's ManagedSettings store was found cleared or changed while
+    /// authorization still stands.
+    SettingsCleared,
     /// A permission Faro needs is off. `never_granted`: it was never seen
     /// granted on this enrollment, rather than turned off.
     PermissionRevoked {
@@ -96,9 +97,41 @@ pub enum Tamper {
     },
 }
 
+/// Why the DNS filter is off, as far as the phone can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FilterCause {
+    /// The VPN was switched off.
+    VpnDisconnected,
+    /// Connect On Demand was turned off.
+    OnDemandOff,
+    /// Another VPN took over.
+    OtherVpn,
+    /// The Faro VPN profile was deleted.
+    ProfileRemoved,
+    /// The tunnel stopped reporting and nothing says why.
+    Unknown,
+}
+
+impl From<FilterCause> for FilterOffCause {
+    fn from(c: FilterCause) -> Self {
+        match c {
+            FilterCause::VpnDisconnected => FilterOffCause::VpnDisconnected,
+            FilterCause::OnDemandOff => FilterOffCause::OnDemandOff,
+            FilterCause::OtherVpn => FilterOffCause::OtherVpn,
+            FilterCause::ProfileRemoved => FilterOffCause::ProfileRemoved,
+            FilterCause::Unknown => FilterOffCause::Unknown,
+        }
+    }
+}
+
 impl From<Tamper> for TamperSignal {
     fn from(t: Tamper) -> Self {
         match t {
+            Tamper::ScreenTimeRevoked => TamperSignal::ScreenTimeRevoked,
+            Tamper::FilterOff { cause } => TamperSignal::FilterOff {
+                cause: cause.into(),
+            },
+            Tamper::SettingsCleared => TamperSignal::SettingsCleared,
             Tamper::PermissionRevoked {
                 permission,
                 never_granted,
@@ -121,15 +154,26 @@ impl From<Tamper> for TamperSignal {
 /// A context signal: listed in the daily report, never an alert.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Context {
+    /// Connections to DNS-over-HTTPS resolvers were dropped.
+    DohDropped,
+    /// Another VPN is connected.
+    OtherVpn,
+    /// The phone looks jailbroken.
+    JailbreakSuspected,
     VpnActive,
     VirtualMachine,
     RemoteDesktop,
-    BrowserWithoutExtension { browser: String },
+    BrowserWithoutExtension {
+        browser: String,
+    },
 }
 
 impl From<Context> for TamperSignal {
     fn from(c: Context) -> Self {
         match c {
+            Context::DohDropped => TamperSignal::DohDropped,
+            Context::OtherVpn => TamperSignal::OtherVpn,
+            Context::JailbreakSuspected => TamperSignal::JailbreakSuspected,
             Context::VpnActive => TamperSignal::VpnActive,
             Context::VirtualMachine => TamperSignal::VirtualMachine,
             Context::RemoteDesktop => TamperSignal::RemoteDesktop,
@@ -176,6 +220,131 @@ impl SettingChangeRecord {
             key: self.key,
             old: self.old_value,
             new: self.new_value,
+        })
+    }
+}
+
+/// A loosening that waits before it applies (docs/IOS.md §9), carried by
+/// the `settings_change` that announces it, applies it or cancels it. All
+/// times are Unix ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct PendingLoosening {
+    /// When the member asked for it.
+    pub requested_at_ms: Option<i64>,
+    /// When it applies.
+    pub takes_effect_at_ms: Option<i64>,
+    /// When the member cancelled it, if they did.
+    pub cancelled_at_ms: Option<i64>,
+    /// The delay in force, in seconds.
+    pub delay_secs: Option<u64>,
+}
+
+/// Bounds on a summary.
+pub const MAX_SUMMARY_HOSTS: usize = 200;
+pub const MAX_CATEGORY: usize = 32;
+pub const MAX_HOST: usize = 253;
+
+/// One host in a [`BlockedSummaryRecord`]: the host only, never a path or
+/// a query.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BlockedHostRecord {
+    pub host: String,
+    pub category: String,
+    pub count: u32,
+}
+
+/// Blocked DNS lookups in one bucket (`blocked_summary`, docs/IOS.md §11).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BlockedSummaryRecord {
+    /// Start of the bucket, Unix ms.
+    pub bucket_start_ms: i64,
+    pub bucket_secs: u64,
+    /// Blocked lookups per category.
+    pub by_category: std::collections::HashMap<String, u32>,
+    /// The hosts listed (adult and gambling only).
+    pub hosts: Vec<BlockedHostRecord>,
+    /// Blocked lookups of hosts not listed.
+    pub other_hosts: u32,
+}
+
+/// How often a Screen Time shield was shown or closed in one bucket
+/// (`shield_summary`). Counts only, never app names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ShieldSummaryRecord {
+    /// Start of the bucket, Unix ms.
+    pub bucket_start_ms: i64,
+    pub bucket_secs: u64,
+    pub shown: u32,
+    pub closed: u32,
+}
+
+fn category_ok(c: &str) -> bool {
+    (1..=MAX_CATEGORY).contains(&c.len())
+        && c.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A DNS host name as the filter matched it: lowercase letters, digits,
+/// `-` and `.`, at most 253 bytes. Anything that could carry a path, a
+/// query or a port is refused.
+fn host_ok(h: &str) -> bool {
+    (1..=MAX_HOST).contains(&h.len())
+        && !h.starts_with('.')
+        && h.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+}
+
+impl BlockedSummaryRecord {
+    pub(crate) fn into_body(self) -> Result<EventBody, String> {
+        if self.bucket_secs == 0 {
+            return Err("a bucket lasts at least a second".into());
+        }
+        if self.hosts.len() > MAX_SUMMARY_HOSTS || self.by_category.len() > MAX_SUMMARY_HOSTS {
+            return Err(format!(
+                "a summary lists at most {MAX_SUMMARY_HOSTS} hosts and categories"
+            ));
+        }
+        let mut by_category = BTreeMap::new();
+        for (c, n) in self.by_category {
+            if !category_ok(&c) {
+                return Err(format!("{c:?} is not a category name"));
+            }
+            by_category.insert(c, n);
+        }
+        let mut hosts = Vec::with_capacity(self.hosts.len());
+        for h in self.hosts {
+            if !host_ok(&h.host) {
+                return Err("a listed host is a DNS name only (lowercase, no path or port)".into());
+            }
+            if !category_ok(&h.category) {
+                return Err(format!("{:?} is not a category name", h.category));
+            }
+            hosts.push(BlockedHost {
+                host: h.host,
+                category: h.category,
+                count: h.count,
+            });
+        }
+        Ok(EventBody::BlockedSummary {
+            bucket_start: self.bucket_start_ms,
+            bucket_secs: self.bucket_secs,
+            by_category,
+            hosts,
+            other_hosts: self.other_hosts,
+        })
+    }
+}
+
+impl ShieldSummaryRecord {
+    pub(crate) fn into_body(self) -> Result<EventBody, String> {
+        if self.bucket_secs == 0 {
+            return Err("a bucket lasts at least a second".into());
+        }
+        Ok(EventBody::ShieldSummary {
+            bucket_start: self.bucket_start_ms,
+            bucket_secs: self.bucket_secs,
+            shown: self.shown,
+            closed: self.closed,
         })
     }
 }

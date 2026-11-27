@@ -4,11 +4,12 @@
 mod support;
 
 use faro_mobile::{
-    Approval, Context, FaroError, HeartbeatState, KeyStore, KeyStoreError, MemoryKeyStore,
-    SettingChangeRecord, Tamper,
+    Approval, BlockedHostRecord, BlockedSummaryRecord, Context, FaroError, FilterCause,
+    HeartbeatState, KeyStore, KeyStoreError, MemoryKeyStore, PendingLoosening, SettingChangeRecord,
+    ShieldSummaryRecord, Tamper,
 };
 use faro_proto::api::DeviceState;
-use faro_proto::body::{EventBody, TamperSignal};
+use faro_proto::body::{EventBody, FilterOffCause, TamperSignal};
 use faro_proto::EventKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -46,10 +47,7 @@ async fn enrolls_waits_for_approval_then_records_and_uploads() {
         (
             c.status().unwrap(),
             c.poll_approval().unwrap(),
-            c.record_tamper(Tamper::PermissionRevoked {
-                permission: "screen_time".into(),
-                never_granted: false,
-            }),
+            c.record_tamper(Tamper::ScreenTimeRevoked),
             c.heartbeat(HeartbeatState::Active),
         )
     })
@@ -75,48 +73,109 @@ async fn enrolls_waits_for_approval_then_records_and_uploads() {
     assert!(status.approved);
     assert_eq!(status.manifest_version, Some(anchor.version));
 
-    // Events: tamper (urgent), a settings change (normal); context is kept
-    // for the report and is never an event.
+    // Events: tamper (urgent), a settings change with a pending loosening
+    // (normal), the filter's and the shields' summaries (capture-class);
+    // context is kept for the report and is never an event.
     let c = core.clone();
-    let (s0, s1) = blocking(move || {
+    let seqs = blocking(move || {
         let s0 = c
-            .record_tamper(Tamper::PermissionRevoked {
-                permission: "screen_time".into(),
-                never_granted: false,
+            .record_tamper(Tamper::FilterOff {
+                cause: FilterCause::ProfileRemoved,
             })
             .unwrap();
         let s1 = c
-            .record_settings_change(vec![SettingChangeRecord {
-                key: "blocking.gambling".into(),
-                old_value: Some("on".into()),
-                new_value: Some("off".into()),
-            }])
+            .record_settings_change(
+                vec![SettingChangeRecord {
+                    key: "blocking.gambling".into(),
+                    old_value: Some("on".into()),
+                    new_value: Some("off".into()),
+                }],
+                Some(PendingLoosening {
+                    requested_at_ms: Some(1_000),
+                    takes_effect_at_ms: Some(86_401_000),
+                    cancelled_at_ms: None,
+                    delay_secs: Some(86_400),
+                }),
+            )
             .unwrap();
-        c.record_context(Context::VpnActive).unwrap();
-        (s0, s1)
+        let s2 = c
+            .record_blocked_summary(BlockedSummaryRecord {
+                bucket_start_ms: 1_800_000_000_000,
+                bucket_secs: 300,
+                by_category: [("adult".to_owned(), 6)].into(),
+                hosts: vec![BlockedHostRecord {
+                    host: "adult.example".into(),
+                    category: "adult".into(),
+                    count: 6,
+                }],
+                other_hosts: 0,
+            })
+            .unwrap();
+        let s3 = c
+            .record_shield_summary(ShieldSummaryRecord {
+                bucket_start_ms: 1_800_000_000_000,
+                bucket_secs: 300,
+                shown: 2,
+                closed: 1,
+            })
+            .unwrap();
+        c.record_context(Context::DohDropped).unwrap();
+        [s0, s1, s2, s3]
     })
     .await;
-    assert_eq!((s0, s1), (0, 1));
+    assert_eq!(seqs, [0, 1, 2, 3]);
     let c = core.clone();
     let (pending, context) =
         blocking(move || (c.pending_events(10).unwrap(), c.context_since(0).unwrap())).await;
-    assert_eq!(pending.len(), 2);
-    assert_eq!(pending[0].header.kind, EventKind::Tamper);
-    assert_eq!(pending[0].header.urgency, faro_proto::Urgency::Urgent);
-    assert_eq!(pending[1].header.kind, EventKind::SettingsChange);
+    let shape: Vec<_> = pending
+        .iter()
+        .map(|e| (e.header.kind, e.header.urgency))
+        .collect();
+    use faro_proto::Urgency as U;
+    assert_eq!(
+        shape,
+        vec![
+            (EventKind::Tamper, U::Urgent),
+            (EventKind::SettingsChange, U::Normal),
+            (EventKind::Capture, U::None),
+            (EventKind::Capture, U::None),
+        ]
+    );
     assert_eq!(context.len(), 1);
-    assert_eq!(context[0].signal, TamperSignal::VpnActive);
+    assert_eq!(context[0].signal, TamperSignal::DohDropped);
 
     // The bodies open for the member and the ally, as their web apps do.
-    let body = faro_core::open_event_body(&pending[0], &w.member, &w.member_keys.enc).unwrap();
+    let open = |i: usize| faro_core::open_event_body(&pending[i], &w.member, &w.member_keys.enc);
+    assert_eq!(
+        open(0).unwrap(),
+        EventBody::tamper(TamperSignal::FilterOff {
+            cause: FilterOffCause::ProfileRemoved
+        })
+    );
     assert!(matches!(
-        body,
-        EventBody::Tamper {
-            signal: TamperSignal::PermissionRevoked { .. },
+        open(1).unwrap(),
+        EventBody::SettingsChange {
+            takes_effect_at: Some(86_401_000),
+            delay_secs: Some(86_400),
+            cancelled_at: None,
             ..
         }
     ));
-    assert!(faro_core::open_event_body(&pending[1], &w.ally.id, &w.ally.keys.enc).is_ok());
+    assert!(matches!(
+        open(2).unwrap(),
+        EventBody::BlockedSummary { ref hosts, .. } if hosts[0].host == "adult.example"
+    ));
+    assert!(matches!(
+        open(3).unwrap(),
+        EventBody::ShieldSummary {
+            shown: 2,
+            closed: 1,
+            ..
+        }
+    ));
+    for e in &pending {
+        assert!(faro_core::open_event_body(e, &w.ally.id, &w.ally.keys.enc).is_ok());
+    }
 
     // Upload, then a heartbeat that names the head.
     let c = core.clone();
@@ -127,11 +186,11 @@ async fn enrolls_waits_for_approval_then_records_and_uploads() {
         )
     })
     .await;
-    assert_eq!(up.acked_through, Some(1));
+    assert_eq!(up.acked_through, Some(3));
     assert_eq!(up.pending_events, 0);
     assert!(up.warnings.is_empty(), "{:?}", up.warnings);
-    assert_eq!(hb.acked_through, Some(1));
-    assert_eq!(w.stored_seqs(&enrolled.device_id).await, vec![0, 1]);
+    assert_eq!(hb.acked_through, Some(3));
+    assert_eq!(w.stored_seqs(&enrolled.device_id).await, vec![0, 1, 2, 3]);
     let kinds = w.alert_kinds().await;
     assert!(
         !kinds
@@ -147,7 +206,7 @@ async fn enrolls_waits_for_approval_then_records_and_uploads() {
             .await
             .unwrap();
     assert_eq!(state, DeviceState::Sleeping.as_str());
-    assert_eq!(reported, 1);
+    assert_eq!(reported, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -200,28 +259,57 @@ async fn refuses_bad_links_names_and_a_second_enrollment() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejects_context_as_tamper_and_bad_settings() {
+async fn rejects_bad_settings_and_summaries() {
     let w = World::new().await;
     let phone = Phone::new();
     let (core, _) = approved_phone(&w, &phone).await;
     let c = core.clone();
-    let (empty, bad_key, control) = blocking(move || {
-        (
-            c.record_settings_change(vec![]),
-            c.record_settings_change(vec![SettingChangeRecord {
-                key: "has space".into(),
-                old_value: None,
-                new_value: None,
-            }]),
-            c.record_settings_change(vec![SettingChangeRecord {
-                key: "k".into(),
-                old_value: Some("a\nb".into()),
-                new_value: None,
-            }]),
-        )
+    let summary = |host: &str, category: &str| BlockedSummaryRecord {
+        bucket_start_ms: 0,
+        bucket_secs: 300,
+        by_category: Default::default(),
+        hosts: vec![BlockedHostRecord {
+            host: host.into(),
+            category: category.into(),
+            count: 1,
+        }],
+        other_hosts: 0,
+    };
+    let results = blocking(move || {
+        vec![
+            c.record_settings_change(vec![], None),
+            c.record_settings_change(
+                vec![SettingChangeRecord {
+                    key: "has space".into(),
+                    old_value: None,
+                    new_value: None,
+                }],
+                None,
+            ),
+            c.record_settings_change(
+                vec![SettingChangeRecord {
+                    key: "k".into(),
+                    old_value: Some("a\nb".into()),
+                    new_value: None,
+                }],
+                None,
+            ),
+            // A summary carries host names only: no paths, ports or URLs.
+            c.record_blocked_summary(summary("adult.example/path", "adult")),
+            c.record_blocked_summary(summary("adult.example:443", "adult")),
+            c.record_blocked_summary(summary("https://adult.example", "adult")),
+            c.record_blocked_summary(summary("Adult.Example", "adult")),
+            c.record_blocked_summary(summary("adult.example", "Adult Sites")),
+            c.record_shield_summary(ShieldSummaryRecord {
+                bucket_start_ms: 0,
+                bucket_secs: 0,
+                shown: 1,
+                closed: 0,
+            }),
+        ]
     })
     .await;
-    for r in [empty, bad_key, control] {
+    for r in results {
         assert!(matches!(r, Err(FaroError::InvalidArgument { .. })), "{r:?}");
     }
 }

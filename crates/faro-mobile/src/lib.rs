@@ -40,7 +40,9 @@
 //! * **Keys never leave the device**, and Rust wipes its copies of them
 //!   ([`keys`]).
 //! * **Nothing about browsing leaves the phone** except sealed event
-//!   bodies (§4 principle 1): this crate has no API that sends a hostname.
+//!   bodies (§4 principle 1): the hosts in a blocked summary exist only
+//!   inside the body sealed to the member and allies, and nothing here asks
+//!   anyone whether to block.
 
 uniffi::setup_scaffolding!();
 

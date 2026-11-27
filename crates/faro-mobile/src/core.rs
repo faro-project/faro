@@ -4,8 +4,9 @@ use crate::error::FaroError;
 use crate::keys::{self, KeyStore, DEVICE_TOKEN};
 use crate::store::{self, Store, BUSY_TIMEOUT, ENDORSEMENT, ENROLLMENT};
 use crate::types::{
-    Approval, Context, CoreStatus, EnrolledDevice, HeartbeatAnswer, HeartbeatState,
-    InstancePreview, SettingChangeRecord, Tamper, UploadOutcome, MAX_SETTING_CHANGES, PLATFORM,
+    Approval, BlockedSummaryRecord, Context, CoreStatus, EnrolledDevice, HeartbeatAnswer,
+    HeartbeatState, InstancePreview, PendingLoosening, SettingChangeRecord, ShieldSummaryRecord,
+    Tamper, UploadOutcome, MAX_SETTING_CHANGES, PLATFORM,
 };
 use faro_client::enroll::{self as shared, EndorsementPoll, Enrollment, Registration};
 use faro_client::link::parse_enroll_link;
@@ -251,11 +252,13 @@ impl FaroCore {
         self.append(&EventBody::tamper(signal), Urgency::Urgent)
     }
 
-    /// Record a settings change that allies are told about. Returns its
-    /// `seq`.
+    /// Record a settings change that allies are told about, with the
+    /// pending loosening it announces, applies or cancels, if any. Returns
+    /// its `seq`.
     pub fn record_settings_change(
         &self,
         changes: Vec<SettingChangeRecord>,
+        pending: Option<PendingLoosening>,
     ) -> Result<u64, FaroError> {
         if changes.is_empty() || changes.len() > MAX_SETTING_CHANGES {
             return Err(FaroError::invalid(format!(
@@ -267,7 +270,35 @@ impl FaroCore {
             .map(SettingChangeRecord::into_proto)
             .collect::<Result<Vec<_>, _>>()
             .map_err(FaroError::invalid)?;
-        self.append(&EventBody::SettingsChange { changes }, Urgency::Normal)
+        let p = pending.unwrap_or(PendingLoosening {
+            requested_at_ms: None,
+            takes_effect_at_ms: None,
+            cancelled_at_ms: None,
+            delay_secs: None,
+        });
+        let body = EventBody::SettingsChange {
+            changes,
+            requested_at: p.requested_at_ms,
+            takes_effect_at: p.takes_effect_at_ms,
+            cancelled_at: p.cancelled_at_ms,
+            delay_secs: p.delay_secs,
+        };
+        self.append(&body, Urgency::Normal)
+    }
+
+    /// Record the DNS filter's blocked lookups for one bucket
+    /// (`blocked_summary`, a `capture`-class event: urgency `none`). Hosts
+    /// travel only inside the sealed body. Returns its `seq`.
+    pub fn record_blocked_summary(&self, summary: BlockedSummaryRecord) -> Result<u64, FaroError> {
+        let body = summary.into_body().map_err(FaroError::invalid)?;
+        self.append(&body, Urgency::None)
+    }
+
+    /// Record the shields' counts for one bucket (`shield_summary`, a
+    /// `capture`-class event). Returns its `seq`.
+    pub fn record_shield_summary(&self, summary: ShieldSummaryRecord) -> Result<u64, FaroError> {
+        let body = summary.into_body().map_err(FaroError::invalid)?;
+        self.append(&body, Urgency::None)
     }
 
     /// Record a context signal for the daily report. It is never an event

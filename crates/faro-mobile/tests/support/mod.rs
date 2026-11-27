@@ -126,6 +126,7 @@ impl World {
             .clone();
         assert_eq!(listed["status"], "pending_endorsement");
         assert_eq!(listed["name"], DEVICE_NAME);
+        assert_eq!(listed["platform"], "ios");
         assert_eq!(listed["key_id"], fingerprint);
         let device_key: SignPublicKey =
             serde_json::from_value(listed["sign_pubkey"].clone()).expect("sign_pubkey");
