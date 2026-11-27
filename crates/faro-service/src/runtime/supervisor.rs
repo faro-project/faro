@@ -94,14 +94,23 @@ impl Supervisor {
         self.drops.push_back(now_ms);
         self.restart_pending.insert(session.to_owned());
         let count = self.in_window(now_ms, self.window_ms);
+        // Latched by `mark_reported`, once the signal has committed.
         if count >= self.threshold && !self.latched {
-            self.latched = true;
             return Some(TamperSignal::AgentKilledRepeatedly {
                 count,
                 window_secs: self.window_ms / 1000,
             });
         }
         None
+    }
+
+    /// The signal `on_disconnect` returned has been committed: not again
+    /// until the drops fall below the threshold. Ignored if they already
+    /// have.
+    pub fn mark_reported(&mut self, now_ms: u64) {
+        if self.in_window(now_ms, self.window_ms) >= self.threshold {
+            self.latched = true;
+        }
     }
 
     /// `session`'s agent connected. Returns `Some` if this is a restart
@@ -153,7 +162,11 @@ mod tests {
                 window_secs: 600
             })
         );
+        // Until the signal commits, the condition stands and is signalled again.
         s.on_connect(31_000, "s");
+        assert!(s.on_disconnect(35_000, "s", false).is_some());
+        s.mark_reported(35_000);
+        s.on_connect(36_000, "s");
         assert_eq!(s.on_disconnect(40_000, "s", false), None, "latched");
         s.on_connect(41_000, "s");
         // After the window empties the latch re-arms.

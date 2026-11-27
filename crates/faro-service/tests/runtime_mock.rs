@@ -640,6 +640,178 @@ async fn full_lifecycle_against_mock_instance() {
     assert_eq!(report.capture.state, CaptureState::Stopped);
 }
 
+/// Break (or repair) the service's outbox the way a full volume does: every
+/// event insert fails, reads still work.
+fn set_outbox_full(state_dir: &std::path::Path, full: bool) {
+    let db = rusqlite::Connection::open(state_dir.join(faro_core::outbox::OUTBOX_FILE)).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute_batch(if full {
+        "CREATE TRIGGER IF NOT EXISTS test_full BEFORE INSERT ON events \
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;"
+    } else {
+        "DROP TRIGGER IF EXISTS test_full;"
+    })
+    .unwrap();
+}
+
+/// A failed outbox commit must not lose a flag or a tamper event (#188): they
+/// wait in memory and commit once the outbox works again, and while it keeps
+/// failing the service stops claiming to be alive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn events_survive_a_failing_outbox() {
+    let instance_id = InstanceId::new("inst_mock");
+    let member_id = UserId::new("usr_member");
+    let member = SigningKey::generate();
+    let member_enc = EncryptionKeypair::generate();
+    let v1 = manifest_doc(&member, &instance_id, &member_id, 1, &member_enc, &[]);
+    let shared: Shared = Arc::new(Mutex::new(Mock {
+        instance_id: instance_id.clone(),
+        identity: SigningKey::generate().public(),
+        member_id: member_id.clone(),
+        member_sign: member.public(),
+        device_id: DeviceId::new("dev_mock"),
+        device_key: None,
+        endorsement: None,
+        manifest: v1.clone(),
+        head: None,
+        events: Vec::new(),
+        heartbeats: Vec::new(),
+        reports: Vec::new(),
+        auth_failures: Vec::new(),
+    }));
+    let app = Router::new()
+        .route("/.well-known/faro", get(well_known))
+        .route("/v1/devices/enroll", post(do_enroll))
+        .route("/v1/devices/self", get(device_self))
+        .route("/v1/members/{id}/recipient-manifest", get(manifest))
+        .route("/v1/events:batch", post(events))
+        .route("/v1/heartbeat", post(heartbeat))
+        .route("/v1/reports", post(reports))
+        .with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = parse_instance_url(&format!("http://{addr}")).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().join("state");
+    let dir = StateDir::open(&state_dir).unwrap();
+    let wall0 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let clock = ManualClock::new(wall0, 5_000_000);
+    let params = EnrollParams {
+        instance: base.clone(),
+        code: EnrollCode::parse("abcd 1234").unwrap(),
+        device_name: "Test Laptop".into(),
+        client: ClientOptions::default(),
+        member_key: None,
+    };
+    enroll::enroll(&dir, Arc::new(clock.clone()), &params, |_| true)
+        .await
+        .unwrap();
+    let mut config = Config {
+        state_dir: state_dir.clone(),
+        ..Config::default()
+    };
+    config.network.endorsement_poll_secs = 1;
+    config.network.upload_interval_secs = 1;
+    let script = Script::new();
+    let classifier = ScriptedClassifier::new(ImageScores::new([("explicit", 0.95f32)]).unwrap());
+    let service = Service::builder(config)
+        .clock(Arc::new(clock.clone()))
+        .frame_source(InProcessFrameSource::new(
+            script.platform(),
+            Duration::from_millis(10),
+        ))
+        .classifier(Box::new(classifier))
+        .tick_interval(Duration::from_millis(10))
+        .scheduler_seed(7)
+        .build()
+        .unwrap();
+    let handle = service.spawn();
+    wait_for(&handle, "awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    {
+        let mut m = shared.lock().unwrap();
+        let e = DeviceEndorsement {
+            instance_id: instance_id.clone(),
+            member_id: member_id.clone(),
+            device_id: m.device_id.clone(),
+            device_sign_pubkey: m.device_key.unwrap(),
+            endorsed_at_ms: wall0,
+            min_manifest: v1.body.reference(),
+        };
+        m.endorsement = Some(member.endorse(e));
+    }
+    wait_for(&handle, "running", |s| s.phase == Phase::Running).await;
+    // The boot event has committed; from here the volume is "full".
+    wait_for(&handle, "boot committed", |s| s.last_seq.is_some()).await;
+    set_outbox_full(&state_dir, true);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = handle.status();
+
+    // A tamper event and (as time passes) flags, none of which can commit.
+    script.with(|s| s.tamper.push(TamperSignal::WaylandTokenLost));
+    let ticker = {
+        let clock = clock.clone();
+        tokio::spawn(async move {
+            loop {
+                clock.advance(200);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+    wait_for(&handle, "tamper signalled", |s| s.tamper_events >= 1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let st = handle.status();
+    assert_eq!(st.last_seq, before.last_seq, "nothing could commit");
+    assert_eq!(st.flags, before.flags);
+
+    // Failing for a long time: heartbeats stop, so the instance's liveness
+    // monitor sees silence instead of an `active` device.
+    ticker.abort();
+    clock.advance(16 * 60 * 1000);
+    wait_for(&handle, "commit failure shown", |s| s.commit_failing).await;
+    let sent = handle.status().heartbeats_sent;
+    handle.heartbeat_now();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(handle.status().heartbeats_sent, sent, "no heartbeat");
+
+    // Space is freed: the queued events commit, in order, and upload.
+    set_outbox_full(&state_dir, false);
+    wait_for(&handle, "queued events committed", |s| {
+        !s.commit_failing && s.last_seq > before.last_seq
+    })
+    .await;
+    handle.heartbeat_now();
+    wait_for(&handle, "heartbeats resume", |s| s.heartbeats_sent > sent).await;
+    handle.upload_now();
+    wait_for(&handle, "uploaded", |s| {
+        s.acked_through.is_some() && s.acked_through == s.last_seq
+    })
+    .await;
+    {
+        let m = shared.lock().unwrap();
+        let tamper = m
+            .events
+            .iter()
+            .filter(|e| e.header.kind == EventKind::Tamper)
+            .find_map(
+                |e| match open_event_body(e, &member_id, &member_enc).unwrap() {
+                    EventBody::Tamper { signal, .. } => Some(signal),
+                    _ => None,
+                },
+            );
+        assert_eq!(tamper, Some(TamperSignal::WaylandTokenLost));
+        assert!(m.auth_failures.is_empty(), "{:?}", m.auth_failures);
+    }
+    handle.shutdown().await.unwrap();
+}
+
 fn status_config(state_dir: &std::path::Path) -> Config {
     Config {
         state_dir: state_dir.to_owned(),

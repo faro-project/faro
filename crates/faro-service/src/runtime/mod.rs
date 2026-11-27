@@ -1064,8 +1064,11 @@ impl ServiceSignals {
 
     /// An active tamper signal from outside the core, for example Faro's
     /// own files changing (`IntegrityFailure`).
-    pub fn tamper(&self, signal: TamperSignal) {
-        let _ = self.control.try_send(Control::Tamper(signal));
+    ///
+    /// Returns whether the core's queue took it; if not (it is full), the
+    /// caller should report the same signal again later.
+    pub fn tamper(&self, signal: TamperSignal) -> bool {
+        self.control.try_send(Control::Tamper(signal)).is_ok()
     }
 }
 

@@ -113,6 +113,64 @@ fn signal_key(sig: &TamperSignal, account: &Option<String>) -> SignalKey {
     };
     (std::mem::discriminant(sig), detail, account.clone())
 }
+
+/// Events whose commit failed wait in memory for the next tick, at most
+/// this many (flags carry a thumbnail). Past it the least urgent are
+/// dropped, and the count is logged.
+const MAX_QUEUED_EVENTS: usize = 32;
+/// Commits that keep failing for this long stop the heartbeats (see
+/// [`Core::note_commit_result`]). Three heartbeat intervals.
+const COMMIT_FAILING_ALARM_MS: u64 = 15 * 60 * 1000;
+
+/// A "reported once" condition. It is set when the tamper event for it has
+/// committed, never before, so a failed commit leaves the condition to be
+/// raised again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Latch {
+    Absence(String),
+    Stall,
+    CaptureFailing,
+    ScreenOff,
+    AgentKilled,
+}
+
+/// What happens once a queued event commits.
+enum Follow {
+    /// A flag: it goes on the report and the status counter.
+    Flag(FlagBody),
+    /// A tamper event: the dedupe entry and the latches are set.
+    Tamper { key: SignalKey, latches: Vec<Latch> },
+    /// A settings change: it is now announced, so remember that.
+    Settings(MemberSettings),
+}
+
+struct Queued {
+    body: EventBody,
+    urgency: Urgency,
+    follow: Follow,
+}
+
+/// How an event that was handed to [`Core::emit_queued`] ended up.
+#[derive(Debug, PartialEq, Eq)]
+enum Emitted {
+    /// Committed as `(seq, ts_ms)`.
+    Committed(u64, i64),
+    /// Kept for the next tick.
+    Queued,
+    /// Not kept: it cannot be built, or the queue was full of more urgent
+    /// events.
+    Dropped,
+}
+
+/// Why a commit attempt failed.
+#[derive(Debug, PartialEq, Eq)]
+enum CommitFail {
+    /// The outbox or the recipient set could not be used; worth retrying.
+    Transient,
+    /// The event cannot be built; retrying changes nothing.
+    Permanent,
+}
+
 /// Awake time a session can go without a connected agent before the
 /// service raises `unmonitored_user_session` (§3.7): two missed pings of
 /// the slowest allowed ping interval plus launchd's relaunch throttle, with
@@ -368,6 +426,12 @@ pub struct Core {
     /// Finished report periods whose sealing failed, with their end.
     unsealed: Vec<(ReportJournal, i64)>,
     next_report_retry: u64,
+    /// Events that could not be committed yet, oldest first.
+    queued: Vec<Queued>,
+    /// Since when (monotonic) commits have been failing, if they are.
+    commit_failing_since: Option<u64>,
+    /// Events dropped from a full queue since start.
+    dropped_events: u64,
     source_tx: mpsc::Sender<SourceCommand>,
     hb_state: watch::Sender<DeviceState>,
     upload_poke: Arc<Notify>,
@@ -459,6 +523,9 @@ impl Core {
             last_tick_mono: None,
             unsealed: Vec::new(),
             next_report_retry: 0,
+            queued: Vec::new(),
+            commit_failing_since: None,
+            dropped_events: 0,
             source_tx: p.source_tx,
             hb_state: p.hb_state,
             upload_poke: p.upload_poke,
@@ -493,16 +560,184 @@ impl Core {
     }
 
     /// Seal `body` to the current recipient manifest, sign it, chain it and
-    /// durably commit it. Returns its `(seq, ts_ms)`.
+    /// durably commit it. Returns its `(seq, ts_ms)`. A failure is not
+    /// retried: for a flag or a tamper event use [`Self::emit_queued`].
     async fn emit(&mut self, body: EventBody) -> Option<(u64, i64)> {
         let urgency = self.settings.urgency().urgency_for(&body);
+        let r = self.try_commit(&body, urgency).await;
+        self.note_commit_result(&r);
+        r.ok()
+    }
+
+    /// [`Self::emit`] for an event that must not be lost: when the commit
+    /// fails it waits in a bounded in-memory queue and is retried on every
+    /// tick, re-sealed then (so to a newer manifest if one was accepted
+    /// meanwhile; its timestamp is the commit's). `follow` runs when it has
+    /// committed, now or later.
+    async fn emit_queued(&mut self, body: EventBody, follow: Follow) -> Emitted {
+        let urgency = self.settings.urgency().urgency_for(&body);
+        // Behind events already waiting, so the chain keeps their order.
+        if self.queued.is_empty() {
+            let r = self.try_commit(&body, urgency).await;
+            self.note_commit_result(&r);
+            match r {
+                Ok((seq, ts)) => {
+                    self.apply_follow(follow, seq, ts);
+                    return Emitted::Committed(seq, ts);
+                }
+                Err(CommitFail::Permanent) => return Emitted::Dropped,
+                Err(CommitFail::Transient) => {}
+            }
+        }
+        let kind = body.kind();
+        if self.queued.len() >= MAX_QUEUED_EVENTS {
+            // Make room by dropping the least urgent, the oldest of those
+            // (the newest says the most about the present), unless the new
+            // event is less urgent than all of them.
+            let least = self.queued.iter().map(|e| e.urgency).min();
+            let victim = least
+                .filter(|l| *l <= urgency)
+                .and_then(|l| self.queued.iter().position(|e| e.urgency == l));
+            self.dropped_events += 1;
+            let dropped = self.dropped_events;
+            match victim {
+                Some(i) => {
+                    self.queued.remove(i);
+                    tracing::error!(
+                        dropped,
+                        "the event queue is full; dropped its least urgent event"
+                    );
+                }
+                None => {
+                    tracing::error!(%kind, dropped, "the event queue is full of more urgent events; dropped this one");
+                    return Emitted::Dropped;
+                }
+            }
+        }
+        tracing::warn!(%kind, queued = self.queued.len() + 1, "event not committed; will retry");
+        self.queued.push(Queued {
+            body,
+            urgency,
+            follow,
+        });
+        Emitted::Queued
+    }
+
+    /// Commit the queued events, most urgent first, until one fails.
+    async fn retry_queued(&mut self) {
+        // Stable: equal urgencies keep their order.
+        self.queued.sort_by_key(|q| std::cmp::Reverse(q.urgency));
+        while let Some(q) = self.queued.first() {
+            let (body, urgency) = (q.body.clone(), q.urgency);
+            let r = self.try_commit(&body, urgency).await;
+            self.note_commit_result(&r);
+            let q = match r {
+                Err(CommitFail::Transient) => return,
+                Ok((seq, ts)) => {
+                    let q = self.queued.remove(0);
+                    self.apply_follow(q.follow, seq, ts);
+                    continue;
+                }
+                Err(CommitFail::Permanent) => self.queued.remove(0),
+            };
+            tracing::error!(kind = %q.body.kind(), "dropped a queued event that cannot be built");
+        }
+    }
+
+    /// Track how long commits have been failing. Once it has been
+    /// [`COMMIT_FAILING_ALARM_MS`], heartbeats stop (`Heartbeater::send`):
+    /// the instance's liveness monitor alerts on silence, and nothing else
+    /// it can see would tell it that this device can no longer record.
+    fn note_commit_result(&mut self, r: &Result<(u64, i64), CommitFail>) {
+        match r {
+            Ok(_) => {
+                if self.commit_failing_since.take().is_some() {
+                    tracing::info!("the outbox accepts events again");
+                    self.status.update(|s| s.commit_failing = false);
+                }
+            }
+            Err(CommitFail::Permanent) => {}
+            Err(CommitFail::Transient) => {
+                let now = self.clock.mono_ms();
+                let since = *self.commit_failing_since.get_or_insert(now);
+                if now.saturating_sub(since) >= COMMIT_FAILING_ALARM_MS {
+                    self.status.update_if(|s| {
+                        let first = !s.commit_failing;
+                        s.commit_failing = true;
+                        first
+                    });
+                }
+            }
+        }
+    }
+
+    fn apply_follow(&mut self, follow: Follow, seq: u64, ts: i64) {
+        match follow {
+            Follow::Flag(flag) => {
+                self.journal.flag(seq, ts, &flag);
+                self.status.update(|s| s.flags += 1);
+            }
+            Follow::Tamper { key, latches } => {
+                self.recent_signals.insert(key, self.clock.mono_ms());
+                for l in latches {
+                    self.set_latch(l);
+                }
+            }
+            Follow::Settings(new) => {
+                self.journal.seq(seq);
+                self.persist_settings(&new);
+            }
+        }
+    }
+
+    fn set_latch(&mut self, l: Latch) {
+        match l {
+            Latch::Absence(id) => {
+                if let Some(a) = self.absence.get_mut(&id) {
+                    a.reported = true;
+                }
+            }
+            Latch::Stall => self.stall.reported = true,
+            Latch::CaptureFailing => self.capture_failing_reported = true,
+            Latch::ScreenOff => self.screen_off_reported = true,
+            Latch::AgentKilled => self.supervisor.mark_reported(self.clock.mono_ms()),
+        }
+    }
+
+    /// A tamper event that sets this latch is waiting to commit.
+    fn latch_pending(&self, l: &Latch) -> bool {
+        self.queued.iter().any(|q| match &q.follow {
+            Follow::Tamper { latches, .. } => latches.contains(l),
+            _ => false,
+        })
+    }
+
+    /// The condition behind `l` is over: a queued event must not set it
+    /// when it commits.
+    fn cancel_latch(&mut self, l: &Latch) {
+        for q in &mut self.queued {
+            if let Follow::Tamper { latches, .. } = &mut q.follow {
+                latches.retain(|x| x != l);
+            }
+        }
+    }
+
+    /// One attempt to seal and commit `body`, with the recovery from a
+    /// stale manifest or chain head.
+    async fn try_commit(
+        &mut self,
+        body: &EventBody,
+        urgency: Urgency,
+    ) -> Result<(u64, i64), CommitFail> {
         for attempt in 0..3 {
-            let set = self.recipients().await?;
-            let prepared = match self.writer.prepare(&body, urgency, &set) {
+            let Some(set) = self.recipients().await else {
+                return Err(CommitFail::Transient);
+            };
+            let prepared = match self.writer.prepare(body, urgency, &set) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = %e, kind = %body.kind(), "cannot build event");
-                    return None;
+                    return Err(CommitFail::Permanent);
                 }
             };
             let to_commit = prepared.clone();
@@ -521,7 +756,7 @@ impl Core {
                     if h.urgency >= Urgency::Normal {
                         self.upload_poke.notify_one();
                     }
-                    return Some((seq, ts));
+                    return Ok((seq, ts));
                 }
                 Err(OutboxError::StaleRecipients { .. }) if attempt < 2 => {
                     // A newer manifest was accepted meanwhile (perhaps one
@@ -536,17 +771,17 @@ impl Core {
                     Ok(head) => self.writer.set_head(head),
                     Err(e) => {
                         tracing::error!(error = %e, "cannot re-read the chain head");
-                        return None;
+                        return Err(CommitFail::Transient);
                     }
                 },
                 Err(e) => {
                     tracing::error!(error = %e, kind = %body.kind(), "cannot commit event");
                     self.status.update(|s| s.last_error = Some(e.to_string()));
-                    return None;
+                    return Err(CommitFail::Transient);
                 }
             }
         }
-        None
+        Err(CommitFail::Transient)
     }
 
     /// Route a tamper or context signal that concerns the whole computer
@@ -557,6 +792,17 @@ impl Core {
 
     /// Route a signal from `account`'s session.
     async fn signal_for(&mut self, sig: TamperSignal, account: Option<String>) {
+        self.signal_latched(sig, account, Vec::new()).await;
+    }
+
+    /// [`Self::signal_for`] for a condition that is reported once: `latches`
+    /// are set when the event has committed.
+    async fn signal_latched(
+        &mut self,
+        sig: TamperSignal,
+        account: Option<String>,
+        latches: Vec<Latch>,
+    ) {
         let wall = self.clock.wall_ms();
         match route_signal(&sig) {
             SignalRoute::ReportContext => self.journal.signal(None, wall, sig, account),
@@ -565,21 +811,29 @@ impl Core {
                 self.recent_signals
                     .retain(|_, t| now.saturating_sub(*t) < SIGNAL_DEDUPE_MS);
                 let key = signal_key(&sig, &account);
-                if self.recent_signals.contains_key(&key) {
+                let waiting = self
+                    .queued
+                    .iter()
+                    .any(|q| matches!(&q.follow, Follow::Tamper { key: k, .. } if *k == key));
+                if self.recent_signals.contains_key(&key) || waiting {
                     tracing::debug!(signal = ?sig, "duplicate tamper signal suppressed");
                     return;
                 }
-                self.recent_signals.insert(key, now);
                 tracing::debug!(signal = ?sig, "tamper signal detail");
                 tracing::warn!(account = ?account, "tamper signal");
-                let r = self
-                    .emit(EventBody::Tamper {
-                        signal: sig.clone(),
-                        account: account.clone(),
-                    })
-                    .await;
-                let ts = r.map_or(wall, |(_, ts)| ts);
-                self.journal.signal(r.map(|(s, _)| s), ts, sig, account);
+                // The dedupe entry and the latches are set when it commits.
+                let follow = Follow::Tamper { key, latches };
+                let body = EventBody::Tamper {
+                    signal: sig.clone(),
+                    account: account.clone(),
+                };
+                let seq_ts = match self.emit_queued(body, follow).await {
+                    Emitted::Committed(seq, ts) => Some((seq, ts)),
+                    Emitted::Queued | Emitted::Dropped => None,
+                };
+                let ts = seq_ts.map_or(wall, |(_, ts)| ts);
+                self.journal
+                    .signal(seq_ts.map(|(s, _)| s), ts, sig, account);
                 self.status.update(|s| s.tamper_events += 1);
             }
         }
@@ -606,7 +860,9 @@ impl Core {
         };
         let baseline = announced.clone().unwrap_or_default();
         let current = self.settings.clone();
-        self.announce_settings(&baseline, &current, announced.is_none())
+        // Queued if it cannot be committed now: the settings from
+        // `service.toml` are in force, and must still be announced.
+        self.announce_settings(&baseline, &current, announced.is_none(), true)
             .await;
     }
 
@@ -615,8 +871,16 @@ impl Core {
         old: &MemberSettings,
         new: &MemberSettings,
         force_store: bool,
+        queue: bool,
     ) -> bool {
         if let Some(body) = MemberSettings::change_event(old, new) {
+            if queue {
+                // Remembered as announced once the event has committed.
+                return matches!(
+                    self.emit_queued(body, Follow::Settings(new.clone())).await,
+                    Emitted::Committed(..)
+                );
+            }
             let Some((seq, _)) = self.emit(body).await else {
                 // Not persisted, so the change is announced on the next try.
                 return false;
@@ -625,10 +889,14 @@ impl Core {
         } else if !force_store {
             return true;
         }
+        self.persist_settings(new);
+        true
+    }
+
+    fn persist_settings(&self, new: &MemberSettings) {
         if let Err(e) = self.state_dir.write_json(SETTINGS_FILE, new) {
             tracing::error!(error = %e, "cannot persist announced settings");
         }
-        true
     }
 
     /// `shutdown` event and the partial report for today so far.
@@ -852,6 +1120,7 @@ impl Core {
         self.context = ContextSignals::default();
         self.screen_permission = None;
         self.screen_off_reported = false;
+        self.cancel_latch(&Latch::ScreenOff);
         self.accessibility = None;
         let connected = self.capturing();
         let account = self.target_account();
@@ -902,7 +1171,7 @@ impl Core {
         let missing: Vec<String> = self
             .absence
             .iter()
-            .filter(|(_, a)| a.reported)
+            .filter(|(_, a)| a.ms >= AGENT_ABSENT_MS)
             .map(|(id, _)| self.account_of(id))
             .collect();
         let sessions = self.sessions.as_ref().map_or(1, Vec::len);
@@ -928,7 +1197,10 @@ impl Core {
             agent_connected: self.agents.contains_key(id),
             agent_version: self.agent_versions.get(id).cloned(),
             capture_target: target == Some(id),
-            unmonitored: self.absence.get(id).is_some_and(|a| a.reported),
+            unmonitored: self
+                .absence
+                .get(id)
+                .is_some_and(|a| a.ms >= AGENT_ABSENT_MS),
         };
         let listed = self.sessions.as_deref().unwrap_or_default();
         let mut out: Vec<SessionReport> = listed
@@ -1040,6 +1312,7 @@ impl Core {
             .map_or(0, |t| mono.saturating_sub(t))
             .min(MAX_TICK_GAP_MS);
         self.last_tick_mono = Some(mono);
+        self.retry_queued().await;
         if let Some(sig) = self.guard.observe_clock(&*self.clock) {
             self.signal(sig).await;
         }
@@ -1106,6 +1379,7 @@ impl Core {
             // `capture_failed`, not as a stall.
             self.stall.ms = 0;
             self.stall.reported = false;
+            self.cancel_latch(&Latch::Stall);
             self.status
                 .update(|s| s.capture.last_attempt_ms = Some(wall));
             match self
@@ -1147,29 +1421,32 @@ impl Core {
             .retain(|id, _| missing.iter().any(|(m, _, _)| m == id));
         let mut newly = Vec::new();
         for (id, account, active) in missing {
-            let a = self.absence.entry(id).or_default();
+            let a = self.absence.entry(id.clone()).or_default();
             a.ms = a.ms.saturating_add(awake_ms);
+            // Latched once the event has committed; until then it is
+            // raised again each tick, unless one is already waiting.
             if a.ms >= AGENT_ABSENT_MS && !a.reported {
-                a.reported = true;
-                newly.push((account, active, a.ms));
+                newly.push((id, account, active, a.ms));
             }
         }
+        newly.retain(|(id, ..)| !self.latch_pending(&Latch::Absence(id.clone())));
         if newly.is_empty() {
             return;
         }
         // Publish the missing accounts before the tamper events count up, so
         // nobody watching the status sees a tamper event without its cause.
         self.update_session_status();
-        for (account, active, absent_ms) in newly {
+        for (id, account, active, absent_ms) in newly {
             tracing::warn!(
                 %account,
                 absent_ms,
                 "a session has had no Faro agent connected"
             );
             let user = label(&account).unwrap_or_else(|| "unknown".to_owned());
-            self.signal_for(
+            self.signal_latched(
                 TamperSignal::UnmonitoredUserSession { user },
                 label(&account),
+                vec![Latch::Absence(id)],
             )
             .await;
             if active && !self.capturing() {
@@ -1235,10 +1512,9 @@ impl Core {
             limit =
                 limit.max(cfg.idle_interval_max_ms + u64::from(mean_secs).saturating_mul(2_000));
         }
-        if self.stall.ms < limit || self.stall.reported {
+        if self.stall.ms < limit || self.stall.reported || self.latch_pending(&Latch::Stall) {
             return;
         }
-        self.stall.reported = true;
         let missed = self.stall.ms / u64::from(mean_secs.max(1)).saturating_mul(1000);
         let missed = u32::try_from(missed).unwrap_or(u32::MAX).max(1);
         tracing::warn!(
@@ -1247,11 +1523,12 @@ impl Core {
             has_target = self.capturing(),
             "the session at the screen has its agent connected but nothing is captured from it"
         );
-        self.signal_for(
+        self.signal_latched(
             TamperSignal::CaptureFailing {
                 consecutive_failures: missed,
             },
             label(&account),
+            vec![Latch::Stall],
         )
         .await;
     }
@@ -1270,20 +1547,25 @@ impl Core {
             s.capture.consecutive_failures = in_row;
             s.capture.last_failure = Some(failure);
         });
-        if self.failures_in_row >= self.capture_failure_threshold && !self.capture_failing_reported
+        if self.failures_in_row >= self.capture_failure_threshold
+            && !self.capture_failing_reported
+            && !self.latch_pending(&Latch::CaptureFailing)
         {
-            self.capture_failing_reported = true;
             let account = self.target_account();
             let denied = reason.contains(&denied_reason(self.capture_permission))
                 || self.screen_permission == Some(PermissionState::Denied);
+            let mut latches = vec![Latch::CaptureFailing];
             let sig = match (denied, self.screen_off_reported) {
                 // Allies were already told Screen Recording is off.
-                (true, true) => return,
+                (true, true) => {
+                    self.capture_failing_reported = true;
+                    return;
+                }
                 // Off without a revocation the service saw: never granted
                 // here (a new install, or a reinstall that dropped the
                 // grant), or turned off in a way it missed.
                 (true, false) => {
-                    self.screen_off_reported = true;
+                    latches.push(Latch::ScreenOff);
                     TamperSignal::PermissionRevoked {
                         permission: self.capture_permission.into(),
                         never_granted: !self
@@ -1295,7 +1577,7 @@ impl Core {
                     consecutive_failures: self.failures_in_row,
                 },
             };
-            self.signal_for(sig, account).await;
+            self.signal_latched(sig, account, latches).await;
         }
     }
 
@@ -1420,6 +1702,7 @@ impl Core {
         };
         self.failures_in_row = 0;
         self.capture_failing_reported = false;
+        self.cancel_latch(&Latch::CaptureFailing);
         let mono = self.clock.mono_ms();
         let wall = self.clock.wall_ms();
         self.scheduler.on_result(mono, best.rating, borderline);
@@ -1450,10 +1733,9 @@ impl Core {
                 burst: info.burst,
                 account: self.target_account(),
             };
-            if let Some((seq, ts)) = self.emit(EventBody::Flag(flag.clone())).await {
-                self.journal.flag(seq, ts, &flag);
-                self.status.update(|s| s.flags += 1);
-            }
+            // Kept for a retry if the commit fails.
+            self.emit_queued(EventBody::Flag(flag.clone()), Follow::Flag(flag))
+                .await;
         }
     }
 
@@ -1471,6 +1753,7 @@ impl Core {
                 self.agents.insert(session.clone(), account);
                 self.agent_versions.insert(session.clone(), agent_version);
                 self.absence.remove(&session);
+                self.cancel_latch(&Latch::Absence(session.clone()));
                 self.update_session_status();
                 if let Some(r) = self.supervisor.on_connect(mono, &session) {
                     self.journal.agent_restart();
@@ -1503,7 +1786,10 @@ impl Core {
                     });
                 }
                 if let Some(sig) = self.supervisor.on_disconnect(mono, &session, expected) {
-                    self.signal_for(sig, label(&account)).await;
+                    if !self.latch_pending(&Latch::AgentKilled) {
+                        self.signal_latched(sig, label(&account), vec![Latch::AgentKilled])
+                            .await;
+                    }
                 }
                 self.update_session_status();
                 self.publish_state();
@@ -1610,19 +1896,20 @@ impl Core {
                         None => self.seen_permissions.granted_before(&key),
                     };
                 if revoked {
-                    self.screen_off_reported = true;
-                    self.signal_for(
+                    self.signal_latched(
                         TamperSignal::PermissionRevoked {
                             permission: self.capture_permission.into(),
                             never_granted: false,
                         },
                         account.clone(),
+                        vec![Latch::ScreenOff],
                     )
                     .await;
                 }
                 if granted {
                     // Turning it off again is a new signal.
                     self.screen_off_reported = false;
+                    self.cancel_latch(&Latch::ScreenOff);
                 }
                 if granted && self.seen_permissions.screen_granted_accounts.insert(key) {
                     if let Err(e) = self
@@ -1719,7 +2006,7 @@ impl Core {
             Control::SetPause(r) => self.set_pause(r).await,
             Control::UpdateSettings(new, reply) => {
                 let old = self.settings.clone();
-                let ok = self.announce_settings(&old, &new, false).await;
+                let ok = self.announce_settings(&old, &new, false, false).await;
                 if ok {
                     if let Err(e) = self.scheduler.set_mean(new.capture_mean_secs()) {
                         tracing::error!(error = %e, "scheduler refused the new capture mean");

@@ -92,6 +92,8 @@ windows = { version = "0.62", features = [
 faro-platform-macos.workspace = true
 
 [dev-dependencies]
+# tests/runtime_mock.rs breaks the outbox the way a full volume does.
+rusqlite.workspace = true
 blake3.workspace = true
 faro-update = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

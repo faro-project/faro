@@ -288,6 +288,14 @@ impl Heartbeater {
         if !self.gate.is_open() {
             return Err(UploadStop::Gated);
         }
+        // A heartbeat says the device is recording. While it cannot commit
+        // events it is not, and silence is what the instance alerts on.
+        if self.status.read(|s| s.commit_failing) {
+            tracing::error!(
+                "not sending a heartbeat: the outbox has refused events for a long time"
+            );
+            return Err(UploadStop::Gated);
+        }
         let answer = uplink::send_heartbeat(
             &self.client,
             &self.outbox,

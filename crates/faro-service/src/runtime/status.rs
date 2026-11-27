@@ -105,6 +105,10 @@ pub struct ServiceStatus {
     /// The instance's identity no longer matches the pin; uploads paused.
     pub identity_mismatch: bool,
     pub last_error: Option<String>,
+    /// Events have failed to commit to the outbox for a long time (a full
+    /// disk, say). Heartbeats are withheld meanwhile, so the instance's
+    /// liveness monitor raises a missed check-in.
+    pub commit_failing: bool,
     /// Every session and its agent ([`StatusReport::sessions`]).
     pub session_list: Vec<SessionReport>,
     /// Capture state, target and the latest attempts.
@@ -177,6 +181,10 @@ impl StatusTx {
     pub fn new() -> (Self, watch::Receiver<ServiceStatus>) {
         let (tx, rx) = watch::channel(ServiceStatus::default());
         (StatusTx(Arc::new(tx)), rx)
+    }
+
+    pub fn read<T>(&self, f: impl FnOnce(&ServiceStatus) -> T) -> T {
+        f(&self.0.borrow())
     }
 
     pub fn update(&self, f: impl FnOnce(&mut ServiceStatus)) {
