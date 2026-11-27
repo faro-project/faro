@@ -1,0 +1,18 @@
+[package]
+name = "faro-uniffi-bindgen"
+description = "UniFFI's bindgen CLI, pinned to the version faro-mobile uses, for apps/ios/build-rust.sh"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Not a member of the root workspace: it has its own lockfile, so the
+# bindgen's dependencies (clap, askama, ...) stay out of the Rust programs'
+# lockfile and third-party notices. The empty table keeps Cargo from
+# looking upward for the root workspace.
+[workspace]
+
+[dependencies]
+# Must be exactly the version faro-mobile's `uniffi` resolves to
+# (build-rust.sh checks it against the root Cargo.lock).
+uniffi = { version = "=0.29.5", features = ["cli"] }
