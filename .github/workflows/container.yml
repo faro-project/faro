@@ -11,20 +11,13 @@
 # after the release's update metadata is verified, so this workflow no
 # longer runs on v* tags.
 #
-# Everything runs on the project's self-hosted runners (docs/DEVELOPMENT.md,
-# "CI runners"), never on GitHub's hosted ones:
+# Each platform builds natively on GitHub's runners (docs/DEVELOPMENT.md,
+# "CI runners"), never under QEMU emulation:
 #
-#   linux/arm64   natively on the Raspberry Pi (self-hosted, Linux, ARM64)
-#   linux/amd64   natively on the Intel Mac (self-hosted, macOS, X64), in
-#                 the x86_64 Linux VM of colima, which is hardware
-#                 virtualised, not emulated. The repository variable
-#                 FARO_LINUX_X64_RUNNER (JSON, the same one release.yml
-#                 reads) moves it, for example to an x86_64 Linux runner.
-#   publish       the merge job, on the Pi
-#
-# No platform is built under QEMU emulation: an emulated amd64 build on the
-# Pi would hold that runner, which every pull request also needs, for an
-# hour or more per push.
+#   linux/arm64   ubuntu-24.04-arm
+#   linux/amd64   ubuntu-24.04. The repository variable FARO_LINUX_X64_RUNNER
+#                 (JSON, the same one release.yml reads) moves it.
+#   publish       the merge job, on ubuntu-24.04
 #
 # Pull requests that touch the container files build both platforms and
 # smoke-test them (the `test` job), with a read-only token and no registry
@@ -37,8 +30,7 @@
 # publishes the platforms that built (with a warning naming the missing
 # one), so a broken amd64 build doesn't hold back the arm64 image for
 # Raspberry Pis. The tags then point at an image without that platform
-# until the next good build. A runner that is offline is different: its
-# job waits for it (GitHub fails it after a day), and so does the publish.
+# until the next good build.
 # (A release, in release.yml, needs every platform: it is never published
 # half-built.)
 
@@ -79,9 +71,9 @@ jobs:
         # Keep in step with the `build` job's matrix.
         include:
           - platform: linux/amd64
-            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '["self-hosted", "macOS", "X64"]' }}
+            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '"ubuntu-24.04"' }}
           - platform: linux/arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
+            runner: '"ubuntu-24.04-arm"'
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 120
     permissions:
@@ -117,10 +109,6 @@ jobs:
           docker run --rm --platform "$PLATFORM" "$REF" version
           docker run --rm --platform "$PLATFORM" --entrypoint uname "$REF" -m
 
-      # Self-hosted runners keep their Docker images between jobs.
-      - if: always()
-        run: docker image rm -f "$REF" || true
-
   # Pushes to main and manual runs: build each platform and push it by
   # digest only; `merge` applies the tags.
   build:
@@ -133,9 +121,9 @@ jobs:
         # the merge job.
         include:
           - platform: linux/amd64
-            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '["self-hosted", "macOS", "X64"]' }}
+            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '"ubuntu-24.04"' }}
           - platform: linux/arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
+            runner: '"ubuntu-24.04-arm"'
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 120
     permissions:
@@ -204,14 +192,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      # Self-hosted runners keep their Docker images between jobs.
-      - if: always() && steps.build.outputs.digest != ''
-        env:
-          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
-        run: |
-          docker image rm -f "$REF" || true
-          rm -rf "$RUNNER_TEMP/digests"
-
   merge:
     name: publish multi-arch image
     # always(): run even when a build job failed (see the header). Never
@@ -221,7 +201,7 @@ jobs:
       && github.event_name != 'pull_request'
       && needs.build.result != 'cancelled'
     needs: build
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
