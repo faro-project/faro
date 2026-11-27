@@ -158,7 +158,12 @@ fn protect_tree(dir: &Path, dacl_sddl: &str, skip: Option<&str>) -> std::io::Res
         info |= OWNER_SECURITY_INFORMATION;
     }
     for c in &children {
-        set_named(c, info, &child)?;
+        match set_named(c, info, &child) {
+            // Gone since the listing (an atomic write's temporary file,
+            // renamed or removed): nothing left to protect.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            r => r?,
+        }
     }
 
     if dacl_sddl != STATE_DIR_SDDL {
@@ -300,11 +305,11 @@ fn set_named(
         )
     };
     if err.is_err() {
-        return Err(std::io::Error::other(format!(
-            "SetNamedSecurityInfoW({}): {}",
-            path.display(),
-            std::io::Error::from_raw_os_error(err.0 as i32)
-        )));
+        let os = std::io::Error::from_raw_os_error(err.0 as i32);
+        return Err(std::io::Error::new(
+            os.kind(),
+            format!("SetNamedSecurityInfoW({}): {os}", path.display()),
+        ));
     }
     Ok(())
 }
@@ -689,7 +694,18 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         assert!(writable_by_others(tmp.path()).unwrap());
-        assert!(writable_by_others(&std::env::current_exe().unwrap()).unwrap());
+        // A file anyone may write. (Not this test binary: who owns it, and
+        // so whether it counts, depends on how the runner restored it.)
+        let open = tmp.path().join("open");
+        std::fs::write(&open, b"").unwrap();
+        let sd = SecurityDescriptor::from_sddl("D:P(A;;FA;;;WD)").unwrap();
+        set_named(
+            &open,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            &sd,
+        )
+        .unwrap();
+        assert!(writable_by_others(&open).unwrap());
         assert!(writable_by_others(&tmp.path().join("missing")).is_err());
     }
 

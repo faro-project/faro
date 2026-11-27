@@ -432,7 +432,17 @@ try {
         if ($u -notmatch 'faro-service\.exe" goodbye --reason uninstalled') { Fail "the goodbye's command line is not in the log: $ulog" }
         if (Get-Service $ServiceName -ErrorAction SilentlyContinue) { Fail 'the service is still installed after the uninstall' }
         foreach ($d in $ProgramDir, $DataDir, 'HKLM:\Software\Classes\faro', 'HKLM:\Software\Faro') {
-            if (Test-Path $d) { Fail "$d is still there after the uninstall" }
+            if (Test-Path $d) {
+                if ($d -eq $DataDir) {
+                    # What is left, and what the uninstall said about it.
+                    Get-ChildItem -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue |
+                        ForEach-Object { Write-Host "left: $($_.FullName)" }
+                    $u -split "`r?`n" |
+                        Select-String -Pattern 'RemoveFolder|FARODATADIR|RemoveFiles|StateCleanup|Return value 3|Error \d' |
+                        Select-Object -First 60 | ForEach-Object { Write-Host "log: $_" }
+                }
+                Fail "$d is still there after the uninstall"
+            }
         }
         Say 'uninstall: ok'
     }
