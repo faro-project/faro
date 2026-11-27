@@ -1,0 +1,67 @@
+[package]
+name = "faro-android"
+description = "Faro's Rust core for Android: faro-service's runtime in the app process, behind UniFFI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# `cdylib` is libfaro_android.so, which the app loads (through JNA, as
+# UniFFI's Kotlin bindings do); `lib` for the tests and the bindgen binary.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# The Kotlin bindings generator, the same UniFFI version as the library
+# (build-android.sh runs it on the host). Only with `--features bindgen`, so
+# neither the library nor the app ever builds UniFFI's generator.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+default = []
+# The image classifier on ONNX Runtime (faro-service's `onnx`). Off: ONNX
+# Runtime for Android must come from the official AAR's libraries, which is
+# not wired up yet (docs/ANDROID.md §7.2). Without it the runtime rates
+# frames from context signals only, as a desktop build without a model does.
+onnx = ["faro-service/onnx"]
+# Build the `uniffi-bindgen` binary (host only).
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+faro-proto.workspace = true
+faro-crypto.workspace = true
+faro-core.workspace = true
+faro-client.workspace = true
+faro-detect.workspace = true
+faro-ipc.workspace = true
+faro-platform.workspace = true
+faro-service = { path = "../faro-service", version = "0.1.0-beta.1", default-features = false }
+# Proc-macro mode only: no UDL, no build script. MPL-2.0, used unmodified
+# (deny.toml), the same version as faro-mobile's.
+uniffi = { version = "0.29", default-features = false }
+semver = "1.0.28"
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url = "2.5"
+zeroize.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+axum.workspace = true
+serde_json.workspace = true
+# The tests run the real instance in-process and reuse its integration-test
+# harness (server/tests/common/mod.rs), as faro-mobile's and faro-service's
+# end-to-end tests do.
+faro-server = { path = "../../server", version = "0.1.0-beta.1" }
+sqlx.workspace = true
+tower = { workspace = true, features = ["util"] }
