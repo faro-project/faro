@@ -13,9 +13,11 @@
 //! through `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
 //! `SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION`.
 //!
-//! **Call order:** [`protect_state_dir`] first, then [`protect_log_dir`]
-//! (the log directory sits inside the state directory, and protecting the
-//! state directory resets its children to inherit).
+//! **The log directory** (`logs`, [`LOG_SUBDIR`]) sits inside the state
+//! directory with a DACL of its own. [`protect_state_dir`] leaves it alone,
+//! so the many privileged opens of the state directory neither undo it nor
+//! fail on it (an elevated administrator may only read it); the service
+//! sets it with [`protect_log_dir`] when it starts, as SYSTEM.
 //!
 //! **Reparse points** (symbolic links, junctions, mount points) are refused
 //! anywhere in the tree: a privileged process rewriting ACLs through a link
@@ -52,6 +54,10 @@ pub const STATE_DIR_SDDL: &str = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 /// (`FR`), so an ally with the admin password can read the service log
 /// without being able to quietly edit it.
 pub const LOG_DIR_SDDL: &str = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FR;;;BA)";
+
+/// The log directory's name inside the state directory
+/// (`crate::layout::LOG_DIR`). [`protect_state_dir`] skips it.
+pub const LOG_SUBDIR: &str = "logs";
 
 /// Accounts whose write access to Faro's files is expected.
 const TRUSTED_SIDS: [&str; 3] = [
@@ -96,20 +102,30 @@ const REPLACE_RIGHTS: u32 = 0x0000_0040 // FILE_DELETE_CHILD
 /// Also: the owner becomes SYSTEM when running as SYSTEM (Administrators
 /// when running as an elevated administrator; unchanged otherwise, which
 /// only happens in tests), and every existing child loses its explicit
-/// ACEs and inherits only from `dir`. Fails if `dir` or anything under it
-/// is a reparse point.
+/// ACEs and inherits only from `dir`, except the log directory
+/// ([`LOG_SUBDIR`]) and what it holds, which keep their DACL. Fails if
+/// `dir` or anything under it is a reparse point, the log directory
+/// included.
 pub fn protect_state_dir(dir: &Path) -> std::io::Result<()> {
-    protect_tree(dir, STATE_DIR_SDDL)
+    protect_tree(dir, STATE_DIR_SDDL, Some(LOG_SUBDIR))
 }
 
 /// Give a log directory SYSTEM full control and Administrators read.
 /// Same treatment of owner, children and reparse points as
 /// [`protect_state_dir`].
 pub fn protect_log_dir(dir: &Path) -> std::io::Result<()> {
-    protect_tree(dir, LOG_DIR_SDDL)
+    protect_tree(dir, LOG_DIR_SDDL, None)
 }
 
-fn protect_tree(dir: &Path, dacl_sddl: &str) -> std::io::Result<()> {
+/// Protect `dir` with `dacl_sddl` and reset everything under it, except a
+/// direct child named `skip`.
+///
+/// The root is locked first, so nobody else can add an entry while the
+/// children are reset, but with [`STATE_DIR_SDDL`]: a stricter final DACL
+/// (the log directory's Administrators read) would leave an elevated
+/// administrator unable to take ownership of the children. The final DACL
+/// goes on last, and `SetNamedSecurityInfoW` passes it down to them.
+fn protect_tree(dir: &Path, dacl_sddl: &str, skip: Option<&str>) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(dir)?;
     if is_reparse(&meta) {
         return Err(reparse_error(dir));
@@ -125,15 +141,15 @@ fn protect_tree(dir: &Path, dacl_sddl: &str) -> std::io::Result<()> {
     // service runs as SYSTEM, and once the root is protected nobody else
     // can add entries, so nothing is missed.
     let mut children = Vec::new();
-    collect_children(dir, &mut children)?;
+    collect_children(dir, skip, &mut children)?;
 
     let owner = owner_sddl();
-    let root = SecurityDescriptor::from_sddl(&format!("{owner}{dacl_sddl}"))?;
     let mut info = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
     if !owner.is_empty() {
         info |= OWNER_SECURITY_INFORMATION;
     }
-    set_named(dir, info, &root)?;
+    let staging = SecurityDescriptor::from_sddl(&format!("{owner}{STATE_DIR_SDDL}"))?;
+    set_named(dir, info, &staging)?;
 
     // Children: an empty, unprotected DACL means "only what is inherited".
     let child = SecurityDescriptor::from_sddl(&format!("{owner}D:AI"))?;
@@ -143,6 +159,15 @@ fn protect_tree(dir: &Path, dacl_sddl: &str) -> std::io::Result<()> {
     }
     for c in &children {
         set_named(c, info, &child)?;
+    }
+
+    if dacl_sddl != STATE_DIR_SDDL {
+        let root = SecurityDescriptor::from_sddl(&format!("{owner}{dacl_sddl}"))?;
+        let mut info = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+        if !owner.is_empty() {
+            info |= OWNER_SECURITY_INFORMATION;
+        }
+        set_named(dir, info, &root)?;
     }
     Ok(())
 }
@@ -173,16 +198,22 @@ fn reparse_error(p: &Path) -> std::io::Error {
     )
 }
 
-fn collect_children(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// Everything under `dir`, refusing reparse points. A direct child named
+/// `skip` is checked but neither listed nor walked.
+fn collect_children(dir: &Path, skip: Option<&str>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
+        let entry = entry?;
+        let path = entry.path();
         let meta = std::fs::symlink_metadata(&path)?;
         if is_reparse(&meta) {
             return Err(reparse_error(&path));
         }
+        if skip.is_some_and(|s| entry.file_name().eq_ignore_ascii_case(s)) {
+            continue;
+        }
         out.push(path.clone());
         if meta.is_dir() {
-            collect_children(&path, out)?;
+            collect_children(&path, None, out)?;
         }
     }
     Ok(())
@@ -586,6 +617,24 @@ mod tests {
         protect_log_dir(&dir).unwrap();
         assert_eq!(dacl_sddl(&dir), LOG_DIR_SDDL);
         assert!(dacl_sddl(&dir.join("faro-service.log")).contains("FR;;;BA"));
+        loosen(&dir);
+    }
+
+    #[test]
+    fn state_dir_leaves_the_log_dir_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Faro");
+        let logs = dir.join(LOG_SUBDIR);
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("faro-service.log"), b"").unwrap();
+        protect_state_dir(&dir).unwrap();
+        protect_log_dir(&logs).unwrap();
+        // Every privileged open of the state directory protects it again.
+        protect_state_dir(&dir).unwrap();
+        assert_eq!(dacl_sddl(&dir), STATE_DIR_SDDL);
+        assert_eq!(dacl_sddl(&logs), LOG_DIR_SDDL);
+        assert!(dacl_sddl(&logs.join("faro-service.log")).contains("FR;;;BA"));
+        loosen(&logs);
         loosen(&dir);
     }
 

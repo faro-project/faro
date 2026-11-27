@@ -223,7 +223,7 @@ jobs:
         working-directory: apps/ios/FaroKit
         run: |
           id="$(xcrun simctl list devices available | grep -m1 iPhone | grep -Eo '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}')"
-          xcodebuild test -scheme FaroKit -destination "platform=iOS Simulator,id=$id" \
+          xcodebuild test -scheme FaroKit-Package -destination "platform=iOS Simulator,id=$id" \
             -derivedDataPath ../build/kit CODE_SIGNING_ALLOWED=NO
 
   # The macOS installer: build the unsigned, universal (arm64 + x86_64)

@@ -775,9 +775,17 @@ mod tests {
             RuleValue::Text("not a requirement (".into()),
         );
         assert!(matches!(rule_ok(&d), Ok(Err(_))));
-        // A requirement this process does satisfy is accepted.
+        // A requirement this process does satisfy is accepted. Only a signed
+        // process satisfies any requirement, even `always`: the linker
+        // signs arm64 binaries (ad hoc), but leaves x86_64 ones unsigned.
+        // The package signs both slices.
         d.insert("requirement".into(), RuleValue::Text("always".into()));
-        assert_eq!(rule_ok(&d), Ok(Ok(())));
+        let want = if cfg!(target_arch = "aarch64") {
+            Ok(Ok(()))
+        } else {
+            Ok(Err("the rule was written by another program".into()))
+        };
+        assert_eq!(rule_ok(&d), want);
         // No creator recorded: only the definition counts.
         assert_eq!(rule_ok(&faro_rule()), Ok(Ok(())));
     }

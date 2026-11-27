@@ -2171,16 +2171,22 @@ mod tests {
         // A prompt answer is forwarded, up to MAX_FRAMES_PER_CAPTURE frames.
         request(&h, &mut agent).await;
         let batches = MAX_BATCHES_PER_CAPTURE + 2;
-        for _ in 0..batches {
-            agent
+        for i in 0..batches {
+            let sent = agent
                 .send(&AgentMsg::Frames {
                     captured_at_mono_ms: 10_050,
                     frames: (0..faro_ipc::MAX_FRAMES_PER_MESSAGE)
                         .map(|_| wire_frame())
                         .collect(),
                 })
-                .await
-                .unwrap();
+                .await;
+            if let Err(e) = sent {
+                // Say why the service let the agent go.
+                let left = h
+                    .until(|e| matches!(e, SourceEvent::AgentDisconnected { .. }))
+                    .await;
+                panic!("batch {i} of {batches}: {e}; the service: {left:?}");
+            }
         }
         let mut frames = 0;
         while frames < MAX_FRAMES_PER_CAPTURE {

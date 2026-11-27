@@ -1435,8 +1435,12 @@ async fn a_problem_report_names_the_instance_and_holds_no_secret() {
     };
     let report = collect(&config, &sources, dev.clock.wall_ms());
     let instance = url::Url::parse(&dev.enrollment.instance_url).expect("instance URL");
-    assert_eq!(report.instance_host.as_deref(), instance.host_str());
     let status = report.file("status.txt").expect("status.txt").contents();
+    assert_eq!(
+        report.instance_host.as_deref(),
+        instance.host_str(),
+        "status.txt:\n{status}"
+    );
     assert!(
         status.contains(&format!("({})", dev.enrollment.instance_url)),
         "the instance's address stays:\n{status}"

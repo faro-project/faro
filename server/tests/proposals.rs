@@ -551,7 +551,13 @@ fn only_approve_calls_the_one_statement_that_activates_a_link() {
                 continue;
             }
             let src = std::fs::read_to_string(&path).unwrap();
-            let rel = path.strip_prefix(&root).unwrap().display().to_string();
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
             for needle in [
                 "ally_links SET state = 'active'",
