@@ -12,9 +12,10 @@
 //!   size.
 //! * **Which key to seal to** ([`recipient_keys`]): an ally's key from the
 //!   sender's own manifest, otherwise the person's member encryption key,
-//!   otherwise their ally key. The browser trusts only the first without
-//!   question (it is in the sender's own signed manifest); the others are
-//!   marked "not yet verified" until participants have signed keys.
+//!   otherwise their ally key. The browser trusts none of this: it checks
+//!   every recipient and key against the sender's own signed manifest and,
+//!   in a group, the roster it verified, and refuses the rest (GROUPS.md
+//!   §10.2). `sender_ally` is a hint it recomputes.
 //! * **Checking an upload** ([`check_message`]): the instance verifies the
 //!   author's signature and that the message is for this place and these
 //!   people. It would gain nothing by skipping this (every reader verifies

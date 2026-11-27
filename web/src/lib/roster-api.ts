@@ -33,6 +33,7 @@ import { sealOpen, sealTo } from './crypto/seal.ts';
 import { instance } from './instance.svelte.ts';
 import type { AllyKey } from './keys/keyring.svelte.ts';
 import {
+	changeKey,
 	splitPending,
 	storageStore,
 	syncRoster,
@@ -184,7 +185,7 @@ export interface WorkResult {
 	pending: RosterPending;
 	/** Entries signed and uploaded. */
 	signed: number;
-	/** Waiting for the facilitator's approval (joins, others' key changes). */
+	/** Waiting for the facilitator's approval (joins, others' key changes, role changes). */
 	needsApproval: RosterChange[];
 	/** Changes about this facilitator with keys that aren't theirs. */
 	refused: RosterChange[];
@@ -193,7 +194,7 @@ export interface WorkResult {
 /**
  * What a facilitator's client does when it opens a group: sign and upload
  * everything pending that it may sign on its own, plus `approved` (changes
- * the facilitator approved, by user id), rotating the epoch as each entry
+ * the facilitator approved, by `changeKey`), rotating the epoch as each entry
  * requires, and a snapshot when one is due. Every change is checked against
  * the roster this browser verified (`state`) before it is signed.
  */
@@ -217,7 +218,7 @@ export async function signPendingWork(
 			// The instance's head isn't ours: someone else signed. Sync first.
 			throw new Error('The group changed while you were updating it. Reload the page.');
 		}
-		const todo = [...split.auto, ...split.approve.filter((c) => approved.has(c.user_id))];
+		const todo = [...split.auto, ...split.approve.filter((c) => approved.has(changeKey(c)))];
 		// The facilitator needs to be in the roster (and able to sign) first.
 		if (todo.length === 0) break;
 		const r = prepareEntries(state, todo, signer.userId, signer.seed);

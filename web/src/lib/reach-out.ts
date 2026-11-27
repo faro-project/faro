@@ -9,7 +9,7 @@
 // valid signature proves the author's key wrote it; whether that key is
 // really the author's is what the safety code tells an ally (`verified`).
 
-import { unb64Fixed } from './crypto/bytes.ts';
+import { equal, unb64Fixed } from './crypto/bytes.ts';
 import {
 	messageText,
 	newItemId,
@@ -21,6 +21,7 @@ import {
 	type GroupMessageKind,
 	type SealedGroupMessage
 } from './crypto/group.ts';
+import type { RosterState } from './crypto/roster.ts';
 import { verification, type Verification } from './keys/verified.ts';
 import type { AllyKey, MemberKeys } from './keys/keyring.svelte.ts';
 
@@ -129,8 +130,183 @@ export function noteLength(text: string): number {
 }
 
 /** The people in `r` who can read a message (they have a key). */
-export function sealable(r: Recipients): RecipientKey[] {
+export function sealable<T extends RecipientKey>(r: { recipients: T[] }): T[] {
 	return r.recipients.filter((p) => p.enc_pubkey);
+}
+
+// ---- Checking who a message is sealed to ---------------------------------------
+//
+// The instance says who a message goes to and hands out their keys
+// (`GET /v1/me/message-recipients`), and it could add a key of its own or
+// swap one. So before anything is sealed, every recipient is checked here
+// against what this browser verified itself (GROUPS.md §10.2, §10.3 item 6):
+//
+// * your own allies' keys, from your recipient manifest, which your member
+//   key signed after you compared safety codes (`ally`);
+// * everyone else in a group, against the group's roster as this browser
+//   verified it (`roster`);
+// * outside a group, people you have a link with who aren't your allies,
+//   and the facilitators of a group you ask to join, can't be checked:
+//   their keys are accepted but marked "not yet verified" (`unverified`),
+//   as GROUPS.md §10.2 allows. Inside a group, an unchecked key is refused.
+//
+// Anyone the sender didn't choose (not one of their allies, not a
+// facilitator, not someone they named) is refused, as is a key that isn't
+// the one checked: nothing is sealed, and the person sees why.
+
+/** Who the sender chose, as the page asked for them. */
+export type Chosen =
+	/** Your allies (in a group: your allies who are in it). */
+	| { audience: 'allies' }
+	/** A group's facilitators, in the roster this browser verified. */
+	| { audience: 'facilitators' }
+	/** The people you named (a proposal note's or a reply's one person, too). */
+	| { audience: 'people'; userIds: string[] }
+	/** The facilitators of a group you aren't in: their keys can't be checked. */
+	| { audience: 'join_request' };
+
+/** What this browser checked itself, to check a recipient list against. */
+export interface Trusted {
+	/** Your allies and their keys, from your own verified recipient manifest. */
+	allies: readonly { ally_id: string; enc_pubkey: string }[];
+	/**
+	 * The group's roster as this browser verified it, for a message in a
+	 * group; null outside one (and for a join request's note).
+	 */
+	roster: RosterState | null;
+}
+
+/** How a recipient's key was checked: see the section comment. */
+export type KeyTrust = 'ally' | 'roster' | 'unverified';
+
+export interface CheckedRecipient extends RecipientKey {
+	/** Null when they have no key (they can't read it). */
+	trust: KeyTrust | null;
+}
+
+/** A recipient list that passed `checkRecipients`: the only kind that can be sealed to. */
+export interface CheckedRecipients {
+	instance_id: string;
+	/** The group they were checked for (null outside one): the message must be for it. */
+	group_id: string | null;
+	recipients: CheckedRecipient[];
+	can_sign: boolean;
+	readonly checked: true;
+}
+
+/** A recipient the sender didn't choose, or a key that doesn't check out. */
+export class RecipientError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'RecipientError';
+	}
+}
+
+function sameKey(a: string, b: string): boolean {
+	try {
+		return equal(unb64Fixed(a, 32), unb64Fixed(b, 32));
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Check what the instance says a message goes to against what the sender
+ * chose and what this browser verified (the section comment). Throws a
+ * `RecipientError` with a sentence for the person if anything is off.
+ * `groupId` is the group the message is for (null outside one).
+ */
+export function checkRecipients(
+	r: Recipients,
+	me: string,
+	groupId: string | null,
+	chosen: Chosen,
+	trusted: Trusted
+): CheckedRecipients {
+	const allies = new Map(trusted.allies.map((a) => [a.ally_id, a.enc_pubkey]));
+	const inGroup = groupId !== null && chosen.audience !== 'join_request';
+	const roster = inGroup ? trusted.roster : null;
+	if (inGroup) {
+		if (!roster || roster.next_seq === 0) {
+			throw new RecipientError(
+				"This group's member list hasn't been signed yet, so Faro can't check who would read this. A facilitator's browser does it when they open the group."
+			);
+		}
+		if (roster.group_id !== groupId || roster.instance_id !== r.instance_id) {
+			throw new RecipientError(
+				"The people the server named aren't from this group's member list. Nothing was sent."
+			);
+		}
+	}
+	const member = (id: string) =>
+		roster && Object.hasOwn(roster.members, id) ? roster.members[id] : null;
+	const named = chosen.audience === 'people' ? new Set(chosen.userIds) : null;
+	const seen = new Set<string>();
+	const out: CheckedRecipient[] = [];
+	for (const p of r.recipients) {
+		const name = p.display_name || 'Someone';
+		if (seen.has(p.user_id)) {
+			throw new RecipientError(`The server listed ${name} twice. Nothing was sent.`);
+		}
+		seen.add(p.user_id);
+		if (p.user_id === me) continue;
+		const allyKey = allies.get(p.user_id) ?? null;
+		const m = member(p.user_id);
+		const isChosen =
+			chosen.audience === 'allies'
+				? allyKey !== null && (!inGroup || m !== null)
+				: chosen.audience === 'facilitators'
+					? m?.role === 'facilitator'
+					: chosen.audience === 'people'
+						? named!.has(p.user_id)
+						: true;
+		if (!isChosen) {
+			throw new RecipientError(
+				`The server added ${name}, who isn't someone you chose. Nothing was sent. Tell the person who runs this instance.`
+			);
+		}
+		let trust: KeyTrust | null = null;
+		if (p.enc_pubkey) {
+			if (allyKey !== null && sameKey(p.enc_pubkey, allyKey)) trust = 'ally';
+			else if (m && sameKey(p.enc_pubkey, m.enc_pubkey)) trust = 'roster';
+			else if (
+				allyKey === null &&
+				!inGroup &&
+				(chosen.audience === 'people' || chosen.audience === 'join_request')
+			) {
+				trust = 'unverified';
+			} else {
+				throw new RecipientError(
+					allyKey !== null
+						? `The key the server gave for ${name} isn't the one in your ally list. Nothing was sent.`
+						: m
+							? `${name}'s key isn't the one in this group's member list yet. Nothing was sent. Try again after a facilitator has opened the group.`
+							: `${name} isn't in this group's member list yet, so their key can't be checked. Nothing was sent. Try again after a facilitator has opened the group.`
+				);
+			}
+		}
+		out.push({ ...p, sender_ally: allyKey !== null, trust });
+	}
+	return {
+		instance_id: r.instance_id,
+		group_id: groupId,
+		recipients: out,
+		can_sign: r.can_sign,
+		checked: true
+	};
+}
+
+/** The people whose keys couldn't be checked ("not yet verified"). */
+export function unverifiedRecipients(r: CheckedRecipients | null): CheckedRecipient[] {
+	return r ? r.recipients.filter((p) => p.trust === 'unverified') : [];
+}
+
+/** The line shown before sealing to keys that couldn't be checked, or null. */
+export function unverifiedLine(r: CheckedRecipients | null): string | null {
+	const u = unverifiedRecipients(r);
+	if (!u.length) return null;
+	const names = u.map((p) => p.display_name).join(', ');
+	return `The ${u.length === 1 ? 'key' : 'keys'} of ${names} ${u.length === 1 ? "isn't" : "aren't"} from your own ally list or a group member list this browser checked, so ${u.length === 1 ? "it's" : "they're"} not yet verified.`;
 }
 
 /**
@@ -139,12 +315,15 @@ export function sealable(r: Recipients): RecipientKey[] {
  */
 export function composeMessage(
 	keys: Pick<MemberKeys, 'userId' | 'signSeed' | 'encPk'>,
-	recipients: Recipients,
+	recipients: CheckedRecipients,
 	kind: GroupMessageKind,
 	groupId: string | null,
 	text: string | null,
 	now = Date.now()
 ): SealedGroupMessage {
+	if (recipients.checked !== true || recipients.group_id !== groupId) {
+		throw new RecipientError('The recipients were not checked for this message.');
+	}
 	const to = sealable(recipients).filter((p) => p.user_id !== keys.userId);
 	if (to.length === 0) throw new Error('Nobody you chose can read a message yet.');
 	return sealGroupMessage(
@@ -227,12 +406,23 @@ export interface ReadBytes {
 	reason?: string;
 }
 
+/** `ReadResult.reason` when a group message's author isn't in the group's verified roster. */
+export const NOT_IN_ROSTER = "the author isn't in the group's member list this browser checked";
+
 /**
  * Check a served message and open its body as `me`, without parsing it:
  * the shared core of reach outs, notes, check-ins and replies. `instanceId`,
  * when known, must be the one it names; `groupId`, when known, the group.
  * A whole-group message (`epoch` set) is for anyone in the group, and opens
  * with `keys.epochKey`; without it the result is `locked`.
+ *
+ * The instance serves the author's signing key with the message. With
+ * `roster` (the group's roster as this browser verified it), a message in
+ * that group is accepted only if its author is in the roster with that
+ * signing key, so the instance can't sign one in a participant's name with
+ * a key of its own (GROUPS.md §10.3 item 6). A join request's note is the
+ * exception: its author isn't in the group yet. Until a group's roster has
+ * its first entry there is nothing to check against.
  */
 export function readSealed(
 	view: MessageView,
@@ -241,7 +431,8 @@ export function readSealed(
 	instanceId?: string | null,
 	/** Who the page says wrote it (the reach out's sender, the proposer). */
 	expectedAuthor?: string | null,
-	groupId?: string | null
+	groupId?: string | null,
+	roster?: RosterState | null
 ): ReadBytes {
 	const refuse = (reason: string): ReadBytes => ({
 		status: 'invalid',
@@ -266,6 +457,18 @@ export function readSealed(
 	if (m.kind !== view.kind) return refuse('it is another kind of message');
 	if (instanceId && m.instance_id !== instanceId) return refuse('it is for another instance');
 	if (groupId && m.group_id !== groupId) return refuse('it is for another group');
+	if (roster && m.group_id && m.kind !== 'join_request_note') {
+		if (roster.group_id !== m.group_id || roster.instance_id !== m.instance_id) {
+			return refuse("the member list is another group's");
+		}
+		if (roster.next_seq > 0) {
+			const a = Object.hasOwn(roster.members, m.author_id) ? roster.members[m.author_id] : null;
+			if (!a) return refuse(NOT_IN_ROSTER);
+			if (!a.sign_pubkey || !sameKey(a.sign_pubkey, view.author.sign_pubkey)) {
+				return refuse("the author's signing key isn't the one in the group's member list");
+			}
+		}
+	}
 	const wholeGroup = m.epoch != null;
 	if (!wholeGroup && m.author_id !== me && !m.recipients.some((r) => r.user_id === me)) {
 		return refuse('it is not addressed to you');
@@ -302,9 +505,10 @@ export function readMessage(
 	keys: ReadKeys,
 	instanceId?: string | null,
 	expectedAuthor?: string | null,
-	groupId?: string | null
+	groupId?: string | null,
+	roster?: RosterState | null
 ): ReadResult {
-	const r = readSealed(view, me, keys, instanceId, expectedAuthor, groupId);
+	const r = readSealed(view, me, keys, instanceId, expectedAuthor, groupId, roster);
 	if (r.status !== 'ok') {
 		return { status: r.status, text: null, verified: r.verified, reason: r.reason };
 	}

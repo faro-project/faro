@@ -560,8 +560,8 @@ The instance runs the §10.2 checks on uploads against its own copy of the roste
 
 `/roster/pending` compares the roster with who is in the group and lists the changes to sign. A facilitator's browser checks them against the roster it verified, and when it opens the group with the facilitator's keys unlocked:
 
-- **signs on its own** leaves, removals and role changes, and changes to the facilitator's own keys (checked against the keys it holds), departures in the first entries so no new epoch is ever sealed to someone who left;
-- **asks first** before joins and other people's key changes, showing names and key ids: they add a reader, with a key the instance supplied;
+- **signs on its own** other people's leaves and removals, and changes to the facilitator's own keys (checked against the keys it holds), departures in the first entries so no new epoch is ever sealed to someone who left. A removal only takes a reader away; an instance proposing one nobody asked for gains nothing it couldn't by not serving that person;
+- **asks first** before joins and other people's key changes, showing names and key ids: they add a reader, with a key the instance supplied. It also asks before role changes and the facilitator's own leave or removal: they change who may sign the roster, on the instance's word. An approval covers that exact change only;
 - never signs a change that gives the facilitator keys that aren't theirs.
 
 While `posting_paused` (someone who left is still in the roster, or someone's keys changed), clients pause whole-group posting: "Waiting for a facilitator to update the group". Nothing is escalated to admins (GROUPS.md decision 9).
@@ -627,7 +627,9 @@ A browser shows a message only after all of these, in order:
 3. Strict Ed25519 verification against the author's member signing key.
 4. The context: `item_id` is the message asked for, `author_id` is the author the instance names, `instance_id` is this instance, and the reader is the author or a recipient. In whole-group mode there are no recipients: the reader opens it with the epoch key (§10.3) of `epoch`, which they checked against the signed roster, and the group is the one they asked for. A reply also names the check-in it answers: the reader checks the parent the instance reports against the signed `parent_id`.
 
-A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*, as are the keys a sender seals to other than their own manifest's allies, until participants have signed keys (GROUPS.md §10.3).
+A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*. For a message in a group (other than a join request's note, whose author isn't in the group yet), the reader also requires the served signing key to be the author's in the roster it verified (§10.4), once that roster has an entry; an author who isn't in it is refused.
+
+Senders check the other way round before sealing: each key the instance serves for a recipient must be the one in the sender's own manifest (for their allies) or in the roster the sender's browser verified (for anyone else in a group), and each recipient must be someone the sender chose. Otherwise nothing is sealed. The keys of people outside a group who aren't the sender's allies, and of the facilitators of a group the sender asks to join, can't be checked; they are marked *not yet verified* (GROUPS.md §10.2).
 
 ### 11.4 What the instance checks
 
