@@ -702,6 +702,28 @@ fn admin_log_text(
                 people,
             );
         }
+        // Only the other admins get these. The detail is setting names and
+        // values (`retention.blob_days:30>7`), never content.
+        Action::SettingsChanged => {
+            let changes = a
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .split(';')
+                .filter(|c| !c.is_empty())
+                .map(|c| format!("\n  {}", c.replace('>', " -> ")))
+                .collect::<String>();
+            return (
+                format!("Settings on {instance} were changed"),
+                format!(
+                    "{who} changed the settings of {instance}:{changes}\n\nEvery admin is told \
+                     when settings change. Shorter retention or a longer liveness grace period \
+                     also raises an alert to each member's allies. If you didn't expect this, \
+                     check the settings:"
+                ),
+                format!("{url}/admin/settings"),
+            );
+        }
         Action::GroupListed | Action::GroupUnlisted => {
             return (
                 format!("A group on {instance} was listed or unlisted"),
@@ -731,7 +753,8 @@ fn admin_log_text(
             | Action::AccountEnabled
             | Action::GroupArchived
             | Action::GroupListed
-            | Action::GroupUnlisted => (
+            | Action::GroupUnlisted
+            | Action::SettingsChanged => (
                 format!("You are no longer an admin of {instance}"),
                 format!(
                     "{who} removed your admin role on {instance}{how}. You can still sign in, and \
@@ -760,7 +783,8 @@ fn admin_log_text(
         | Action::AccountEnabled
         | Action::GroupArchived
         | Action::GroupListed
-        | Action::GroupUnlisted => (
+        | Action::GroupUnlisted
+        | Action::SettingsChanged => (
             format!("{person} is no longer an admin of {instance}"),
             format!(
                 "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \

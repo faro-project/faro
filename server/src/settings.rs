@@ -30,6 +30,115 @@ pub struct InstanceSettings {
     /// Groups (GROUPS.md §13). Not in the config file: console only.
     #[serde(default)]
     pub groups: GroupSettings,
+    /// Longer windows that still apply to older data after an admin
+    /// shortened retention (see [`RetentionBefore`]).
+    #[serde(default)]
+    pub retention_before: RetentionBefore,
+}
+
+/// A window an admin shortened: data received **before** `since` keeps the
+/// old, longer `days`; only data received from then on follows the new
+/// window (§8). Shortening instance retention is never retroactive, as with
+/// a member's own choice ([`crate::retention`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowBefore {
+    pub days: u32,
+    /// When the shorter window took effect (Unix ms).
+    pub since: i64,
+}
+
+/// [`WindowBefore`] per retention window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionBefore {
+    pub event_header: Option<WindowBefore>,
+    pub blob: Option<WindowBefore>,
+    pub alert: Option<WindowBefore>,
+}
+
+impl RetentionBefore {
+    /// After retention goes from `old` to `new` at `now_ms`: a window that
+    /// got shorter keeps the longest window older data was promised
+    /// (`old`, or what `self` already kept it for); one that is no
+    /// shorter than that drops the rule; the others stay as they were.
+    pub fn after_change(
+        self,
+        old: &RetentionConfig,
+        new: &RetentionConfig,
+        now_ms: i64,
+    ) -> RetentionBefore {
+        let pick = |before: Option<WindowBefore>, o: u32, n: u32| match before {
+            _ if n < o => Some(WindowBefore {
+                days: before.map_or(o, |b| b.days.max(o)),
+                since: now_ms,
+            }),
+            Some(b) if n >= b.days => None,
+            b => b,
+        };
+        RetentionBefore {
+            event_header: pick(
+                self.event_header,
+                old.event_header_days,
+                new.event_header_days,
+            ),
+            blob: pick(self.blob, old.blob_days, new.blob_days),
+            alert: pick(self.alert, old.alert_days, new.alert_days),
+        }
+    }
+}
+
+/// The shortest retention window an admin can set in the console. Below
+/// this, a flagged report or alert could be gone before an ally opens it
+/// (§4.3 and §8), for every member. The same floor members have
+/// ([`crate::retention::MIN_MEMBER_DAYS`]). The config file is not held to
+/// it: it is the operator's own deployment decision.
+pub const MIN_INSTANCE_RETENTION_DAYS: u32 = crate::retention::MIN_MEMBER_DAYS;
+
+/// What differs between `old` and `new`, as `path:old>new` entries joined by
+/// `;` (for the admin log). Setting names and values only; the
+/// [`RetentionBefore`] bookkeeping is left out.
+pub fn describe_changes(old: &InstanceSettings, new: &InstanceSettings) -> String {
+    fn walk(path: &str, a: &serde_json::Value, b: &serde_json::Value, out: &mut Vec<String>) {
+        match (a, b) {
+            (serde_json::Value::Object(x), serde_json::Value::Object(y)) => {
+                for (k, av) in x {
+                    let p = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    if let Some(bv) = y.get(k) {
+                        walk(&p, av, bv, out);
+                    }
+                }
+            }
+            _ if a != b => out.push(format!("{path}:{a}>{b}")),
+            _ => {}
+        }
+    }
+    let (Ok(mut a), Ok(mut b)) = (serde_json::to_value(old), serde_json::to_value(new)) else {
+        return String::new();
+    };
+    for v in [&mut a, &mut b] {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("retention_before");
+        }
+    }
+    let mut out = Vec::new();
+    walk("", &a, &b, &mut out);
+    out.join(";")
+}
+
+/// Which settings in `old` and `new` weaken monitoring for members: setting
+/// names (`liveness_grace_longer`, then the retention windows that got
+/// shorter), empty when nothing does. Told to every member's allies.
+pub fn weakened(old: &InstanceSettings, new: &InstanceSettings) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if new.liveness.grace_secs > old.liveness.grace_secs {
+        out.push("liveness_grace_longer");
+    }
+    out.extend(crate::retention::shortened(&old.retention, &new.retention));
+    out
 }
 
 /// Who may create groups.
@@ -144,6 +253,8 @@ pub struct StoredSettings {
     pub groups_who_can_invite: Option<WhoCanInvite>,
     pub groups_invites_create_accounts: Option<bool>,
     pub groups_max_per_user: Option<u32>,
+    /// Longer windows still applying to data received before a shortening.
+    pub retention_before: Option<RetentionBefore>,
 }
 
 /// `PATCH /admin/api/settings` body: any subset of fields.
@@ -156,6 +267,20 @@ pub struct SettingsPatch {
     pub liveness_grace_secs: Option<u64>,
     pub update_channel: Option<String>,
     pub groups: Option<GroupSettingsPatch>,
+}
+
+impl SettingsPatch {
+    /// Retention windows in the patch below [`MIN_INSTANCE_RETENTION_DAYS`].
+    /// Checked on the patch only, so a value stored before the floor existed
+    /// never stops the server from starting.
+    pub fn below_retention_floor(&self) -> bool {
+        self.retention.as_ref().is_some_and(|r| {
+            [r.event_header_days, r.blob_days, r.alert_days]
+                .into_iter()
+                .flatten()
+                .any(|d| d < MIN_INSTANCE_RETENTION_DAYS)
+        })
+    }
 }
 
 /// Any subset of [`GroupSettings`].
@@ -258,6 +383,7 @@ impl InstanceSettings {
                 channel: c.updates.channel.clone(),
             },
             groups: GroupSettings::default(),
+            retention_before: RetentionBefore::default(),
         }
     }
 
@@ -303,6 +429,7 @@ impl InstanceSettings {
             )));
         }
         let mut out = Self::from_config(&c);
+        out.retention_before = stored.retention_before.unwrap_or_default();
         let g = &mut out.groups;
         if let Some(v) = stored.groups_enabled {
             g.enabled = v;
@@ -418,6 +545,68 @@ mod tests {
         };
         let s = InstanceSettings::resolve(&c, &pin).unwrap();
         assert_eq!(s.updates.channel, "stable-1");
+    }
+
+    fn windows(e: u32, b: u32, a: u32) -> RetentionConfig {
+        RetentionConfig {
+            event_header_days: e,
+            blob_days: b,
+            alert_days: a,
+        }
+    }
+
+    #[test]
+    fn shortening_remembers_the_longest_window_older_data_was_promised() {
+        let none = RetentionBefore::default();
+        let a = none.after_change(&windows(90, 30, 90), &windows(90, 14, 90), 10);
+        assert_eq!(
+            a.blob,
+            Some(WindowBefore {
+                days: 30,
+                since: 10
+            })
+        );
+        assert_eq!((a.event_header, a.alert), (None, None));
+        // Shortened again: older data still keeps 30; the new `since` is later.
+        let b = a.after_change(&windows(90, 14, 90), &windows(90, 7, 90), 20);
+        assert_eq!(
+            b.blob,
+            Some(WindowBefore {
+                days: 30,
+                since: 20
+            })
+        );
+        // Raised, but still below what older data keeps: the rule stays.
+        let c = b.after_change(&windows(90, 7, 90), &windows(90, 20, 90), 30);
+        assert_eq!(c.blob, b.blob);
+        // Raised to at least that: nothing to protect any more.
+        let d = c.after_change(&windows(90, 20, 90), &windows(90, 45, 90), 40);
+        assert_eq!(d.blob, None);
+    }
+
+    #[test]
+    fn weakened_names_what_got_weaker() {
+        let c = cfg();
+        let old = InstanceSettings::from_config(&c);
+        let mut new = old.clone();
+        assert!(weakened(&old, &new).is_empty());
+        new.liveness.grace_secs += 1;
+        new.retention.alert_days -= 1;
+        assert_eq!(
+            weakened(&old, &new),
+            vec!["liveness_grace_longer", "alert_days"]
+        );
+        assert!(
+            weakened(&new, &old).is_empty(),
+            "the other way is not weaker"
+        );
+        assert_eq!(
+            describe_changes(&old, &new),
+            format!(
+                "liveness.grace_secs:{}>{};retention.alert_days:90>89",
+                old.liveness.grace_secs, new.liveness.grace_secs
+            )
+        );
     }
 
     #[test]

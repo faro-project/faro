@@ -180,6 +180,19 @@ pub async fn enabled_admin_ids_except<'e>(
         .collect()
 }
 
+/// Every member account (including disabled ones: their devices keep
+/// reporting), for an instance-wide alert to their allies.
+pub async fn member_ids<'e>(
+    e: impl Executor<'e, Database = Any>,
+) -> Result<Vec<UserId>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id FROM users WHERE is_member = 1 ORDER BY created_at, id")
+        .fetch_all(e)
+        .await?;
+    rows.iter()
+        .map(|r| Ok(UserId::new(r.try_get::<String, _>("id")?)))
+        .collect()
+}
+
 /// Grant or revoke the admin role. Returns false if the account already
 /// had that value.
 pub async fn set_admin<'e>(

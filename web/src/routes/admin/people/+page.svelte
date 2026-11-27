@@ -524,9 +524,9 @@
 	<h2 id="admin-log">Admin log</h2>
 	<p class="muted">
 		Every time someone is made an admin or stops being one, every account disabled or re-enabled,
-		every deletion an admin asks for, and every account created from the command line. Faro emails
-		the admins about each one. Entries are never removed, but a deleted account's name is taken out
-		of them.
+		every settings change, every deletion an admin asks for, and every account created from the
+		command line. Faro emails the admins about each one. Entries are never removed, but a deleted
+		account's name is taken out of them.
 	</p>
 	{#if logError}
 		<div class="notice error" role="alert">{logError}</div>
@@ -553,6 +553,11 @@
 							disabled <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{:else if e.action === 'account_enabled'}
 							re-enabled <strong title={e.user?.email}>{accountOf(e)}</strong>
+						{:else if e.action === 'settings_changed'}
+							changed settings:
+							<span class="muted">
+								{(e.detail ?? '').split(';').join(', ').replaceAll('>', ' → ')}
+							</span>
 						{:else}
 							cancelled the deletion of <strong title={e.user?.email}>{accountOf(e)}</strong>
 						{/if}
