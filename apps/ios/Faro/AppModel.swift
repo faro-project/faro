@@ -28,6 +28,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var settings: FaroSettings?
     @Published private(set) var pending: [PendingChange] = []
     @Published var choicesError: String?
+    /// Whether events (a loosening asked for or cancelled, say) still wait
+    /// in the outbox, so the allies have not been told yet.
+    @Published private(set) var eventsQueued = false
 
     let notices = NoticeTapHandler()
     private var group: AppGroup?
@@ -429,6 +432,20 @@ final class AppModel: ObservableObject {
         await Task.detached { SettingsEventSender.send(group: group, core: core) }.value
     }
 
+    /// Sends what the outbox holds and notes whether anything is left.
+    /// Returns true if nothing waits afterwards (also when there was
+    /// nothing to send). Blocks on the network off the main thread.
+    @discardableResult
+    func uploadNow() async -> Bool {
+        guard let core = try? openCore() else { return false }
+        let left = await Task.detached { () -> Bool in
+            do { _ = try core.uploadPending() } catch {}
+            return (try? core.hasPending()) ?? true
+        }.value
+        eventsQueued = left
+        return !left
+    }
+
     /// The member saved their choices. Tightening applies at once; loosening
     /// waits for the delay (`PendingState.submit`).
     @discardableResult
@@ -439,6 +456,9 @@ final class AppModel: ObservableObject {
             if screenTimeOn, let s = try? store.read().settings { ScreenTimeEnforcer.apply(s) }
             choicesError = nil
             await refreshChoices()
+            // The loosening's request goes out now, not with the next
+            // tamper or the next time the app is opened.
+            await uploadNow()
             return result
         } catch {
             choicesError = "Couldn't save your choices: \(error.localizedDescription)"
@@ -458,6 +478,7 @@ final class AppModel: ObservableObject {
         }
         if screenTimeOn, let s = try? store.read().settings { ScreenTimeEnforcer.apply(s) }
         await refreshChoices()
+        await uploadNow()
     }
 
     // MARK: Helpers

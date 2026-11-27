@@ -9,6 +9,7 @@
 //! * [`codec`] — `FARO` magic + version + length framing around postcard
 //!   payloads, with a hard size cap checked before allocation. Sync and async.
 //! * [`messages`] — the typed [`AgentMsg`] / [`ServiceMsg`] vocabulary.
+//!   [`limits`] bounds the text an agent sends in them.
 //!   Frames travel as [`WireFrame`]: **raw pixels only**, never an encoded
 //!   image format, so the service never decodes images it did not produce
 //!   (§9).
@@ -52,6 +53,7 @@ pub mod endpoint;
 pub mod enroll;
 pub mod error;
 pub mod handshake;
+pub mod limits;
 pub mod messages;
 #[cfg(windows)]
 pub mod named_pipe;

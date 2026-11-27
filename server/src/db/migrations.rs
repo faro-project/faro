@@ -104,6 +104,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "admin_log_settings_detail",
                     include_str!("../../migrations/0017_admin_log_settings_detail.sql"),
                 ),
+                (
+                    18,
+                    "alert_repeats",
+                    include_str!("../../migrations/0018_alert_repeats.sql"),
+                ),
             ]
         }
     }

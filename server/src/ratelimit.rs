@@ -79,6 +79,12 @@ struct Table {
 
 impl Table {
     fn check(&mut self, key: &str, limit: Limit, now_ms: i64) -> Result<(), u64> {
+        self.check_cost(key, limit, 1, now_ms)
+    }
+
+    /// Take `cost` tokens at once (clamped to the bucket's capacity, so a
+    /// limit smaller than one request's cost still lets a full bucket through).
+    fn check_cost(&mut self, key: &str, limit: Limit, cost: u32, now_ms: i64) -> Result<(), u64> {
         let rate = limit.refill_per_ms();
         let cap = f64::from(limit.capacity);
         if !self.buckets.contains_key(key) && self.buckets.len() >= PRUNE_THRESHOLD {
@@ -101,11 +107,12 @@ impl Table {
         let elapsed = (now_ms - b.updated_ms).max(0) as f64;
         b.tokens = (b.tokens + elapsed * rate).min(cap);
         b.updated_ms = now_ms.max(b.updated_ms);
-        if b.tokens >= 1.0 {
-            b.tokens -= 1.0;
+        let need = f64::from(cost.max(1)).min(cap);
+        if b.tokens >= need {
+            b.tokens -= need;
             Ok(())
         } else {
-            let wait_ms = ((1.0 - b.tokens) / rate).ceil();
+            let wait_ms = ((need - b.tokens) / rate).ceil();
             Err(((wait_ms / 1000.0).ceil() as u64).max(1))
         }
     }
@@ -117,6 +124,11 @@ pub struct RateLimiter {
     clients: Mutex<Table>,
     /// Per account or email address: never pressured by client floods.
     accounts: Mutex<Table>,
+    /// Per authenticated device or member (ingest and alert limits). Separate
+    /// so a flood of unauthenticated addresses cannot evict them, and the
+    /// reverse. Keys are server-issued ids, so the table is bounded by the
+    /// number of devices and members.
+    devices: Mutex<Table>,
 }
 
 fn with_table<T>(m: &Mutex<Table>, f: impl FnOnce(&mut Table) -> T) -> Option<T> {
@@ -140,6 +152,13 @@ impl RateLimiter {
     /// Take one token from a per-account / per-address bucket.
     pub fn check_account(&self, key: &str, limit: Limit, now_ms: i64) -> Result<(), u64> {
         with_table(&self.accounts, |t| t.check(key, limit, now_ms)).unwrap_or(Ok(()))
+    }
+
+    /// Take `cost` tokens from an authenticated device's or member's bucket
+    /// (`cost` is clamped to the limit's capacity). On refusal returns the
+    /// seconds until enough tokens will be available.
+    pub fn check_device(&self, key: &str, limit: Limit, cost: u32, now_ms: i64) -> Result<(), u64> {
+        with_table(&self.devices, |t| t.check_cost(key, limit, cost, now_ms)).unwrap_or(Ok(()))
     }
 
     #[cfg(test)]
@@ -241,6 +260,21 @@ mod tests {
             rl.check_client("k", lim, 10_000_000).unwrap();
         }
         assert!(rl.check_client("k", lim, 10_000_000).is_err());
+    }
+
+    #[test]
+    fn a_costly_request_takes_several_tokens_and_waits_for_them() {
+        let rl = RateLimiter::new();
+        let lim = Limit::per_hour(100);
+        rl.check_device("d", lim, 60, 0).unwrap();
+        assert!(rl.check_device("d", lim, 60, 0).is_err());
+        rl.check_device("d", lim, 40, 0).unwrap();
+        // 60 tokens come back after 36 minutes.
+        assert_eq!(rl.check_device("d", lim, 60, 0), Err(2160));
+        rl.check_device("d", lim, 60, 2_160_000).unwrap();
+        // A cost above capacity is clamped, so a full bucket still passes.
+        rl.check_device("e", lim, 5_000, 0).unwrap();
+        assert!(rl.check_device("e", lim, 1, 0).is_err());
     }
 
     #[test]

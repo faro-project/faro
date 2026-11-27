@@ -103,6 +103,7 @@ Every OS runs the same three processes.
 - Protocol: length-prefixed, versioned `serde` messages using `postcard` or CBOR.
 - Status: the service sends each agent `ServiceMsg::Status`, a view of its status scoped to that agent's session and the computer (`faro_ipc::MemberStatus::for_session`), for the status menu. It never names another account or session, and nothing the agent sends changes it. Before the agent's socket exists (not enrolled, or waiting for approval), the agent asks the enroll socket's `Status` instead.
 - Frame transfer: the agent downscales to a longest side of 768 px and sends **raw pixels**, so the service never decodes image formats it didn't produce.
+- What an agent says is its word, even once admitted. The service cuts every string an agent sends to fixed limits on arrival (`faro_ipc::limits`: titles 4 KiB, app ids and names 512 bytes, URLs 8 KiB), so no app's window title can make a `flag` too large for the instance; the agents also cut titles themselves (1024 UTF-16 units on Windows, 1024 characters on macOS). Of the tamper signals (§3.7), it takes from an agent only those an agent observes: `permission_revoked` for `screen_recording` or `accessibility`, `capture_failing` (the Windows agent's per-display check), `window_hidden_from_capture`, `wayland_token_lost` and the context signals, with free text stripped of control characters and cut to 256 bytes, at most 10 at once and one more every 6 s per connection. `agent_killed_repeatedly`, `integrity_failure`, `clock_manipulation` and `unmonitored_user_session` are the service's alone: an agent that sends one is reported once per connection as `integrity_failure` (`crates/faro-service/src/source/agent_tamper.rs`).
 
 ### 3.2 Code layout: one Rust core plus platform crates
 
@@ -500,6 +501,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
   | `invalid_signature` | server | urgent | An event or report arrived that the device's key didn't sign. |
   | `missed_checkin` | server | urgent only | The device went silent past the grace period. The normal-urgency "back online" alert of the same kind is not tamper-class. |
   | `upload_stalled` | server | urgent | The device is alive but not uploading what it records (PROTOCOL.md §7). |
+  | `alerts_coalesced` | server | urgent | A device or member exceeded the alert rate limit; the alerts beyond it are counted on this one (`folded=N`) instead of each paging allies. The events themselves are stored and visible. |
+  | `storage_quota` | server | urgent | A device is over its storage quota: new event bodies are not stored (headers are) and new reports are refused. |
   | `device_removed` | server | urgent | The member removed an active computer, which stops its monitoring. |
   | `ally_removed` | server | normal | The member removed an ally, or an ally left. That is the most direct way to stop being watched. A removed ally is told too. |
   | `account_disabled` | server | urgent | An admin disabled the account (§4.3). The person is told even though their account is disabled. |

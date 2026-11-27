@@ -21,12 +21,13 @@
 
 use crate::api::events::MAX_ENVELOPES;
 use crate::blob::BlobId;
-use crate::db::repo::alerts::{self, AlertSource, NewAlert};
+use crate::db::repo::alerts::{AlertSource, NewAlert};
 use crate::db::repo::events::{self as ev_repo, BlobKind};
 use crate::db::repo::is_unique_violation;
 use crate::db::repo::reports::{self, NewReport};
 use crate::db::to_i64;
 use crate::device_auth::{AuthedDevice, SignedJson};
+use crate::device_limits;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::tokens::new_hex_id;
@@ -116,6 +117,7 @@ pub async fn post(
     State(state): State<AppState>,
     SignedJson { device, body: up }: SignedJson<ReportUpload>,
 ) -> AppResult<(StatusCode, Json<ReportAccepted>)> {
+    device_limits::check_report(&state, device.row())?;
     check_shape(&state, &device, &up)?;
     let h = &up.header;
     let header_hash = Hash32::of(&h.signing_bytes());
@@ -123,8 +125,10 @@ pub async fn post(
 
     if faro_crypto::verify_item(&row.sign_pubkey, h, &up.sig).is_err() {
         let kind = ServerAlertKind::InvalidSignature;
-        alerts::insert(
-            state.db().pool(),
+        let mut conn = state.db().pool().acquire().await?;
+        device_limits::raise(
+            &state,
+            &mut conn,
             &NewAlert {
                 member_id: &row.owner_user_id,
                 device_id: Some(&row.id),
@@ -133,7 +137,11 @@ pub async fn post(
                 urgency: kind.urgency(),
                 event_seq: None,
                 detail: Some("bad_report_signature".to_owned()),
-                dedupe_key: Some(format!("report-badsig:{}:{}", row.id, header_hash)),
+                dedupe_key: Some(device_limits::interval_key(
+                    &state,
+                    "report-badsig",
+                    &row.id,
+                )),
                 now_ms: state.now_ms(),
             },
         )
@@ -155,6 +163,13 @@ pub async fn post(
         ));
     }
 
+    if let Some(limit) = device_limits::quota_bytes(&state) {
+        let used = ev_repo::device_stored_bytes(state.db().pool(), &row.id).await?;
+        if used.saturating_add(up.body.ciphertext.len() as u64) > limit {
+            crate::api::events::quota_alert(&state, row, "report").await?;
+            return Err(AppError::QuotaExceeded);
+        }
+    }
     let bytes = serde_json::to_vec(&up.body)
         .map_err(|_| AppError::internal("cannot serialize report body"))?;
     let size = bytes.len();

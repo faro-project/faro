@@ -880,14 +880,47 @@ async fn record_failure(
     Ok(())
 }
 
-/// Send every due immediate notification.
+/// Whether an immediate notification may be combined with others for the same
+/// recipient and member: routine alerts and reports, not notices that carry
+/// their own wording (account status, removal, admin log, groups).
+fn coalescible(n: &DueNotification) -> bool {
+    n.admin_log.is_none()
+        && n.group_notice.is_none()
+        && !n.to_extra_recipient
+        && account_status(n).is_none()
+}
+
+/// One unit of immediate sending: a single notification, or everything due
+/// for one (recipient, member) combined into one email.
+#[allow(clippy::large_enum_variant)]
+enum SendItem {
+    Single(DueNotification),
+    Group(Vec<DueNotification>),
+}
+
+impl SendItem {
+    fn ids(&self) -> Vec<String> {
+        match self {
+            SendItem::Single(n) => vec![n.id.clone()],
+            SendItem::Group(g) => g.iter().map(|n| n.id.clone()).collect(),
+        }
+    }
+}
+
+/// Send every due immediate notification. At most one email per recipient and
+/// member goes out per `device_limits.email_interval_secs`; rows that arrive
+/// meanwhile wait and are sent together as one coalesced email.
 pub async fn send_immediate(state: &AppState) -> Result<SendSummary, AppError> {
     let now = state.now_ms();
+    let interval_ms = i64::try_from(state.config().device_limits.email_interval_secs)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
     let mut s = SendSummary::default();
     let mut quiet = HashMap::new();
     let due = notif::due(state.db().pool(), Mode::Immediate, now, SEND_BATCH).await?;
-    let mut rows = due.into_iter();
-    while let Some(n) = rows.next() {
+    let mut items: Vec<SendItem> = Vec::new();
+    let mut groups: BTreeMap<(String, String), Vec<DueNotification>> = BTreeMap::new();
+    for n in due {
         if undeliverable(&n) {
             notif::suppress(state.db().pool(), &n.id).await?;
             s.dropped += 1;
@@ -898,27 +931,106 @@ pub async fn send_immediate(state: &AppState) -> Result<SendSummary, AppError> {
             s.deferred += 1;
             continue;
         }
-        let email = compose_immediate(state, &n);
+        if interval_ms > 0 && coalescible(&n) {
+            let key = (
+                n.recipient_id.as_str().to_owned(),
+                n.member_id.as_str().to_owned(),
+            );
+            groups.entry(key).or_default().push(n);
+        } else {
+            items.push(SendItem::Single(n));
+        }
+    }
+    for g in groups.into_values() {
+        let (recipient, member) = (g[0].recipient_id.clone(), g[0].member_id.clone());
+        if let Some(last) =
+            notif::last_immediate_sent(state.db().pool(), &recipient, &member).await?
+        {
+            let until = last.saturating_add(interval_ms);
+            if until > now {
+                for n in &g {
+                    notif::defer(state.db().pool(), &n.id, until).await?;
+                }
+                s.deferred += g.len();
+                continue;
+            }
+        }
+        items.push(if g.len() == 1 {
+            SendItem::Single(g.into_iter().next().expect("one"))
+        } else {
+            SendItem::Group(g)
+        });
+    }
+    let mut items = items.into_iter();
+    while let Some(item) = items.next() {
+        let (email, attempts) = match &item {
+            SendItem::Single(n) => (compose_immediate(state, n), n.attempts),
+            SendItem::Group(g) => (
+                compose_coalesced(state, g),
+                g.iter().map(|n| n.attempts).max().unwrap_or(0),
+            ),
+        };
+        let ids = item.ids();
         match state.mailer().send(email).await {
             Ok(()) => {
-                notif::mark_sent(state.db().pool(), &n.id, now).await?;
-                s.sent += 1;
+                for id in &ids {
+                    notif::mark_sent(state.db().pool(), id, now).await?;
+                }
+                s.sent += ids.len();
             }
             Err(e) if e.is_instance_wide() => {
                 // Nothing else would get through either: stop the pass.
-                let ids: Vec<String> = std::iter::once(n.id).chain(rows.map(|r| r.id)).collect();
-                pause_for_outage(state, &ids, &e, now).await?;
+                let mut all = ids;
+                for rest in items.by_ref() {
+                    all.extend(rest.ids());
+                }
+                pause_for_outage(state, &all, &e, now).await?;
                 s.failed_attempts += 1;
-                s.paused += ids.len();
+                s.paused += all.len();
                 break;
             }
             Err(e) => {
-                record_failure(state, std::slice::from_ref(&n.id), n.attempts, &e, now).await?;
+                record_failure(state, &ids, attempts, &e, now).await?;
                 s.failed_attempts += 1;
             }
         }
     }
     Ok(s)
+}
+
+/// One email for several notifications about the same member.
+fn compose_coalesced(state: &AppState, group: &[DueNotification]) -> Email {
+    let cfg = state.config();
+    let n0 = &group[0];
+    let member = &n0.member_name;
+    // Alerts that were themselves folded count for the alerts folded in.
+    let total: i64 = group
+        .iter()
+        .map(|n| 1 + detail_ms(n, "folded").unwrap_or(0))
+        .sum();
+    let urgent = group
+        .iter()
+        .filter(|n| n.urgency == Urgency::Urgent)
+        .count();
+    let subject = if urgent > 0 {
+        format!("Urgent: {total} new alerts for {member}")
+    } else {
+        format!("{total} new alerts for {member}")
+    };
+    let urgent_line = if urgent > 0 {
+        format!(" {urgent} of them urgent.")
+    } else {
+        String::new()
+    };
+    Email {
+        to: n0.recipient_email.clone(),
+        subject,
+        text: format!(
+            "{total} new alerts and reports for {member} on {}.{urgent_line} \
+             They are combined into one message. Open Faro to view.\n\n{}\n",
+            cfg.instance.name, cfg.public_url
+        ),
+    }
 }
 
 /// Send one digest per recipient with due digest items.

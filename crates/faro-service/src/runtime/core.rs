@@ -85,9 +85,34 @@ const CAPTURE_TIMEOUT_MS: u64 = 60_000;
 /// first. The IPC source only forwards batches sharing the first batch's
 /// capture time, so this cannot admit unsolicited frames.
 const CAPTURE_CONTINUATION_MS: u64 = 5_000;
-/// Identical tamper signals within this window are reported once (the agent
-/// and the service can both notice the same permission revocation).
+/// Tamper signals with the same [`SignalKey`] within this window are
+/// reported once (the agent and the service can both notice the same
+/// permission revocation).
 const SIGNAL_DEDUPE_MS: u64 = 60_000;
+
+/// What makes two tamper signals one report within [`SIGNAL_DEDUPE_MS`]:
+/// the variant and the account, and for the two variants whose detail comes
+/// from a short fixed list, the permission (and `never_granted`) or the
+/// component. Agents may only name permissions the IPC source allows, and
+/// never send `integrity_failure`. Free text and counters are left out, so
+/// changing them does not defeat the dedupe.
+type SignalKey = (
+    std::mem::Discriminant<TamperSignal>,
+    Option<String>,
+    Option<String>,
+);
+
+fn signal_key(sig: &TamperSignal, account: &Option<String>) -> SignalKey {
+    let detail = match sig {
+        TamperSignal::PermissionRevoked {
+            permission,
+            never_granted,
+        } => Some(format!("{permission}/{never_granted}")),
+        TamperSignal::IntegrityFailure { component } => Some(component.clone()),
+        _ => None,
+    };
+    (std::mem::discriminant(sig), detail, account.clone())
+}
 /// Awake time a session can go without a connected agent before the
 /// service raises `unmonitored_user_session` (§3.7): two missed pings of
 /// the slowest allowed ping interval plus launchd's relaunch throttle, with
@@ -330,11 +355,13 @@ pub struct Core {
     screen_permission: Option<PermissionState>,
     /// A Screen Recording `permission_revoked` was sent for the capture
     /// target since its permission was last seen granted. The failures it
-    /// causes are then not reported a second time (§3.7).
+    /// causes are then not reported a second time (§3.7). Set only where
+    /// the service itself saw the permission off, never by a signal a
+    /// source forwarded, so a forged one cannot silence later reports.
     screen_off_reported: bool,
     accessibility: Option<bool>,
     seen_permissions: SeenPermissions,
-    recent_signals: HashMap<String, u64>,
+    recent_signals: HashMap<SignalKey, u64>,
     /// Awake time since the agent said the system sleeps.
     asleep_awake_ms: u64,
     last_tick_mono: Option<u64>,
@@ -522,10 +549,6 @@ impl Core {
         None
     }
 
-    fn is_screen_recording_off(&self, sig: &TamperSignal) -> bool {
-        matches!(sig, TamperSignal::PermissionRevoked { permission, .. } if permission == self.capture_permission)
-    }
-
     /// Route a tamper or context signal that concerns the whole computer
     /// (§3.7, PROTOCOL.md §3.3).
     pub async fn signal(&mut self, sig: TamperSignal) {
@@ -534,9 +557,6 @@ impl Core {
 
     /// Route a signal from `account`'s session.
     async fn signal_for(&mut self, sig: TamperSignal, account: Option<String>) {
-        if self.is_screen_recording_off(&sig) && account == self.target_account() {
-            self.screen_off_reported = true;
-        }
         let wall = self.clock.wall_ms();
         match route_signal(&sig) {
             SignalRoute::ReportContext => self.journal.signal(None, wall, sig, account),
@@ -544,9 +564,9 @@ impl Core {
                 let now = self.clock.mono_ms();
                 self.recent_signals
                     .retain(|_, t| now.saturating_sub(*t) < SIGNAL_DEDUPE_MS);
-                let key = format!("{sig:?}/{account:?}");
+                let key = signal_key(&sig, &account);
                 if self.recent_signals.contains_key(&key) {
-                    tracing::debug!(signal = %key, "duplicate tamper signal suppressed");
+                    tracing::debug!(signal = ?sig, "duplicate tamper signal suppressed");
                     return;
                 }
                 self.recent_signals.insert(key, now);
@@ -1262,12 +1282,15 @@ impl Core {
                 // Off without a revocation the service saw: never granted
                 // here (a new install, or a reinstall that dropped the
                 // grant), or turned off in a way it missed.
-                (true, false) => TamperSignal::PermissionRevoked {
-                    permission: self.capture_permission.into(),
-                    never_granted: !self
-                        .seen_permissions
-                        .granted_before(account.as_deref().unwrap_or_default()),
-                },
+                (true, false) => {
+                    self.screen_off_reported = true;
+                    TamperSignal::PermissionRevoked {
+                        permission: self.capture_permission.into(),
+                        never_granted: !self
+                            .seen_permissions
+                            .granted_before(account.as_deref().unwrap_or_default()),
+                    }
+                }
                 (false, _) => TamperSignal::CaptureFailing {
                     consecutive_failures: self.failures_in_row,
                 },
@@ -1587,6 +1610,7 @@ impl Core {
                         None => self.seen_permissions.granted_before(&key),
                     };
                 if revoked {
+                    self.screen_off_reported = true;
                     self.signal_for(
                         TamperSignal::PermissionRevoked {
                             permission: self.capture_permission.into(),

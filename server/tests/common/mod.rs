@@ -55,6 +55,8 @@ pub fn test_config(dir: &std::path::Path) -> Config {
     c.registration.allowed_email_domains = vec!["example.org".into()];
     c.rate_limit.unauthenticated_per_minute = 10_000;
     c.rate_limit.magic_links_per_email_per_hour = 10_000;
+    // One email per alert unless a test asks for coalescing.
+    c.device_limits.email_interval_secs = 0;
     c.validate().expect("test config validates");
     c
 }

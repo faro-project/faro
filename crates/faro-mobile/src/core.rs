@@ -57,6 +57,10 @@ pub struct FaroCore {
     pub(crate) rt: Rt,
     pub(crate) store: Mutex<Store>,
     outbox: Mutex<Option<Outbox>>,
+    /// Held for a whole [`FaroCore::upload_pending`]: two uploads of one
+    /// core (the tunnel's timers, the app's tasks) run one after the other,
+    /// not interleaved on the outbox.
+    upload: Mutex<()>,
     /// Monotonic time of the last identity check that passed.
     identity_checked: Mutex<Option<u64>>,
     /// The instance's clock minus this phone's, as the last answer's
@@ -540,10 +544,25 @@ impl FaroCore {
         })
     }
 
+    /// Whether anything waits for [`FaroCore::upload_pending`]: an event or
+    /// a report in the outbox. A local read, no key and no network; false
+    /// when not enrolled or after Leave Faro, where there is nothing to send.
+    pub fn has_pending(&self) -> Result<bool, FaroError> {
+        let Some(e) = lock(&self.store).get::<Enrollment>(ENROLLMENT)? else {
+            return Ok(false);
+        };
+        if self.leaving()?.is_some() {
+            return Ok(false);
+        }
+        let stats = self.with_outbox(&e, |o| Ok(o.stats()?))?;
+        Ok(stats.events > 0 || stats.reports > 0)
+    }
+
     /// Upload everything pending: refresh the recipient manifest (a
     /// newer one the member signed is adopted, anything else is refused and
     /// the current one kept), then events in `seq` order, then reports.
     pub fn upload_pending(&self) -> Result<UploadOutcome, FaroError> {
+        let _one_at_a_time = lock(&self.upload);
         let e = self.enrollment()?;
         if !self.is_approved(&e)? {
             return Err(FaroError::NotApproved);
@@ -566,9 +585,19 @@ impl FaroCore {
         }
         let access = Access { core: self, e: &e };
         let mut acked = None;
-        let drained = self
-            .rt
-            .block_on(uplink::drain_events(&client, &access, |a| acked = Some(a)))?;
+        let mut refused = Vec::new();
+        let drained = self.rt.block_on(uplink::drain_events(
+            &client,
+            &access,
+            |a| acked = Some(a),
+            |r| {
+                refused.push(format!(
+                    "the instance refused event {} ({}): {}",
+                    r.seq, r.kind, r.reason
+                ))
+            },
+        ))?;
+        warnings.extend(refused);
         if let EventsDrained::AckBeyondHead { acked, .. } = drained {
             warnings.push(format!(
                 "instance acknowledged seq {acked} beyond the local head"
@@ -625,6 +654,7 @@ impl FaroCore {
             rt: Rt(Some(rt)),
             store: Mutex::new(store),
             outbox: Mutex::new(None),
+            upload: Mutex::new(()),
             identity_checked: Mutex::new(None),
             clock_offset: Arc::new(AtomicI64::new(0)),
         }))
@@ -734,10 +764,23 @@ impl FaroCore {
         let mut wait = Duration::from_millis(500);
         loop {
             let access = Access { core: self, e };
-            let error = match self
-                .rt
-                .block_on(uplink::drain_events(client, &access, |_| {}))
-            {
+            let mut refused = None;
+            let drained = uplink::drain_events(
+                client,
+                &access,
+                |_| {},
+                |r| {
+                    if r.seq == seq {
+                        refused = Some(format!("the instance refused the goodbye: {}", r.reason));
+                    }
+                },
+            );
+            let drained = self.rt.block_on(drained);
+            // Dropped from the outbox, so not delivered, ever.
+            if let Some(why) = refused {
+                return Delivery::NotYet(why);
+            }
+            let error = match drained {
                 Ok(_) => None,
                 Err(err) => {
                     let err = FaroError::from(err);
@@ -914,8 +957,12 @@ impl OutboxAccess for Access<'_> {
     fn pending(
         &self,
         limit: usize,
+        max_bytes: usize,
     ) -> impl Future<Output = Result<Vec<SignedEvent>, OutboxError>> + Send {
-        std::future::ready(self.core.with_outbox_raw(self.e, |o| o.pending(limit)))
+        std::future::ready(
+            self.core
+                .with_outbox_raw(self.e, |o| o.pending_within(limit, max_bytes)),
+        )
     }
     fn ack_through(&self, acked: u64) -> impl Future<Output = Result<u64, OutboxError>> + Send {
         std::future::ready(self.core.with_outbox_raw(self.e, |o| o.ack_through(acked)))

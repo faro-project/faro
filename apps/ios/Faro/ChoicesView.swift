@@ -129,7 +129,9 @@ struct ChoicesView: View {
         } header: {
             Text("Waiting to take effect")
         } footer: {
-            Text("Your allies were told. Until then, these are still blocked.")
+            Text(model.eventsQueued
+                 ? "Your allies will be told as soon as Faro can reach the instance. Until then, these are still blocked."
+                 : "Your allies were told. Until then, these are still blocked.")
         }
     }
 
@@ -216,9 +218,10 @@ struct ChoicesView: View {
 
     private func savedText(_ r: SubmitResult) -> String {
         var parts: [String] = []
+        let told = model.eventsQueued ? "your allies will be told as soon as Faro can reach the instance" : "your allies were told"
         if !r.appliedNow.isEmpty { parts.append("Blocking more is on now.") }
-        if !r.loosenedNow.isEmpty { parts.append("Blocking less took effect now, and your allies were told.") }
-        if !r.waiting.isEmpty { parts.append("Blocking less is waiting, and your allies were told.") }
+        if !r.loosenedNow.isEmpty { parts.append("Blocking less took effect now, and \(told).") }
+        if !r.waiting.isEmpty { parts.append("Blocking less is waiting, and \(told).") }
         if !r.superseded.isEmpty { parts.append("An earlier change that was waiting was cancelled.") }
         return parts.joined(separator: " ")
     }

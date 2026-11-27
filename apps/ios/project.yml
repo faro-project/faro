@@ -114,6 +114,7 @@ targets:
         # The background refresh that looks for a newer domain list (docs/IOS.md §7.2).
         BGTaskSchedulerPermittedIdentifiers:
           - org.faro.ios.refresh-domains
+          - org.faro.ios.heartbeat-upload
         UIBackgroundModes:
           - fetch
     settings:

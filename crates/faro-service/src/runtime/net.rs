@@ -5,21 +5,25 @@
 //! state), and each loop retries with jittered backoff until the instance is
 //! reachable again.
 
+use super::core::Control;
 use super::status::StatusTx;
 use crate::backoff::Backoff;
 use crate::client::{ClientError, InstanceClient};
 use crate::state::Enrollment;
-use faro_client::uplink::{self, EventsDrained, OutboxAccess, UplinkError};
+use faro_client::uplink::{self, EventsDrained, OutboxAccess, RefusedEvent, UplinkError};
 use faro_core::clock::Clock;
 use faro_core::outbox::PendingReport;
 use faro_core::{ManifestDecision, Outbox, OutboxError, PrunePolicy, RecipientSet};
 use faro_crypto::{ChainHead, SigningKey};
 use faro_proto::api::{DeviceState, HeartbeatResponse};
+use faro_proto::body::TamperSignal;
 use faro_proto::SignedEvent;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 /// The outbox, shared between the core and the network tasks. Every call
 /// runs on Tokio's blocking pool: SQLite with `synchronous=FULL` fsyncs.
@@ -62,8 +66,9 @@ impl OutboxAccess for OutboxHandle {
     fn pending(
         &self,
         limit: usize,
+        max_bytes: usize,
     ) -> impl Future<Output = Result<Vec<SignedEvent>, OutboxError>> + Send {
-        self.run(move |o| o.pending(limit))
+        self.run(move |o| o.pending_within(limit, max_bytes))
     }
     fn ack_through(&self, acked: u64) -> impl Future<Output = Result<u64, OutboxError>> + Send {
         self.run(move |o| o.ack_through(acked))
@@ -103,6 +108,39 @@ pub struct Uploader {
     pub status: StatusTx,
     pub gate: IdentityGate,
     pub prune: PrunePolicy,
+    /// Where an event the instance refused for good is reported, as a
+    /// tamper signal (§3.7). `None` (the uninstaller): only logged.
+    pub control: Option<mpsc::Sender<Control>>,
+    /// Set by a `429`: no upload is tried before then.
+    pub deferral: Deferral,
+    /// The last event the instance refused for good.
+    pub last_refused: Mutex<Option<RefusedEvent>>,
+}
+
+/// How long to wait after a `429` without a usable `Retry-After`.
+const RATE_LIMITED_WAIT: Duration = Duration::from_secs(60);
+
+/// Until when the instance asked us not to upload (`429`, `Retry-After`).
+#[derive(Debug, Default)]
+pub struct Deferral(Mutex<Option<Instant>>);
+
+impl Deferral {
+    /// Time left, if the instance asked us to wait.
+    fn remaining(&self) -> Option<Duration> {
+        let until = (*self.0.lock().unwrap_or_else(PoisonError::into_inner))?;
+        let left = until.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
+    }
+
+    /// Remember a `429` answer, if `e` is one.
+    fn note(&self, e: &ClientError) {
+        if e.status() != Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+            return;
+        }
+        let wait = e.retry_after().unwrap_or(RATE_LIMITED_WAIT);
+        tracing::info!(wait_secs = wait.as_secs(), "instance asked us to slow down");
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now() + wait);
+    }
 }
 
 /// Why an upload pass stopped early.
@@ -112,6 +150,8 @@ pub enum UploadStop {
     Outbox(OutboxError),
     /// The instance's identity no longer matches the pin.
     Gated,
+    /// The instance answered `429`; this much of its wait is left.
+    Deferred(Duration),
 }
 
 impl From<UplinkError> for UploadStop {
@@ -129,14 +169,26 @@ impl Uploader {
         if !self.gate.is_open() {
             return Err(UploadStop::Gated);
         }
-        self.drain_events().await?;
-        self.drain_reports().await
+        if let Some(left) = self.deferral.remaining() {
+            return Err(UploadStop::Deferred(left));
+        }
+        let r = match self.drain_events().await {
+            Ok(()) => self.drain_reports().await,
+            Err(e) => Err(e),
+        };
+        if let Err(UploadStop::Client(e)) = &r {
+            self.deferral.note(e);
+        }
+        r
     }
 
     async fn drain_events(&self) -> Result<(), UploadStop> {
-        let drained = uplink::drain_events(&self.client, &self.outbox, |acked| {
-            self.status.update(|s| s.acked_through = Some(acked));
-        })
+        let drained = uplink::drain_events(
+            &self.client,
+            &self.outbox,
+            |acked| self.status.update(|s| s.acked_through = Some(acked)),
+            |refused| self.refused(refused),
+        )
         .await?;
         if let EventsDrained::AckBeyondHead { acked, .. } = drained {
             // The instance claims events this device never wrote: keep
@@ -148,6 +200,39 @@ impl Uploader {
             });
         }
         Ok(())
+    }
+
+    /// An event the instance will never take (logged by `drain_events`).
+    /// When the instance raises no alert of its own for it (an oversized
+    /// or malformed event), allies would otherwise see only the `chain_gap`
+    /// the next event leaves, so it is reported as an `integrity_failure`
+    /// naming the event's kind and the instance's reason.
+    fn refused(&self, r: &RefusedEvent) {
+        *self
+            .last_refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(r.clone());
+        self.status.update(|s| {
+            s.last_error = Some(format!(
+                "the instance refused event {} ({}): {}",
+                r.seq, r.kind, r.reason
+            ));
+        });
+        if r.instance_alerted() {
+            return;
+        }
+        let Some(control) = &self.control else {
+            return;
+        };
+        let signal = TamperSignal::IntegrityFailure {
+            component: format!(
+                "upload: the instance refused a {} event ({})",
+                r.kind, r.reason
+            ),
+        };
+        if let Err(e) = control.try_send(Control::Tamper(signal)) {
+            tracing::error!(error = %e, "cannot report the refused event");
+        }
     }
 
     async fn drain_reports(&self) -> Result<(), UploadStop> {
@@ -353,5 +438,33 @@ pub async fn periodic<F, Fut>(
         } else {
             wait = backoff.next_delay().min(every);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api(status: u16, retry_after: Option<Duration>) -> ClientError {
+        ClientError::Api {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            code: "x".into(),
+            message: String::new(),
+            retry_after,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_429_defers_uploads_for_its_retry_after() {
+        let d = Deferral::default();
+        assert_eq!(d.remaining(), None);
+        d.note(&api(503, Some(Duration::from_secs(30))));
+        assert_eq!(d.remaining(), None, "only a 429 defers");
+        d.note(&api(429, Some(Duration::from_secs(30))));
+        assert_eq!(d.remaining(), Some(Duration::from_secs(30)));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(d.remaining(), None);
+        d.note(&api(429, None));
+        assert_eq!(d.remaining(), Some(RATE_LIMITED_WAIT));
     }
 }
