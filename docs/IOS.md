@@ -344,6 +344,8 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **Loosening waits 24 hours by default.** The member can set it from 0 to 72 hours, and allies see the setting.
 - **Faro doesn't set up or rely on an ally-held Screen Time passcode.**
 - **Setup can't be finished without both layers.** There is no skip for Screen Time access or the VPN configuration: a phone with only one layer would be enrolled and look protected while half of §5's design is missing. Turning a layer off later is allowed and reported (§10.2).
+- **The resolver-reading gap is accepted.** On each network change the tunnel turns its DNS settings off for well under a second to read the network's resolvers (§7.4). Layer 1 still covers WebKit during that moment.
+- **No resolver means `SERVFAIL`, never a public one.** Allowed names fail at once until the network's resolvers are found again. No lookup goes to a third party.
 
 ### Open
 
