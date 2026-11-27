@@ -9,6 +9,10 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { DeviceSummary, MyAllies, SetupStatus, SupportedMember } from '#lib/types.ts';
 	import Logo from '#lib/ui/Logo.svelte';
+	import ReachOut from '#lib/ui/ReachOut.svelte';
+	import ReachOuts from '#lib/ui/ReachOuts.svelte';
+
+	let reachOutVersion = $state(0);
 
 	let needsSetup = $state<boolean | null>(null);
 	let devices = $state<DeviceSummary[] | null>(null);
@@ -126,6 +130,19 @@
 			</p>
 		</div>
 	{/if}
+
+	<section class="card reach-out" aria-labelledby="h-reach">
+		<div class="reach-head">
+			<div>
+				<h2 id="h-reach">Struggling?</h2>
+				<p class="muted small">
+					Reach out to your allies or your group. They're told right away, without any details.
+				</p>
+			</div>
+			<ReachOut user={u} onsent={() => reachOutVersion++} />
+		</div>
+		<ReachOuts user={u} version={reachOutVersion} />
+	</section>
 
 	<div class="grid">
 		{#if u.roles.member}
@@ -274,6 +291,27 @@
 
 	.actions.center {
 		justify-content: center;
+	}
+
+	.reach-out {
+		margin-bottom: 1rem;
+	}
+
+	.reach-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+	}
+
+	.reach-head h2 {
+		font-size: 1.1rem;
+		margin: 0;
+	}
+
+	.reach-head p {
+		margin: 0.2rem 0 0;
 	}
 
 	.grid {

@@ -18,6 +18,7 @@
 	import Gate from '#lib/ui/Gate.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
 	import ProposalBlocks from '#lib/ui/groups/ProposalBlocks.svelte';
+	import ReachOutSettings from '#lib/ui/ReachOutSettings.svelte';
 
 	let memberKeys = $state<MemberKeysBlob | null | undefined>(undefined);
 	let allyKey = $state<AllyKeyBlob | null | undefined>(undefined);
@@ -225,6 +226,16 @@
 				can stop them from sending any, in any group. They aren't told.
 			</p>
 			<ProposalBlocks />
+		</section>
+
+		<section class="card">
+			<h2>Reach outs</h2>
+			<p class="muted">
+				When someone reaches out to you, you're told right away, after your quiet hours. For each
+				person you can let their reach outs through quiet hours, move them to the digest, or switch
+				them off.
+			</p>
+			<ReachOutSettings />
 		</section>
 
 		<DeleteAccount {user} />

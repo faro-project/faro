@@ -52,6 +52,8 @@ Tags in use:
 | `faro/group-roster-snapshot/v1` | Facilitator-signed roster snapshot (§10.5) |
 | `faro/group-epoch-key/v1` | Commitment to a group epoch key (§10.3) |
 | `faro/group-safety-code/v1` | Group safety code (§10.8) |
+| `faro/group-message/v1` | Author-signed group message: a reach out or a note (§11) |
+| `faro/group-message-body/v1` | Group message body AAD (§11) |
 
 ## 3. Events and the hash chain
 
@@ -513,3 +515,56 @@ While `posting_paused` (someone who left is still in the roster, or someone's ke
 - **Withholding.** The instance can delay entries (clients report a short log) or stop serving the group, but can't forge, reorder or roll back entries for a browser that has a checkpoint.
 - **Removal is forward-only.** Someone who leaves keeps the epoch keys they already had. The instance stops serving them group items at once; the next epoch is never sealed to them.
 - **Checkpoints are per browser.** Clearing site data or using another browser starts again from §10.4's bootstrapping.
+
+## 11. Group messages: reach outs and notes
+
+Reach outs and the notes on alliance proposals and join requests (GROUPS.md §8.3, §10.2) are written by one person for specific people. The instance stores and routes them but can neither read nor forge them. They are made and read only by the web app (`web/src/lib/crypto/group.ts`); the Rust reference is `faro_proto::group` and `faro_crypto::{seal,verify,open}_group_message`.
+
+**Status: new in this version, awaiting maintainer sign-off** before it reaches `main`.
+
+### 11.1 Header
+
+`GroupMessage`, signed by the author's **member signing key** and flattened with `sig` like an endorsement:
+
+| Field | Type | Notes |
+|---|---|---|
+| `instance_id` | string | |
+| `group_id` | string or null | 32 lowercase hex. `null` only for a reach out outside any group; notes always name their group |
+| `item_id` | string | 32 lowercase hex, chosen at random by the author's browser. The instance files the message under it |
+| `kind` | string | `reach_out`, `proposal_note` or `join_request_note` |
+| `author_id` | string | |
+| `issued_at_ms` | i64 | Within 5 minutes of the instance's clock on upload |
+| `recipients` | list | `{user_id, enc_pubkey}`: 1 to 32 entries, sorted strictly ascending by `user_id`, never the author. A proposal note has exactly one |
+| `body_hash` | 32 bytes | `BLAKE3(nonce ‖ ciphertext)` of the body, or 32 zero bytes when there is none (a signed, content-free reach out) |
+
+`signing_bytes = Canonical("faro/group-message/v1").str(instance_id).str(group_id or "").str(item_id).str(kind).str(author_id).i64(issued_at_ms).u64(len(recipients))`, then `.str(user_id).fixed(enc_pubkey)` for each recipient in order, then `.fixed(body_hash)`. The empty string is never a valid group id, so "no group" can't collide with one.
+
+The signature covers who it is for and the exact keys it was sealed to, so the instance can't add a reader, drop one, move a message to another group or item, or pass off one kind as another. `author_id` and `issued_at_ms` go beyond GROUPS.md §10.2's list: the first binds the message to its author independently of which key verifies it, the second lets readers show a time the instance can't change.
+
+### 11.2 Body
+
+The item construction of §4.1, with:
+
+- `aad = Canonical("faro/group-message-body/v1").str(instance_id).str(item_id)`;
+- plaintext: UTF-8 JSON `{"text": "…"}`, at most 500 characters (Unicode scalar values), not blank. Readers ignore other fields;
+- envelopes: exactly one per recipient, with `key_id` of the signed `enc_pubkey`, and exactly one for the author, sealed to the author's own member encryption key so they can read what they sent. At most 33, inside the instance's 64;
+- ciphertext at most 4096 bytes.
+
+On the wire, upload and download alike: `{"message": Signed<GroupMessage>, "body": EncryptedItem | null}`.
+
+### 11.3 Readers
+
+A browser shows a message only after all of these, in order:
+
+1. The structure checks above (`validate`), before any signature: they bound the work a hostile document causes.
+2. The body against the header: present exactly when `body_hash` isn't zero, hashing to it, and with the envelope set above.
+3. Strict Ed25519 verification against the author's member signing key.
+4. The context: `item_id` is the message asked for, `author_id` is the author the instance names, `instance_id` is this instance, and the reader is the author or a recipient.
+
+A message that fails any of these is not shown at all, with a warning. The signing key is served by the instance, so how far a reader can trust it depends on what they checked themselves: an ally who compared safety codes with the author (the safety code covers the member signing key) sees the message as **verified**. Anyone else sees it marked *not yet verified*, as are the keys a sender seals to other than their own manifest's allies, until participants have signed keys (GROUPS.md §10.3).
+
+### 11.4 What the instance checks
+
+On upload the instance runs steps 1 to 3 with the author's stored key, and also checks the kind and group for the route, the author's own copy (sealed to their member key), that every recipient is someone this message may go to, and that each signed key is one it knows for that person. It gains nothing by skipping these, since every reader checks again, but they keep junk out of the database.
+
+People without a member signing key (ally-only participants) can't write messages. They can still send a **content-free reach out**, which is not a group message at all: no signature and no body. Readers mark it *"Sent through the server. Can't be verified."* A member who hasn't unlocked their keys can send the same kind.

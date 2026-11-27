@@ -6,12 +6,17 @@
 	// full: never who is in it or how many. Asking to join is a request that
 	// only the group's facilitators see; each needs a facilitator's yes.
 	import { resolve } from '$app/paths';
-	import { api, seg } from '#lib/api.ts';
+	import { api, ApiError, seg } from '#lib/api.ts';
 	import { joinNames } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import { describeSchedule } from '#lib/meetings.ts';
+	import { keyring } from '#lib/keys/keyring.svelte.ts';
+	import { loadRecipients } from '#lib/reach-out-api.ts';
+	import { composeMessage, MAX_NOTE_CHARS, noteLength, sealable } from '#lib/reach-out.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { DirectoryEntry, MyJoinRequest, Page } from '#lib/types.ts';
+	import Modal from '../Modal.svelte';
+	import NoteField from '../NoteField.svelte';
 
 	let { onjoined }: { onjoined?: () => void } = $props();
 
@@ -81,15 +86,47 @@
 		entries = entries.map((e) => (e.id === id ? { ...e, ...change } : e));
 	}
 
-	async function ask(e: DirectoryEntry) {
-		busyId = e.id;
+	// Asking, with an optional note to the facilitators: signed with your
+	// member key and sealed to each facilitator's key (GROUPS.md §10.2).
+	let asking = $state<DirectoryEntry | null>(null);
+	let note = $state('');
+	let askError = $state('');
+	let noteTooLong = $derived(noteLength(note) > MAX_NOTE_CHARS);
+
+	function startAsk(e: DirectoryEntry) {
+		asking = e;
+		note = '';
+		askError = '';
 		actionError = '';
+	}
+
+	async function ask() {
+		const e = asking;
+		const u = session.user;
+		if (!e || !u) return;
+		busyId = e.id;
+		askError = '';
 		try {
-			await api.post(`/v1/groups/${seg(e.id)}/join-requests`, {});
+			let message = null;
+			if (note.trim()) {
+				const keys = keyring.memberFor(u.id);
+				if (!keys) {
+					askError = 'Unlock your keys to sign the note, or remove it.';
+					return;
+				}
+				const r = await loadRecipients('join_request_note', { groupId: e.id });
+				if (!sealable(r).length) {
+					askError = "The facilitators can't receive a note yet. Ask without one.";
+					return;
+				}
+				message = composeMessage(keys, r, 'join_request_note', e.id, note);
+			}
+			await api.post(`/v1/groups/${seg(e.id)}/join-requests`, message ? { note: message } : {});
 			set(e.id, { requested: true });
+			asking = null;
 			onjoined?.();
 		} catch (err) {
-			actionError = groupError(err);
+			askError = err instanceof Error && !(err instanceof ApiError) ? err.message : groupError(err);
 		} finally {
 			busyId = '';
 		}
@@ -180,7 +217,7 @@
 										class="primary small"
 										type="button"
 										disabled={busyId === g.id}
-										onclick={() => ask(g)}
+										onclick={() => startAsk(g)}
 									>
 										Ask to join
 									</button>
@@ -208,6 +245,35 @@
 			</p>
 		{/if}
 	</section>
+{/if}
+
+{#if asking && session.user}
+	<Modal title="Ask to join {asking.name}" onclose={() => (asking = null)}>
+		<p>
+			The facilitators{#if asking.facilitators.length}
+				({joinNames(asking.facilitators)}){/if} see your name and your note, and say yes or no. Nobody
+			else in the group sees your request.
+		</p>
+		<NoteField
+			user={session.user}
+			bind:text={note}
+			canSign={session.hasMemberKeys}
+			label="A note to the facilitators (optional)"
+			placeholder="I'm new to the church and was told to ask about this group."
+		/>
+		{#if askError}<div class="notice error" role="alert"><p>{askError}</p></div>{/if}
+		<div class="actions">
+			<button
+				class="primary"
+				type="button"
+				disabled={busyId === asking.id || noteTooLong}
+				onclick={ask}
+			>
+				{busyId === asking.id ? 'Sending…' : 'Ask to join'}
+			</button>
+			<button class="secondary" type="button" onclick={() => (asking = null)}>Cancel</button>
+		</div>
+	</Modal>
 {/if}
 
 <style>

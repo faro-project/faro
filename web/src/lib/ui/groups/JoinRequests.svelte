@@ -1,13 +1,16 @@
 <script lang="ts">
 	// People asking to join a listed group (GROUPS.md §8.8), for facilitators.
-	// A name and when they asked, and nothing else about them: not whether
+	// A name, when they asked and their note (if they wrote one, opened and
+	// checked in the browser), and nothing else about them: not whether
 	// they use Faro on their own computer, nor who their allies are. Saying
 	// yes adds them (with nothing shared); saying no tells them only "Not
 	// accepted", and they can't ask again for a while.
 	import { api, seg } from '#lib/api.ts';
 	import { ago, date } from '#lib/format.ts';
 	import { groupError } from '#lib/groups-api.ts';
+	import { session } from '#lib/session.svelte.ts';
 	import type { GroupView, JoinRequestEntry, Page } from '#lib/types.ts';
+	import SignedNote from '../SignedNote.svelte';
 
 	let { group, onchanged }: { group: GroupView; onchanged: (g?: GroupView) => void } = $props();
 
@@ -69,8 +72,8 @@
 		<div class="empty"><p>Nobody is waiting to join right now.</p></div>
 	{:else}
 		<p class="muted">
-			You see a name and when they asked. If you say no they are only told "Not accepted", and
-			requests nobody answers end after 14 days.
+			You see a name, when they asked, and a note if they wrote one. If you say no they are only
+			told "Not accepted", and requests nobody answers end after 14 days.
 		</p>
 		{#if error}<div class="notice error" role="alert"><p>{error}</p></div>{/if}
 		<ul class="rows">
@@ -82,6 +85,9 @@
 							<div class="row-meta">
 								Asked {ago(r.created_at_ms)} · until {date(r.expires_at_ms)}
 							</div>
+							{#if r.note_id && session.user}
+								<SignedNote messageId={r.note_id} user={session.user} />
+							{/if}
 						</div>
 						<div class="row-actions">
 							<button

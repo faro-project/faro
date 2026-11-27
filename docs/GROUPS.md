@@ -497,11 +497,15 @@ proposal_blocks(user_id, blocked_id, created_at)
 
 pairing_suggestions(id, group_id, facilitator_id, user_a, user_b, created_at, dismissed_a, dismissed_b)
 
-reach_outs(id, sender_id, group_id NULL, created_at, sig, blob_ref NULL)
+reach_outs(id, sender_id, group_id NULL, audience[allies|facilitators|people], created_at, sig, blob_ref NULL)
 reach_out_recipients(reach_out_id, recipient_id, answered_at, answer[call|here])
--- notes and reach-out content keys use the existing envelopes table
+group_messages(id, kind[reach_out|proposal_note|join_request_note], author_id, group_id,
+        message_json, body_json, created_at)   -- signed header and sealed body (PROTOCOL.md §11);
+                                               -- note_blob_ref and blob_ref point here
+group_message_recipients(message_id, recipient_id, key_id)
 
 notification_prefs + quiet_hours_bypass(user_id, sender_id)   -- "let Sam's reach outs through"
+reach_out_prefs(user_id, sender_id, mode)                      -- a person's reach outs to the digest, or off
 
 ALTER TABLE ally_links ADD COLUMN origin_group_id TEXT NULL;  -- label only, never for authorization
 
@@ -562,6 +566,10 @@ PUT|DELETE /v1/me/proposal-blocks/{user_id}
 POST   /v1/me/reach-outs                           {recipients[] | audience, group_id?, sig, ciphertext?, envelopes?}
 POST   /v1/reach-outs/{id}/answer                  {answer}
 PUT|DELETE /v1/me/quiet-hours-bypass/{user_id}
+GET    /v1/me/reach-outs                           incoming (others' answer counts) and outgoing (who answered)
+GET    /v1/me/message-recipients?for=&audience=&group_id=&user_ids=   who a message goes to, with keys
+GET    /v1/group-messages/{id}                     a signed message, for its author and recipients only
+GET    /v1/me/reach-out-settings                   PUT /v1/me/reach-out-prefs/{user_id} {mode}
 
 -- Phase C
 GET    /v1/groups/{id}/roster?after_seq=           log entries, paged, with the head and latest snapshot seq

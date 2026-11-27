@@ -50,11 +50,13 @@ use crate::db::repo::proposals::{
 };
 use crate::db::repo::{allies, groups, is_unique_violation, member_keys, users};
 use crate::error::{AppError, AppResult};
+use crate::messages::{self, Expect};
 use crate::state::AppState;
 use axum::extract::{Path, State as AxState};
 use axum::http::StatusCode;
 use axum::Json;
 use faro_proto::api::AllyKeyUpload;
+use faro_proto::group::{GroupMessageKind, SealedGroupMessage};
 use faro_proto::UserId;
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +105,8 @@ pub struct OutgoingProposal {
     /// Not accepted: the same kind can be sent to this person again from
     /// this time ("You can ask again on *date*").
     pub ask_again_at_ms: Option<i64>,
+    /// The caller's note (`GET /v1/group-messages/{id}`), if they wrote one.
+    pub note_id: Option<String>,
 }
 
 /// A proposal sent to the caller, with their own decision as they made it.
@@ -120,6 +124,8 @@ pub struct IncomingProposal {
     pub expires_at_ms: i64,
     /// When the caller accepted or declined, or the sender withdrew.
     pub decided_at_ms: Option<i64>,
+    /// The sender's signed note (`GET /v1/group-messages/{id}`), if any.
+    pub note_id: Option<String>,
 }
 
 fn outgoing_view(l: Listed, now: i64) -> OutgoingProposal {
@@ -130,6 +136,7 @@ fn outgoing_view(l: Listed, now: i64) -> OutgoingProposal {
             .then_some(p.decided_at_ms)
             .flatten(),
         withdrawn_at_ms: p.withdrawn_at_ms,
+        note_id: p.note_id.clone(),
         ask_again_at_ms: (state == SenderState::NotAccepted && p.cooldown_until_ms > now)
             .then_some(p.cooldown_until_ms),
         state,
@@ -151,6 +158,7 @@ fn incoming_view(l: Listed, now: i64) -> IncomingProposal {
     IncomingProposal {
         state: p.recipient_state(now),
         decided_at_ms: p.decided_at_ms,
+        note_id: p.note_id.clone(),
         id: p.id,
         group_id: p.group_id,
         group_name: l.group_name,
@@ -204,6 +212,11 @@ pub struct CreateProposal {
     /// one their browser just made (as when accepting an invitation).
     #[serde(default)]
     pub ally_key: Option<AllyKeyUpload>,
+    /// A note to the recipient, at most 500 characters, signed with the
+    /// sender's member key and sealed to the recipient in the browser
+    /// (GROUPS.md §10.2).
+    #[serde(default)]
+    pub note: Option<SealedGroupMessage>,
 }
 
 /// Whether two sets of `(member, ally)` links share one.
@@ -329,6 +342,27 @@ pub async fn create(
             "too many open invitations and proposals; wait for some to be answered or expire",
         ));
     }
+    // The note: checked and stored before the proposal that points to it.
+    // A hidden proposal keeps it too, for the sender's own view; the
+    // recipient never gets it.
+    let note_id = match &req.note {
+        None => None,
+        Some(note) => {
+            messages::accept_message(
+                &mut tx,
+                &state,
+                me,
+                note,
+                &Expect {
+                    kind: GroupMessageKind::ProposalNote,
+                    group_id: Some(&group_id),
+                    allowed: std::slice::from_ref(&to),
+                },
+            )
+            .await?;
+            Some(note.message.body.item_id.clone())
+        }
+    };
     let offer_key = if i_am_ally {
         Some(ensure_ally_key(&mut tx, me, req.ally_key.as_ref(), now).await?)
     } else {
@@ -353,6 +387,7 @@ pub async fn create(
             kind,
             offer_ally_key_id: offer_key.as_deref(),
             hidden,
+            note_id: note_id.as_deref(),
             now_ms: now,
         },
     )

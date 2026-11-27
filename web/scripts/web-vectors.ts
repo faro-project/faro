@@ -5,7 +5,8 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { b64, hex, utf8 } from '../src/lib/crypto/bytes.ts';
+import { b64, hex, unb64, utf8 } from '../src/lib/crypto/bytes.ts';
+import { sealGroupMessage } from '../src/lib/crypto/group.ts';
 import { sign, signPublicKey } from '../src/lib/crypto/keys.ts';
 import { deriveWrapKey, wrapSecret, wrapWithKey } from '../src/lib/crypto/passphrase.ts';
 import {
@@ -63,6 +64,25 @@ const s1 = new Uint8Array(32).fill(0x21);
 const s2 = new Uint8Array(32).fill(0x31);
 
 const msg = utf8('signed by the web app');
+// A reach out sealed and signed here, to both allies.
+const messageText = 'Sealed in the browser: can someone call me? ✓';
+const groupMessage = sealGroupMessage(
+	seed,
+	unb64(memberEnc),
+	{
+		instance_id: ids.instance,
+		group_id: 'fedcba9876543210fedcba9876543210',
+		item_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+		kind: 'reach_out',
+		author_id: ids.member,
+		issued_at_ms: 1_790_000_600_000,
+		recipients: [
+			{ user_id: ids.ally_b, enc_pubkey: v.keys.ally_b_pubkey },
+			{ user_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey }
+		]
+	},
+	messageText
+);
 // What an ally's browser opens from the instance's sealed challenge.
 const challenge = new Uint8Array(32).fill(0x44);
 v.from_web = {
@@ -139,6 +159,10 @@ v.from_web = {
 			},
 			challenge
 		)
+	},
+	group_message: {
+		sealed: groupMessage,
+		plaintext: JSON.stringify({ text: messageText })
 	}
 };
 // A roster log signed by the web app: its creator (the web seed) and ally A

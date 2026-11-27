@@ -773,14 +773,22 @@ fn admin_log_text(
 }
 
 /// Re-check quiet hours at send time (a retry or a digest may fall inside
-/// them). Returns the deferral instant, if any.
+/// them). Returns the deferral instant, if any. A reach out its recipient
+/// lets through quiet hours is never held back
+/// ([`crate::groups::QUIET_BYPASS_DETAIL`]).
 async fn quiet_deferral(
     state: &AppState,
     cache: &mut HashMap<(UserId, UserId), Option<i64>>,
-    recipient: &UserId,
-    member: &UserId,
+    n: &DueNotification,
     now: i64,
 ) -> Result<Option<i64>, AppError> {
+    if n.group_notice.as_ref().is_some_and(|g| {
+        g.kind == crate::db::repo::group_notices::NoticeKind::ReachOut.as_str()
+            && g.detail.as_deref() == Some(crate::groups::QUIET_BYPASS_DETAIL)
+    }) {
+        return Ok(None);
+    }
+    let (recipient, member) = (&n.recipient_id, &n.member_id);
     let key = (recipient.clone(), member.clone());
     if let Some(v) = cache.get(&key) {
         return Ok(*v);
@@ -861,9 +869,7 @@ pub async fn send_immediate(state: &AppState) -> Result<SendSummary, AppError> {
             s.dropped += 1;
             continue;
         }
-        if let Some(until) =
-            quiet_deferral(state, &mut quiet, &n.recipient_id, &n.member_id, now).await?
-        {
+        if let Some(until) = quiet_deferral(state, &mut quiet, &n, now).await? {
             notif::defer(state.db().pool(), &n.id, until).await?;
             s.deferred += 1;
             continue;
@@ -904,9 +910,7 @@ pub async fn send_digests(state: &AppState) -> Result<SendSummary, AppError> {
             s.dropped += 1;
             continue;
         }
-        if let Some(until) =
-            quiet_deferral(state, &mut quiet, &n.recipient_id, &n.member_id, now).await?
-        {
+        if let Some(until) = quiet_deferral(state, &mut quiet, &n, now).await? {
             notif::defer(state.db().pool(), &n.id, until).await?;
             s.deferred += 1;
             continue;
@@ -1010,6 +1014,15 @@ pub(crate) fn group_notice_text(
         (Some(NoticeKind::AllianceAccepted), _) => (
             format!("{who} accepted on {instance}"),
             format!("{who} accepted. Compare safety codes with them in Faro to finish."),
+        ),
+        // Content-free, and never the group: "Sam is reaching out."
+        (Some(NoticeKind::ReachOut), _) => (
+            format!("{who} is reaching out on {instance}"),
+            format!("{who} is reaching out. Open Faro to see."),
+        ),
+        (Some(NoticeKind::ReachOutAnswered), _) => (
+            format!("{who} answered on {instance}"),
+            format!("{who} answered your reach out. Open Faro to see."),
         ),
         (Some(NoticeKind::GroupJoinRequested), _) => (
             format!("Someone asked to join a group you facilitate on {instance}"),

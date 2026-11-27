@@ -18,10 +18,15 @@
 
 use faro_crypto::roster::{apply_entry, open_epoch_key, verify_snapshot, SignedRosterEntry};
 use faro_crypto::{
-    open_item, seal_item, seal_to, unwrap_secret, verify, verify_signed, wrap_secret,
-    EncryptionKeypair, KdfParams, Recipient, SigningKey, WrappedSecret,
+    open_group_message, open_item, seal_group_message, seal_item, seal_to, unwrap_secret, verify,
+    verify_group_message, verify_signed, wrap_secret, EncryptionKeypair, KdfParams, Recipient,
+    SigningKey, WrappedSecret,
 };
 use faro_proto::encoding::{b64_decode, b64_encode};
+use faro_proto::group::{
+    body_aad as message_body_aad, GroupMessage, GroupMessageKind, MessageRecipient,
+    SealedGroupMessage,
+};
 use faro_proto::keys::{
     key_id, safety_code, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement, KeyRewrap,
     ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap, RecipientManifest, Signed,
@@ -30,7 +35,7 @@ use faro_proto::roster::{
     epoch_key_check, genesis_prev_hash, group_safety_code, EpochRotation, GroupRole, RosterChange,
     RosterEntry, RosterSnapshot, RosterState,
 };
-use faro_proto::{event, DeviceId, EncryptedItem, InstanceId, Signature, UserId};
+use faro_proto::{event, DeviceId, EncryptedItem, Hash32, InstanceId, Signature, UserId};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -138,6 +143,34 @@ fn ally_key_rewrap() -> AllyKeyRewrap {
         enc_pubkey: ally_a().public(),
         issued_at_ms: 1_790_000_400_000,
         wrapped_privkey: r#"{"v":1,"note":"pässwörd ✓","recovery":{}}"#.into(),
+    }
+}
+
+const MESSAGE_GROUP: &str = "fedcba9876543210fedcba9876543210";
+const ITEM: &str = "0123456789abcdef0123456789abcdef";
+const MESSAGE_PLAINTEXT: &str = r#"{"text":"Rough night. Can someone call me? ✓"}"#;
+
+/// A reach out from the member to both allies, in a group. Content-free
+/// (zero `body_hash`) so its signature is deterministic.
+fn group_message() -> GroupMessage {
+    GroupMessage {
+        instance_id: InstanceId::new(INSTANCE),
+        group_id: Some(MESSAGE_GROUP.into()),
+        item_id: ITEM.into(),
+        kind: GroupMessageKind::ReachOut,
+        author_id: UserId::new(MEMBER),
+        issued_at_ms: 1_790_000_500_000,
+        recipients: vec![
+            MessageRecipient {
+                user_id: UserId::new(ALLY_A),
+                enc_pubkey: ally_a().public(),
+            },
+            MessageRecipient {
+                user_id: UserId::new(ALLY_B),
+                enc_pubkey: ally_b().public(),
+            },
+        ],
+        body_hash: Hash32::ZERO,
     }
 }
 
@@ -283,6 +316,14 @@ fn generate() -> Value {
     let wrapped_unicode = wrap_secret(&[0x99; 32], "pässwörd ✓".as_bytes(), cheap()).unwrap();
     let a = ally_a().public();
     let msg = b"faro test message";
+    let gm = group_message();
+    let gm_sealed = seal_group_message(
+        &ms,
+        &member_enc().public(),
+        gm.clone(),
+        Some(MESSAGE_PLAINTEXT.as_bytes()),
+    )
+    .unwrap();
     let log = roster_log();
     let snap = roster_snapshot(&log);
     let inst = InstanceId::new(INSTANCE);
@@ -371,6 +412,17 @@ fn generate() -> Value {
             "proven": ProvenAllyKeyRewrap { proof: akr.proof(&REWRAP_CHALLENGE), body: akr.clone() },
             "proof_bytes_hex": hex::encode(akr.proof_bytes()),
         },
+        "group_message": {
+            "content_free": {
+                "signed": signed_json(gm.clone(), ms.sign(&gm)),
+                "signing_bytes_hex": hex::encode(gm.signing_bytes()),
+            },
+            "body_aad_hex": hex::encode(message_body_aad(&InstanceId::new(INSTANCE), ITEM)),
+        },
+        "group_message_sealed": {
+            "sealed": gm_sealed,
+            "plaintext": MESSAGE_PLAINTEXT,
+        },
         "roster": {
             "group_id": GROUP,
             "genesis_prev_hash": genesis_prev_hash(&inst, GROUP),
@@ -450,6 +502,7 @@ fn web_vectors() {
         "/member_binding",
         "/key_rewrap",
         "/ally_key_rewrap",
+        "/group_message",
         "/roster",
     ] {
         assert_eq!(v.pointer(ptr), fresh.pointer(ptr), "{ptr} is stale");
@@ -475,6 +528,19 @@ fn web_vectors() {
         let ws: WrappedSecret = serde_json::from_value(w["wrapped"].clone()).unwrap();
         let pt = unwrap_secret(&ws, s(w, "/passphrase").as_bytes()).unwrap();
         assert_eq!(&**pt, h(w, "/plaintext_hex").as_slice());
+    }
+    let gm: SealedGroupMessage =
+        serde_json::from_value(v["group_message_sealed"]["sealed"].clone()).unwrap();
+    verify_group_message(&member_sign().public(), &gm).unwrap();
+    for (id, k) in [
+        (MEMBER, member_enc()),
+        (ALLY_A, ally_a()),
+        (ALLY_B, ally_b()),
+    ] {
+        let pt = open_group_message(&gm, &UserId::new(id), &k)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&**pt, s(&v, "/group_message_sealed/plaintext").as_bytes());
     }
 
     // The roster log verifies, and the sealed epoch key opens against the
@@ -539,6 +605,22 @@ fn web_vectors() {
         serde_json::from_value(web["ally_key_rewrap"]["proven"].clone()).unwrap();
     let challenge: [u8; 32] = h(web, "/ally_key_rewrap/challenge_hex").try_into().unwrap();
     assert_eq!(akr.proof, akr.body.proof(&challenge));
+
+    // A reach out the web app sealed and signed: it verifies with the web
+    // key only, and opens for each recipient.
+    let gm: SealedGroupMessage =
+        serde_json::from_value(web["group_message"]["sealed"].clone()).expect("web message parses");
+    verify_group_message(&pk, &gm).unwrap();
+    assert!(verify_group_message(&member_sign().public(), &gm).is_err());
+    for (id, k) in [(ALLY_A, ally_a()), (ALLY_B, ally_b())] {
+        let pt = open_group_message(&gm, &UserId::new(id), &k)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&**pt, s(web, "/group_message/plaintext").as_bytes());
+    }
+    let mut forged = gm.clone();
+    forged.message.body.recipients.pop();
+    assert!(verify_group_message(&pk, &forged).is_err());
 
     // The web app's roster log: entries it signed, its snapshot, and an
     // epoch key it sealed to ally A.

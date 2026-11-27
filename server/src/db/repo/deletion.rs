@@ -71,6 +71,14 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("pairing_suggestions", "user_b", Clears::Rows),
     ("participant_sign_keys", "user_id", Clears::Rows),
     ("group_epoch_keys", "user_id", Clears::Rows),
+    ("group_messages", "author_id", Clears::Rows),
+    ("group_message_recipients", "recipient_id", Clears::Rows),
+    ("reach_outs", "sender_id", Clears::Rows),
+    ("reach_out_recipients", "recipient_id", Clears::Rows),
+    ("quiet_hours_bypass", "user_id", Clears::Rows),
+    ("quiet_hours_bypass", "sender_id", Clears::Rows),
+    ("reach_out_prefs", "user_id", Clears::Rows),
+    ("reach_out_prefs", "sender_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -158,6 +166,17 @@ pub const PURGE_BY_ID: &[&str] = &[
     // keys until a facilitator signs their removal.
     "DELETE FROM group_epoch_keys WHERE user_id = $1",
     "DELETE FROM participant_sign_keys WHERE user_id = $1",
+    // Reach outs and signed notes (GROUPS.md §18): the person's own reach
+    // outs and messages, their copies of others', their answers and their
+    // reach-out settings either way. Notes on other people's proposals and
+    // join requests that went with the person go in the retention pass's
+    // sweep of unused messages (`group_messages::sweep_unused`).
+    "DELETE FROM reach_out_recipients WHERE recipient_id = $1",
+    "DELETE FROM reach_outs WHERE sender_id = $1",
+    "DELETE FROM group_message_recipients WHERE recipient_id = $1",
+    "DELETE FROM group_messages WHERE author_id = $1",
+    "DELETE FROM quiet_hours_bypass WHERE user_id = $1 OR sender_id = $1",
+    "DELETE FROM reach_out_prefs WHERE user_id = $1 OR sender_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

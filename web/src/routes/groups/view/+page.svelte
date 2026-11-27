@@ -35,6 +35,7 @@
 	import RosterPersonActions from '#lib/ui/groups/RosterPersonActions.svelte';
 	import SharingSettings from '#lib/ui/groups/SharingSettings.svelte';
 	import WaitingForYou from '#lib/ui/groups/WaitingForYou.svelte';
+	import ReachOut from '#lib/ui/ReachOut.svelte';
 
 	let groupId = $state('');
 	let group = $state<GroupView | null>(null);
@@ -291,6 +292,18 @@
 					onarchived={() => goto(resolve('/groups'))}
 				/>
 			{:else}
+				{#if !readOnly}
+					<section class="section reach" aria-labelledby="reach-h">
+						<div>
+							<h2 id="reach-h">Struggling?</h2>
+							<p class="muted small">
+								Reach out to your allies, the facilitators or people here. They're told right away,
+								without any details. Answers show on your <a href={resolve('/')}>home page</a>.
+							</p>
+						</div>
+						<ReachOut {user} groupId={group.id} />
+					</section>
+				{/if}
 				<PairingCards groupId={group.id} {readOnly} />
 				<WaitingForYou groupId={group.id} {readOnly} />
 				<MeetingCard {group} />
@@ -372,6 +385,22 @@
 
 	.description {
 		white-space: pre-wrap;
+	}
+
+	.reach {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+	}
+
+	.reach h2 {
+		margin: 0;
+	}
+
+	.reach p {
+		margin: 0.2rem 0 0;
 	}
 
 	.tabs {
