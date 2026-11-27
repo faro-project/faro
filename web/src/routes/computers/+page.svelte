@@ -129,7 +129,7 @@
 			// Built here, not from the server's `enroll_url`: the server must not
 			// be able to choose the fingerprint the device checks (#179).
 			return {
-				link: buildEnrollLink(window.location.origin, code.code, keyId(keys.signPk)),
+				link: buildEnrollLink(window.location.origin, code.enroll_url, keyId(keys.signPk)),
 				error: ''
 			};
 		} catch (e) {
