@@ -126,7 +126,7 @@ Click the Faro icon in the menu bar (the tray icon in the notification area on W
 | **Status: Not enrolled** | Faro monitors nothing yet. Follow the steps at the top of this guide. |
 | **Status: Waiting for approval in the web app** | Choose **Open the Computers Page…**, check the code, and approve the computer ([step 5](#5-compare-the-code-and-approve-in-the-web-app)). |
 | **Status: Connecting to the Faro service…** | Wait a minute. If it stays, log out and in again, or restart the Mac. |
-| **Status: Screen Recording is off** (Mac only) | Choose **Open Screen Recording Settings…** and switch on **Faro Agent**. If it is on already (after reinstalling Faro, for example), select it, remove it with **−** and add it again. Your allies are told while it is off. |
+| **Status: Screen Recording is off** (Mac only) | Choose **Open Screen Recording Settings…** and switch on **Faro Agent**. If Faro Agent is not in the list, or is on but the message stays (after reinstalling Faro, for example), remove it with **−** if it is there, then click **+** and add Faro Agent from the Faro folder on the startup disk. Your allies are told while it is off. |
 | **Status: Can't reach** *your instance* | Check that the Mac is online. Faro keeps what it records and sends it once your instance answers. |
 | **Status: Faro can't take screenshots** | Restart the Mac. If it still says so, tell whoever runs your instance. |
 | **Status: Faro stopped sending to** *your instance* | Your instance no longer has the identity this Mac was enrolled with. Tell whoever runs your instance. |

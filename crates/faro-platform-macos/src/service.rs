@@ -59,10 +59,11 @@ pub const AGENT_LABEL: &str = "org.faro.agent";
 /// that a gap in coverage is short (and the restart is reported).
 pub const DEFAULT_THROTTLE_SECS: u32 = 10;
 
-/// Lowest uid of a regular (human) macOS account. Lower uids are system
-/// accounts such as `_mbsetupuser` (Setup Assistant), which own CGS sessions
-/// but are not people Faro monitors.
-pub const FIRST_REGULAR_UID: u32 = 501;
+/// CGS session owners that are not a person at the screen: the login window
+/// and Setup Assistant's account. Everything else with a finished login is
+/// monitored whatever its uid: Guest (201 when enabled), root, and admin
+/// accounts created with a low uid.
+const NON_PERSON_SESSION_USERS: [&str; 2] = ["loginwindow", "_mbsetupuser"];
 
 /// Why a launchd plist could not be generated.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -413,8 +414,8 @@ pub struct ConsoleSession {
     pub login_done: bool,
 }
 
-/// Turn raw session records into [`SessionInfo`]s: drop system accounts and
-/// sessions still at the login window, dedupe by uid (one GUI session per
+/// Turn raw session records into [`SessionInfo`]s: drop the login window, Setup
+/// Assistant and sessions still at the login window, dedupe by uid (one GUI session per
 /// user on macOS), and identify sessions as `uid:<uid>`.
 ///
 /// `console_uid` is the user currently on the console as reported by the
@@ -434,10 +435,7 @@ pub fn sessions_from_records(
     };
     let mut out: Vec<SessionInfo> = Vec::new();
     for r in records {
-        if r.uid < FIRST_REGULAR_UID
-            || !r.login_done
-            || r.user.is_empty()
-            || r.user == "loginwindow"
+        if !r.login_done || r.user.is_empty() || NON_PERSON_SESSION_USERS.contains(&r.user.as_str())
         {
             continue;
         }
@@ -809,6 +807,23 @@ mod tests {
         assert!(!s[0].active && s[0].graphical);
         assert_eq!(s[1].id, SessionId("uid:502".into()));
         assert!(s[1].active);
+    }
+
+    /// Regression: sessions below uid 501 (Guest is 201, root is 0) used to
+    /// be dropped, so nothing monitored or flagged them.
+    #[test]
+    fn low_uid_sessions_are_listed() {
+        let records = [
+            rec("alice", 501, false, true),
+            rec("Guest", 201, true, true),
+            rec("root", 0, false, true),
+            rec("_mbsetupuser", 248, false, true),
+        ];
+        let s = sessions_from_records(&records, Some(201));
+        let ids: Vec<_> = s.iter().map(|s| s.id.0.as_str()).collect();
+        assert_eq!(ids, ["uid:501", "uid:201", "uid:0"]);
+        assert_eq!((s[1].user.as_str(), s[1].active), ("Guest", true));
+        assert!(!s[0].active && !s[2].active);
     }
 
     #[test]

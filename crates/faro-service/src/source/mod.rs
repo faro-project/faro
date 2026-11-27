@@ -31,6 +31,8 @@
 // are desktop only: Android has no agent process, and captures in-process
 // (`crates/faro-android`).
 #[cfg(all(any(unix, windows), not(target_os = "android")))]
+pub mod agent_tamper;
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod codesign;
 mod in_process;
 #[cfg(all(any(unix, windows), not(target_os = "android")))]
@@ -153,7 +155,8 @@ pub enum SourceEvent {
         accessibility: Option<bool>,
     },
     /// A tamper or context signal from an agent, with its session's account
-    /// (`None` if unknown).
+    /// (`None` if unknown). From an IPC agent, only the signals
+    /// [`agent_tamper`] lets through, with their text bounded.
     Tamper {
         signal: TamperSignal,
         account: Option<String>,

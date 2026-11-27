@@ -14,7 +14,7 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { ProposalKind, RosterEntry } from '#lib/types.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
-	import { loadRecipients } from '#lib/reach-out-api.ts';
+	import { loadCheckedRecipients } from '#lib/reach-out-api.ts';
 	import { composeMessage, MAX_NOTE_CHARS, noteLength, sealable } from '#lib/reach-out.ts';
 	import AllyKeySetup from '../AllyKeySetup.svelte';
 	import Modal from '../Modal.svelte';
@@ -113,7 +113,9 @@
 					error = 'Unlock your keys to sign the note, or remove it.';
 					return;
 				}
-				const r = await loadRecipients('proposal_note', {
+				// Their key is checked against the group's verified member list (or
+				// your own ally list) first; anything else is refused.
+				const r = await loadCheckedRecipients(keys, 'proposal_note', {
 					groupId,
 					userIds: [person.user_id]
 				});

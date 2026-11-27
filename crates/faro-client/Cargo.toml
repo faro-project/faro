@@ -30,5 +30,6 @@ httpdate = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

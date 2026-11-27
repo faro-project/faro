@@ -30,13 +30,16 @@ use faro_proto::group::{
 use faro_proto::keys::{
     key_id, safety_code, sanitize_ally_name, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement,
     KeyRewrap, ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap,
-    RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2,
+    RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3,
 };
+use faro_proto::report::ReportHeader;
 use faro_proto::roster::{
     epoch_key_check, genesis_prev_hash, group_safety_code, EpochRotation, GroupRole, RosterChange,
     RosterEntry, RosterSnapshot, RosterState,
 };
-use faro_proto::{event, DeviceId, EncryptedItem, Hash32, InstanceId, Signature, UserId};
+use faro_proto::{
+    event, DeviceId, EncryptedItem, EventKind, Hash32, InstanceId, Signature, Urgency, UserId,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -81,6 +84,7 @@ fn manifest() -> RecipientManifest {
         instance_id: InstanceId::new(INSTANCE),
         member_id: UserId::new(MEMBER),
         version: 3,
+        prev_hash: None,
         issued_at_ms: 1_790_000_000_123,
         member_enc_pubkey: member_enc().public(),
         allies: vec![
@@ -106,6 +110,17 @@ fn manifest_v2() -> RecipientManifest {
     m.version = 4;
     m.allies[0].name = Some("Zoë Ångström 🙏".into());
     m.allies[1].name = Some(String::new());
+    m
+}
+
+/// `manifest_v2()`'s successor in format 3, linked to it by `prev_hash`.
+fn manifest_v3() -> RecipientManifest {
+    let prev = manifest_v2();
+    let mut m = prev.clone();
+    m.format = MANIFEST_FORMAT_V3;
+    m.version = prev.version + 1;
+    m.prev_hash = Some(prev.hash());
+    m.issued_at_ms = prev.issued_at_ms + 1;
     m
 }
 
@@ -144,6 +159,59 @@ fn device_endorsement() -> DeviceEndorsement {
         device_sign_pubkey: device_sign().public(),
         endorsed_at_ms: 1_790_000_100_000,
         min_manifest: manifest().reference(),
+    }
+}
+
+/// Three linked events from `device_sign()`: a boot, an urgent flag with a
+/// body, and a tamper signed `none` (the instance raises it to its floor).
+/// Body hashes are fixed values, so the headers are deterministic.
+fn event_chain() -> Vec<(event::EventHeader, Signature)> {
+    let (inst, dev) = (InstanceId::new(INSTANCE), DeviceId::new(DEVICE));
+    let mut prev = event::genesis_hash(&inst, &dev);
+    let specs = [
+        (EventKind::Boot, Urgency::None, None),
+        (
+            EventKind::Flag,
+            Urgency::Urgent,
+            Some(("event body 1", 120)),
+        ),
+        (EventKind::Tamper, Urgency::None, Some(("event body 2", 64))),
+    ];
+    let mut out = Vec::new();
+    for (seq, (kind, urgency, body)) in (0u64..).zip(specs) {
+        let header = event::EventHeader {
+            v: event::EVENT_HEADER_VERSION,
+            instance_id: inst.clone(),
+            device_id: dev.clone(),
+            seq,
+            prev_hash: prev,
+            ts_ms: 1_790_000_000_000 + 60_000 * i64::try_from(seq).unwrap(),
+            mono_ms: 5_000 + 60_000 * seq,
+            boot_id: "boot-7f3a".into(),
+            kind,
+            urgency,
+            body_hash: body.map_or(Hash32::ZERO, |(b, _)| Hash32::of(b.as_bytes())),
+            body_len: body.map_or(0, |(_, n)| n),
+        };
+        prev = header.chain_hash();
+        let sig = device_sign().sign(&header);
+        out.push((header, sig));
+    }
+    out
+}
+
+fn report_header() -> ReportHeader {
+    ReportHeader {
+        v: 1,
+        instance_id: InstanceId::new(INSTANCE),
+        member_id: UserId::new(MEMBER),
+        device_id: DeviceId::new(DEVICE),
+        period_start_ms: 1_790_000_000_000,
+        period_end_ms: 1_790_086_400_000,
+        first_seq: Some(0),
+        last_seq: Some(2),
+        body_hash: Hash32::of(b"report body"),
+        body_len: 300,
     }
 }
 
@@ -349,6 +417,7 @@ fn generate() -> Value {
     let ms = member_sign();
     let m = manifest();
     let m2 = manifest_v2();
+    let m3 = manifest_v3();
     let de = device_endorsement();
     let ae = ally_endorsement();
     let mb = member_binding();
@@ -475,6 +544,11 @@ fn generate() -> Value {
             "signing_bytes_hex": hex::encode(m2.signing_bytes()),
             "hash": m2.hash(),
         },
+        "manifest_v3": {
+            "signed": signed_json(m3.clone(), ms.sign(&m3)),
+            "signing_bytes_hex": hex::encode(m3.signing_bytes()),
+            "hash": m3.hash(),
+        },
         "ally_names": ALLY_NAMES
             .iter()
             .map(|n| json!({ "input_hex": hex::encode(n), "output": sanitize_ally_name(n) }))
@@ -482,6 +556,20 @@ fn generate() -> Value {
         "device_endorsement": {
             "signed": signed_json(de.clone(), ms.sign(&de)),
             "signing_bytes_hex": hex::encode(de.signing_bytes()),
+        },
+        "event_chain": {
+            "genesis_hash": event::genesis_hash(&inst, &DeviceId::new(DEVICE)),
+            "links": event_chain().iter().map(|(h, sig)| json!({
+                "header": h,
+                "sig": sig,
+                "signing_bytes_hex": hex::encode(h.signing_bytes()),
+                "chain_hash": h.chain_hash(),
+            })).collect::<Vec<_>>(),
+        },
+        "report_header": {
+            "header": report_header(),
+            "sig": device_sign().sign(&report_header()),
+            "signing_bytes_hex": hex::encode(report_header().signing_bytes()),
         },
         "ally_endorsement": {
             "signed": signed_json(ae.clone(), ms.sign(&ae)),
@@ -600,8 +688,11 @@ fn web_vectors() {
         "/ed25519",
         "/manifest",
         "/manifest_v2",
+        "/manifest_v3",
         "/ally_names",
         "/device_endorsement",
+        "/event_chain",
+        "/report_header",
         "/ally_endorsement",
         "/member_binding",
         "/key_rewrap",
@@ -629,6 +720,28 @@ fn web_vectors() {
         let pt = open_item(&item, &aad, &UserId::new(id), &k).unwrap();
         assert_eq!(&**pt, s(&v, "/event_item/plaintext").as_bytes());
     }
+    // The event chain the web app walks verifies here from genesis, with
+    // no gaps (bodies stripped, as the chain endpoint serves them).
+    let events: Vec<faro_proto::SignedEvent> = v["event_chain"]["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| faro_proto::SignedEvent {
+            header: serde_json::from_value(l["header"].clone()).unwrap(),
+            sig: serde_json::from_value(l["sig"].clone()).unwrap(),
+            body: None,
+        })
+        .collect();
+    let (_, gaps) = faro_crypto::verify_chain(
+        &InstanceId::new(INSTANCE),
+        &DeviceId::new(DEVICE),
+        &device_sign().public(),
+        &events,
+        false,
+    )
+    .unwrap();
+    assert!(gaps.is_empty());
+
     let item: EncryptedItem = serde_json::from_value(v["report_item"]["item"].clone()).unwrap();
     let aad = h(&v, "/canonical/report_body_aad_hex");
     let pt = open_item(&item, &aad, &UserId::new(ALLY_B), &ally_b()).unwrap();
@@ -735,6 +848,15 @@ fn web_vectors() {
         got, signed,
         "the web app signed what Rust's sanitizer makes"
     );
+    // The web app's next version after that one, in format 3: linked to
+    // it, and verified here.
+    let m3: Signed<RecipientManifest> =
+        serde_json::from_value(web["manifest_v3"].clone()).expect("web v3 manifest parses");
+    assert_eq!(m3.body.format, MANIFEST_FORMAT_V3);
+    m3.body.validate().unwrap();
+    verify_signed(&pk, &m3).unwrap();
+    assert_eq!(m3.body.version, m2.body.version + 1);
+    assert_eq!(m3.body.prev_hash, Some(m2.body.hash()));
     let de: Signed<DeviceEndorsement> =
         serde_json::from_value(web["device_endorsement"].clone()).unwrap();
     verify_signed(&pk, &de).unwrap();

@@ -30,9 +30,10 @@ pub const SCREEN_RECORDING_OFF: SettingsNotice = SettingsNotice {
     body: "Screen Recording is off for Faro Agent, so Faro can't check this screen. \
            While it stays off, the member's allies are told that Faro can't see the screen.\n\n\
            To turn it on, open System Settings \u{2192} Privacy & Security \u{2192} \
-           Screen & System Audio Recording and switch on Faro Agent. If it is already on \
-           (after Faro was reinstalled, for example), select it, remove it with the \u{2212} \
-           button and add it again.",
+           Screen & System Audio Recording and switch on Faro Agent. If Faro Agent is not in \
+           the list, or it is on but Faro still can't see the screen (after Faro was \
+           reinstalled, for example), remove it with the \u{2212} button if it is there, \
+           then click + and add \"Faro Agent\" from the Faro folder on the startup disk.",
     open: "Open System Settings",
     later: "Later",
     url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",

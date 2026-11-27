@@ -762,6 +762,18 @@ impl Outbox {
 
     /// Up to `limit` unacknowledged events, oldest first.
     pub fn pending(&self, limit: usize) -> Result<Vec<SignedEvent>, OutboxError> {
+        self.pending_within(limit, usize::MAX)
+    }
+
+    /// Up to `limit` unacknowledged events, oldest first, whose stored JSON
+    /// adds up to at most `max_bytes`; always at least the oldest one, so an
+    /// event larger than `max_bytes` still comes out (alone). Rows are read
+    /// one at a time, so a large backlog is never loaded whole.
+    pub fn pending_within(
+        &self,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<SignedEvent>, OutboxError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = self
             .conn
@@ -770,8 +782,13 @@ impl Outbox {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })?;
         let mut out = Vec::new();
+        let mut bytes = 0usize;
         for row in rows {
             let (seq, json) = row?;
+            bytes = bytes.saturating_add(json.len());
+            if !out.is_empty() && bytes > max_bytes {
+                break;
+            }
             let ev: SignedEvent = serde_json::from_str(&json)
                 .map_err(|e| OutboxError::Corrupt(format!("event {seq}: {e}")))?;
             if to_i64(ev.header.seq, "seq")? != seq {
@@ -1258,6 +1275,11 @@ mod tests {
         assert!(gaps.is_empty());
         assert_eq!(head, e.ob.head().unwrap());
         assert_eq!(e.ob.pending(2).unwrap().len(), 2);
+        // By bytes: always the oldest, then as many as fit.
+        let one = serde_json::to_string(&pend[0]).unwrap().len();
+        assert_eq!(e.ob.pending_within(100, 0).unwrap().len(), 1);
+        assert_eq!(e.ob.pending_within(100, one * 2 + 1).unwrap().len(), 2);
+        assert_eq!(e.ob.pending_within(100, usize::MAX).unwrap().len(), 5);
         assert_eq!(e.ob.ack_through(2).unwrap(), 3);
         assert_eq!(e.ob.pending(100).unwrap()[0].header.seq, 3);
         assert!(matches!(
@@ -2135,6 +2157,56 @@ mod tests {
             ob2.manifest_checkpoint().unwrap(),
             Some(v3.body.reference())
         );
+    }
+
+    /// #180: a new computer is anchored to version 2 (the ally was removed
+    /// there), but the instance had the member's page build a version 3 on
+    /// the pre-removal version 1. Its format 3 link gives it away.
+    #[test]
+    fn bootstrap_refuses_a_successor_from_another_branch() {
+        use faro_proto::keys::MANIFEST_FORMAT_V3;
+        let f = Fixture::new(1);
+        let pinned = f.member_sign.public();
+        let linked = |version: u64, prev: Hash32, allies: bool| {
+            let mut b = f.named_body(version);
+            b.format = MANIFEST_FORMAT_V3;
+            b.prev_hash = Some(prev);
+            if !allies {
+                b.allies.clear();
+            }
+            f.sign(b)
+        };
+        let mut v1 = f.named_body(1);
+        v1.format = MANIFEST_FORMAT_V3;
+        let v1 = f.sign(v1);
+        let v2 = linked(2, v1.body.hash(), false);
+        let fork3 = linked(3, v1.body.hash(), true);
+        let anchor = ManifestAnchor::AtLeast(v2.body.reference());
+        let td = tempfile::tempdir().unwrap();
+        let mut ob = Outbox::open(td.path(), &f.inst, &DeviceId::new("dev_new")).unwrap();
+        assert!(matches!(
+            ob.bootstrap_manifest(&fork3, &pinned, &f.member, anchor),
+            Err(OutboxError::Manifest(RecipientError::Fork {
+                version: 3,
+                ..
+            }))
+        ));
+        assert_eq!(ob.manifest_checkpoint().unwrap(), None);
+        let v3 = linked(3, v2.body.hash(), false);
+        let set = ob
+            .bootstrap_manifest(&v3, &pinned, &f.member, anchor)
+            .unwrap();
+        assert!(set.allies().is_empty());
+        // And once bootstrapped, the next version is held to the link too.
+        let fork4 = linked(4, fork3.body.hash(), true);
+        assert!(matches!(
+            ob.accept_manifest(&fork4, &pinned, &f.member),
+            Err(OutboxError::Manifest(RecipientError::Fork {
+                version: 4,
+                ..
+            }))
+        ));
+        assert_eq!(ob.manifest_checkpoint().unwrap(), Some(v3.body.reference()));
     }
 
     /// Regression: a set obtained before another component accepted a

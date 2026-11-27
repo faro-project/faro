@@ -11,8 +11,15 @@
 	import { groupError } from '#lib/groups-api.ts';
 	import { describeSchedule } from '#lib/meetings.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
-	import { loadRecipients } from '#lib/reach-out-api.ts';
-	import { composeMessage, MAX_NOTE_CHARS, noteLength, sealable } from '#lib/reach-out.ts';
+	import { loadCheckedRecipients } from '#lib/reach-out-api.ts';
+	import {
+		composeMessage,
+		MAX_NOTE_CHARS,
+		noteLength,
+		sealable,
+		unverifiedLine,
+		type CheckedRecipients
+	} from '#lib/reach-out.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { DirectoryEntry, MyJoinRequest, Page } from '#lib/types.ts';
 	import Modal from '../Modal.svelte';
@@ -88,15 +95,24 @@
 
 	// Asking, with an optional note to the facilitators: signed with your
 	// member key and sealed to each facilitator's key (GROUPS.md §10.2).
+	// You aren't in the group, so this browser can't check their keys
+	// against its member list: unless they are your allies (checked against
+	// your own ally list), the note says so and asks once more before
+	// sealing to them.
 	let asking = $state<DirectoryEntry | null>(null);
 	let note = $state('');
 	let askError = $state('');
+	/** Checked recipients with keys that couldn't be verified, shown before sealing. */
+	let unverified = $state.raw<{ groupId: string; to: CheckedRecipients; line: string } | null>(
+		null
+	);
 	let noteTooLong = $derived(noteLength(note) > MAX_NOTE_CHARS);
 
 	function startAsk(e: DirectoryEntry) {
 		asking = e;
 		note = '';
 		askError = '';
+		unverified = null;
 		actionError = '';
 	}
 
@@ -114,10 +130,20 @@
 					askError = 'Unlock your keys to sign the note, or remove it.';
 					return;
 				}
-				const r = await loadRecipients('join_request_note', { groupId: e.id });
-				if (!sealable(r).length) {
-					askError = "The facilitators can't receive a note yet. Ask without one.";
-					return;
+				let r: CheckedRecipients;
+				if (unverified?.groupId === e.id) {
+					r = unverified.to;
+				} else {
+					r = await loadCheckedRecipients(keys, 'join_request_note', { groupId: e.id });
+					if (!sealable(r).length) {
+						askError = "The facilitators can't receive a note yet. Ask without one.";
+						return;
+					}
+					const line = unverifiedLine(r);
+					if (line) {
+						unverified = { groupId: e.id, to: r, line };
+						return;
+					}
 				}
 				message = composeMessage(keys, r, 'join_request_note', e.id, note);
 			}
@@ -261,6 +287,12 @@
 			label="A note to the facilitators (optional)"
 			placeholder="I'm new to the church and was told to ask about this group."
 		/>
+		{#if unverified?.groupId === asking.id && note.trim()}
+			<p class="muted small" role="status">
+				{unverified.line} You aren't in the group yet, so Faro can't check them against its member list.
+				Send the note anyway, or remove it.
+			</p>
+		{/if}
 		{#if askError}<div class="notice error" role="alert"><p>{askError}</p></div>{/if}
 		<div class="actions">
 			<button
@@ -269,7 +301,11 @@
 				disabled={busyId === asking.id || noteTooLong}
 				onclick={ask}
 			>
-				{busyId === asking.id ? 'Sending…' : 'Ask to join'}
+				{busyId === asking.id
+					? 'Sending…'
+					: unverified?.groupId === asking.id && note.trim()
+						? 'Send anyway'
+						: 'Ask to join'}
 			</button>
 			<button class="secondary" type="button" onclick={() => (asking = null)}>Cancel</button>
 		</div>

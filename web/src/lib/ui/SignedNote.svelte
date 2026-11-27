@@ -3,7 +3,11 @@
 	// proposal or join request), opened here in the browser (GROUPS.md
 	// §10.2). It is shown only if the author's signature checks out; the
 	// server can't read it or write one in someone's name. Whether the key
-	// is really the author's is what comparing safety codes tells you.
+	// is really the author's is what comparing safety codes tells you; for a
+	// message in a group (other than a join request's note, whose author
+	// isn't in it yet), the key must also be the author's in the group's
+	// member list as this browser verified it.
+	import type { RosterState } from '../crypto/roster.ts';
 	import { epochKeyFor } from '../check-in-api.ts';
 	import { instance } from '../instance.svelte.ts';
 	import { keyring } from '../keys/keyring.svelte.ts';
@@ -32,6 +36,12 @@
 	/** The key of a whole-group message's epoch, opened against the verified roster. */
 	let epochKey = $state.raw<Uint8Array | null>(null);
 	let epochTried = '';
+	/** The verified roster of the message's group, and which group it is for. */
+	let roster = $state.raw<RosterState | null>(null);
+	let rosterFor = $state('');
+	let needsRoster = $derived(
+		!!view?.message?.group_id && view.message.kind !== 'join_request_note'
+	);
 
 	$effect(() => {
 		if (messageId === loadedFor) return;
@@ -66,14 +76,25 @@
 			});
 	});
 
+	$effect(() => {
+		const gid = view?.message?.group_id;
+		if (!needsRoster || !gid || rosterFor === gid) return;
+		void loadRoster(gid, user.id)
+			.then((r) => (roster = r.state))
+			.catch(() => (roster = null))
+			.finally(() => (rosterFor = gid));
+	});
+
 	let result = $derived(
-		view
+		view && (!needsRoster || rosterFor === view.message.group_id)
 			? readMessage(
 					view,
 					user.id,
 					{ member: keyring.member, ally: keyring.ally, epochKey },
 					instance.info?.instance_id,
-					author
+					author,
+					null,
+					needsRoster ? roster : null
 				)
 			: null
 	);

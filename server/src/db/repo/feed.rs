@@ -83,6 +83,10 @@ pub enum FeedRowKind {
         kind: EventKind,
         urgency: Urgency,
         blob_id: Option<String>,
+        /// The device-signed header as stored (JSON) and its signature
+        /// (base64url).
+        header_json: String,
+        sig: String,
     },
     Report {
         id: String,
@@ -90,6 +94,8 @@ pub enum FeedRowKind {
         period_start_ms: i64,
         period_end_ms: i64,
         blob_id: String,
+        header_json: String,
+        sig: String,
     },
     Alert {
         id: String,
@@ -139,7 +145,8 @@ impl After {
 macro_rules! events_sql {
     ($pred:literal, $limit:literal) => {
         concat!(
-            "SELECT device_id, seq, ts_ms, kind, effective_urgency, blob_id, received_at
+            "SELECT device_id, seq, ts_ms, kind, effective_urgency, blob_id, header_json, sig,
+                    received_at
              FROM events
              WHERE member_id = $1 AND effective_urgency IN ('normal', 'urgent') AND ",
             $pred,
@@ -152,7 +159,8 @@ macro_rules! events_sql {
 macro_rules! reports_sql {
     ($pred:literal, $limit:literal) => {
         concat!(
-            "SELECT id, device_id, period_start_ms, period_end_ms, blob_id, received_at
+            "SELECT id, device_id, period_start_ms, period_end_ms, blob_id, header_json, sig,
+                    received_at
              FROM reports
              WHERE member_id = $1 AND blob_id IS NOT NULL AND ",
             $pred,
@@ -241,6 +249,8 @@ pub async fn page(
                 kind,
                 urgency: parse_col(&r, "effective_urgency", Urgency::parse)?,
                 blob_id: r.try_get("blob_id")?,
+                header_json: r.try_get("header_json")?,
+                sig: r.try_get("sig")?,
             },
         });
     }
@@ -272,6 +282,8 @@ pub async fn page(
                 period_start_ms: r.try_get("period_start_ms")?,
                 period_end_ms: r.try_get("period_end_ms")?,
                 blob_id,
+                header_json: r.try_get("header_json")?,
+                sig: r.try_get("sig")?,
             },
         });
     }

@@ -316,16 +316,21 @@ export interface OwnKeys {
 
 export interface SplitPending {
 	/**
-	 * Signed without asking: leaves, removals and role changes, which only
-	 * mirror what facilitators and participants already did, and changes to
-	 * the facilitator's own keys, which the browser checks against the keys
-	 * it holds.
+	 * Signed without asking: leaves and removals of other people, which only
+	 * take a reader away (and rotate the epoch, so the sooner the better),
+	 * and changes to the facilitator's own keys, which the browser checks
+	 * against the keys it holds. The instance proposing a removal that
+	 * nobody asked for gains nothing it couldn't do by not serving that
+	 * person; it can't add a reader this way.
 	 */
 	auto: RosterChange[];
 	/**
-	 * Joins and other people's key changes: they give a key access to the
-	 * group, and the instance supplied that key, so a facilitator approves
-	 * them (names and key ids shown) before they are signed.
+	 * Asked first, since each changes who can read or who can change the
+	 * member list, on the instance's word: joins and other people's key
+	 * changes (they give a key the instance supplied access to the group),
+	 * role changes (a facilitator's signature decides who is in the group),
+	 * and the facilitator's own leave or removal. A facilitator approves
+	 * them (names, and key ids where there are keys) before they are signed.
 	 */
 	approve: RosterChange[];
 	/** Changes about this facilitator with keys that aren't theirs: never signed. */
@@ -336,8 +341,10 @@ export interface SplitPending {
 export function splitPending(changes: RosterChange[], me: OwnKeys): SplitPending {
 	const out: SplitPending = { auto: [], approve: [], refused: [] };
 	for (const c of changes) {
-		if (c.kind === 'leave' || c.kind === 'remove' || c.kind === 'role') {
-			out.auto.push(c);
+		if (c.kind === 'leave' || c.kind === 'remove') {
+			(c.user_id === me.userId ? out.approve : out.auto).push(c);
+		} else if (c.kind === 'role') {
+			out.approve.push(c);
 		} else if (c.user_id === me.userId) {
 			const mine = c.enc_pubkey === me.encPk && (c.sign_pubkey ?? null) === me.signPk;
 			(mine ? out.auto : out.refused).push(c);
@@ -346,4 +353,21 @@ export function splitPending(changes: RosterChange[], me: OwnKeys): SplitPending
 		}
 	}
 	return out;
+}
+
+/**
+ * Identifies one change exactly, for approvals: approving "Jo joins with
+ * key X" approves only that, not a later change about Jo.
+ */
+export function changeKey(c: RosterChange): string {
+	switch (c.kind) {
+		case 'join':
+			return `join:${c.user_id}:${c.role}:${c.enc_pubkey}:${c.sign_pubkey ?? ''}`;
+		case 'keys':
+			return `keys:${c.user_id}:${c.enc_pubkey}:${c.sign_pubkey ?? ''}`;
+		case 'role':
+			return `role:${c.user_id}:${c.role}`;
+		default:
+			return `${c.kind}:${c.user_id}`;
+	}
 }

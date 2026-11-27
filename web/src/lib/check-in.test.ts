@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { unb64 } from './crypto/bytes.ts';
+import { b64, unb64 } from './crypto/bytes.ts';
 import { groupMessageSigningBytes } from './crypto/group.ts';
+import { encPublicKey, signPublicKey } from './crypto/keys.ts';
 import { signWith } from './crypto/proto.ts';
 import {
+	NOT_IN_ROSTER,
 	checkInErrorMessage,
 	checkInPromptDue,
 	composeCheckIn,
@@ -19,7 +21,14 @@ import {
 	scaleLabel,
 	type PostView
 } from './check-in.ts';
-import { composeGroupReachOut, readMessage, type Recipients } from './reach-out.ts';
+import type { RosterState } from './crypto/roster.ts';
+import {
+	checkRecipients,
+	composeGroupReachOut,
+	readMessage,
+	type CheckedRecipients,
+	type Recipients
+} from './reach-out.ts';
 
 const V = JSON.parse(
 	readFileSync(
@@ -57,7 +66,7 @@ const person = (id: string, name: string, pk: string | null) => ({
 	source: pk ? ('ally_key' as const) : null,
 	sender_ally: true
 });
-const recipients: Recipients = {
+const served: Recipients = {
 	instance_id: ids.instance,
 	can_sign: true,
 	recipients: [
@@ -65,6 +74,48 @@ const recipients: Recipients = {
 		person(ids.ally_a, 'Al', K.ally_a_pubkey)
 	]
 };
+/** The group's roster as the readers' browsers verified it. */
+const ROSTER: RosterState = {
+	instance_id: ids.instance,
+	group_id: GROUP,
+	next_seq: 1,
+	head: 'b3:' + '0'.repeat(64),
+	epoch: 3,
+	epoch_key_check: 'b3:' + '0'.repeat(64),
+	members: {
+		[ids.member]: {
+			user_id: ids.member,
+			role: 'facilitator',
+			enc_pubkey: K.member_enc_pubkey,
+			sign_pubkey: K.member_sign_pubkey
+		},
+		[ids.ally_a]: {
+			user_id: ids.ally_a,
+			role: 'participant',
+			enc_pubkey: K.ally_a_pubkey,
+			sign_pubkey: null
+		},
+		[ids.ally_b]: {
+			user_id: ids.ally_b,
+			role: 'participant',
+			enc_pubkey: K.ally_b_pubkey,
+			sign_pubkey: null
+		}
+	},
+	epoch_checks: {}
+};
+/** The author's own allies, from their signed manifest. */
+const MY_ALLIES = [
+	{ ally_id: ids.ally_a, enc_pubkey: K.ally_a_pubkey },
+	{ ally_id: ids.ally_b, enc_pubkey: K.ally_b_pubkey }
+];
+const recipients = checkRecipients(
+	served,
+	ids.member,
+	GROUP,
+	{ audience: 'allies' },
+	{ allies: MY_ALLIES, roster: ROSTER }
+);
 const author = { user_id: ids.member, display_name: 'Sam', sign_pubkey: K.member_sign_pubkey };
 const epochKey = new Uint8Array(32).fill(0x42);
 const CHECK_IN = { scale: 4 as const, went_well: 'Three good days ✓', ask: 'A call' };
@@ -88,21 +139,28 @@ test('a check-in to named people reads for each recipient and the author', () =>
 		[ids.ally_b, { ally: allyB }],
 		[ids.member, { member }]
 	] as const) {
-		const r = readPost(v, me, keys, ids.instance, GROUP);
+		const r = readPost(v, me, keys, ids.instance, GROUP, ROSTER);
 		assert.equal(r.status, 'ok', me);
 		assert.deepEqual(r.checkIn, CHECK_IN);
 	}
-	assert.equal(readPost(v, ids.ally_a, {}, ids.instance, GROUP).status, 'locked');
+	assert.equal(readPost(v, ids.ally_a, {}, ids.instance, GROUP, ROSTER).status, 'locked');
 	// Someone it isn't addressed to, another group, another instance, a bad body.
-	assert.equal(readPost(v, 'usr_stranger', { ally: allyA }, ids.instance, GROUP).status, 'invalid');
 	assert.equal(
-		readPost(v, ids.ally_a, { ally: allyA }, ids.instance, '0'.repeat(32)).status,
+		readPost(v, 'usr_stranger', { ally: allyA }, ids.instance, GROUP, ROSTER).status,
 		'invalid'
 	);
-	assert.equal(readPost(v, ids.ally_a, { ally: allyA }, 'inst_other', GROUP).status, 'invalid');
+	assert.equal(
+		readPost(v, ids.ally_a, { ally: allyA }, ids.instance, '0'.repeat(32), ROSTER).status,
+		'invalid'
+	);
+	assert.equal(
+		readPost(v, ids.ally_a, { ally: allyA }, 'inst_other', GROUP, ROSTER).status,
+		'invalid'
+	);
 	const other = asView(composeCheckIn(member, recipients, GROUP, { scale: 1 }));
 	assert.equal(
-		readPost({ ...v, body: other.body }, ids.ally_a, { ally: allyA }, ids.instance, GROUP).status,
+		readPost({ ...v, body: other.body }, ids.ally_a, { ally: allyA }, ids.instance, GROUP, ROSTER)
+			.status,
 		'invalid'
 	);
 	// Forged by someone else's key.
@@ -112,7 +170,7 @@ test('a check-in to named people reads for each recipient and the author', () =>
 		message: signWith(new Uint8Array(32).fill(9), header, groupMessageSigningBytes)
 	};
 	assert.equal(
-		readPost(forged, ids.ally_a, { ally: allyA }, ids.instance, GROUP).status,
+		readPost(forged, ids.ally_a, { ally: allyA }, ids.instance, GROUP, ROSTER).status,
 		'invalid'
 	);
 	// A check-in can't be passed off as a reach out, or the reverse.
@@ -127,31 +185,35 @@ test('a whole-group check-in opens with the epoch key of its epoch only', () => 
 	assert.deepEqual(v.message.recipients, []);
 	// Anyone in the group, with the key.
 	for (const me of [ids.ally_a, ids.ally_b, ids.member]) {
-		const r = readPost(v, me, { epochKey }, ids.instance, GROUP);
+		const r = readPost(v, me, { epochKey }, ids.instance, GROUP, ROSTER);
 		assert.equal(r.status, 'ok');
 		assert.deepEqual(r.checkIn, CHECK_IN);
 	}
-	assert.equal(readPost(v, ids.ally_a, {}, ids.instance, GROUP).status, 'locked');
+	assert.equal(readPost(v, ids.ally_a, {}, ids.instance, GROUP, ROSTER).status, 'locked');
 	assert.equal(
-		readPost(v, ids.ally_a, { epochKey: new Uint8Array(32).fill(1) }, ids.instance, GROUP).status,
+		readPost(v, ids.ally_a, { epochKey: new Uint8Array(32).fill(1) }, ids.instance, GROUP, ROSTER)
+			.status,
 		'unreadable'
 	);
 	// The server files it under another epoch, group, or kind.
 	assert.equal(
-		readPost({ ...v, epoch: 4 }, ids.ally_a, { epochKey }, ids.instance, GROUP).status,
+		readPost({ ...v, epoch: 4 }, ids.ally_a, { epochKey }, ids.instance, GROUP, ROSTER).status,
 		'invalid'
 	);
 	assert.equal(
-		readPost({ ...v, epoch: null }, ids.ally_a, { epochKey }, ids.instance, GROUP).status,
+		readPost({ ...v, epoch: null }, ids.ally_a, { epochKey }, ids.instance, GROUP, ROSTER).status,
 		'invalid'
 	);
 	assert.equal(
-		readPost(v, ids.ally_a, { epochKey }, ids.instance, '0'.repeat(32)).status,
+		readPost(v, ids.ally_a, { epochKey }, ids.instance, '0'.repeat(32), ROSTER).status,
 		'invalid'
 	);
 	// Re-epoched or moved: the signature or the key wrapping fails.
 	const moved = { ...v, epoch: 4, message: { ...v.message, epoch: 4 } };
-	assert.equal(readPost(moved, ids.ally_a, { epochKey }, ids.instance, GROUP).status, 'invalid');
+	assert.equal(
+		readPost(moved, ids.ally_a, { epochKey }, ids.instance, GROUP, ROSTER).status,
+		'invalid'
+	);
 });
 
 test('a whole-group reach out reads through readMessage with the epoch key', () => {
@@ -173,12 +235,15 @@ test('a whole-group reach out reads through readMessage with the epoch key', () 
 
 test('a reply is bound to its check-in, and private to its author', () => {
 	const parent = 'aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb';
-	const to: Recipients = { ...recipients, recipients: [recipients.recipients[1]] };
+	const to: CheckedRecipients = { ...recipients, recipients: [recipients.recipients[1]] };
 	const v = asView(composeReply(member, to, GROUP, parent, 'Proud of you'));
-	const r = readPost(v, ids.ally_a, { ally: allyA }, ids.instance, GROUP);
+	const r = readPost(v, ids.ally_a, { ally: allyA }, ids.instance, GROUP, ROSTER);
 	assert.equal(r.status, 'ok');
 	assert.equal(r.text, 'Proud of you');
-	assert.equal(readPost(v, ids.ally_b, { ally: allyB }, ids.instance, GROUP).status, 'invalid');
+	assert.equal(
+		readPost(v, ids.ally_b, { ally: allyB }, ids.instance, GROUP, ROSTER).status,
+		'invalid'
+	);
 	// The server files it under another check-in.
 	assert.equal(
 		readPost(
@@ -186,12 +251,14 @@ test('a reply is bound to its check-in, and private to its author', () => {
 			ids.ally_a,
 			{ ally: allyA },
 			ids.instance,
-			GROUP
+			GROUP,
+			ROSTER
 		).status,
 		'invalid'
 	);
 	assert.equal(
-		readPost({ ...v, parent_id: null }, ids.ally_a, { ally: allyA }, ids.instance, GROUP).status,
+		readPost({ ...v, parent_id: null }, ids.ally_a, { ally: allyA }, ids.instance, GROUP, ROSTER)
+			.status,
 		'invalid'
 	);
 	// And the signature covers the parent.
@@ -202,7 +269,8 @@ test('a reply is bound to its check-in, and private to its author', () => {
 			ids.ally_a,
 			{ ally: allyA },
 			ids.instance,
-			GROUP
+			GROUP,
+			ROSTER
 		).status,
 		'invalid'
 	);
@@ -218,10 +286,100 @@ test('composing checks the answers and the people', () => {
 	assert.throws(() => composeCheckIn(member, recipients, GROUP, { scale: 3, ask: ' ' }));
 	assert.throws(
 		() =>
-			composeCheckIn(member, { ...recipients, recipients: [person('usr_x', 'X', null)] }, GROUP, {
-				scale: 3
-			}),
+			composeCheckIn(
+				member,
+				{ ...recipients, recipients: [{ ...person('usr_x', 'X', null), trust: null }] },
+				GROUP,
+				{ scale: 3 }
+			),
 		/Nobody/
+	);
+});
+
+test('a hostile recipient list for a check-in or a reply is refused', () => {
+	const serverKey = b64(encPublicKey(new Uint8Array(32).fill(7)));
+	const t = { allies: MY_ALLIES, roster: ROSTER };
+	// "My allies in this group", plus the instance's own key.
+	assert.throws(
+		() =>
+			checkRecipients(
+				{ ...served, recipients: [...served.recipients, person('usr_spy', 'Spy', serverKey)] },
+				ids.member,
+				GROUP,
+				{ audience: 'allies' },
+				t
+			),
+		/Spy, who isn't someone you chose/
+	);
+	// An ally's key swapped, with sender_ally set.
+	assert.throws(
+		() =>
+			checkRecipients(
+				{ ...served, recipients: [person(ids.ally_a, 'Al', serverKey)] },
+				ids.member,
+				GROUP,
+				{ audience: 'allies' },
+				t
+			),
+		/ally list/
+	);
+	// The facilitators: only the roster's.
+	assert.throws(
+		() =>
+			checkRecipients(
+				{ ...served, recipients: [person(ids.ally_a, 'Al', K.ally_a_pubkey)] },
+				ids.member,
+				GROUP,
+				{ audience: 'facilitators' },
+				t
+			),
+		/isn't someone you chose/
+	);
+	// A reply: the check-in's author alone, with their roster key.
+	const author = { ...person(ids.ally_a, 'Al', serverKey), sender_ally: false };
+	const reply = (r: typeof author) =>
+		checkRecipients(
+			{ ...served, recipients: [r] },
+			ids.member,
+			GROUP,
+			{ audience: 'people', userIds: [ids.ally_a] },
+			{ allies: [], roster: ROSTER }
+		);
+	assert.throws(() => reply(author), /member list/);
+	assert.equal(reply({ ...author, enc_pubkey: K.ally_a_pubkey }).recipients[0].trust, 'roster');
+	// And a list checked for another group can't be used here.
+	const elsewhere = checkRecipients(
+		served,
+		ids.member,
+		null,
+		{ audience: 'allies' },
+		{ allies: MY_ALLIES, roster: null }
+	);
+	assert.throws(() => composeCheckIn(member, elsewhere, GROUP, CHECK_IN), /not checked/);
+	assert.throws(() => composeReply(member, elsewhere, GROUP, 'a'.repeat(32), 'hi'), /not checked/);
+});
+
+test("a post signed with a key that isn't its author's in the roster is refused", () => {
+	const v = asView(composeCheckIn(member, recipients, GROUP, CHECK_IN));
+	const evilSeed = new Uint8Array(32).fill(9);
+	const { sig: _sig, ...header } = v.message;
+	const forged: PostView = {
+		...v,
+		message: signWith(evilSeed, header, groupMessageSigningBytes),
+		author: { ...author, sign_pubkey: b64(signPublicKey(evilSeed)) }
+	};
+	assert.equal(
+		readPost(forged, ids.ally_a, { ally: allyA }, ids.instance, GROUP, null).status,
+		'ok'
+	);
+	assert.equal(
+		readPost(forged, ids.ally_a, { ally: allyA }, ids.instance, GROUP, ROSTER).status,
+		'invalid'
+	);
+	const without = { ...ROSTER, members: { [ids.ally_a]: ROSTER.members[ids.ally_a] } };
+	assert.equal(
+		readPost(v, ids.ally_a, { ally: allyA }, ids.instance, GROUP, without).reason,
+		NOT_IN_ROSTER
 	);
 });
 

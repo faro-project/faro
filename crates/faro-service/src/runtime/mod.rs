@@ -631,6 +631,9 @@ impl Service {
             status: status.clone(),
             gate: gate.clone(),
             prune: PrunePolicy::default(),
+            control: Some(control_tx.clone()),
+            deferral: Default::default(),
+            last_refused: Default::default(),
         });
         let refresher = Arc::new(ManifestRefresher {
             client: client.clone(),
@@ -916,6 +919,13 @@ async fn upload_pass(up: &Uploader) -> bool {
     match up.drain().await {
         Ok(()) | Err(UploadStop::Gated) => true,
         Err(UploadStop::Client(e)) if e.is_pending_endorsement() => true,
+        Err(UploadStop::Deferred(left)) => {
+            tracing::debug!(
+                left_secs = left.as_secs(),
+                "upload deferred at the instance's request"
+            );
+            false
+        }
         Err(UploadStop::Client(e)) => {
             tracing::info!(error = %e, "upload failed; events stay queued");
             false

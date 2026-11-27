@@ -566,9 +566,19 @@ impl FaroCore {
         }
         let access = Access { core: self, e: &e };
         let mut acked = None;
-        let drained = self
-            .rt
-            .block_on(uplink::drain_events(&client, &access, |a| acked = Some(a)))?;
+        let mut refused = Vec::new();
+        let drained = self.rt.block_on(uplink::drain_events(
+            &client,
+            &access,
+            |a| acked = Some(a),
+            |r| {
+                refused.push(format!(
+                    "the instance refused event {} ({}): {}",
+                    r.seq, r.kind, r.reason
+                ))
+            },
+        ))?;
+        warnings.extend(refused);
         if let EventsDrained::AckBeyondHead { acked, .. } = drained {
             warnings.push(format!(
                 "instance acknowledged seq {acked} beyond the local head"
@@ -734,10 +744,23 @@ impl FaroCore {
         let mut wait = Duration::from_millis(500);
         loop {
             let access = Access { core: self, e };
-            let error = match self
-                .rt
-                .block_on(uplink::drain_events(client, &access, |_| {}))
-            {
+            let mut refused = None;
+            let drained = uplink::drain_events(
+                client,
+                &access,
+                |_| {},
+                |r| {
+                    if r.seq == seq {
+                        refused = Some(format!("the instance refused the goodbye: {}", r.reason));
+                    }
+                },
+            );
+            let drained = self.rt.block_on(drained);
+            // Dropped from the outbox, so not delivered, ever.
+            if let Some(why) = refused {
+                return Delivery::NotYet(why);
+            }
+            let error = match drained {
                 Ok(_) => None,
                 Err(err) => {
                     let err = FaroError::from(err);
@@ -914,8 +937,12 @@ impl OutboxAccess for Access<'_> {
     fn pending(
         &self,
         limit: usize,
+        max_bytes: usize,
     ) -> impl Future<Output = Result<Vec<SignedEvent>, OutboxError>> + Send {
-        std::future::ready(self.core.with_outbox_raw(self.e, |o| o.pending(limit)))
+        std::future::ready(
+            self.core
+                .with_outbox_raw(self.e, |o| o.pending_within(limit, max_bytes)),
+        )
     }
     fn ack_through(&self, acked: u64) -> impl Future<Output = Result<u64, OutboxError>> + Send {
         std::future::ready(self.core.with_outbox_raw(self.e, |o| o.ack_through(acked)))

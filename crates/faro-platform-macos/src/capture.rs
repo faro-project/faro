@@ -25,7 +25,13 @@
 //! never prompts. Capture is refused up front when it reports "not granted",
 //! because ScreenCaptureKit calls themselves can trigger the system prompt,
 //! and the agent must never surprise the member with a dialog mid-session.
-//! Onboarding calls [`request_screen_capture_access`] explicitly.
+//! Nothing else in the agent asks, so on a clean Mac macOS would never show
+//! a prompt nor list Faro Agent under Screen Recording. The agent therefore
+//! calls [`request_screen_capture_access_once`] the first time it finds the
+//! permission missing in an account (the first-run notice), and records that
+//! it asked in a marker file in the account's home. After that, macOS only
+//! offers the person a shortcut to System Settings, and a refusal is shown
+//! by the notice and the status menu, never by another request.
 //!
 //! # Privacy
 //!
@@ -81,10 +87,37 @@ pub fn screen_capture_permission() -> PermissionState {
     }
 }
 
-/// Ask macOS for Screen Recording permission (onboarding only).
+/// Marker, relative to an account's home, left once the account was asked.
+pub const SCREEN_ACCESS_ASKED_IN_HOME: &str =
+    "Library/Application Support/Faro/screen-recording-asked";
+
+/// Ask macOS for Screen Recording permission, but only the first time in the
+/// account whose home is `home`. Returns `None` if this account was asked
+/// before (or the marker could not be written, so a failing disk can't make
+/// the agent ask on every run), else whether access is granted *now*.
+pub fn request_screen_capture_access_once(home: &std::path::Path) -> Option<bool> {
+    ask_once(
+        &home.join(SCREEN_ACCESS_ASKED_IN_HOME),
+        request_screen_capture_access,
+    )
+}
+
+fn ask_once(marker: &std::path::Path, ask: impl FnOnce() -> bool) -> Option<bool> {
+    if marker.exists() {
+        return None;
+    }
+    // Record first: a crash during the request must not turn into a prompt on
+    // every launch.
+    std::fs::create_dir_all(marker.parent()?).ok()?;
+    std::fs::write(marker, b"").ok()?;
+    Some(ask())
+}
+
+/// Ask macOS for Screen Recording permission.
 ///
-/// Shows the system prompt the first time; afterwards macOS only points the
-/// user at System Settings. Returns whether access is granted *now*; on
+/// Shows the system prompt the first time the app asks (that is the OS's
+/// behaviour; not checked on a clean Mac, see the PR for #198); afterwards
+/// macOS only points the user at System Settings. Returns whether access is granted *now*; on
 /// current macOS a newly granted permission usually takes effect only after
 /// the process restarts, so callers should relaunch the agent.
 pub fn request_screen_capture_access() -> bool {
@@ -549,5 +582,48 @@ mod tests {
         if let Ok(ids) = active_displays() {
             assert!(ids.len() <= MAX_DISPLAYS);
         }
+    }
+}
+
+#[cfg(test)]
+mod ask_once_tests {
+    use super::*;
+
+    #[test]
+    fn asks_once_per_home() {
+        let home = tempfile::tempdir().unwrap();
+        let marker = home.path().join(SCREEN_ACCESS_ASKED_IN_HOME);
+        let mut asked = 0;
+        assert_eq!(
+            ask_once(&marker, || {
+                asked += 1;
+                false
+            }),
+            Some(false)
+        );
+        assert_eq!(
+            ask_once(&marker, || {
+                asked += 1;
+                true
+            }),
+            None
+        );
+        assert_eq!(asked, 1);
+        // Another account's home is asked separately.
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(
+            ask_once(&other.path().join(SCREEN_ACCESS_ASKED_IN_HOME), || true),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn unwritable_marker_does_not_ask() {
+        let mut asked = false;
+        let r = ask_once(std::path::Path::new("/dev/null/x/marker"), || {
+            asked = true;
+            true
+        });
+        assert_eq!((r, asked), (None, false));
     }
 }
