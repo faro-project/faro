@@ -36,6 +36,12 @@ use std::time::{Duration, Instant};
 /// change that added the platform.
 pub const MIN_SERVER_VERSION: &str = "0.1.0-beta.1";
 
+/// Where the packaged image model's manifest is, under the state directory
+/// (`<data_dir>/faro`): `models/opennsfw/manifest.json`, next to the
+/// `opennsfw-int8.onnx` it names. The app copies both there from its assets
+/// before it creates [`FaroAndroid`] (`ModelAssets` in the Kotlin app).
+pub const MODEL_MANIFEST: &str = "models/opennsfw/manifest.json";
+
 /// The session the in-process source reports (the status menu's view is
 /// scoped to it).
 const SESSION: &str = "android";
@@ -88,8 +94,14 @@ pub struct AndroidOptions {
     pub poll_every: Duration,
     /// The service's tick.
     pub tick: Duration,
-    /// Instead of the packaged model (there is none on Android yet).
+    /// Instead of the packaged model.
     pub classifier: Option<ClassifierFactory>,
+    /// The app was built with the image model in its assets. Then the model
+    /// at [`MODEL_MANIFEST`] must be there and work: missing, changed or
+    /// unloadable is an urgent `integrity_failure`, and a build without
+    /// ONNX Runtime counts as unloadable. Not set (a development build with
+    /// no model), the core rates from context signals and raises nothing.
+    pub model_packaged: bool,
     pub configure: Option<Configure>,
     /// For the secure-window debounce.
     pub mono: MonoClock,
@@ -106,6 +118,7 @@ impl Default for AndroidOptions {
             poll_every: POLL_EVERY,
             tick: Duration::from_secs(1),
             classifier: None,
+            model_packaged: false,
             configure: None,
             mono: mono_clock(),
             clock: Arc::new(SystemClock::new()),
@@ -180,14 +193,23 @@ pub struct FaroAndroid {
 #[uniffi::export]
 impl FaroAndroid {
     /// Open Faro on `data_dir` (the app's no-backup files directory; the
-    /// state lives in `<data_dir>/faro`, created 0700).
+    /// state lives in `<data_dir>/faro`, created 0700). `model_packaged` is
+    /// whether the app carries the image model (its manifest is in the
+    /// assets); the app has then copied it to `<data_dir>/faro/models/opennsfw`
+    /// ([`MODEL_MANIFEST`]), and the core treats a model that isn't there,
+    /// or doesn't match its manifest, as tamper.
     #[uniffi::constructor]
     pub fn new(
         data_dir: String,
         platform: Arc<dyn AndroidPlatform>,
+        model_packaged: bool,
     ) -> Result<Arc<Self>, FaroAndroidError> {
         crate::logging::init();
-        Self::with_options(PathBuf::from(data_dir), platform, AndroidOptions::default())
+        let opts = AndroidOptions {
+            model_packaged,
+            ..AndroidOptions::default()
+        };
+        Self::with_options(PathBuf::from(data_dir), platform, opts)
     }
 
     /// Parse a `faro://enroll?…` link (or an instance address and code,
@@ -591,6 +613,10 @@ impl Inner {
             .tick_interval(self.opts.tick);
         if let Some(c) = &self.opts.classifier {
             b = b.classifier(c());
+        } else if self.opts.model_packaged {
+            // `model_manifest` makes the model required: missing, changed
+            // or unloadable raises `integrity_failure`.
+            b = b.model_manifest(self.dir.path().join(MODEL_MANIFEST));
         }
         let service = b.build().map_err(service_err)?;
         let signals = service.signals();

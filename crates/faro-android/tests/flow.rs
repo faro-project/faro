@@ -7,7 +7,9 @@ use faro_android::{AndroidTamper, ApprovalState, FaroAndroidError, PermissionSta
 use faro_proto::body::{EventBody, TamperSignal};
 use faro_proto::{EventKind, Urgency};
 use std::sync::Arc;
-use support::{blocking, eventually, explicit, phone_core, FakePhone, World, DEVICE_NAME};
+use support::{
+    blocking, eventually, explicit, phone_core, phone_core_with, FakePhone, World, DEVICE_NAME,
+};
 
 /// Enroll a phone with a link naming the member key and approve it.
 async fn approved(
@@ -347,4 +349,51 @@ async fn enroll_needs_the_preview_and_refuses_bad_input() {
         matches!(again, Err(FaroAndroidError::State(_))),
         "{again:?}"
     );
+}
+
+/// An app built with the image model, whose model isn't in its data
+/// directory (deleted, or never copied): an urgent `integrity_failure`.
+/// A build without a model (the other tests) raises nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_packaged_model_that_is_missing_is_an_urgent_integrity_failure() {
+    support::init_logging();
+    let w = World::new().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let core = phone_core_with(tmp.path(), FakePhone::new(), None, true);
+    let link = w.link(Some(&w.member_key_id())).await;
+    let c = core.clone();
+    let enrolled = blocking(move || {
+        c.preview_enrollment(link.clone())?;
+        c.enroll(link, DEVICE_NAME.into())
+    })
+    .await
+    .expect("enrolled");
+    w.endorse(&enrolled.device_id, &enrolled.device_fingerprint)
+        .await;
+    let c = core.clone();
+    assert_eq!(
+        blocking(move || c.poll_approval()).await.unwrap(),
+        ApprovalState::Active
+    );
+    core.start().unwrap();
+    let dev = enrolled.device_id.clone();
+    let events = eventually("an integrity failure", async || {
+        let ev = w.events(&dev).await;
+        ev.iter().any(|e| e.1 == EventKind::Tamper).then_some(ev)
+    })
+    .await;
+    let tamper = events.iter().find(|e| e.1 == EventKind::Tamper).unwrap();
+    assert_eq!(tamper.2, Urgency::Urgent);
+    assert!(
+        matches!(
+            &tamper.3,
+            EventBody::Tamper {
+                signal: TamperSignal::IntegrityFailure { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        tamper.3
+    );
+    core.stop();
 }

@@ -50,6 +50,30 @@ writes `jniLibs/<abi>/libfaro_android.so` and `kotlin/` (the UniFFI bindings); t
 the `jniLibs` and Kotlin source directories. To use a core somebody already built, pass
 `-Pfaro.generatedDir=<dir>` (a directory with `jniLibs/` and `kotlin/`, relative to `apps/android`).
 
+## The image model
+
+The core classifies frames with the OpenNSFW model on ONNX Runtime. Both are in the APK, but only
+the way you ask for them:
+
+- **ONNX Runtime** is on by default. `build-android.sh` downloads Microsoft's `onnxruntime-android`
+  1.22.0 AAR from Maven Central (checked against a pinned SHA-256, cached in `FARO_ORT_CACHE`,
+  default `%LOCALAPPDATA%aro-onnxruntime` on Windows and `~/.cache/faro-onnxruntime` elsewhere) and
+  ships its `libonnxruntime.so` next to `libfaro_android.so`. `-Pfaro.onnx=false` builds without it.
+- **The model** is built on macOS only (`crates/faro-detect/models/opennsfw/build.sh <dir>`). Pass
+  that directory with `-Pfaro.modelDir=<dir>` or `FARO_MODEL_DIR`:
+
+  ```sh
+  ./gradlew :app:assembleDebug -Pfaro.modelDir=/path/to/models
+  ```
+
+  Its `manifest.json` and `opennsfw-int8.onnx` go to the APK's `assets/model/opennsfw/`, and the
+  licences (ONNX Runtime's and the model's) to `assets/notices/`; the About screen shows them.
+  Without it the app has no model: it rates from context signals only, and raises nothing for it.
+
+At startup the app copies the model to `noBackupFilesDir/faro/models/opennsfw/` (only what is missing
+or different). An APK built with a model reports an urgent `integrity_failure` to the allies if that
+copy goes missing, is changed or won't load.
+
 ## Setting up a phone
 
 1. Install the APK and open Faro.
@@ -81,7 +105,7 @@ That runner needs, before the job can pass:
 - a JDK 17 or newer on `PATH`;
 - the Android SDK (`platforms;android-35`, build-tools) at `ANDROID_HOME`, with licences accepted;
 - the NDK `ndk;30.0.16248370` at `ANDROID_NDK_HOME`;
-- network access to Google's Maven (`dl.google.com`) and Maven Central for Gradle dependencies.
+- network access to Google's Maven (`dl.google.com`) and Maven Central for Gradle dependencies and ONNX Runtime's AAR (and `files.pythonhosted.org` for its licence files).
 
 Rust, cargo-ndk and Gradle are installed by the job itself. The Gradle version is set in the
 workflow because no wrapper jar is committed.

@@ -24,10 +24,11 @@ required-features = ["bindgen"]
 
 [features]
 default = []
-# The image classifier on ONNX Runtime (faro-service's `onnx`). Off: ONNX
-# Runtime for Android must come from the official AAR's libraries, which is
-# not wired up yet (docs/ANDROID.md §7.2). Without it the runtime rates
-# frames from context signals only, as a desktop build without a model does.
+# The image classifier on ONNX Runtime (faro-service's `onnx`). build-android.sh
+# builds with it, linking Microsoft's ONNX Runtime for Android dynamically
+# (fetch-onnxruntime.sh; ORT_LIB_LOCATION per ABI). Off (`--no-onnx`, and the
+# host tests): the runtime rates frames from context signals only, as a
+# desktop build without a model does.
 onnx = ["faro-service/onnx"]
 # Build the `uniffi-bindgen` binary (host only).
 bindgen = ["uniffi/cli"]

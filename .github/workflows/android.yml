@@ -14,6 +14,7 @@ on:
     paths:
       - "apps/android/**"
       - "crates/faro-android/**"
+      - "crates/faro-detect/models/opennsfw/**"
       - ".github/workflows/android.yml"
 
 permissions:
@@ -50,12 +51,17 @@ jobs:
       # (task buildFaroCore), so the Rust core is built for both ABIs there. Check
       # that the crate builds for the host first, so a Rust error fails fast.
       - run: cargo test --locked -p faro-android
+      # The image model is built on macOS only (pinned macOS Python wheels), so it
+      # is built here and packaged into the APK. ONNX Runtime for Android is
+      # fetched by the Gradle build (crates/faro-android/fetch-onnxruntime.sh).
+      - name: Build the image model
+        run: crates/faro-detect/models/opennsfw/build.sh "$RUNNER_TEMP/models"
       # The committed wrapper pins Gradle 8.10.2 by checksum; setup-gradle
       # also validates the wrapper jar and caches Gradle's downloads.
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests and a debug APK
         working-directory: apps/android
-        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        run: ./gradlew --no-daemon -Pfaro.modelDir="$RUNNER_TEMP/models" :app:testDebugUnitTest :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: faro-android-debug-${{ github.sha }}

@@ -42,6 +42,7 @@
     <string name="about_version">Faro for Android, version %1$s</string>
     <string name="about_body">Faro helps someone stay accountable about what they look at on their devices. Screenshots are blurred on this phone before anything leaves it, and only the member\'s chosen allies can open them. Your Faro instance can\'t read them.\n\nThis phone is monitored for as long as Faro is installed. Removing Faro is allowed, but it is never silent: your allies are told.</string>
     <string name="about_licences">Licences and source code</string>
+    <string name="about_notices">Licences of the parts Faro uses</string>
     <string name="about_licences_url">https://github.com/faro-project/faro/blob/main/LICENSE</string>
 
     <!-- Enrollment -->

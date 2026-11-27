@@ -160,7 +160,19 @@ pub fn phone_core(
     phone: Arc<FakePhone>,
     classifier: Option<fn() -> Box<dyn faro_detect::Classifier>>,
 ) -> Arc<FaroAndroid> {
+    phone_core_with(dir, phone, classifier, false)
+}
+
+/// [`phone_core`], for an app that is (`model_packaged`) or isn't built
+/// with the image model.
+pub fn phone_core_with(
+    dir: &std::path::Path,
+    phone: Arc<FakePhone>,
+    classifier: Option<fn() -> Box<dyn faro_detect::Classifier>>,
+    model_packaged: bool,
+) -> Arc<FaroAndroid> {
     let mut opts = AndroidOptions {
+        model_packaged,
         poll_every: Duration::from_millis(50),
         tick: Duration::from_millis(50),
         configure: Some(Arc::new(|c: &mut faro_service::Config| {

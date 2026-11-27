@@ -19,6 +19,9 @@ object FaroCore {
         // Keys and the outbox live in app-private storage that is excluded from backups.
         val dir = File(app.noBackupFilesDir, "faro").apply { mkdirs() }
         val platform = AndroidPlatformBridge(app)
-        return FaroAndroid(dir.absolutePath, platform).also { instance = it }
+        // The packaged image model (if the APK has one) goes where the core looks for it before the
+        // core opens; the core treats a model missing or changed from here on as tamper.
+        val modelPackaged = ModelAssets.install(app, dir)
+        return FaroAndroid(dir.absolutePath, platform, modelPackaged).also { instance = it }
     }
 }

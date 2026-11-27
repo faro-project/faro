@@ -20,6 +20,17 @@ class AboutActivity : Activity() {
                 // No browser installed: nothing to open.
             }
         }
+        // ONNX Runtime's licence and notices, and the image model's, when the build packaged them.
+        val notices = NoticeAssets.text(this)
+        if (notices.isNotEmpty()) {
+            var shown = false
+            screen.button(getString(R.string.about_notices)) {
+                if (!shown) {
+                    shown = true
+                    screen.small(notices)
+                }
+            }
+        }
     }
 }
 

@@ -17,13 +17,14 @@
 //! | [`types`] | what Kotlin sees |
 //! | [`logging`] | `tracing` to logcat |
 //!
-//! **No image model yet.** The classifier needs ONNX Runtime for Android
-//! (the `onnx` feature, off). Without it the runtime does what a desktop
-//! build without a model does: frames are still captured and their hashes
-//! compared, but they are rated from context signals only (the domain
-//! list, when one is installed), and the status says
-//! "this build has no ONNX Runtime; rating from context signals only". No
-//! tamper signal is raised for the missing model.
+//! **The image model** needs ONNX Runtime for Android (the `onnx` feature,
+//! which `build-android.sh` turns on; `--no-onnx` leaves it off). The app
+//! copies its packaged model to `<data_dir>/faro/models/opennsfw` and tells
+//! [`FaroAndroid::new`] it did (`model_packaged`); then the model must load,
+//! and a missing, changed or unloadable one is an urgent `integrity_failure`.
+//! An app built without a model (or a core without the feature, in the host
+//! tests) rates frames from context signals only (the domain list, when one
+//! is installed), the status says so, and no tamper signal is raised.
 //!
 //! ## Invariants kept here (docs/DEVELOPMENT.md)
 //!

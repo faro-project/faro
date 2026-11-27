@@ -149,7 +149,7 @@ On a computer, a root service and a per-user agent are two processes (ARCHITECTU
 
 ### 7.2 Detection
 
-- **Classifier.** The same OpenNSFW int8 model as the desktop clients, run by **ONNX Runtime for Android**. The preferred route is to link the official AAR's native libraries into `libfaro_android.so`'s build. Whether that works cleanly with the `ort` crate, or needs a thin binding of our own, is an **open item** (§18). Inference speed and the effect on battery are spike S7.
+- **Classifier.** The same OpenNSFW int8 model as the desktop clients, run by **ONNX Runtime for Android**. Status: the official AAR's `libonnxruntime.so` (1.22.0, pinned by digest) is linked dynamically by the `ort` crate and ships next to `libfaro_android.so`, and the model is packaged in the APK; no thin binding was needed (§18). The packaged model must load: a missing, changed or unloadable one is an urgent `integrity_failure`, as on desktop. Inference speed and the effect on battery on real phones are still spike S7.
 - **Same flags and reasons.** Thresholds, explainable reasons and the blurred thumbnail for a flagged frame are the desktop's, unchanged.
 - **Domain bundle.** The same domain category bundle as on desktop, used to classify the host of the foreground browser (§7.3), through `faro_detect::load_domains`.
 
@@ -357,7 +357,7 @@ These are facts the design depends on that platform documentation doesn't settle
 - **The APK signing key:** who holds it, where, and the loss plan. It can't be rotated like the TUF keys (§11). Needs an entry in KEY-CEREMONY.md before Phase A.
 - **Google Play:** is a listing worth pursuing given the Accessibility policy, or should Faro stay with APK and F-Droid? (Phase C.)
 - **Developer verification:** does the project register as a developer if Google's requirement applies to sideloaded APKs, and under whose name? (Ties to ARCHITECTURE.md §14 "Funding and stewardship".)
-- **ONNX Runtime for Android:** link the official AAR's libraries under the `ort` crate, or use a thin binding of our own? (§7.2, S7.)
+- **ONNX Runtime for Android:** settled for linking (the official AAR's libraries under the `ort` crate, §7.2); speed and battery on real phones are still open (S7).
 - **The Android grace period:** the same as computers, or longer, once Phase A shows how long real phones go without a heartbeat.
 - **The battery budget:** the capture interval or cadence on battery, set from S7 and beta data.
 - **Support list:** which makers' phones the beta will say it supports, after S1.
