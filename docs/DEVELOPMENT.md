@@ -781,6 +781,15 @@ The app's Gradle build runs `crates/faro-android/build-android.sh <out-dir>`, wh
 - **Urgent signals.** `report_tamper_now` hands the signal to the running runtime (starting it if needed), waits until it is recorded, uploads, and returns when the instance has acknowledged it or after five seconds.
 - **No image model yet**: the `onnx` feature is off until ONNX Runtime for Android is linked from the official AAR; frames are rated from context signals only, as on a desktop build without a model.
 - **Logging** goes to logcat (tag `faro`) at `info`.
+- **Trying it on an emulator or a phone.** `crates/faro-android/tests/emulator.rs` is an ignored test that runs the test harness's instance (an admin, a member with keys, an ally) on a fixed port, prints an enrollment link, approves the first device that enrolls as the member's browser would, and prints every event it uploads, opened with the member's key:
+
+  ```sh
+  FARO_EMULATOR_PORT=8787 cargo test -p faro-android --test emulator -- --ignored --nocapture
+  adb reverse tcp:8787 tcp:8787
+  adb shell am start -a android.intent.action.VIEW -d '<the faro://enroll link it printed>'
+  ```
+
+  The link is `http://127.0.0.1` because the client allows plain HTTP only for loopback, which `adb reverse` provides. `FARO_EMULATOR_MINUTES` (default 30) is how long it runs. Don't use `uiautomator dump` while testing: a UI-automation session suspends other accessibility services, so Faro correctly reports its accessibility service as turned off.
 
 ## CI runners
 

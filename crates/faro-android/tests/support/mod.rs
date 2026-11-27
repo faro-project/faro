@@ -188,10 +188,14 @@ pub struct World {
 
 impl World {
     pub async fn new() -> World {
+        World::listening_on("127.0.0.1:0").await
+    }
+
+    /// The same instance on a chosen address (the emulator harness uses a
+    /// fixed port that `adb reverse` forwards).
+    pub async fn listening_on(bind: &str) -> World {
         let t = TestApp::with_config(|_| {}).await;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
+        let listener = tokio::net::TcpListener::bind(bind).await.expect("bind");
         let addr = listener.local_addr().expect("address");
         let app = faro_server::router::build(t.state.clone());
         tokio::spawn(async move {
@@ -240,6 +244,18 @@ impl World {
     /// platform and the key fingerprint the phone shows, and signs an
     /// endorsement anchored to the current manifest.
     pub async fn endorse(&self, device_id: &str, fingerprint: &str) -> ManifestRef {
+        self.endorse_named(device_id, fingerprint, Some(DEVICE_NAME))
+            .await
+    }
+
+    /// [`World::endorse`], checking the device's name only when `name` is
+    /// set (a real phone names itself).
+    pub async fn endorse_named(
+        &self,
+        device_id: &str,
+        fingerprint: &str,
+        name: Option<&str>,
+    ) -> ManifestRef {
         let r = self
             .t
             .get("/v1/me/devices", Some(&self.member_session))
@@ -254,7 +270,9 @@ impl World {
             .expect("the device is listed")
             .clone();
         assert_eq!(listed["status"], "pending_endorsement");
-        assert_eq!(listed["name"], DEVICE_NAME);
+        if let Some(name) = name {
+            assert_eq!(listed["name"], name);
+        }
         assert_eq!(listed["platform"], "android");
         assert_eq!(listed["key_id"], fingerprint);
         let device_key: SignPublicKey =
