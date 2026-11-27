@@ -147,6 +147,7 @@ cargo test --release --lib                              # the seeds still decode
 | `faro-ipc` | `decode_agent_msg`, `decode_service_msg`, `stream_decoder` | Agent ↔ service messages |
 | `faro-dnsfilter` | `packet` | A raw IP packet from the tunnel through the engine. A reply must be a well-formed `NXDOMAIN` packet back to the sender, a forwarded query must be the payload unchanged, and an allowed name must never be counted. The packets are read back by the harness's own parser and checksum, not the crate's |
 | | `response` | An upstream answer wrapped back to the client |
+| | `answer` | An upstream answer to an allowed query through the `Session`: CNAME, DNAME, SVCB and HTTPS records and truncation. A blocked alias (by the harness's own parser) must never pass, an answer that passes must come back unchanged but for its id, a truncated one must be fetched again over TCP, and only blocked names are counted. Fragments are reassembled by the harness |
 | | `state` | Saved counters and filter configs, as the tunnel loads them from the app group |
 
 Every target fails on a panic. Beyond that, every faro-proto decoder must round-trip (decode, encode, decode to an equal value, encode to the same bytes), and the faro-update targets check the state machine's rules after every call: nothing trusted rolls back, a failed call changes nothing but the observed time, and the persisted state loads back unchanged and stays small.
@@ -185,13 +186,16 @@ cargo run -p faro-detect --example domains-compile -- build --config crates/faro
 
 ## The DNS filter
 
-`faro-dnsfilter` is the engine of the iOS packet tunnel (IOS.md §7). The extension hands it each packet with `Engine::handle_packet(packet, now_ms, screen_on)` and does what the returned `Action` says: write the `NXDOMAIN` reply back, send the DNS payload upstream and wrap the answer with `ReplyTo::wrap`, or drop the packet. The crate documentation has the rules. In short:
+`faro-dnsfilter` is the engine of the iOS packet tunnel (IOS.md §7). The tunnel runs it through `Session` (behind `faro_mobile::DnsFilter`): it hands each packet to `Session::packet` and does what the returned `Step` says: write packets back to the tunnel, or send a query to the network's resolver and hand the answer to `Session::answer`. Underneath, `Engine::handle_packet` decides about a packet and `Engine::check_answer` about an answer. The crate documentation has the rules. In short:
 
 - **Only UDP to port 53 is handled.** TCP gets no answer, so clients retry over UDP, and DNS over HTTPS, TLS or QUIC to the routed resolver addresses (`RESOLVER_ADDRS`) is dropped. Malformed queries are dropped too: several questions, compression pointers in the question, labels over 63 bytes, names over 255, bytes other than letters, digits, `-` and `_`.
 - **The decision**, first match wins: the always-blocked list (`ALWAYS_BLOCKED`, encrypted-DNS bootstrap names and iCloud Private Relay), the instance host (always allowed), the member's block list, the member's allow list, then the bundle's categories (`adult` always on). Names match their parents on label boundaries. Both constant lists carry a version (`ALWAYS_BLOCKED_VERSION`, `RESOLVER_LIST_VERSION`): bump it when a list changes.
+- **Answers are checked too.** Every CNAME and DNAME target, and the target of every SVCB and HTTPS record, in the answer to an allowed name goes through the same decision. If one is blocked, the client gets `NXDOMAIN` and the lookup is counted as a block of the target. An answer that can't be read that far gets `SERVFAIL`. Answers for the instance host are not checked.
+- **Forwarding.** Each forwarded query gets a random id of the session's own, and the answer must come from the resolver it went to, with the query's exact question, within 4 seconds. A truncated answer (`TC` set) is never passed on: the session asks for the whole answer over TCP from the same resolver and sends it back over UDP, in IP fragments when it is larger than the tunnel's MTU (`packet::build_udp_fragments`). Without a resolver, allowed names get `SERVFAIL` at once. There is no fallback resolver.
 - **Counters and bursts** only ever see blocked lookups. The thresholds are constants in `burst.rs`.
+- **The tunnel's addresses** are in `tunnel.rs`: the DNS address `198.18.0.53` and `2001:2::53`, both in the benchmarking ranges no real network uses, and the host routes (that address and `RESOLVER_ADDRS`, nothing else).
 
-`cargo test -p faro-dnsfilter` checks the packet fixtures against checksums computed outside the crate, and a privacy test checks that no allowed name reaches the counters. To measure memory and time per query against a real bundle, build it ([The domain category bundle](#the-domain-category-bundle)), then:
+`cargo test -p faro-dnsfilter` checks the packet fixtures against checksums computed outside the crate, reassembles fragments with its own code, and has privacy tests that check that no allowed name reaches the counters, the burst detector or the session's state, through answers and aliases too. To measure memory and time per query against a real bundle, build it ([The domain category bundle](#the-domain-category-bundle)), then:
 
 ```sh
 cargo run --release -p faro-dnsfilter --example dnsfilter-measure -- \
@@ -712,6 +716,7 @@ The iOS targets, the XCFramework and the Swift bindings are built by `apps/ios/b
 - **Enrollment** is the desktop's (`faro_client::enroll`): `preview_enrollment` parses the link and shows the instance, `enroll` checks the instance still has the identity the member saw, registers, and pins the member key (checked against the link's `m` when there is one), and `poll_approval` verifies the endorsement and bootstraps the recipient manifest no lower than its anchor. The device enrolls with platform `ios`.
 - **Events** are the protocol's types (PROTOCOL.md §3), the iPhone ones included: `record_tamper` (an urgent `tamper` event, such as `screen_time_revoked` or `filter_off`), `record_settings_change` (with the pending-loosening fields), `record_blocked_summary` and `record_shield_summary` (capture-class; a summary names DNS hosts only, never a path, port or URL, and only inside the sealed body), `record_context` (kept for the daily report, never an event), `heartbeat(state)` and `upload_pending()`, which also adopts a newer recipient manifest the member signed.
 - **Domain bundles.** `update_domains(root)` verifies the instance mirror's metadata against the root the app passes in, selects the newest `blocklist` target, checks the bundle with `load_domains` and installs it under `domains/<blake3>/`, with the same rules as the service ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)). `installed_domains` checks it again on each load; one that changed is removed and reported as an urgent `integrity_failure`.
+- **The DNS filter.** `DnsFilter` is `faro-dnsfilter`'s `Session` for the packet tunnel ([The DNS filter](#the-dns-filter)). It starts from the packaged domain list, the member's choices (`filter.json` in the app group) and the counters the last run saved, whichever of them can be read: it needs neither the keys nor the database, so it filters before the first unlock. Without a usable list it still blocks the always-blocked names and the member's list, and `status()` says why. `refresh_domains(core)` switches to a newer list installed by `update_domains`, reading it only when its recorded version is newer. `set_upstreams` takes the network's resolvers as the system reports them and leaves out the tunnel's own addresses. `tunnel_network()` gives the tunnel's addresses and routes, so Swift spells none of them.
 - **Tests** run the real instance in-process, as faro-service's end-to-end tests do (`crates/faro-mobile/tests/support`). `tests/processes.rs` starts copies of its own test binary as child processes that append to one chain at once with the parent, then verifies the whole chain and uploads it.
 
 ## The iOS app
@@ -724,7 +729,8 @@ The iOS targets, the XCFramework and the Swift bindings are built by `apps/ios/b
 
 ```sh
 apps/ios/build-rust.sh                  # FaroCore.xcframework and the Swift bindings
-apps/ios/build-notices.sh               # optional: the licences the app shows (needs cargo-about, network)
+apps/ios/build-domains.sh               # the domain list the tunnel ships, and its notice (network, once)
+apps/ios/build-notices.sh               # optional: the licences the app shows, and the above (needs cargo-about, network)
 cd apps/ios && xcodegen generate        # Faro.xcodeproj (git-ignored)
 xcodebuild build -project Faro.xcodeproj -scheme Faro \
     -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
@@ -740,7 +746,7 @@ Run `build-rust.sh` again after changing `faro-mobile`'s interface, and `xcodege
 | Target | Bundle ID | Links FaroCore | What it is |
 |---|---|---|---|
 | `Faro` | `org.faro.ios` | yes | The app (SwiftUI). Embeds the four extensions. Registers the `faro` URL scheme |
-| `FaroTunnel` | `org.faro.ios.tunnel` | yes | `NEPacketTunnelProvider`, the DNS filter (stub: refuses to start) |
+| `FaroTunnel` | `org.faro.ios.tunnel` | yes | `NEPacketTunnelProvider`: the DNS filter and the heartbeats ([The packet tunnel](#the-packet-tunnel)) |
 | `FaroMonitor` | `org.faro.ios.monitor` | no | `DeviceActivityMonitor` (stub) |
 | `FaroShield` | `org.faro.ios.shield` | no | `ShieldConfigurationDataSource` (block screen wording; counts how often it is shown) |
 | `FaroShieldAction` | `org.faro.ios.shieldaction` | no | `ShieldActionDelegate` (Close button; counts presses) |
@@ -750,7 +756,7 @@ The monitor and the two shield extensions run under a 6 MB memory limit, so they
 - **`FaroKit`** (`apps/ios/FaroKit`) is a local Swift package, Foundation only, for what the targets share and what can be tested: the app group's paths (`AppGroup`), the settings file model the monitor re-applies (`FaroSettings`, `SettingsStore`), marker files and `flock`-protected counters. Its XCTest tests run on the host and the Simulator: `swift test --package-path apps/ios/FaroKit`, or `xcodebuild test -scheme FaroKit -destination 'platform=iOS Simulator,name=iPhone 17'` in that directory (use any Simulator you have). Put logic here, not in a target, when it can run without Screen Time or a tunnel.
 - **Identifiers.** App group `group.org.faro.ios` in all five targets; Keychain access group `$(AppIdentifierPrefix)org.faro.ios.shared` in the app and the tunnel, the two that hold keys. `com.apple.developer.family-controls` is on all five, and `packet-tunnel-provider` on the app and the tunnel. The `Info.plist` and `.entitlements` files are written by `xcodegen generate` from `project.yml` and checked in, so a change shows in review; CI fails if regenerating changes them.
 - **`uniffi-bindgen`** is `apps/ios/uniffi-bindgen`, a small crate outside the root workspace with its own lockfile, `uniffi` pinned to the version `faro-mobile` uses. `build-rust.sh` fails if the two lockfiles disagree. When you bump UniFFI, change both.
-- **Licences.** The app has a Licences screen that shows `third-party.txt` (the crates in `faro-mobile`'s tree, `release/notices/third-party.sh ios`) and `domains.txt` (the domain list's notice), both made by `build-notices.sh` into `apps/ios/Generated/Notices` and bundled as resources. A build without them still works, and the screen says so. A release build must have both ([Third-party notices](#third-party-notices)). The Swift package dependencies, if any are added later, need their notices there too.
+- **Licences.** The app has a Licences screen that shows `third-party.txt` (the crates in `faro-mobile`'s tree, `release/notices/third-party.sh ios`) and `domains.txt` (the domain list's notice, made by `build-domains.sh` with the list itself, so the two match), both made by `build-notices.sh` into `apps/ios/Generated/Notices` and bundled as resources. A build without them still works, and the screen says so. A release build must have both ([Third-party notices](#third-party-notices)). The Swift package dependencies, if any are added later, need their notices there too.
 - **Signing.** `DEVELOPMENT_TEAM` is empty in `project.yml` and CI builds with `CODE_SIGNING_ALLOWED=NO`. To run on a device, set your team in Xcode or pass `DEVELOPMENT_TEAM=...`. Family Controls and the packet tunnel need entitlements Apple grants per App ID, which the project doesn't have yet (IOS.md §14).
 
 **What runs where.**
@@ -763,6 +769,17 @@ The monitor and the two shield extensions run under a 6 MB memory limit, so they
 | A real iPhone with the entitlements | Everything else (IOS.md §17 spikes) |
 
 CI runs this as the `ios` job on the Apple Silicon Mac runner: it skips with a notice when the runner has no Xcode or no xcodegen.
+
+### The packet tunnel
+
+`FaroTunnel` (IOS.md §7, §10.1) is thin Swift over `DnsFilter`: it moves packets between the packet flow and the network's resolvers and keeps the timers. Every decision is in Rust, where it is tested on the host.
+
+- **Network settings** come from `tunnel_network()`: the interface addresses `198.18.0.1` and `2001:2::1`, the DNS address `198.18.0.53` and `2001:2::53` with `matchDomains = [""]`, MTU 1500, and host routes for the DNS address and `RESOLVER_ADDRS` only. No other traffic enters the tunnel.
+- **Upstream** is the network's own resolvers, read with libresolv (`SystemResolvers`, through the bridging header) before the tunnel's settings apply, and again when the network changes (`NWPathMonitor`, ignoring tunnel interfaces). While the tunnel's DNS settings apply, the system reports the tunnel's own address as the resolver, so to read again the tunnel lifts its DNS settings for a moment, keeping its routes, and puts them back: lookups in that moment, well under a second, go to the network's resolvers unfiltered (IOS.md §7.4). Queries go out on one connected UDP `NWConnection` per resolver, outside the tunnel (`Upstream`), and a truncated answer on a short TCP connection. There is never a fallback resolver: with none found, allowed names get `SERVFAIL` at once, blocked ones still `NXDOMAIN`, and the tunnel tries again after a minute, then every 5 minutes and on every network change.
+- **The domain list** is `Generated/Domains` (from `build-domains.sh`), bundled into the extension. A build without it runs with the always-blocked names and the member's list only, and logs why. Every 10 minutes the tunnel switches to a newer verified list installed in the app group, if there is one.
+- **Heartbeats** go through `FaroCore` every 5 minutes while the phone is awake, with `state: sleeping` from `sleep(completionHandler:)` (which waits at most 5 seconds for it) and a fresh one on `wake()`. While the keys are locked (before the first unlock) they are skipped and filtering goes on. There is no `shutting_down` heartbeat when the tunnel stops: the instance shouldn't read the filter being switched off as an expected silence.
+- **The app group.** The `tunnel_alive` marker (`Markers.tunnelAlive`) every minute; the counters (`counters/dns_blocked.json`, blocked lookups only) every 10 minutes, on `sleep` and on stop; `filter.json` (the member's choices) read on start and every 10 minutes. Before the first unlock none of these can be read or written, and the tunnel keeps going on the defaults and in memory.
+- **Logging** (`os.Logger`, subsystem `org.faro.ios.tunnel`) never includes a name. Every 10 minutes it logs the filter's state and `os_proc_available_memory()`. On the host, `dnsfilter-measure` with the shipped list (69,340 domains, 542,149 bytes) measured about 530 KiB of heap in the steady state, 1.3 MiB more with the counters at their bound, and at most 2 MiB of queries in flight.
 
 ## CI runners
 

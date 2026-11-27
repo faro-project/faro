@@ -20,6 +20,8 @@ faro-crypto.workspace = true
 faro-core.workspace = true
 faro-client.workspace = true
 faro-update.workspace = true
+# The packet tunnel's DNS filter engine (docs/IOS.md §7).
+faro-dnsfilter.workspace = true
 # Only the domain categorizer is used (`load_domains`); the `onnx` feature
 # stays off, so no ONNX Runtime is linked.
 faro-detect.workspace = true

@@ -112,6 +112,13 @@ targets:
       - path: Shared
       - path: Generated/FaroCore
         optional: true
+      # The packaged domain list (domains.bin and its manifest), made by
+      # build-notices.sh. Optional so the project builds without it; the
+      # tunnel then blocks only the always-blocked names and the member's
+      # list, and logs why. A release build must have it.
+      - path: Generated/Domains
+        optional: true
+        buildPhase: resources
     dependencies:
       - package: FaroKit
       - framework: FaroCore.xcframework
@@ -143,6 +150,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.faro.ios.tunnel
+        # libresolv's resolver configuration, which Swift can't import.
+        SWIFT_OBJC_BRIDGING_HEADER: FaroTunnel/FaroTunnel-Bridging-Header.h
 
   FaroMonitor:
     type: app-extension

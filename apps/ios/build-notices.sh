@@ -11,6 +11,9 @@
 #
 #   apps/ios/build-notices.sh
 #
+# The domain list's notice is made by build-domains.sh, with the list the
+# packet tunnel ships (apps/ios/Generated/Domains), so the two always match.
+#
 # Run it before `xcodegen generate`. It uses the host's Rust toolchain
 # (plain `cargo`), not the iOS one. Release builds must include both files;
 # a development build can leave them out and the screen says so.
@@ -22,15 +25,6 @@ out="$here/Generated/Notices"
 mkdir -p "$out"
 
 "$repo/release/notices/third-party.sh" ios "$out/third-party.txt"
-
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-config="$repo/crates/faro-detect/domains/sources.toml"
-compile=(cargo run --manifest-path "$repo/Cargo.toml" --locked --quiet
-    -p faro-detect --example domains-compile --)
-"${compile[@]}" fetch --config "$config" --sources-dir "$repo/target/domains/sources"
-"${compile[@]}" build --config "$config" --sources-dir "$repo/target/domains/sources" \
-    --out "$work/domains.bin"
-"${compile[@]}" notice --manifest "$work/domains.manifest.json" --out "$out/domains.txt"
+"$here/build-domains.sh"
 
 echo "wrote $out/third-party.txt and $out/domains.txt"

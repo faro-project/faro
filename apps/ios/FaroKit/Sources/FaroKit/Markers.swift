@@ -5,6 +5,10 @@ import Darwin
 /// whose content is a Unix time in milliseconds (docs/IOS.md §10.2, such as
 /// the tunnel's "alive" timestamp). Written by one process, read by another.
 public struct Markers: Sendable {
+    /// Set by the packet tunnel every minute while it runs. Older than 20
+    /// minutes while the phone is in use means the DNS filter is off.
+    public static let tunnelAlive = "tunnel_alive"
+
     public let directory: URL
 
     public init(directory: URL) {
