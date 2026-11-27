@@ -1004,11 +1004,18 @@ async fn reminders_go_out_two_hours_before_once_and_never_name_the_group() {
     t.clock.advance_ms(30 * 60_000);
     assert_eq!(meetings::run_once(&t.state).await.unwrap().notices, 0);
     t.notify_now().await;
+    // The reminder goes out two hours before, which is the day before when
+    // the meeting is just after midnight (UTC, the group's time zone).
+    let day = if (start - 2 * HOUR).div_euclid(DAY) == start.div_euclid(DAY) {
+        " today"
+    } else {
+        " tomorrow"
+    };
     for p in [&a, &b] {
         let m = t.mail_to(&p.email);
         assert_eq!(m.len(), 1, "{}: {m:?}", p.email);
         assert!(
-            m[0].text.contains("meets at ") && m[0].text.contains(" today"),
+            m[0].text.contains("meets at ") && m[0].text.contains(day),
             "{}",
             m[0].text
         );
