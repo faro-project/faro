@@ -96,16 +96,19 @@ copy goes missing, is changed or won't load.
 They need the generated Kotlin to compile (the whole module builds together), so they run after the
 core is built: `./gradlew :app:testDebugUnitTest`.
 
-## CI runner
+## CI
 
-`.github/workflows/android.yml` runs on `[self-hosted, macOS, ARM64]` (Google ships no NDK for Linux
-ARM64) on manual dispatch and on pull requests that touch `apps/android/**` or `crates/faro-android/**`.
-That runner needs, before the job can pass:
+`.github/workflows/android.yml` runs on GitHub's hosted runners, never a self-hosted one (it builds
+pull-request code). It runs on pushes to `main`, on manual dispatch and on pull requests that touch
+`apps/android/**`, any crate `faro-android` depends on (transitively) or the workspace manifests.
 
-- a JDK 17 or newer on `PATH`;
-- the Android SDK (`platforms;android-35`, build-tools) at `ANDROID_HOME`, with licences accepted;
-- the NDK `ndk;30.0.16248370` at `ANDROID_NDK_HOME`;
-- network access to Google's Maven (`dl.google.com`) and Maven Central for Gradle dependencies and ONNX Runtime's AAR (and `files.pythonhosted.org` for its licence files).
+- `model` (`macos-15`) builds the image model, because its pinned Python wheels are macOS only, and
+  passes it on as an artifact.
+- `android` (`ubuntu-24.04`) sets up JDK 17, the Android SDK (`platforms;android-35`, build-tools
+  35.0.0) and the NDK `ndk;30.0.16248370` with `android-actions/setup-android`, installs Rust and
+  cargo-ndk, runs `cargo test -p faro-android`, then Gradle's `:app:testDebugUnitTest` and
+  `:app:assembleDebug`, and keeps the debug APK for 14 days.
 
-Rust, cargo-ndk and Gradle are installed by the job itself. The Gradle version is set in the
-workflow because no wrapper jar is committed.
+**Status:** this workflow has never completed. Hosted runners have been blocked by billing since
+2026-11-25 ([CI status](../../docs/DEVELOPMENT.md#ci-runners)), so the Gradle build in CI is untried
+and may need small fixes on its first run.
