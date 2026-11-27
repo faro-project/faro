@@ -553,7 +553,8 @@ impl Core {
                     return;
                 }
                 self.recent_signals.insert(key, now);
-                tracing::warn!(signal = ?sig, account = ?account, "tamper signal");
+                tracing::debug!(signal = ?sig, "tamper signal detail");
+                tracing::warn!(account = ?account, "tamper signal");
                 let r = self
                     .emit(EventBody::Tamper {
                         signal: sig.clone(),

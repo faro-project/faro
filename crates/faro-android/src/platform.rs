@@ -231,7 +231,7 @@ impl Shared {
             .and_then(|f| f.label.as_deref().map(|l| clean(l, MAX_APP_NAME)))
             .filter(|l| !l.is_empty())
             .unwrap_or(package);
-        tracing::warn!(%app, "a secure window keeps the screen from Faro");
+        tracing::debug!(%app, "a secure window keeps the screen from Faro");
         lock(&self.pending).push(TamperSignal::WindowHiddenFromCapture { app });
     }
 
