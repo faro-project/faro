@@ -5,7 +5,7 @@
 This guide covers what is different about the beta, and what to expect from it. For the step-by-step instructions it links to the other guides:
 
 - [Self-hosting Faro](SELF-HOSTING.md), for operators: setting up, email, backups, upgrading.
-- [Adding your Mac or Windows PC to Faro](MEMBER-GUIDE.md), for members: enrolling a computer, checking that Faro works, problem reports.
+- [Adding your Mac, Windows PC or iPhone to Faro](MEMBER-GUIDE.md), for members: enrolling a computer or phone, checking that Faro works, problem reports.
 - [A guide for allies](ALLY-GUIDE.md), for allies: accepting an invitation, reading alerts, having the conversation.
 - [Developing Faro](DEVELOPMENT.md), for anyone who wants the technical detail behind this guide.
 
@@ -27,6 +27,7 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 - **One version: `0.1.0-beta.1`.** The Mac app, the Windows client and the server have the same version number.
 - **Macs and Windows PCs.** The Mac package runs on Apple Silicon and Intel Macs with macOS 13 or later. [Maintainer: confirm the minimum macOS for the beta. ONNX Runtime, which runs the image model, is built for macOS 13.3, and nobody has tried Faro on 13.0 to 13.2.]
 - **Windows 10 and 11, x64 only.** The Windows package is an MSI. It runs on Windows 10 22H2 (build 19045) and Windows 11, on 64-bit (x64) PCs. Windows on ARM comes later.
+- **iPhones, through TestFlight.** The iPhone app blocks rather than watches, and has its own setup and limits ([3.9](#39-on-an-iphone), [4.6](#46-on-an-iphone)).
 - **The `beta` update channel.** Members' computers get updates through their instance, and the instance offers one channel. A `0.1.0-beta.1` release goes to `beta` only. `stable` gets nothing until `0.1.0`, so every pilot instance must choose **Beta** ([2.2](#22-choose-the-beta-update-channel)).
 - **Small on purpose.** A few instances and the people they invite, so problems are found while they are easy to fix. Expect some false alarms ([section 4](#4-known-limitations-and-false-alarms)), and please report what goes wrong ([section 5](#5-reporting-problems)).
 
@@ -60,6 +61,7 @@ Notes in the form **[Maintainer: …]** mark things the Faro project still has t
 - **An allowlist for apps that hide their windows.** Every third-party app that does it is reported by name ([4.3](#43-a-window-was-hidden-from-faro)).
 - **A desktop app for allies.** Allies read their alerts in the instance's web app.
 - **Sending a problem report from the menu.** **Report a problem…** explains how to make one in Terminal and copies the command; it doesn't make or send the report itself.
+- **Allies' names on an iPhone.** An iPhone shows its allies by count and safety code until issue #169 adds their names.
 
 ---
 
@@ -205,6 +207,16 @@ On Windows, uninstall in **Settings → Apps**, or run `msiexec /x` with the MSI
 
 To stop a computer reporting without uninstalling, remove it on the **Computers** page (**Remove…**). Your allies get an urgent alert that a computer was removed. Uninstall Faro on it afterwards, too.
 
+### 3.9 On an iPhone
+
+The iPhone app blocks adult websites and apps on the phone. It doesn't watch the screen. The steps are in [Adding your iPhone](MEMBER-GUIDE.md#adding-your-iphone). Before you start:
+
+- **Get the app through TestFlight.** In the beta the iPhone app comes through Apple's TestFlight, not the App Store. [Maintainer: confirm how pilot members are invited to TestFlight, and by whom.]
+- **The phone needs iOS 17 or later.**
+- **Setup asks for Screen Time and the VPN,** and can't be finished without them. Turning either one off later is reported to your allies.
+- **The version is 0.1.0.** The iPhone app doesn't carry the `-beta.1` suffix of the Mac and Windows builds. [Maintainer: confirm the version and build number that TestFlight shows.]
+- **To remove Faro,** use **Leave Faro** in its Settings ([Leaving Faro](MEMBER-GUIDE.md#9-leaving-faro)). You can't delete the app while Faro protects itself.
+
 ---
 
 ## 4. Known limitations and false alarms
@@ -281,6 +293,21 @@ The same kinds of alert apply to a Windows PC, with these differences.
 - **The notice.** The monitoring notice at sign-in is a window, not a notification, because Focus Assist and full-screen apps silently drop notifications.
 - **Not yet tested on a real Windows PC:** several monitors; Remote Desktop sessions; fast user switching; the lock screen and UAC screen being recorded as unavailable; Brave, Waterfox, Zen and Floorp; a real VPN or virtual machine; signed builds and updates; the image model. As on a Mac ([4.4](#44-not-yet-tested-on-real-macs)), please report anything that goes wrong.
 
+### 4.6 On an iPhone
+
+The alerts an iPhone can send, and what to say about each, are in the [ally guide's section 10](ALLY-GUIDE.md#10-if-the-member-uses-an-iphone). These are the limits to expect in the beta:
+
+- **It blocks; it doesn't watch.** There are no screen checks, no pictures and no image model. Allies see blocked lookups by category and host, and how often a blocked app was opened, never which app.
+- **Some sites get around the DNS filter.** Sites reached through some private DNS services or apps aren't blocked. Sites reached by IP address, or on brand-new domains, aren't covered by the DNS filter either. Apple's filter still covers adult sites in Safari and other web views.
+- **For a moment after a network change, lookups aren't filtered.** Faro needs to read the network's DNS servers, which takes well under a second each time the network changes. Lookups in that moment go unfiltered.
+- **One VPN at a time.** Another VPN takes over, and Faro reports it as **Another VPN took over**.
+- **Bursts may be noise.** A burst of blocked lookups is flagged from its count and timing. Adverts and link previews can cause one, and the thresholds are set from beta data.
+- **Silence looks like a missed check-in.** A phone that is asleep, switched off or out of signal is reported as **stopped checking in** until it reconnects. The grace period for phones is the same as for computers, for now. [Maintainer: confirm after the beta shows how long phones sleep (IOS.md §19).]
+- **Offline removal is invisible at once.** If a member turns off Screen Time access and deletes the app without a connection, the alert never leaves the phone. Allies get a missed check-in instead.
+- **Expected alerts while you test.** Turning off the VPN, Connect On Demand or Screen Time to test them sends the alerts in the ally guide. Tell your allies first, so these don't come as a surprise.
+- **Problem reports from an iPhone.** The report in [section 5](#5-reporting-problems) is made on a Mac or PC. [Maintainer: say how an iPhone member sends a problem report.]
+- **Before the pilot.** [Maintainer: confirm that the spikes S1 to S8 in [IOS.md §17](IOS.md#17-spikes-what-to-confirm-on-a-device-first) have been answered on real phones.]
+
 ---
 
 ## 5. Reporting problems
@@ -315,6 +342,8 @@ Send the zip to **[Maintainer: where to send problem reports]**, with a few word
 3. **Delete your account** in the web app: **Settings**, then **Delete your account** at the bottom. Your allies are emailed straight away. For 7 days nothing else changes and you can cancel. After that, once everyone has been told, the instance removes everything about you.
 
 If you delete your account without uninstalling, your computers keep being monitored until the 7 days are up; after that the instance refuses them, and they report nothing more. Uninstall Faro on them anyway.
+
+On an iPhone, there is no uninstall step for Faro itself. Use **Leave Faro** in Faro's Settings instead. It tells your allies first, then turns Faro off, and then you delete the app ([Leaving Faro](MEMBER-GUIDE.md#9-leaving-faro)). Step 3 still applies.
 
 ### An ally leaving
 

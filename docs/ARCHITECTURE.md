@@ -23,8 +23,8 @@ There is **no central Faro service.** A church, a college, a ministry, a small g
 
 ### Non-goals for v1
 
-- Mobile (iOS and Android).
-- Content **blocking** or filtering.
+- Mobile (iOS and Android). The iOS client is specified in [IOS.md](IOS.md).
+- Content **blocking** or filtering. iOS blocks: an iPhone's client is the one exception, and [IOS.md](IOS.md#1-summary) (§1) says what it does. The desktop clients still don't block.
 - Live viewing of the screen. That will never be built.
 - Any ML on the server.
 - **Storing unblurred images anywhere.** That includes the member's own device (§3.5).
@@ -588,7 +588,7 @@ Service and agent, scheduler, classifier v1, in-memory blur and zeroize, hash ch
 Linux client, browser extension, DNS/ETW signals, full tamper table, CLIP-head model, OCR, Web Push, Faro Ally desktop app, signed web bundles, OIDC/SAML SSO, groups, `faro-server doctor`, reproducible builds, crypto audit, an opt-in public list of instances for people who don't want to host their own (§14).
 
 **Phase 3: Beyond**
-Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter), Helm chart, and possibly federation between instances.
+Optional DNS-level blocking, ChromeOS, Android, a limited iOS client (Screen Time / content filter, specified in [IOS.md](IOS.md)), Helm chart, and possibly federation between instances.
 
 ---
 

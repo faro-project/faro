@@ -23,18 +23,20 @@ There is no central Faro service. A church, a college, a small group or one pers
 - [Architecture](docs/ARCHITECTURE.md): the full design, threat model and roadmap.
 - [Wire protocol](docs/PROTOCOL.md): byte-level signing, hashing and encryption formats.
 - [Development](docs/DEVELOPMENT.md): building, testing, crate map and the invariants every change must keep.
-- [Closed beta](docs/BETA.md): for the pilot instances and the people they enroll: what the beta is (the Mac and Windows clients), setting up, the alerts to expect, reporting problems and leaving.
+- [iOS client](docs/IOS.md): the design of the iPhone client, which blocks rather than watches, and what it can and can't do.
+- [Closed beta](docs/BETA.md): for the pilot instances and the people they enroll: what the beta is (the Mac, Windows and iPhone clients), setting up, the alerts to expect, reporting problems and leaving.
 - [Self-hosting](docs/SELF-HOSTING.md): running a Faro instance, for operators.
 - [Ally guide](docs/ALLY-GUIDE.md): a plain-language guide for allies, from accepting an invitation to having the conversation.
-- [Adding your Mac or Windows PC](docs/MEMBER-GUIDE.md): a plain-language guide for members, from the enrollment link to approving the computer.
+- [Adding your Mac, Windows PC or iPhone](docs/MEMBER-GUIDE.md): a plain-language guide for members, from the enrollment link to approving the computer or phone.
 - [Key ceremony](docs/KEY-CEREMONY.md): the maintainer's runbook for creating and rotating the update signing keys.
 - [Security policy](SECURITY.md): how to report a vulnerability, and what's in scope.
 
 ## Repository layout
 
 ```
-crates/   Rust client crates (proto, crypto, core, detect, ipc, platform, update, service, agent)
+crates/   Rust client crates (proto, crypto, core, client, detect, dnsfilter, mobile, ipc, platform, update, service, agent)
 server/   faro-server, the self-hosted instance
+apps/     the iOS app and its extensions (apps/ios)
 docs/     architecture, protocol and development docs
 assets/   brand assets (logo, colours)
 ```
