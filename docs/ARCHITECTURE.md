@@ -386,7 +386,7 @@ GET  /v1/members/{id}/allies/keys member-signed ally pubkeys
 POST /v1/events:batch             signed headers (incl. urgency) + ciphertext
 POST /v1/heartbeat                signed {seq, ts, state}
 POST /v1/reports                  encrypted report blob + envelopes
-GET  /v1/ally/feed                metadata list of reports and alerts
+GET  /v1/ally/feed                metadata list of reports and alerts, and each device's platform
 GET  /v1/blobs/{id}               ciphertext (served directly or via presigned S3 URL)
 GET  /v1/updates/...              mirrored, project-signed update metadata + artifacts
 POST /v1/invites, /accept         ally invitations

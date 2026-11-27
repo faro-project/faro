@@ -15,6 +15,7 @@
 		describeBody,
 		describeEntry,
 		isIosBody,
+		platformOf,
 		reportSummary,
 		type NameOf
 	} from './describe.ts';
@@ -63,6 +64,7 @@
 	let opened = $state<Record<string, Opened | OpenFailure | 'loading'>>({});
 	let expanded = $state<Record<string, boolean>>({});
 	let learnedNames = $state<Record<string, string>>({});
+	let serverPlatforms = $state<Record<string, Platform>>({});
 	let learnedIos = $state<Record<string, true>>({});
 	let loadedKey = '';
 
@@ -73,6 +75,7 @@
 			const r = await loadFeed(memberId, Date.now() - days * 86400_000);
 			items = r.items;
 			truncated = r.truncated;
+			serverPlatforms = r.platforms;
 		} catch (e) {
 			error = describeError(e);
 		} finally {
@@ -141,10 +144,15 @@
 		void Promise.all([worker(), worker(), worker(), worker()]);
 	});
 
-	/** An iPhone, if the page knows: from the device list, or from what an iPhone sent. */
+	/**
+	 * What a device is, if the page knows: from the member's device list, from
+	 * the feed (which tells an ally too), or from what an iPhone sent.
+	 */
 	function platform(id: string | null): Platform | undefined {
-		if (!id) return undefined;
-		return devicePlatforms[id] ?? (learnedIos[id] ? 'ios' : undefined);
+		return (
+			platformOf(id, devicePlatforms, serverPlatforms) ??
+			(id && learnedIos[id] ? ('ios' as const) : undefined)
+		);
 	}
 
 	function device(id: string | null): string {

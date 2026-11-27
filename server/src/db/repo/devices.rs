@@ -307,3 +307,24 @@ pub async fn list_for_owner<'e>(
     .map(from_row)
     .collect()
 }
+
+/// The platform of each of a member's devices, removed ones included: a
+/// goodbye is the last thing a removed device says, and the feed still shows
+/// it. Platform is not secret from anyone who can read the feed.
+pub async fn platforms_for_owner<'e>(
+    e: impl Executor<'e, Database = Any>,
+    owner: &UserId,
+) -> Result<Vec<(DeviceId, Platform)>, sqlx::Error> {
+    sqlx::query("SELECT id, platform FROM devices WHERE owner_user_id = $1")
+        .bind(owner.as_str())
+        .fetch_all(e)
+        .await?
+        .iter()
+        .map(|row| {
+            Ok((
+                DeviceId::new(row.try_get::<String, _>("id")?),
+                parse_col(row, "platform", Platform::parse)?,
+            ))
+        })
+        .collect()
+}
