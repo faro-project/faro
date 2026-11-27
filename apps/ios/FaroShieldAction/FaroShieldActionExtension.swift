@@ -18,7 +18,7 @@ final class FaroShieldActionExtension: ShieldActionDelegate {
 
     private func respond(to action: ShieldAction) -> ShieldActionResponse {
         guard action == .primaryButtonPressed else { return .close }
-        if let group = AppGroup.container(), let counter = try? Counter(group: group, name: "shield_closed") {
+        if let group = AppGroup.container(), let counter = try? Counter(group: group, name: CounterName.shieldClosed) {
             _ = try? counter.increment()
         }
         return .close
