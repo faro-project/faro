@@ -1,5 +1,6 @@
 import XCTest
 @testable import FaroKit
+@testable import FaroKitApp
 
 final class EnrollLinkTests: XCTestCase {
     private let good = "faro://enroll?i=https%3A%2F%2Ffaro.example.org&c=7q2k-m9xd&m=0123456789abcdef"

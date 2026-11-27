@@ -1,5 +1,6 @@
 import BackgroundTasks
 import FaroKit
+import FaroKitApp
 import Foundation
 import os
 

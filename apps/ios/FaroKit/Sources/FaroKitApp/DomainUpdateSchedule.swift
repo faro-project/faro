@@ -1,3 +1,4 @@
+import FaroKit
 import Foundation
 
 /// When the app looks for a newer domain list on the instance's update

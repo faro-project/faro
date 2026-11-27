@@ -1,3 +1,4 @@
+import FaroKit
 import Foundation
 
 /// An enrollment link, `faro://enroll?i=<instance URL>&c=<code>[&m=<member key id>]`
