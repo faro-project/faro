@@ -1180,6 +1180,7 @@ dependencies = [
 name = "faro-client"
 version = "0.1.0-beta.1"
 dependencies = [
+ "axum",
  "faro-core",
  "faro-crypto",
  "faro-proto",

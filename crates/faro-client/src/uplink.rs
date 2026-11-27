@@ -15,21 +15,32 @@ use faro_core::outbox::PendingReport;
 use faro_core::{Clock, OutboxError};
 use faro_crypto::{ChainHead, SigningKey};
 use faro_proto::api::{DeviceState, EventResult, EventsBatchRequest, Heartbeat, HeartbeatResponse};
-use faro_proto::{Hash32, SignedEvent};
+use faro_proto::{EventKind, Hash32, SignedEvent};
 use reqwest::StatusCode;
 use std::future::Future;
 
 /// Events per upload batch (the instance accepts up to 500).
 pub const UPLOAD_BATCH: usize = 200;
+/// Stored event bytes per upload batch. The instance reads at most 8 MiB
+/// per batch request; half leaves room for the request's own framing.
+pub const UPLOAD_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// The reason the instance gives for "try this event again later".
+const RETRY_LATER: &str = "retry_later";
+/// Longest refusal reason kept from the instance's answer.
+const MAX_REASON: usize = 64;
 
 /// The outbox operations uploads and heartbeats need.
 pub trait OutboxAccess {
     /// The durable chain head.
     fn head(&self) -> impl Future<Output = Result<ChainHead, OutboxError>> + Send;
-    /// Up to `limit` unacknowledged events, oldest first.
+    /// Up to `limit` unacknowledged events, oldest first, adding up to at
+    /// most `max_bytes` of stored JSON (but always at least the oldest
+    /// one; `faro_core::Outbox::pending_within`).
     fn pending(
         &self,
         limit: usize,
+        max_bytes: usize,
     ) -> impl Future<Output = Result<Vec<SignedEvent>, OutboxError>> + Send;
     /// Drop events the instance holds (`seq <= acked`).
     fn ack_through(&self, acked: u64) -> impl Future<Output = Result<u64, OutboxError>> + Send;
@@ -53,9 +64,9 @@ pub enum UplinkError {
 /// How [`drain_events`] ended without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventsDrained {
-    /// Nothing is left, or the instance made no progress this pass (the
-    /// oldest pending event keeps being refused, or it acknowledged
-    /// nothing); the next pass tries again.
+    /// Nothing is left, or the instance made no progress this pass (it
+    /// asked to retry the oldest pending event later); the next pass tries
+    /// again.
     Done,
     /// The instance acknowledged events this device never wrote. Everything
     /// is kept: the instance and the device disagree about the chain, which
@@ -63,60 +74,165 @@ pub enum EventsDrained {
     AckBeyondHead { acked: u64, next_seq: u64 },
 }
 
-/// Upload pending events in `seq` order, in batches of [`UPLOAD_BATCH`],
-/// dropping each batch once the instance acknowledges it. `on_acked` is
-/// told each new `acked_through`.
+/// An event the instance refused for good: it answered `rejected` with a
+/// reason other than `retry_later`, so the same bytes will never be
+/// accepted. [`drain_events`] drops it from the outbox once the caller has
+/// been told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedEvent {
+    pub seq: u64,
+    pub kind: EventKind,
+    /// The instance's reason, cut to its first word (`body_too_large`,
+    /// `malformed`, `fork`, ...), at most 64 characters, no control
+    /// characters: it comes from the instance.
+    pub reason: String,
+}
+
+impl RefusedEvent {
+    fn new(seq: u64, kind: EventKind, reason: &str) -> Self {
+        let word = reason.split(':').next().unwrap_or_default();
+        let reason: String = word
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_REASON)
+            .collect();
+        RefusedEvent { seq, kind, reason }
+    }
+
+    /// Whether the instance raises its own alert for this refusal (a fork,
+    /// a bad signature, or a rewrite of an event it already holds,
+    /// PROTOCOL.md §3.2). Otherwise (an oversized or malformed event) the
+    /// device is the only one that can tell anybody: the instance stores
+    /// the next event as a gap, and allies get a bare `chain_gap`.
+    pub fn instance_alerted(&self) -> bool {
+        matches!(
+            self.reason.as_str(),
+            "fork" | "bad_signature" | "conflicting_rewrite" | "late_event_in_recorded_gap"
+        )
+    }
+}
+
+/// Upload pending events in `seq` order, in batches of at most
+/// [`UPLOAD_BATCH`] events and [`UPLOAD_BATCH_BYTES`].
+///
+/// The instance answers each event of a batch in order. Events it
+/// `accepted` or already holds (`duplicate`) are dropped from the outbox.
+/// One it refused for good is handed to `on_refused` and then dropped too,
+/// so it can't hold up every later one. Everything from the first
+/// `retry_later` (or an answer that doesn't match the batch) on is kept
+/// for the next pass. The instance's `acked_through` doesn't decide what
+/// is deleted: after a refused event it counts the gap as held. `on_acked`
+/// is told each `acked_through` (the instance's head, for the status).
+///
+/// A `413` halves the batch and tries again. A `413` for one event alone,
+/// and any other error (a `429` with its `Retry-After`, among them), ends
+/// the pass with everything kept.
 pub async fn drain_events<O: OutboxAccess>(
     client: &InstanceClient,
     outbox: &O,
     mut on_acked: impl FnMut(u64),
+    mut on_refused: impl FnMut(&RefusedEvent),
 ) -> Result<EventsDrained, UplinkError> {
-    let mut last_acked: Option<u64> = None;
+    let mut limit = UPLOAD_BATCH;
     loop {
         let pending = outbox
-            .pending(UPLOAD_BATCH)
+            .pending(limit, UPLOAD_BATCH_BYTES)
             .await
             .map_err(UplinkError::Outbox)?;
         let Some(first) = pending.first().map(|e| e.header.seq) else {
             return Ok(EventsDrained::Done);
         };
         let n = pending.len();
-        let resp = client
+        let sent: Vec<(u64, EventKind)> = pending
+            .iter()
+            .map(|e| (e.header.seq, e.header.kind))
+            .collect();
+        let resp = match client
             .post_events(&EventsBatchRequest { events: pending })
             .await
-            .map_err(UplinkError::Client)?;
-        for r in &resp.results {
-            if let EventResult::Rejected { seq, reason } = r {
-                if reason == "retry_later" {
-                    continue;
-                }
-                tracing::warn!(seq, %reason, "instance rejected an event");
+        {
+            Ok(r) => r,
+            Err(e) if e.status() == Some(StatusCode::PAYLOAD_TOO_LARGE) && n > 1 => {
+                limit = n / 2;
+                tracing::warn!(
+                    n,
+                    limit,
+                    "instance refused the batch as too large; halving it"
+                );
+                continue;
             }
-        }
-        let Some(acked) = resp.acked_through else {
-            tracing::warn!(first, n, "instance acknowledged nothing; will retry later");
-            return Ok(EventsDrained::Done);
+            Err(e) => {
+                if e.status() == Some(StatusCode::PAYLOAD_TOO_LARGE) {
+                    tracing::error!(
+                        seq = first,
+                        kind = %sent[0].1,
+                        "instance refuses this event alone as too large; it stays queued"
+                    );
+                }
+                return Err(UplinkError::Client(e));
+            }
         };
-        match outbox.ack_through(acked).await {
-            Ok(_) => {}
-            Err(OutboxError::AckBeyondHead { acked, next_seq }) => {
+        if let Some(acked) = resp.acked_through {
+            let head = outbox.head().await.map_err(UplinkError::Outbox)?;
+            if acked >= head.next_seq {
                 tracing::error!(
                     acked,
-                    next_seq,
+                    next_seq = head.next_seq,
                     "instance acknowledged beyond our chain head"
                 );
-                return Ok(EventsDrained::AckBeyondHead { acked, next_seq });
+                return Ok(EventsDrained::AckBeyondHead {
+                    acked,
+                    next_seq: head.next_seq,
+                });
             }
-            Err(e) => return Err(UplinkError::Outbox(e)),
         }
-        on_acked(acked);
-        if last_acked.is_some_and(|l| l >= acked) || acked < first {
-            // No progress (e.g. the oldest pending event keeps being
-            // rejected); try again on the next pass instead of spinning.
+        // The leading run of events the instance settled, in batch order.
+        let mut settled: Option<u64> = None;
+        for (i, &(seq, kind)) in sent.iter().enumerate() {
+            match resp.results.get(i) {
+                Some(EventResult::Accepted { seq: s } | EventResult::Duplicate { seq: s })
+                    if *s == seq =>
+                {
+                    settled = Some(seq);
+                }
+                Some(EventResult::Rejected { seq: s, reason })
+                    if *s == seq && reason != RETRY_LATER =>
+                {
+                    let refused = RefusedEvent::new(seq, kind, reason);
+                    tracing::error!(
+                        seq,
+                        kind = %kind,
+                        reason = %refused.reason,
+                        "instance refused an event for good; dropping it from the outbox"
+                    );
+                    on_refused(&refused);
+                    settled = Some(seq);
+                }
+                Some(EventResult::Rejected { seq: s, .. }) if *s == seq => break,
+                _ => {
+                    tracing::warn!(
+                        seq,
+                        "instance's answers do not match the batch; keeping the rest"
+                    );
+                    break;
+                }
+            }
+        }
+        if let Some(acked) = resp.acked_through {
+            on_acked(acked);
+        }
+        let Some(through) = settled else {
+            tracing::info!(first, n, "instance settled nothing; will retry later");
             return Ok(EventsDrained::Done);
-        }
-        last_acked = Some(acked);
-        if n < UPLOAD_BATCH {
+        };
+        // The batch starts at the oldest pending event, so this drops
+        // exactly the settled run.
+        outbox
+            .ack_through(through)
+            .await
+            .map_err(UplinkError::Outbox)?;
+        // Each round drops at least one event, so this ends.
+        if sent.last().is_none_or(|&(last, _)| last != through) {
             return Ok(EventsDrained::Done);
         }
     }
@@ -242,6 +358,7 @@ mod tests {
             status: StatusCode::from_u16(status).unwrap(),
             code: "x".into(),
             message: "y".into(),
+            retry_after: None,
         }
     }
 

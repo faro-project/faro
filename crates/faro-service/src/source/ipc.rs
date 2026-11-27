@@ -44,7 +44,12 @@
 //!   only its frames, foreground, idle/lock and permission state reach the
 //!   core. Other agents' latest state is kept and replayed when their
 //!   session becomes active (fast user switching). Tamper signals are
-//!   forwarded from every agent, labelled with the account.
+//!   forwarded from every agent, labelled with the account, but only those
+//!   an agent may originate, bounded and rate-limited per connection
+//!   ([`super::agent_tamper`]).
+//! * **Bounded text.** Window titles, app ids and names, and browser URLs
+//!   and titles are cut to [`faro_ipc::limits`] on arrival, so no agent
+//!   string can make an event too large for the instance.
 //! * **Frames only on request.** The service owns the schedule (§3.4):
 //!   `Frames` that do not answer an outstanding `CaptureNow` are dropped
 //!   (and zeroized) unread, so a misbehaving agent cannot make the
@@ -64,15 +69,16 @@
 //!   agent never hears another's name, session or permissions. Only the
 //!   service sends it; nothing an agent sends changes it.
 
+use super::agent_tamper::TamperGate;
 use super::codesign;
 use super::sessions::{self, SessionEntry, SessionLister};
 use super::{
     BoxFuture, CaptureTarget, FrameSource, SessionStatus, SourceCommand, SourceEvent, SourceIo,
 };
 use faro_ipc::{
-    read_agent_hello, welcome_agent, AccountId, AgentHello, AgentMsg, BindOptions, IpcError,
-    IpcServer, MemberStatus, PeerInfo, ServerStream, ServiceConnection, ServiceMsg, ShutdownReason,
-    StatusReport, HELLO_TIMEOUT,
+    limits, read_agent_hello, welcome_agent, AccountId, AgentHello, AgentMsg, BindOptions,
+    IpcError, IpcServer, MemberStatus, PeerInfo, ServerStream, ServiceConnection, ServiceMsg,
+    ShutdownReason, StatusReport, HELLO_TIMEOUT,
 };
 use faro_proto::body::account_label;
 use std::collections::{BTreeMap, BTreeSet};
@@ -527,6 +533,8 @@ struct Agent {
     cached: Cached,
     /// The status view last queued to this agent.
     status_sent: Option<MemberStatus>,
+    /// Which of its tamper signals are taken, and how many.
+    tamper: TamperGate,
 }
 
 /// Windows: the connection must come from the session it names, and, where
@@ -1004,6 +1012,7 @@ impl Run {
                 goodbye: false,
                 cached: Cached::default(),
                 status_sent: None,
+                tamper: TamperGate::new(Instant::now()),
             },
         );
         self.offer_status(&hello.session);
@@ -1365,12 +1374,26 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
             }
             Handled::Forward(SourceEvent::Frames(out))
         }
-        AgentMsg::Foreground { app, title } => state(
-            target,
-            &mut a.cached.foreground,
-            SourceEvent::Foreground { app, title },
-        ),
-        AgentMsg::Browser(b) => state(target, &mut a.cached.browser, SourceEvent::Browser(b)),
+        AgentMsg::Foreground { mut app, mut title } => {
+            // Any app picks its own title: bound it before it can reach a
+            // `flag` body (faro_ipc::limits).
+            let cut = app.as_mut().is_some_and(limits::clamp_app)
+                | limits::clamp_opt(&mut title, limits::MAX_TITLE_BYTES);
+            if cut {
+                tracing::debug!("agent foreground text cut to the IPC limits");
+            }
+            state(
+                target,
+                &mut a.cached.foreground,
+                SourceEvent::Foreground { app, title },
+            )
+        }
+        AgentMsg::Browser(mut b) => {
+            if limits::clamp_browser(&mut b) {
+                tracing::debug!("agent browser context cut to the IPC limits");
+            }
+            state(target, &mut a.cached.browser, SourceEvent::Browser(b))
+        }
         AgentMsg::Session {
             idle_secs,
             locked,
@@ -1402,10 +1425,13 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
                 accessibility,
             },
         ),
-        AgentMsg::Tamper(t) => Handled::Forward(SourceEvent::Tamper {
-            signal: t,
-            account: Some(a.account.clone()).filter(|s| !s.is_empty()),
-        }),
+        AgentMsg::Tamper(t) => match a.tamper.admit(t, Instant::now()) {
+            Some(signal) => Handled::Forward(SourceEvent::Tamper {
+                signal,
+                account: Some(a.account.clone()).filter(|s| !s.is_empty()),
+            }),
+            None => Handled::Nothing,
+        },
         AgentMsg::CaptureFailed { reason } => {
             a.capture = None;
             if !target {
@@ -1715,6 +1741,97 @@ mod tests {
             SourceEvent::Frames(f) => assert_eq!(f[0].width(), 4),
             other => panic!("unexpected {other:?}"),
         }
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// An agent can't forge the service's own tamper signals, flood them, or
+    /// send a title too large for a `flag` body (#190, #191).
+    #[tokio::test]
+    async fn agent_input_is_bounded_and_service_signals_are_refused() {
+        use faro_proto::body::{AppInfo, TamperSignal};
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+
+        let forged = [
+            TamperSignal::AgentKilledRepeatedly {
+                count: 99,
+                window_secs: 1,
+            },
+            TamperSignal::IntegrityFailure {
+                component: "faro-service".into(),
+            },
+            TamperSignal::ClockManipulation {
+                wall_delta_ms: 1,
+                mono_delta_ms: 0,
+            },
+            TamperSignal::CaptureFailing {
+                consecutive_failures: 5,
+            },
+            TamperSignal::UnmonitoredUserSession {
+                user: "someone-else".into(),
+            },
+        ];
+        for t in forged {
+            agent.send(&AgentMsg::Tamper(t)).await.unwrap();
+        }
+        // Many more than the burst of one allowed signal.
+        for i in 0..(super::super::agent_tamper::BURST * 3) {
+            agent
+                .send(&AgentMsg::Tamper(TamperSignal::WindowHiddenFromCapture {
+                    app: format!("App {i}"),
+                }))
+                .await
+                .unwrap();
+        }
+        agent
+            .send(&AgentMsg::Foreground {
+                app: Some(AppInfo {
+                    id: "x".repeat(1 << 20),
+                    name: Some("Viewer".into()),
+                }),
+                title: Some("t".repeat(5 << 20)),
+            })
+            .await
+            .unwrap();
+        let mut tampers = Vec::new();
+        loop {
+            match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+                SourceEvent::Tamper { signal, .. } => tampers.push(signal),
+                SourceEvent::Foreground { app, title } => {
+                    assert_eq!(title.map(|t| t.len()), Some(limits::MAX_TITLE_BYTES));
+                    assert_eq!(app.map(|a| a.id.len()), Some(limits::MAX_APP_ID_BYTES));
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        // The Windows agent's per-display check sends `capture_failing`.
+        let capture_failing = TamperSignal::CaptureFailing {
+            consecutive_failures: 5,
+        };
+        assert_eq!(
+            tampers[..2],
+            [
+                TamperSignal::IntegrityFailure {
+                    component: super::super::agent_tamper::REFUSED_COMPONENT.into()
+                },
+                capture_failing,
+            ],
+            "one report for the refused signals"
+        );
+        let hidden = tampers[2..]
+            .iter()
+            .filter(|s| matches!(s, TamperSignal::WindowHiddenFromCapture { .. }))
+            .count();
+        assert_eq!(tampers.len(), 2 + hidden);
+        assert_eq!(
+            hidden + 1,
+            super::super::agent_tamper::BURST as usize,
+            "rate-limited per connection (capture_failing used one)"
+        );
         drop(agent);
         h.stop().await;
     }

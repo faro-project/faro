@@ -96,6 +96,8 @@ Because the header commits to the body through `body_hash`, the instance can ver
 | `seq < next_seq` | `Behind` | `duplicate` if the header hash matches what is stored, otherwise reject and raise an alert |
 | Bad signature | `BadSignature` | Reject, raise an urgent `invalid_signature` alert |
 
+**Device upload rules** (`faro_client::uplink::drain_events`). The device uploads in `seq` order, at most 200 events and 4 MiB of events per batch, and reads the per-event answers in order. It deletes an event from its outbox only when the answer is `accepted` or `duplicate`, or when it is `rejected` for any reason but `retry_later`: the same bytes will never be accepted, so the device reports the refusal and then drops it rather than resending it on every pass. Refusals the instance raises no alert for itself (an event over the 1 MiB body limit, a malformed one) are reported by the desktop service as an urgent `integrity_failure` naming the event's kind and the reason, so allies don't see a bare `chain_gap` when the next event arrives. The first `retry_later` and everything after it stay queued. `acked_through` doesn't decide what is deleted (after a refused event it counts the gap as held); a heartbeat's `acked_through` still prunes what the instance holds. A `413` halves the batch and tries again; for one event alone it stops the pass and keeps the event (the instance's `upload_stalled` then tells allies). A `429` stops uploads until its `Retry-After` (at most 15 minutes; 60 s without one).
+
 ### 3.3 Urgency floor
 
 The member controls the device, so a modified client could sign a tamper event as `none`. The instance stores the signed header verbatim but computes `effective_urgency = max(header.urgency, kind.min_urgency())`:

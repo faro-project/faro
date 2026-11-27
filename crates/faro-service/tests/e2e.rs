@@ -362,6 +362,44 @@ async fn screen_recording_never_granted_is_named_once() {
     dev.shutdown().await;
 }
 
+/// 3a (#191). A `permission_revoked` the source forwards (an agent's word)
+///     doesn't count as the service having told allies: it used to mark
+///     Screen Recording as reported, so the real "never granted" report at
+///     the failure threshold was never sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forwarded_permission_revoked_does_not_silence_the_real_one() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    let forwarded = TamperSignal::PermissionRevoked {
+        permission: "screen_recording".into(),
+        never_granted: false,
+    };
+    dev.script.with(|s| {
+        s.permission = PermissionState::Denied;
+        s.tamper.push(forwarded.clone());
+    });
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+
+    drive_failures(&dev, failure_threshold() + 3).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![
+            forwarded,
+            TamperSignal::PermissionRevoked {
+                permission: "screen_recording".into(),
+                never_granted: true,
+            }
+        ]
+    );
+    dev.shutdown().await;
+}
+
 /// 3a'. Captures failing for any other reason are still `capture_failing`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn other_capture_failures_are_capture_failing() {

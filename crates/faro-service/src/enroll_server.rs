@@ -813,6 +813,7 @@ mod tests {
                 status: StatusCode::from_u16(status).unwrap(),
                 code: code.into(),
                 message: String::new(),
+                retry_after: None,
             })
         };
         assert_eq!(

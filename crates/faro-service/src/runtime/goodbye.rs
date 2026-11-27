@@ -216,6 +216,9 @@ pub async fn say_goodbye(
         status,
         gate,
         prune: PrunePolicy::default(),
+        control: None,
+        deferral: Default::default(),
+        last_refused: Default::default(),
     };
     Ok(deliver(&uploader, &outbox, seq, opts.deliver_within).await)
 }
@@ -253,7 +256,24 @@ async fn deliver(
             Err(UploadStop::Client(e)) => Some(e.to_string()),
             Err(UploadStop::Outbox(e)) => Some(e.to_string()),
             Err(UploadStop::Gated) => Some("the instance identity no longer matches".into()),
+            Err(UploadStop::Deferred(left)) => Some(format!(
+                "the instance asked to wait {}s before uploading",
+                left.as_secs()
+            )),
         };
+        // Refused for good and dropped from the outbox: never delivered.
+        let refused = uploader
+            .last_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .filter(|r| r.seq == seq);
+        if let Some(r) = refused {
+            return GoodbyeOutcome::Queued {
+                seq,
+                error: format!("the instance refused the goodbye: {}", r.reason),
+            };
+        }
         // Acknowledged even if a queued report then failed: the goodbye is
         // what matters here.
         match acked(outbox, seq).await {
