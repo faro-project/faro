@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Faro reads which app (and which website) is in front, and takes a screenshot when the Faro core
+     asks. See docs/ARCHITECTURE.md section 3. Nothing it reads is logged. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewScrolled|typeViewTextChanged|typeTouchInteractionStart"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_description"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="200" />
