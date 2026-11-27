@@ -1,14 +1,24 @@
+import FaroKit
 import SwiftUI
+import UserNotifications
 
 @main
 struct FaroApp: App {
+    @StateObject private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                HomeView()
-            }
+            RootView()
+                .environmentObject(model)
+                .task {
+                    UNUserNotificationCenter.current().delegate = model.notices
+                    await model.load()
+                }
+                // faro://enroll?... (docs/IOS.md §14)
+                .onOpenURL { url in
+                    Task { await model.receive(link: url.absoluteString) }
+                }
         }
         .onChange(of: scenePhase) { phase in
             // docs/IOS.md §6.3: re-apply the Screen Time settings each time
@@ -18,18 +28,21 @@ struct FaroApp: App {
     }
 }
 
-/// The scaffold's only screen. Enrollment, setup, status and Leave Faro
-/// come with their own issues.
-struct HomeView: View {
+struct RootView: View {
+    @EnvironmentObject var model: AppModel
+
     var body: some View {
-        List {
-            Section {
-                Text("Faro is not set up on this phone yet.")
+        NavigationStack {
+            Group {
+                if !model.loaded {
+                    ProgressView()
+                } else if model.flow.step == .done {
+                    StatusView()
+                } else {
+                    SetupView()
+                }
             }
-            Section {
-                NavigationLink("Licences") { LicencesView() }
-            }
+            .navigationDestination(isPresented: $model.showingNotice) { NoticeView() }
         }
-        .navigationTitle("Faro")
     }
 }
