@@ -5,4 +5,3 @@ local.properties
 .idea/
 .kotlin/
 captures/
-# The Gradle wrapper is generated (see README.md); the jar is not committed.
