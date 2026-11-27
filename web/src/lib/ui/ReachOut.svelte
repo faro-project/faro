@@ -6,12 +6,23 @@
 	// them and signed with your member key, so the server can neither read
 	// nor fake it. Without member keys a reach out carries no message and
 	// is marked "Sent through the server. Can't be verified."
+	//
+	// Who it is sealed to is checked in this browser first
+	// (`checkLoadedRecipients`): your allies against your own signed ally
+	// list, everyone in a group against the group's verified member list.
+	// Anyone the server adds, or a key that doesn't match, is refused.
+	import { untrack } from 'svelte';
 	import { api, seg } from '../api.ts';
 	import { epochKeyFor } from '../check-in-api.ts';
 	import type { RosterState } from '../crypto/roster.ts';
 	import { instance } from '../instance.svelte.ts';
 	import { keyring } from '../keys/keyring.svelte.ts';
-	import { loadRecipients, reachOutError, sendReachOut } from '../reach-out-api.ts';
+	import {
+		checkLoadedRecipients,
+		loadRecipients,
+		reachOutError,
+		sendReachOut
+	} from '../reach-out-api.ts';
 	import {
 		composeGroupReachOut,
 		composeMessage,
@@ -19,7 +30,9 @@
 		MAX_NOTE_CHARS,
 		noteLength,
 		sealable,
+		unverifiedLine,
 		type Audience,
+		type CheckedRecipients,
 		type Recipients
 	} from '../reach-out.ts';
 	import type { Page, RosterEntry, User } from '../types.ts';
@@ -59,6 +72,10 @@
 	let people = $state<RosterEntry[] | null>(null);
 	let chosen = $state<string[]>([]);
 	let recipients = $state<Recipients | null>(null);
+	/** `recipients`, checked in this browser (once your keys are unlocked). */
+	let checked = $state.raw<CheckedRecipients | null>(null);
+	let checkError = $state('');
+	let checkRun = 0;
 	let text = $state('');
 	let busy = $state(false);
 	let error = $state('');
@@ -70,6 +87,8 @@
 		audience = 'allies';
 		chosen = [];
 		recipients = null;
+		checked = null;
+		checkError = '';
 		text = '';
 		error = '';
 	}
@@ -92,20 +111,31 @@
 		chosen = chosen.includes(id) ? chosen.filter((c) => c !== id) : [...chosen, id];
 	}
 
+	function opts() {
+		return {
+			audience,
+			groupId: audience === 'allies' ? null : groupId,
+			userIds: audience === 'people' ? chosen : undefined
+		};
+	}
+
+	function errorText(e: unknown): string {
+		return e instanceof Error && !('status' in e) ? e.message : reachOutError(e);
+	}
+
 	async function next() {
 		busy = true;
 		error = '';
+		checked = null;
+		checkError = '';
+		checkRun++;
 		try {
 			if (audience === 'group') {
 				recipients = null;
 				step = 'write';
 				return;
 			}
-			recipients = await loadRecipients('reach_out', {
-				audience,
-				groupId: audience === 'allies' ? null : groupId,
-				userIds: audience === 'people' ? chosen : undefined
-			});
+			recipients = await loadRecipients('reach_out', opts());
 			step = 'write';
 		} catch (e) {
 			error = reachOutError(e);
@@ -120,9 +150,26 @@
 		audience === 'group' ? [{ user_id: '' }] : recipients ? sealable(recipients) : []
 	);
 	let noKey = $derived(recipients?.recipients.filter((r) => !r.enc_pubkey) ?? []);
-	let unverified = $derived(
-		audience === 'group' || !recipients ? [] : sealable(recipients).filter((r) => !r.sender_ally)
-	);
+	// Check who it would be sealed to as soon as the keys are open, so the
+	// page can say whose keys aren't verified before anything is written.
+	$effect(() => {
+		const keys = memberKeys;
+		const r = recipients;
+		if (step !== 'write' || audience === 'group' || !keys || !r) return;
+		untrack(() => {
+			if (checked || checkError) return;
+			const run = ++checkRun;
+			checkLoadedRecipients(keys, r, 'reach_out', opts())
+				.then((c) => {
+					if (run === checkRun) checked = c;
+				})
+				.catch((e) => {
+					if (run === checkRun) checkError = errorText(e);
+				});
+		});
+	});
+
+	let unverified = $derived(audience === 'group' ? null : unverifiedLine(checked));
 	let tooLong = $derived(noteLength(text) > MAX_NOTE_CHARS);
 
 	/** `signed`: with your signature (and the message, if any). */
@@ -151,7 +198,9 @@
 					);
 				}
 			} else if (signed && keys && readers.length && recipients) {
-				message = composeMessage(keys, recipients, 'reach_out', gid, text.trim() ? text : null);
+				// Nothing is sealed to anyone this browser couldn't check.
+				const to = checked ?? (await checkLoadedRecipients(keys, recipients, 'reach_out', opts()));
+				message = composeMessage(keys, to, 'reach_out', gid, text.trim() ? text : null);
 			}
 			const r = await sendReachOut({
 				audience,
@@ -163,7 +212,7 @@
 			step = 'sent';
 			onsent?.();
 		} catch (e) {
-			error = e instanceof Error && !('status' in e) ? e.message : reachOutError(e);
+			error = errorText(e);
 		} finally {
 			busy = false;
 		}
@@ -276,11 +325,10 @@
 					label="A message (optional)"
 					placeholder="Rough night. Can someone call me?"
 				/>
-				{#if unverified.length}
-					<p class="muted small">
-						The keys of {unverified.map((r) => r.display_name).join(', ')} aren't from your own ally list,
-						so they're not yet verified.
-					</p>
+				{#if checkError}
+					<div class="notice error" role="alert"><p>{checkError}</p></div>
+				{:else if unverified}
+					<p class="muted small">{unverified}</p>
 				{/if}
 			{:else}
 				<p class="muted small">
@@ -293,12 +341,12 @@
 					<button
 						class="primary"
 						type="button"
-						disabled={busy || !memberKeys || tooLong}
+						disabled={busy || !memberKeys || tooLong || !!checkError}
 						onclick={() => send(true)}
 					>
 						{busy ? 'Sending…' : 'Send'}
 					</button>
-					{#if !memberKeys}
+					{#if !memberKeys || checkError}
 						<button class="secondary" type="button" disabled={busy} onclick={() => send(false)}>
 							Send without a message
 						</button>

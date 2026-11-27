@@ -329,6 +329,7 @@ Proposal notes, join-request notes and reach-out messages are written by one per
 - **Authenticity:** the author signs `{instance_id, group_id, item_id, kind, recipients, ciphertext hash}` with their member signing key. Without the signature, an operator who knows everyone's public keys could forge a message "from" anyone.
 - **Phases A and B:** only senders with a member signing key can attach a note or message. Ally-only participants can still send proposals, join requests and content-free reach-outs, which the UI marks *"Sent through the server. Can't be verified."*
 - **Recipients' keys:** in Phase B, messages go only to the sender's own allies (keys the sender already signed in their manifest), people the sender has a link with, or the facilitators (keys shown with a "not yet verified" note until Phase C). Sealing to arbitrary participants needs the roster rules in §10.3.
+- **As built (Phase C):** the instance says who a message goes to and serves their keys, and the browser checks every one before sealing. Your allies' keys must be the ones in your own signed manifest (whether someone is your ally is worked out from it, never taken from the instance). In a group, everyone else's key must be theirs in the roster your browser verified, and a facilitator must be one in it. Anyone you didn't choose, or a key that doesn't match, is refused and nothing is sealed. Two kinds of key can't be checked and are sealed to with a "not yet verified" note: people outside any group you have a link with but who aren't your allies, and the facilitators of a group you ask to join (you can't read its roster yet). Readers check the author's signing key against the verified roster too, except on a join request's note, whose author isn't in the group yet.
 
 ### 10.3 Phase C: participant keys and a signed roster log
 
@@ -341,7 +342,7 @@ Sending check-ins to "the whole group" means sealing to keys the server hands ou
 5. **Pinning and the group safety code.** A joiner pins the signing key of the facilitator who invited or accepted them. The **group safety code** is a fingerprint of the current roster head. In a large group, comparing it with any one facilitator is enough, since every entry is facilitator-signed.
 6. **Content** is sealed only to keys in the accepted roster and signed by the author's signing key.
 
-The wire format, client rules and routes are specified in [PROTOCOL.md §10](PROTOCOL.md). As built, a facilitator's browser signs leaves, removals and role changes on its own, but asks the facilitator before signing a join or someone else's new key, since those add a reader with a key the server supplied (PROTOCOL.md §10.7).
+The wire format, client rules and routes are specified in [PROTOCOL.md §10](PROTOCOL.md). As built, a facilitator's browser signs other people's leaves and removals on its own, since those only take a reader away, but asks the facilitator before signing a join or someone else's new key, since those add a reader with a key the server supplied, and before a role change or the facilitator's own removal, since those change who signs the member list (PROTOCOL.md §10.7).
 
 Under this model, the server can't add a reader. A facilitator can, but every addition is visible in the group history and needs the new person's own keys. That is the honest limit of a group whose facilitators choose its members.
 

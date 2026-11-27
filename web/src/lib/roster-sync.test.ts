@@ -19,6 +19,7 @@ import {
 } from './crypto/roster.ts';
 import {
 	memoryStore,
+	changeKey,
 	splitPending,
 	syncRoster,
 	type RosterPage,
@@ -211,7 +212,7 @@ test('a new browser starts from the latest snapshot', async () => {
 	assert.equal(r2.problem, 'wrong_group');
 });
 
-test('pending work: removals are signed automatically, new keys need approval', () => {
+test('pending work: removals are signed automatically, new keys and roles need approval', () => {
 	const me = { userId: F, encPk: 'E', signPk: 'S' };
 	const r = splitPending(
 		[
@@ -226,11 +227,27 @@ test('pending work: removals are signed automatically, new keys need approval', 
 	);
 	assert.deepEqual(
 		r.auto.map((c) => c.user_id),
-		['usr_b', 'usr_c', 'usr_d', F]
+		['usr_b', 'usr_c', F]
 	);
+	// A role change decides who signs the member list: the instance proposing
+	// one isn't enough.
 	assert.deepEqual(
 		r.approve.map((c) => c.user_id),
-		['usr_a', 'usr_e']
+		['usr_a', 'usr_d', 'usr_e']
+	);
+	// Nor is it enough for the facilitator's own removal.
+	const self = splitPending([{ kind: 'remove', user_id: F }], me);
+	assert.deepEqual(self.approve.length, 1);
+	// An approval is for that exact change, not for the next one about the same person.
+	const join = r.approve[0];
+	assert.notEqual(
+		changeKey(join),
+		changeKey({ ...join, enc_pubkey: 'other' } as typeof join),
+		'another key is another change'
+	);
+	assert.notEqual(
+		changeKey({ kind: 'role', user_id: 'usr_d', role: 'facilitator' }),
+		changeKey({ kind: 'role', user_id: 'usr_d', role: 'participant' })
 	);
 	// The instance offering the facilitator's own keys with one of its own.
 	const evil = splitPending(

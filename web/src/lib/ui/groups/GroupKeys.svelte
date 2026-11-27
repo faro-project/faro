@@ -9,9 +9,10 @@
 	// * Someone with no encryption key creates one (passphrase and recovery
 	//   code, stored like an ally key).
 	// * Facilitators: once their keys are unlocked, their browser signs what
-	//   is pending (leaves, removals, role changes) and rotates the group key.
-	//   Joins and other people's new keys are shown for approval first: they
-	//   add a reader, and the key comes from the server. An ally-only
+	//   is pending (leaves and removals) and rotates the group key. Joins,
+	//   other people's new keys and role changes are shown for approval
+	//   first: they add a reader with a key from the server, or change who
+	//   signs the member list, on the server's word. An ally-only
 	//   facilitator first makes a group signing key (decision 6).
 	// * While someone who left is still in the signed list, whole-group
 	//   posting waits: "Waiting for a facilitator to update the group".
@@ -33,7 +34,7 @@
 		signPendingWork,
 		type Signer
 	} from '../../roster-api.ts';
-	import type { RosterPending } from '../../roster-sync.ts';
+	import { changeKey, type RosterPending } from '../../roster-sync.ts';
 	import type { GroupView, Page, RosterEntry as Person, User } from '../../types.ts';
 	import NewPassphrase from '../NewPassphrase.svelte';
 	import RecoveryCode from '../RecoveryCode.svelte';
@@ -172,6 +173,21 @@
 			names = { ...names, ...found };
 		})();
 	});
+
+	function describe(c: RosterChange): string {
+		switch (c.kind) {
+			case 'join':
+				return c.role === 'facilitator' ? 'joins, as a facilitator' : 'joins';
+			case 'keys':
+				return 'has a new key';
+			case 'role':
+				return c.role === 'facilitator' ? 'becomes a facilitator' : 'stops being a facilitator';
+			case 'leave':
+				return 'leaves the group';
+			case 'remove':
+				return 'is removed from the group';
+		}
+	}
 
 	function keyOf(c: RosterChange): string {
 		if (c.kind !== 'join' && c.kind !== 'keys') return '';
@@ -338,16 +354,17 @@
 			{/if}
 			{#if needsApproval.length}
 				<div class="card">
-					<h3>Add to the group's encryption</h3>
+					<h3>Changes to the group's member list</h3>
 					<p>
-						These people can read what the group shares once you add them. Check that each is
-						someone the group expects. Their key ids are shown so you can compare them.
+						The server says these changes are due. Each one changes who can read what the group
+						shares, or who facilitates it, so your browser signs it only once you approve. Check
+						that each is something the group expects. Key ids are shown so you can compare them.
 					</p>
 					<ul class="approve">
 						{#each needsApproval as c (c.user_id)}
 							<li>
-								<strong>{names[c.user_id] ?? c.user_id}</strong>
-								{c.kind === 'keys' ? '(new key)' : ''}
+								<strong>{c.user_id === user.id ? 'You' : (names[c.user_id] ?? c.user_id)}</strong>
+								{describe(c)}
 								<span class="mono small">{keyOf(c)}</span>
 							</li>
 						{/each}
@@ -357,9 +374,9 @@
 							class="primary"
 							type="button"
 							disabled={busy}
-							onclick={() => work(new Set(needsApproval.map((c) => c.user_id)))}
+							onclick={() => work(new Set(needsApproval.map(changeKey)))}
 						>
-							Add {needsApproval.length === 1 ? 'them' : `all ${needsApproval.length}`}
+							Approve {needsApproval.length === 1 ? 'it' : `all ${needsApproval.length}`}
 						</button>
 					</div>
 				</div>
