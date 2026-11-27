@@ -342,6 +342,7 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **No server-side filtering of any kind**, and no APNs.
 - **Loosening waits 24 hours by default.** The member can set it from 0 to 72 hours, and allies see the setting.
 - **Faro doesn't set up or rely on an ally-held Screen Time passcode.**
+- **Setup can't be finished without both layers.** There is no skip for Screen Time access or the VPN configuration: a phone with only one layer would be enrolled and look protected while half of §5's design is missing. Turning a layer off later is allowed and reported (§10.2).
 
 ### Open
 
