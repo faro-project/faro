@@ -9,7 +9,8 @@
 
 use faro_detect::{Category, DomainCategorizerBuilder};
 use faro_dnsfilter::{
-    dns, parse_packet, Action, Counters, Engine, Filter, FilterConfig, Verdict, WrapError,
+    dns, parse_packet, tunnel, Action, Counters, Engine, Filter, FilterConfig, Session, Step,
+    Verdict, WrapError,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
@@ -189,6 +190,265 @@ pub fn response(data: &[u8]) -> bool {
     }
 }
 
+/// The allowed name the `answer` target asks about.
+pub const ANSWER_QUESTION: &str = "www.Wikipedia.org";
+
+/// The names an answer's records point to, read by this file's own parser:
+/// CNAME and DNAME targets, and SVCB and HTTPS targets other than the root.
+/// Pointers may go anywhere earlier in the message, at most 64 of them per
+/// name. `None` if it doesn't parse, or a name has a byte no host name has.
+fn targets(msg: &[u8]) -> Option<Vec<String>> {
+    fn u16_at(m: &[u8], i: usize) -> Option<usize> {
+        Some(usize::from(u16::from_be_bytes([
+            *m.get(i)?,
+            *m.get(i + 1)?,
+        ])))
+    }
+    fn skip(m: &[u8], mut i: usize) -> Option<usize> {
+        loop {
+            let l = *m.get(i)?;
+            if l >= 0xc0 {
+                m.get(i + 1)?;
+                return Some(i + 2);
+            }
+            if l > 63 {
+                return None;
+            }
+            i += 1 + usize::from(l);
+            if i > m.len() {
+                return None;
+            }
+            if l == 0 {
+                return Some(i);
+            }
+        }
+    }
+    fn name(m: &[u8], mut i: usize) -> Option<String> {
+        let mut labels: Vec<String> = vec![];
+        let mut hops = 0;
+        loop {
+            let l = *m.get(i)?;
+            if l >= 0xc0 {
+                let to = (usize::from(l & 0x3f) << 8) | usize::from(*m.get(i + 1)?);
+                hops += 1;
+                if hops > 64 || to >= i {
+                    return None;
+                }
+                i = to;
+                continue;
+            }
+            if l > 63 {
+                return None;
+            }
+            if l == 0 {
+                return Some(labels.join("."));
+            }
+            let raw = m.get(i + 1..i + 1 + usize::from(l))?;
+            if !raw
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+            {
+                return None;
+            }
+            labels.push(String::from_utf8(raw.to_ascii_lowercase()).ok()?);
+            i += 1 + usize::from(l);
+        }
+    }
+    let mut i = 12;
+    for _ in 0..u16_at(msg, 4)? {
+        i = skip(msg, i)? + 4;
+    }
+    let mut out = vec![];
+    for _ in 0..u16_at(msg, 6)? {
+        i = skip(msg, i)?;
+        let rtype = u16_at(msg, i)?;
+        let len = u16_at(msg, i + 8)?;
+        let data = i + 10;
+        msg.get(data..data + len)?;
+        let record = msg.get(..data + len)?;
+        match rtype {
+            5 | 39 => out.push(name(record, data)?),
+            64 | 65 => {
+                let t = name(record, data + 2)?;
+                if !t.is_empty() {
+                    out.push(t);
+                }
+            }
+            _ => {}
+        }
+        i = data + len;
+    }
+    Some(out)
+}
+
+/// Put fragments back together, by this file's own reading of them, into
+/// the UDP payload they carry, checking each fragment's headers and the
+/// UDP checksum of the whole.
+fn reassemble(frags: &[Vec<u8>], src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+    if let [one] = frags {
+        let skip = if src.is_ipv4() { 28 } else { 48 };
+        check_built(one, src, dst, &one[skip..]);
+        return one[skip..].to_vec();
+    }
+    let v6 = src.is_ipv6();
+    let mut udp = vec![];
+    for (i, f) in frags.iter().enumerate() {
+        assert!(f.len() <= tunnel::MTU, "fragment over the MTU");
+        let last = i + 1 == frags.len();
+        let (offset, more, body) = if v6 {
+            assert_eq!(f[6], 44);
+            assert_eq!(f[40], 17);
+            assert_eq!(usize::from(u16::from_be_bytes([f[4], f[5]])), f.len() - 40);
+            let field = u16::from_be_bytes([f[42], f[43]]);
+            (usize::from(field >> 3) * 8, field & 1 == 1, &f[48..])
+        } else {
+            assert_eq!(f[0], 0x45);
+            assert_eq!(sum(&[&f[..20]]), 0xffff);
+            assert_eq!(usize::from(u16::from_be_bytes([f[2], f[3]])), f.len());
+            let field = u16::from_be_bytes([f[6], f[7]]);
+            (
+                usize::from(field & 0x1fff) * 8,
+                field & 0x2000 != 0,
+                &f[20..],
+            )
+        };
+        assert_eq!(offset, udp.len());
+        assert_eq!(more, !last);
+        assert!(last || body.len() % 8 == 0);
+        udp.extend_from_slice(body);
+    }
+    let pseudo = match (src.ip(), dst.ip()) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let len = (udp.len() as u16).to_be_bytes();
+            [&s.octets()[..], &d.octets(), &[0, 17], &len].concat()
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            let len = (udp.len() as u32).to_be_bytes();
+            [&s.octets()[..], &d.octets(), &len, &[0, 0, 0, 17]].concat()
+        }
+        _ => panic!("mixed families"),
+    };
+    assert_eq!(sum(&[&pseudo, &udp]), 0xffff, "UDP checksum of the whole");
+    assert_eq!(u16::from_be_bytes([udp[0], udp[1]]), src.port());
+    assert_eq!(u16::from_be_bytes([udp[2], udp[3]]), dst.port());
+    assert_eq!(usize::from(u16::from_be_bytes([udp[4], udp[5]])), udp.len());
+    udp[8..].to_vec()
+}
+
+/// The `answer` target: an upstream answer to an allowed query, through a
+/// [`Session`], the way the tunnel hands it over. The first byte picks
+/// IPv4 or IPv6 (bit 0) and whether it came over TCP (bit 1). The rest is
+/// the answer's header after the id (10 bytes, with `QR` forced on and one
+/// question), then everything after the question, which is the query's.
+///
+/// An answer that passes must point to no blocked name and come back with
+/// only its id changed. One turned into `NXDOMAIN` must point to a blocked
+/// name, and only blocked names are ever counted. A truncated UDP answer
+/// must be fetched again over TCP, never passed on.
+pub fn answer(data: &[u8]) -> bool {
+    let Some((&pick, rest)) = data.split_first() else {
+        return false;
+    };
+    let (head, tail) = rest.split_at(rest.len().min(10));
+    let (client, server): (SocketAddr, SocketAddr) = if pick & 1 == 0 {
+        (
+            "10.0.0.2:53000".parse().expect("addr"),
+            "198.18.0.53:53".parse().expect("addr"),
+        )
+    } else {
+        (
+            "[2001:2::1]:54321".parse().expect("addr"),
+            "[2001:2::53]:53".parse().expect("addr"),
+        )
+    };
+    let over_tcp = pick & 2 != 0;
+    let upstream: SocketAddr = "192.168.1.1:53".parse().expect("addr");
+    let mut s = Session::new(Engine::new(filter().clone()), 0x5eed);
+    s.set_upstreams([upstream]);
+    let q = query(ANSWER_QUESTION, 1);
+    let packet = faro_dnsfilter::packet::build_udp(client, server, &q).expect("small");
+    let now = 1_800_000_000_000;
+    let Step::Send { payload, .. } = s.packet(&packet, now, true) else {
+        panic!("the allowed query was not forwarded");
+    };
+    let mut msg = payload[..2].to_vec();
+    msg.extend_from_slice(head);
+    msg.resize(12, 0);
+    msg[2] |= 0x80;
+    msg[4..6].copy_from_slice(&[0, 1]);
+    msg.extend_from_slice(&q[12..]);
+    msg.extend_from_slice(tail);
+
+    let step = s.answer(upstream, &msg, over_tcp, now, true);
+    let counted: Vec<String> = s
+        .engine()
+        .counters()
+        .summaries()
+        .into_iter()
+        .flat_map(|b| b.hosts.into_iter().map(|h| h.host))
+        .collect();
+    for h in &counted {
+        assert!(
+            filter().decide(h, 1).is_blocked(),
+            "{h} counted but not blocked"
+        );
+        assert!(!h.contains("wikipedia"), "the allowed name was counted");
+    }
+    let found = targets(&msg);
+    let blocked_target = found
+        .as_ref()
+        .map(|t| t.iter().any(|n| filter().decide(n, 5).is_blocked()));
+    match step {
+        Step::Reply(frags) => {
+            let back = reassemble(&frags, server, client);
+            assert_eq!(&back[..2], &q[..2], "the client's id");
+            let rcode = back.get(3).map(|b| b & 0x0f);
+            if back[2..] == msg[2..] {
+                assert!(
+                    over_tcp || !dns::is_truncated(&msg),
+                    "a truncated answer passed"
+                );
+                assert_ne!(blocked_target, Some(true), "a blocked alias passed");
+                assert!(s.engine().counters().is_empty());
+            } else {
+                assert_eq!(back.len(), q.len(), "an error reply is the question only");
+                assert_eq!(&back[12..], &q[12..]);
+                match rcode {
+                    Some(3) => {
+                        assert_ne!(
+                            blocked_target,
+                            Some(false),
+                            "NXDOMAIN without a blocked alias"
+                        );
+                        assert!(!s.engine().counters().is_empty());
+                    }
+                    Some(2) => assert!(s.engine().counters().is_empty()),
+                    other => panic!("rcode {other:?}"),
+                }
+            }
+            assert_eq!(s.pending(), 0);
+            true
+        }
+        Step::SendTcp {
+            server: to,
+            payload: again,
+            ..
+        } => {
+            assert!(!over_tcp && dns::is_truncated(&msg));
+            assert_eq!(to, upstream);
+            assert_eq!(again, payload);
+            assert!(s.engine().counters().is_empty());
+            true
+        }
+        Step::Nothing(_) => {
+            assert!(s.engine().counters().is_empty());
+            assert_eq!(s.pending(), 1);
+            false
+        }
+        Step::Send { .. } => panic!("an answer sent something upstream"),
+    }
+}
+
 /// The `state` target: what the tunnel loads from the app group. The first
 /// byte picks saved counters (even) or a filter config (odd). Whatever
 /// loads must round-trip.
@@ -323,6 +583,77 @@ pub fn seeds() -> Vec<(&'static str, String, Vec<u8>)> {
     v6_answer[1] = 0x34;
     add("response", "v6", [&[1u8][..], &v6_answer].concat());
 
+    // Answers to ANSWER_QUESTION: the header after the id, then records.
+    // The question's labels are at 12 (www), 16 (Wikipedia) and 26 (org).
+    let wire = |n: &str| {
+        let mut w = vec![];
+        for l in n.split('.') {
+            w.push(l.len() as u8);
+            w.extend_from_slice(l.as_bytes());
+        }
+        w.push(0);
+        w
+    };
+    let rr = |rtype: u16, rdata: &[u8]| {
+        let mut r = vec![0xc0, 0x0c];
+        r.extend_from_slice(&rtype.to_be_bytes());
+        r.extend_from_slice(&[0, 1, 0, 0, 0, 60]);
+        r.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        r.extend_from_slice(rdata);
+        r
+    };
+    let https = |target: &str| [&[0u8, 0][..], &wire(target), &[0, 1, 0, 0]].concat();
+    for (name, pick, tc, records) in [
+        ("a", 0u8, false, vec![rr(1, &[93, 184, 216, 34])]),
+        (
+            "cname-allowed",
+            1,
+            false,
+            vec![rr(5, &wire("dyna.wikimedia.org"))],
+        ),
+        (
+            "cname-blocked",
+            0,
+            false,
+            vec![rr(5, &wire("cdn.porn.test"))],
+        ),
+        (
+            "cname-compressed",
+            0,
+            false,
+            vec![rr(5, &[3, b'c', b'd', b'n', 0xc0, 16])],
+        ),
+        ("cname-loop", 0, false, vec![rr(5, &[1, b'x', 0xc0, 47])]),
+        ("dname-blocked", 1, false, vec![rr(39, &wire("x.xxx"))]),
+        (
+            "https-blocked",
+            0,
+            false,
+            vec![rr(65, &https("svc.casino.test"))],
+        ),
+        ("https-self", 1, false, vec![rr(65, &https(""))]),
+        (
+            "member-blocked",
+            0,
+            false,
+            vec![rr(5, &wire("www.news.test"))],
+        ),
+        ("truncated", 0, true, vec![]),
+        ("truncated-tcp", 2, true, vec![rr(5, &wire("ok.test"))]),
+        (
+            "chain",
+            3,
+            false,
+            vec![rr(5, &wire("b.test")), rr(5, &wire("mask.icloud.com"))],
+        ),
+    ] {
+        let flags: u16 = 0x8180 | if tc { 0x0200 } else { 0 };
+        let mut head = flags.to_be_bytes().to_vec();
+        head.extend_from_slice(&[0, 1, 0, records.len() as u8, 0, 0, 0, 0]);
+        let body = [&[pick][..], &head, &records.concat()].concat();
+        add("answer", &format!("answer-{name}"), body);
+    }
+
     let mut c = Counters::new();
     c.record(
         1_800_000_000_000,
@@ -351,6 +682,7 @@ mod tests {
             let reached = match target {
                 "packet" => packet(&bytes),
                 "response" => response(&bytes),
+                "answer" => answer(&bytes),
                 "state" => state(&bytes),
                 _ => unreachable!(),
             };
@@ -395,6 +727,7 @@ mod tests {
             let ok = match *target {
                 "packet" => packet(&b),
                 "response" => response(&b),
+                "answer" => answer(&b),
                 _ => state(&b),
             };
             total += 1;
@@ -419,6 +752,10 @@ mod tests {
                         }
                         "response" => {
                             response(&b);
+                        }
+                        "answer" => {
+                            answer(&b);
+                            answer(&b[..i]);
                         }
                         _ => {
                             state(&b);

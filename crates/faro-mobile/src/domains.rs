@@ -130,6 +130,12 @@ impl FaroCore {
         }
     }
 
+    /// The version of the installed bundle, from the record alone: nothing
+    /// is read or checked. For deciding whether loading it is worth it.
+    pub fn installed_domains_version(&self) -> Result<Option<String>, FaroError> {
+        Ok(self.domains_record()?.current.map(|c| c.version))
+    }
+
     fn domains_dir(&self) -> PathBuf {
         self.dir.join(DOMAINS_DIR)
     }

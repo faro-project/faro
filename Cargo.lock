@@ -1190,6 +1190,7 @@ dependencies = [
  "faro-core",
  "faro-crypto",
  "faro-detect",
+ "faro-dnsfilter",
  "faro-proto",
  "faro-server",
  "faro-update",

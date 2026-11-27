@@ -12,6 +12,7 @@
 //! | [`core`] | [`FaroCore`]: enrollment, events, heartbeats, uploads |
 //! | [`keys`] | the [`KeyStore`] the platform implements (the Keychain), and [`MemoryKeyStore`] |
 //! | [`store`] | the one database in the app group container |
+//! | [`dnsfilter`] | [`DnsFilter`]: the packet tunnel's DNS filter (`faro-dnsfilter`) |
 //! | [`domains`] | the domain bundle from the signed update channel |
 //! | [`types`] | the records and enums Swift sees |
 //! | [`error`] | [`FaroError`] |
@@ -47,6 +48,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod core;
+pub mod dnsfilter;
 pub mod domains;
 pub mod error;
 pub mod keys;
@@ -54,6 +56,7 @@ pub mod store;
 pub mod types;
 
 pub use crate::core::FaroCore;
+pub use dnsfilter::{DnsFilter, DnsFilterStatus, DnsStep, TunnelNetwork, UpstreamServer};
 pub use error::FaroError;
 pub use keys::{KeyStore, KeyStoreError, MemoryKeyStore};
 pub use types::*;

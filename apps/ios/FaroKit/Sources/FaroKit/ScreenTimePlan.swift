@@ -13,6 +13,10 @@ public enum MarkerName {
     /// Set by the monitor extension each time it runs (docs/IOS.md §6.3), so
     /// the app and the tunnel can tell it is still being called.
     public static let monitorAlive = "monitor_alive"
+    /// Set by the packet tunnel every minute while it runs (docs/IOS.md
+    /// §10.2). Older than 20 minutes while the phone is in use means the DNS
+    /// filter is off.
+    public static let tunnelAlive = "tunnel_alive"
 }
 
 /// The words on the block screen (docs/IOS.md §6.4).

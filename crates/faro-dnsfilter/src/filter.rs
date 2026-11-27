@@ -327,6 +327,12 @@ impl Filter {
         &self.categorizer
     }
 
+    /// Whether `name` (lowercased, without the trailing dot) is the
+    /// instance host, which is always allowed.
+    pub fn is_instance_host(&self, name: &str) -> bool {
+        self.instance_host.as_deref() == Some(name)
+    }
+
     /// Categories this filter blocks, `adult` among them.
     pub fn blocked_categories(&self) -> Vec<Category> {
         Category::from_mask(self.blocked_mask)

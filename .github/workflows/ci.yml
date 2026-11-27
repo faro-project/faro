@@ -194,7 +194,7 @@ jobs:
       - if: steps.xcode.outputs.enabled == 'true'
         uses: Swatinem/rust-cache@v2
       - if: steps.xcode.outputs.enabled == 'true'
-        name: Rust core, bindings and notices
+        name: Rust core, bindings, notices and the domain list
         run: |
           apps/ios/build-rust.sh
           release/notices/third-party.sh --install-cargo-about

@@ -135,9 +135,9 @@ A `ShieldConfigurationDataSource` gives the block screen Faro's look and wording
 
 A `NEPacketTunnelProvider` that is a VPN in name only:
 
-- **Tunnel network settings:** a private address for the tunnel interface, and DNS servers set to one tunnel-local address (for example `198.18.0.53`) with `matchDomains = [""]`, so every lookup goes to it.
+- **Tunnel network settings:** a private address for the tunnel interface, and DNS servers set to one tunnel-local address (`198.18.0.53` and `2001:2::53`, in the benchmarking ranges no real network uses) with `matchDomains = [""]`, so every lookup goes to it.
 - **Included routes:** only that address, plus the known DNS-over-HTTPS and DNS-over-TLS resolver addresses (§7.4). **No other traffic enters the tunnel**, so Faro never sees page contents, connections or anything beyond DNS, and battery and latency costs stay small.
-- **Resolution:** queries for allowed names are forwarded to the resolver the phone would otherwise use (taken from the active network path) over a socket the provider opens outside the tunnel. Responses go back unchanged.
+- **Resolution:** queries for allowed names are forwarded to the resolver the phone would otherwise use (read from the system before the tunnel's DNS settings apply, and again when the network changes) over a socket the provider opens outside the tunnel. There is no fallback: if no resolver can be found, allowed names fail at once (`SERVFAIL`) until one is, and blocked names are still blocked. Responses go back unchanged, unless they alias the name to a blocked one (`innocent.example CNAME blocked.example`, or a DNAME, SVCB or HTTPS target), which gets `NXDOMAIN` like the blocked name itself. A truncated response is fetched again over TCP by the provider, so clients never need DNS over TCP to the tunnel.
 - **Blocking:** a blocked name gets a well-formed `NXDOMAIN` response. Safari's Screen Time page usually wins first for adult sites. Other browsers show their own "can't find the server" page.
 - **On-demand:** an `NEOnDemandRuleConnect` for every interface, so iOS reconnects the tunnel after reboots, network changes and crashes without the app running.
 
@@ -161,6 +161,7 @@ The bundle ships in the app and updates through the instance's update mirror as 
 | Turning the VPN off, or Connect On Demand off, in Settings | Detected and reported (§10). |
 | IP-literal URLs, or sites on brand-new domains | Not covered by DNS. Layer 1 still covers them in WebKit. |
 | Cached DNS answers from before the filter started | They expire within minutes. The tunnel starts at boot through on-demand. |
+| Lookups while the tunnel re-reads the network's resolvers after a network change | iOS only reports the network's resolvers while the tunnel's own DNS settings are off, so the tunnel lifts them for a moment (well under a second) on each network change and puts them back. Lookups in that moment are not filtered. Layer 1 still covers WebKit. |
 
 ### 7.5 Recording what it blocks
 
