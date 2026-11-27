@@ -22,9 +22,8 @@
 
 use faro_crypto::SigningKey;
 use faro_proto::keys::{DeviceEndorsement, Signed};
-use faro_proto::{DeviceId, InstanceId, SignPublicKey, UserId};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::fmt;
+use faro_proto::DeviceId;
+use serde::{de::DeserializeOwned, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -71,46 +70,7 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StateError + '_ {
 }
 
 /// What enrollment established, persisted in `enrollment.json`.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Enrollment {
-    /// Normalized instance base URL (ends in `/`).
-    pub instance_url: String,
-    pub instance_id: InstanceId,
-    /// The instance name the member confirmed.
-    pub instance_name: String,
-    /// Pinned from `/.well-known/faro`; re-checked by the runtime.
-    pub instance_identity_pubkey: SignPublicKey,
-    pub device_id: DeviceId,
-    /// Bearer token. Secret; redacted from `Debug`.
-    pub device_token: String,
-    pub member_id: UserId,
-    /// Pinned at enrollment: the root of trust for the endorsement and every
-    /// recipient manifest.
-    pub member_sign_pubkey: SignPublicKey,
-    pub device_name: String,
-    pub enrolled_at_ms: i64,
-}
-
-impl fmt::Debug for Enrollment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Enrollment")
-            .field("instance_url", &self.instance_url)
-            .field("instance_id", &self.instance_id)
-            .field("instance_name", &self.instance_name)
-            .field("device_id", &self.device_id)
-            .field("device_token", &"<redacted>")
-            .field("member_id", &self.member_id)
-            .field("member_sign_pubkey", &self.member_sign_pubkey)
-            .field("device_name", &self.device_name)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for Enrollment {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.device_token);
-    }
-}
+pub use faro_client::Enrollment;
 
 /// Handle to the (validated) state directory.
 #[derive(Debug, Clone)]
@@ -436,6 +396,7 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faro_proto::{InstanceId, SignPublicKey, UserId};
 
     #[cfg(unix)]
     fn mode(p: &Path) -> u32 {

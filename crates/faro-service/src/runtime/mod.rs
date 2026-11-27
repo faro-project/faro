@@ -281,6 +281,7 @@ impl ServiceBuilder {
         let opts = ClientOptions {
             timeout: self.config.network.request_timeout(),
             ca_file: self.config.network.ca_file.clone(),
+            ..ClientOptions::default()
         };
         let key_for_net = Arc::new(SigningKey::from_bytes(&key.to_bytes()));
         let client = enroll::device_client(

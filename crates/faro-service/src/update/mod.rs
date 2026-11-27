@@ -53,7 +53,7 @@
 //! updater still checks and logs what is available, but installs nothing.
 
 pub mod artifacts;
-pub mod fetch;
+pub use faro_client::fetch;
 pub mod install;
 #[cfg(windows)]
 pub mod msi;
@@ -63,7 +63,6 @@ pub mod signature;
 use crate::state::{StateDir, StateError};
 use faro_core::clock::Clock;
 use faro_proto::Hash32;
-use faro_update::metadata::{MAX_ROOT_BYTES, MAX_TARGETS_BYTES, MAX_TIMESTAMP_BYTES};
 use faro_update::{
     Channel, Selection, TargetInfo, TargetKind, TrustedState, UpdateError, Updater, Version,
 };
@@ -90,8 +89,6 @@ pub const MAX_PACKAGE_BYTES: u64 = 1 << 30;
 pub const MAX_INSTALL_ATTEMPTS: u32 = 3;
 /// A pending install younger than this may still be running.
 pub const PENDING_GRACE_MS: i64 = 30 * 60 * 1000;
-/// Most root rotations walked in one check.
-const MAX_ROOT_STEPS: u64 = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
@@ -307,7 +304,6 @@ impl ClientUpdater {
     /// the shipped root is newer (an upgrade brought a rotated root) or
     /// differs at the same version.
     fn load_trust(&self) -> Result<Updater, CheckError> {
-        let shipped = Updater::bootstrap(&self.root).map_err(CheckError::BadRoot)?;
         let stored: Option<TrustedState> = match self.dir.read_json(TRUST_FILE) {
             Ok(s) => s,
             Err(StateError::Corrupt { .. }) => {
@@ -316,16 +312,7 @@ impl ClientUpdater {
             }
             Err(e) => return Err(e.into()),
         };
-        let Some(stored) = stored else {
-            return Ok(shipped);
-        };
-        let (have, want) = (stored.root().version, shipped.state().root().version);
-        if have < want
-            || (have == want && stored.root_payload_hash() != shipped.state().root_payload_hash())
-        {
-            return Ok(shipped);
-        }
-        Ok(Updater::from_state(stored))
+        fetch::trusted_updater(&self.root, stored).map_err(CheckError::BadRoot)
     }
 
     fn save_trust(&self, u: &Updater) -> Result<(), CheckError> {
@@ -471,45 +458,22 @@ impl ClientUpdater {
         Ok(Outcome::Installing { version })
     }
 
-    /// Roots, timestamp, targets. One retry if the mirror switched release
-    /// between the timestamp and the targets.
+    /// Roots, timestamp, targets ([`fetch::verify_metadata`]), saving the
+    /// trust state after every step.
     async fn verify(&self, u: &mut Updater) -> Result<faro_update::VerifiedTargets, CheckError> {
-        for _ in 0..MAX_ROOT_STEPS {
-            let next = u.state().root().version + 1;
-            let Some(bytes) = self
-                .fetch
-                .meta(&format!("roots/{next}.json"), MAX_ROOT_BYTES)
-                .await?
-            else {
-                break;
-            };
-            u.update_root(&bytes)?;
-            self.save_trust(u)?;
-            tracing::info!(version = next, "update root rotated");
-        }
-        let mut retried = false;
-        loop {
-            let now = self.clock.wall_ms();
-            let ts = self
-                .fetch
-                .meta("timestamp.json", MAX_TIMESTAMP_BYTES)
-                .await?
-                .ok_or(CheckError::Missing("timestamp.json"))?;
-            u.verify_timestamp(&ts, now)?;
-            self.save_trust(u)?;
-            let tg = self
-                .fetch
-                .meta("targets.json", MAX_TARGETS_BYTES)
-                .await?
-                .ok_or(CheckError::Missing("targets.json"))?;
-            match u.verify_targets(&tg, now) {
-                Err(UpdateError::TimestampMismatch(_)) if !retried => {
-                    retried = true;
-                    self.save_trust(u)?;
-                }
-                r => return Ok(r?),
-            }
-        }
+        fetch::verify_metadata(
+            &self.fetch,
+            u,
+            || self.clock.wall_ms(),
+            |u| self.save_trust(u),
+        )
+        .await
+        .map_err(|e| match e {
+            fetch::MetadataError::Fetch(e) => CheckError::Fetch(e),
+            fetch::MetadataError::Verify(e) => CheckError::Verify(e),
+            fetch::MetadataError::Missing(what) => CheckError::Missing(what),
+            fetch::MetadataError::Save(e) => e,
+        })
     }
 
     /// The verified package on disk, downloading it unless an earlier
