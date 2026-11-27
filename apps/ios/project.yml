@@ -66,6 +66,8 @@ targets:
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: libresolv.tbd
+      - sdk: FamilyControls.framework
+      - sdk: NetworkExtension.framework
       - target: FaroTunnel
       - target: FaroMonitor
       - target: FaroShield
