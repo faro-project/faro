@@ -2,7 +2,7 @@
 # Build faro-android for the app: the native libraries and the Kotlin
 # bindings (docs/ANDROID.md §6).
 #
-#   crates/faro-android/build-android.sh <out-dir> [--release] [--no-onnx]
+#   crates/faro-android/build-android.sh <out-dir> [--release] [--no-onnx] [--dev]
 #
 # writes
 #
@@ -28,7 +28,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <out-dir> [--release] [--no-onnx]" >&2
+  echo "usage: $0 <out-dir> [--release] [--no-onnx] [--dev]" >&2
   exit 2
 }
 
@@ -38,13 +38,21 @@ shift
 profile=debug
 cargo_profile=()
 onnx=1
+dev=0
 for arg in "$@"; do
   case "$arg" in
     --release) profile=release; cargo_profile=(--release) ;;
     --no-onnx) onnx=0 ;;
+    # The `dev` feature: lowered detection thresholds from
+    # <data_dir>/dev-thresholds.toml. Never in a release build.
+    --dev) dev=1 ;;
     *) usage ;;
   esac
 done
+if [ "$dev" = 1 ] && [ "$profile" = release ]; then
+  echo "build-android.sh: --dev is for development builds, not --release" >&2
+  exit 2
+fi
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -106,6 +114,9 @@ for abi in "${abis[@]}"; do
       export ORT_SKIP_DOWNLOAD=1
       export ORT_CXX_STDLIB=
       features=(--features onnx)
+    fi
+    if [ "$dev" = 1 ]; then
+      features+=(--features dev)
     fi
     cargo ndk --platform 30 -t "$abi" -o "$out_native/jniLibs" \
       build -p faro-android --lib ${features[@]+"${features[@]}"} ${cargo_profile[@]+"${cargo_profile[@]}"}

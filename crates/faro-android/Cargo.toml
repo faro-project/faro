@@ -30,6 +30,12 @@ default = []
 # host tests): the runtime rates frames from context signals only, as a
 # desktop build without a model does.
 onnx = ["faro-service/onnx"]
+# Development builds only (build-android.sh --dev, Gradle -Pfaro.dev=true):
+# read `[dev_thresholds]` from `<data_dir>/dev-thresholds.toml`, as a desktop
+# `dev` build reads it from service.toml, so the whole flag path can be tried
+# without explicit content (faro_service::thresholds). A build without the
+# feature never lowers a threshold.
+dev = ["faro-service/dev"]
 # Build the `uniffi-bindgen` binary (host only).
 bindgen = ["uniffi/cli"]
 

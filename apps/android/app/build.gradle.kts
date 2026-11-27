@@ -22,6 +22,10 @@ val faroGenerated: Provider<Directory> = prebuilt
 // -Pfaro.onnx=false builds the core without ONNX Runtime, and so without the model.
 val withOnnx = providers.gradleProperty("faro.onnx").orNull != "false"
 
+// -Pfaro.dev=true builds the core with its `dev` feature: it reads lowered detection thresholds
+// from <noBackupFilesDir>/faro/dev-thresholds.toml (docs/DEVELOPMENT.md). Never for a release.
+val withDev = providers.gradleProperty("faro.dev").orNull == "true"
+
 // -Pfaro.modelDir=<dir> (or FARO_MODEL_DIR) packages the image model: the directory that
 // crates/faro-detect/models/opennsfw/build.sh writes (manifest.json, opennsfw-int8.onnx and
 // NOTICE.txt). Without it the app has no model and rates from context signals only.
@@ -52,8 +56,10 @@ val buildFaroCore = tasks.register<Exec>("buildFaroCore") {
         "crates/faro-android/build-android.sh",
         out.get().asFile.absolutePath.replace('\\', '/'),
         *(if (withOnnx) emptyArray() else arrayOf("--no-onnx")),
+        *(if (withDev) arrayOf("--dev") else emptyArray()),
     )
     inputs.property("withOnnx", withOnnx)
+    inputs.property("withDev", withDev)
     inputs.dir(repoRoot.resolve("crates/faro-android")).withPropertyName("faroAndroidCrate")
     inputs.file(repoRoot.resolve("Cargo.lock")).withPropertyName("cargoLock")
     outputs.dir(out)

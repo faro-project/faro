@@ -792,6 +792,14 @@ The app's Gradle build runs `crates/faro-android/build-android.sh <out-dir>`, wh
   ```
 
   The link is `http://127.0.0.1` because the client allows plain HTTP only for loopback, which `adb reverse` provides. `FARO_EMULATOR_MINUTES` (default 30) is how long it runs. Don't use `uiautomator dump` while testing: a UI-automation session suspends other accessibility services, so Faro correctly reports its accessibility service as turned off.
+- **Seeing a flag without explicit content.** As on desktop ([Testing the whole flag path](#testing-the-whole-flag-path)), a core built with the `dev` feature lowers the detection thresholds, here from `<data_dir>/dev-thresholds.toml` (`<noBackupFilesDir>/faro/`, a `[dev_thresholds]` section). Build with `./gradlew :app:assembleDebug -Pfaro.dev=true -Pfaro.modelDir=<model dir>` (`build-android.sh --dev`, which refuses `--release`), then, on a debug build:
+
+  ```sh
+  printf '[dev_thresholds]\nany_low = 0.0001\nexplicit_medium = 0.0002\n' |
+    adb shell "run-as org.faro.android sh -c 'cat > no_backup/faro/dev-thresholds.toml'"
+  ```
+
+  The thresholds must keep `any_low <= explicit_medium <= explicit_high`, or the file is ignored with a warning. The core reads the file when its runtime starts, so restart the app; logcat then shows `DEVELOPMENT THRESHOLDS`, and ordinary screens arrive at the instance as `medium` flags with their blurred thumbnails. A build without `dev` never reads the file.
 
 ## CI runners
 

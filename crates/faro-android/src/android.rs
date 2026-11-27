@@ -36,11 +36,18 @@ use std::time::{Duration, Instant};
 /// change that added the platform.
 pub const MIN_SERVER_VERSION: &str = "0.1.0-beta.1";
 
-/// Where the packaged image model's manifest is, under the state directory
-/// (`<data_dir>/faro`): `models/opennsfw/manifest.json`, next to the
-/// `opennsfw-int8.onnx` it names. The app copies both there from its assets
-/// before it creates [`FaroAndroid`] (`ModelAssets` in the Kotlin app).
+/// Where the packaged image model's manifest is, under the data directory
+/// the app passes in (not the core's own state directory, `<data_dir>/faro`):
+/// `models/opennsfw/manifest.json`, next to the `opennsfw-int8.onnx` it
+/// names. The app copies both there from its assets before it creates
+/// [`FaroAndroid`] (`ModelAssets` in the Kotlin app).
 pub const MODEL_MANIFEST: &str = "models/opennsfw/manifest.json";
+
+/// A `dev` build's lowered detection thresholds, under the data directory:
+/// a `[dev_thresholds]` section as in a desktop service.toml. Read only by a
+/// build with the `dev` feature (faro_service::thresholds).
+#[cfg(feature = "dev")]
+pub const DEV_THRESHOLDS_FILE: &str = "dev-thresholds.toml";
 
 /// The session the in-process source reports (the status menu's view is
 /// scoped to it).
@@ -148,6 +155,8 @@ struct Run {
 }
 
 struct Inner {
+    /// The directory the app passed in; the app writes the model under it.
+    data_dir: PathBuf,
     dir: StateDir,
     shared: Arc<Shared>,
     opts: AndroidOptions,
@@ -414,6 +423,7 @@ impl FaroAndroid {
         let approved = is_approved(&dir);
         Ok(Arc::new(FaroAndroid {
             inner: Arc::new(Inner {
+                data_dir,
                 dir,
                 shared: Shared::new(platform, opts.mono.clone()),
                 opts,
@@ -599,6 +609,18 @@ impl Inner {
             state_dir: self.dir.path().to_owned(),
             ..Config::default()
         };
+        #[cfg(feature = "dev")]
+        {
+            // A development build: `[dev_thresholds]` from the data
+            // directory, as a desktop `dev` build reads it from service.toml.
+            let path = self.data_dir.join(DEV_THRESHOLDS_FILE);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                match Config::from_toml_str(&text) {
+                    Ok(c) => cfg.dev_thresholds = c.dev_thresholds,
+                    Err(e) => tracing::warn!(error = %e, "ignoring {DEV_THRESHOLDS_FILE}"),
+                }
+            }
+        }
         if let Some(c) = &self.opts.configure {
             c(&mut cfg);
         }
@@ -616,7 +638,7 @@ impl Inner {
         } else if self.opts.model_packaged {
             // `model_manifest` makes the model required: missing, changed
             // or unloadable raises `integrity_failure`.
-            b = b.model_manifest(self.dir.path().join(MODEL_MANIFEST));
+            b = b.model_manifest(self.data_dir.join(MODEL_MANIFEST));
         }
         let service = b.build().map_err(service_err)?;
         let signals = service.signals();
