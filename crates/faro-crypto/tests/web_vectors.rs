@@ -32,11 +32,14 @@ use faro_proto::keys::{
     KeyRewrap, ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap,
     RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3,
 };
+use faro_proto::report::ReportHeader;
 use faro_proto::roster::{
     epoch_key_check, genesis_prev_hash, group_safety_code, EpochRotation, GroupRole, RosterChange,
     RosterEntry, RosterSnapshot, RosterState,
 };
-use faro_proto::{event, DeviceId, EncryptedItem, Hash32, InstanceId, Signature, UserId};
+use faro_proto::{
+    event, DeviceId, EncryptedItem, EventKind, Hash32, InstanceId, Signature, Urgency, UserId,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -156,6 +159,59 @@ fn device_endorsement() -> DeviceEndorsement {
         device_sign_pubkey: device_sign().public(),
         endorsed_at_ms: 1_790_000_100_000,
         min_manifest: manifest().reference(),
+    }
+}
+
+/// Three linked events from `device_sign()`: a boot, an urgent flag with a
+/// body, and a tamper signed `none` (the instance raises it to its floor).
+/// Body hashes are fixed values, so the headers are deterministic.
+fn event_chain() -> Vec<(event::EventHeader, Signature)> {
+    let (inst, dev) = (InstanceId::new(INSTANCE), DeviceId::new(DEVICE));
+    let mut prev = event::genesis_hash(&inst, &dev);
+    let specs = [
+        (EventKind::Boot, Urgency::None, None),
+        (
+            EventKind::Flag,
+            Urgency::Urgent,
+            Some(("event body 1", 120)),
+        ),
+        (EventKind::Tamper, Urgency::None, Some(("event body 2", 64))),
+    ];
+    let mut out = Vec::new();
+    for (seq, (kind, urgency, body)) in (0u64..).zip(specs) {
+        let header = event::EventHeader {
+            v: event::EVENT_HEADER_VERSION,
+            instance_id: inst.clone(),
+            device_id: dev.clone(),
+            seq,
+            prev_hash: prev,
+            ts_ms: 1_790_000_000_000 + 60_000 * i64::try_from(seq).unwrap(),
+            mono_ms: 5_000 + 60_000 * seq,
+            boot_id: "boot-7f3a".into(),
+            kind,
+            urgency,
+            body_hash: body.map_or(Hash32::ZERO, |(b, _)| Hash32::of(b.as_bytes())),
+            body_len: body.map_or(0, |(_, n)| n),
+        };
+        prev = header.chain_hash();
+        let sig = device_sign().sign(&header);
+        out.push((header, sig));
+    }
+    out
+}
+
+fn report_header() -> ReportHeader {
+    ReportHeader {
+        v: 1,
+        instance_id: InstanceId::new(INSTANCE),
+        member_id: UserId::new(MEMBER),
+        device_id: DeviceId::new(DEVICE),
+        period_start_ms: 1_790_000_000_000,
+        period_end_ms: 1_790_086_400_000,
+        first_seq: Some(0),
+        last_seq: Some(2),
+        body_hash: Hash32::of(b"report body"),
+        body_len: 300,
     }
 }
 
@@ -501,6 +557,20 @@ fn generate() -> Value {
             "signed": signed_json(de.clone(), ms.sign(&de)),
             "signing_bytes_hex": hex::encode(de.signing_bytes()),
         },
+        "event_chain": {
+            "genesis_hash": event::genesis_hash(&inst, &DeviceId::new(DEVICE)),
+            "links": event_chain().iter().map(|(h, sig)| json!({
+                "header": h,
+                "sig": sig,
+                "signing_bytes_hex": hex::encode(h.signing_bytes()),
+                "chain_hash": h.chain_hash(),
+            })).collect::<Vec<_>>(),
+        },
+        "report_header": {
+            "header": report_header(),
+            "sig": device_sign().sign(&report_header()),
+            "signing_bytes_hex": hex::encode(report_header().signing_bytes()),
+        },
         "ally_endorsement": {
             "signed": signed_json(ae.clone(), ms.sign(&ae)),
             "signing_bytes_hex": hex::encode(ae.signing_bytes()),
@@ -621,6 +691,8 @@ fn web_vectors() {
         "/manifest_v3",
         "/ally_names",
         "/device_endorsement",
+        "/event_chain",
+        "/report_header",
         "/ally_endorsement",
         "/member_binding",
         "/key_rewrap",
@@ -648,6 +720,28 @@ fn web_vectors() {
         let pt = open_item(&item, &aad, &UserId::new(id), &k).unwrap();
         assert_eq!(&**pt, s(&v, "/event_item/plaintext").as_bytes());
     }
+    // The event chain the web app walks verifies here from genesis, with
+    // no gaps (bodies stripped, as the chain endpoint serves them).
+    let events: Vec<faro_proto::SignedEvent> = v["event_chain"]["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| faro_proto::SignedEvent {
+            header: serde_json::from_value(l["header"].clone()).unwrap(),
+            sig: serde_json::from_value(l["sig"].clone()).unwrap(),
+            body: None,
+        })
+        .collect();
+    let (_, gaps) = faro_crypto::verify_chain(
+        &InstanceId::new(INSTANCE),
+        &DeviceId::new(DEVICE),
+        &device_sign().public(),
+        &events,
+        false,
+    )
+    .unwrap();
+    assert!(gaps.is_empty());
+
     let item: EncryptedItem = serde_json::from_value(v["report_item"]["item"].clone()).unwrap();
     let aad = h(&v, "/canonical/report_body_aad_hex");
     let pt = open_item(&item, &aad, &UserId::new(ALLY_B), &ally_b()).unwrap();

@@ -128,6 +128,7 @@
 						memberId={member.member_id}
 						viewer={user}
 						keyKind="ally"
+						memberSignPk={member.member_sign_pubkey}
 						nameOf={(id) => (id === user.id ? 'You' : undefined)}
 					/>
 				{:else}

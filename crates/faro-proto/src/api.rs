@@ -1,11 +1,12 @@
 //! HTTP API request/response types (ARCHITECTURE.md §4.5).
 
 use crate::encoding::{Canonical, EncPublicKey, Hash32, SignPublicKey, Signature};
-use crate::event::{EventKind, SignedEvent, Urgency};
+use crate::event::{EventHeader, EventKind, SignedEvent, Urgency};
 use crate::ids::{DeviceId, InstanceId, UserId};
 use crate::keys::{
     AllyEndorsement, DeviceEndorsement, MemberEncKeyBinding, RecipientManifest, Signed,
 };
+use crate::report::ReportHeader;
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version advertised in `/.well-known/faro`.
@@ -387,6 +388,13 @@ impl ServerAlertKind {
 
 /// One row in `GET /v1/ally/feed`: metadata only; content is fetched as a blob
 /// and decrypted in the browser.
+///
+/// Events and reports carry the device-signed header and its signature, so
+/// a reader can check them against the member-signed device endorsement
+/// (the feed response carries those) instead of trusting the instance's
+/// copy of the metadata (PROTOCOL.md §3.5). The plain fields repeat what
+/// the header says, for readers that don't check. `header` and `sig` are
+/// absent from older instances.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FeedItem {
@@ -396,8 +404,13 @@ pub enum FeedItem {
         seq: u64,
         ts_ms: i64,
         kind: EventKind,
+        /// The effective urgency: the signed one raised to the kind's floor.
         urgency: Urgency,
         blob_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<Box<EventHeader>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<Signature>,
     },
     Report {
         member_id: UserId,
@@ -406,6 +419,10 @@ pub enum FeedItem {
         period_start_ms: i64,
         period_end_ms: i64,
         blob_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<Box<ReportHeader>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<Signature>,
     },
     Alert {
         member_id: UserId,
@@ -416,6 +433,15 @@ pub enum FeedItem {
         ts_ms: i64,
         detail: Option<String>,
     },
+}
+
+/// One stored event header in `GET /v1/ally/chain`: the device-signed
+/// header, its signature, and when the instance received it. No body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainLink {
+    pub received_at_ms: i64,
+    pub header: EventHeader,
+    pub sig: Signature,
 }
 
 /// Uniform JSON error body.
