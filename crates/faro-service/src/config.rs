@@ -123,8 +123,8 @@ pub struct CaptureConfig {
     pub agent_kill_threshold: u32,
     /// 600..=86400 (default 600): a longer window catches slower kill loops.
     pub agent_kill_window_secs: u64,
-    /// Consecutive failed captures before a `capture_failing` tamper event.
-    /// 1..=5 (default 5).
+    /// Failed captures among the last 10 attempts (in a row or not) before
+    /// a `capture_failing` tamper event. 1..=5 (default 5).
     pub capture_failure_threshold: u32,
 }
 

@@ -30,7 +30,10 @@ pub mod status;
 pub mod supervisor;
 mod updates;
 
-pub use self::core::{capture_stall_ms, PauseRequest, AGENT_ABSENT_MS, SCREEN_RECORDING};
+pub use self::core::{
+    capture_stall_ms, PauseRequest, ABSENCE_RERAISE_MS, ABSENT_IN_WINDOW_MS, AGENT_ABSENT_MS,
+    SCREEN_RECORDING,
+};
 pub use goodbye::{say_goodbye, GoodbyeError, GoodbyeOptions, GoodbyeOutcome};
 pub use spawn::AgentSpawn;
 pub use status::{Phase, ServiceStatus};

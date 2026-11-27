@@ -7,9 +7,9 @@
 //! | tick | clock check, report rollover, scheduler → `CaptureNow` |
 //! | `Frames` | detector (frames consumed and zeroized) → report; `medium`+ → `flag` event |
 //! | tamper signal | [`route_signal`]: `tamper` event (urgent), or report context |
-//! | captures failing past the threshold | one `capture_failing`, or `permission_revoked` (`never_granted` if it never was) when Screen Recording is off |
+//! | captures failing past the threshold (failures among the last [`CAPTURE_OUTCOME_WINDOW`] attempts) | one `capture_failing`, or `permission_revoked` (`never_granted` if it never was) when Screen Recording is off |
 //! | agent drop / reconnect (any session) | `agent_restarted`, `agent_killed_repeatedly` past the threshold |
-//! | a session (any account) without an agent | `unmonitored_user_session` tamper after [`AGENT_ABSENT_MS`] |
+//! | a session (any account) without an agent | `unmonitored_user_session` tamper after [`AGENT_ABSENT_MS`], or [`ABSENT_IN_WINDOW_MS`] within [`ABSENCE_WINDOW_MS`]; again every [`ABSENCE_RERAISE_MS`] |
 //! | the session at the screen has its agent, but nothing captures from it | `capture_failing` tamper after [`capture_stall_ms`] |
 //! | an agent connects | the login notice in its session (§12) |
 //! | member pause / resume | `paused` / `resumed` events |
@@ -50,12 +50,12 @@
 //! account's short name inside the encrypted body (§3.6), and the report
 //! timeline records which account was at the screen.
 
-use super::journal::{ReportJournal, DAY_MS};
+use super::journal::{ReportJournal, SavedTimeline, DAY_MS};
 use super::net::OutboxHandle;
 use super::status::StatusTx;
 use super::supervisor::Supervisor;
 use crate::source::{CaptureTarget, SessionStatus, SourceCommand, SourceEvent};
-use crate::state::{Enrollment, StateDir, PERMISSIONS_FILE, SETTINGS_FILE};
+use crate::state::{Enrollment, StateDir, PERMISSIONS_FILE, SETTINGS_FILE, TIMELINE_FILE};
 use crate::update::artifacts::Swaps;
 use faro_core::clock::{Clock, ClockGuard, SystemClock};
 use faro_core::scheduler::interval_bounds_ms;
@@ -73,7 +73,7 @@ use faro_proto::report::ActivityState;
 use faro_proto::Urgency;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
@@ -128,6 +128,8 @@ const COMMIT_FAILING_ALARM_MS: u64 = 15 * 60 * 1000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Latch {
     Absence(String),
+    /// A session's absences added up within [`ABSENCE_WINDOW_MS`].
+    AbsenceWindow(String),
     Stall,
     CaptureFailing,
     ScreenOff,
@@ -176,6 +178,30 @@ enum CommitFail {
 /// the slowest allowed ping interval plus launchd's relaunch throttle, with
 /// margin. A real agent restart reconnects within seconds.
 pub const AGENT_ABSENT_MS: u64 = 90_000;
+/// The sliding window over which a session's absences add up (#193), so
+/// an agent that leaves for just under [`AGENT_ABSENT_MS`] again and again
+/// is caught too.
+pub const ABSENCE_WINDOW_MS: u64 = 3_600_000;
+/// Awake time without an agent within [`ABSENCE_WINDOW_MS`] that raises
+/// `unmonitored_user_session` although no single absence reached
+/// [`AGENT_ABSENT_MS`]: 3 minutes an hour (5 %). An agent restart (crash,
+/// update) or a login reconnects within seconds, so it takes many of them
+/// to get there, and the kill-loop signal counts those.
+pub const ABSENT_IN_WINDOW_MS: u64 = 2 * AGENT_ABSENT_MS;
+/// While a reported absence lasts, `unmonitored_user_session` is raised
+/// again after this much more awake time: allies hear it is still going
+/// on, since heartbeats can only say `idle` (no state the instance has
+/// means "unmonitored").
+pub const ABSENCE_RERAISE_MS: u64 = 3_600_000;
+/// Absence is kept in buckets of this much monotonic time.
+const ABSENCE_BUCKET_MS: u64 = 60_000;
+/// Capture attempts over which failures are counted towards
+/// `capture_failing` (#192): twice the largest allowed
+/// `capture_failure_threshold`, so N failures in a row are always caught,
+/// and so are N failures among the last ten, which no success in between
+/// resets (half of all captures at the default of 5). Counted in attempts,
+/// not time, so it holds at the slower idle capture rate too.
+pub const CAPTURE_OUTCOME_WINDOW: usize = 10;
 /// Awake time the session at the screen may go without a capture attempt,
 /// while its agent is connected and nothing pauses capture, before the
 /// service raises `capture_failing` (§3.7): the longest regular interval
@@ -197,7 +223,28 @@ const MAX_TICK_GAP_MS: u64 = 5_000;
 /// Awake time after which an agent's claim that the system sleeps is no
 /// longer believed: a sleeping machine does not keep running the service.
 /// Generous, because macOS dark wakes (Power Nap) run processes briefly.
+///
+/// The budget is spent across claims and restored only by real sleep (a
+/// tick gap of [`SLEPT_GAP_MS`]), so claiming sleep again after a claimed
+/// wake does not start a new one.
 const SLEEP_CLAIM_MAX_AWAKE_MS: u64 = 600_000;
+/// A gap between ticks this long is the machine having slept (or being
+/// off): the monotonic clock counts sleep, the tick loop does not run.
+const SLEPT_GAP_MS: u64 = 30_000;
+/// Awake time a session may be claimed locked while input keeps arriving
+/// (idle time below the idle threshold) before the claim is not believed.
+/// A real lock follows input that stops: the idle threshold passes, and the
+/// agent says so within its resend interval (60 s). Twice that, at least
+/// [`SLEEP_CLAIM_MAX_AWAKE_MS`].
+fn locked_active_max_ms(idle_threshold_secs: u64) -> u64 {
+    idle_threshold_secs
+        .saturating_mul(2_000)
+        .saturating_add(60_000)
+        .max(SLEEP_CLAIM_MAX_AWAKE_MS)
+}
+/// How often the report timeline is saved ([`TIMELINE_FILE`]) besides at
+/// every change, so its end is known after a power cut.
+const TIMELINE_SAVE_MS: u64 = 60_000;
 /// How often an unsealed daily report is retried.
 const REPORT_RETRY_MS: u64 = 60_000;
 /// Unsealed reports kept for retry; older ones are given up (with an error).
@@ -242,6 +289,16 @@ impl SeenPermissions {
 struct Absence {
     ms: u64,
     reported: bool,
+    /// Raise it again once `ms` reaches this ([`ABSENCE_RERAISE_MS`]).
+    reraise_at_ms: u64,
+}
+
+impl Absence {
+    /// For the status: past the limit, or reported (also when its window
+    /// was).
+    fn unmonitored(&self) -> bool {
+        self.ms >= AGENT_ABSENT_MS || self.reported
+    }
 }
 
 /// How long the session at the screen has had a connected agent that
@@ -391,6 +448,13 @@ pub struct Core {
     sessions: Option<Vec<SessionStatus>>,
     /// Sessions currently without an agent.
     absence: BTreeMap<String, Absence>,
+    /// Awake time each listed session was without an agent, in
+    /// `(bucket start, ms)` buckets of monotonic time, over the last
+    /// [`ABSENCE_WINDOW_MS`].
+    absent_history: BTreeMap<String, VecDeque<(u64, u64)>>,
+    /// Sessions whose windowed absence has been reported; cleared after a
+    /// window with no absence.
+    absence_window_reported: BTreeSet<String>,
     /// The session at the screen has its agent but is not captured from.
     stall: Stall,
     /// Sessions shown the login notice since they began.
@@ -406,6 +470,8 @@ pub struct Core {
     guard: ClockGuard,
     supervisor: Supervisor,
     failures_in_row: u32,
+    /// The last [`CAPTURE_OUTCOME_WINDOW`] capture attempts: `true` failed.
+    capture_outcomes: VecDeque<bool>,
     capture_failing_reported: bool,
     capture_failure_threshold: u32,
     /// [`CoreParts::capture_permission`].
@@ -420,8 +486,18 @@ pub struct Core {
     accessibility: Option<bool>,
     seen_permissions: SeenPermissions,
     recent_signals: HashMap<SignalKey, u64>,
-    /// Awake time since the agent said the system sleeps.
+    /// Awake time the agent has said the system sleeps, since it last
+    /// really slept.
     asleep_awake_ms: u64,
+    /// The capture target says its session is locked.
+    claimed_locked: bool,
+    /// Awake time it has said so while input kept arriving.
+    locked_active_ms: u64,
+    /// That passed [`locked_active_max_ms`]: the claim is ignored until the
+    /// session is idle or unlocked.
+    lock_disbelieved: bool,
+    /// When the timeline is next saved (monotonic).
+    next_timeline_save: u64,
     last_tick_mono: Option<u64>,
     /// Finished report periods whose sealing failed, with their end.
     unsealed: Vec<(ReportJournal, i64)>,
@@ -500,6 +576,8 @@ impl Core {
             agent_versions: BTreeMap::new(),
             sessions: None,
             absence: BTreeMap::new(),
+            absent_history: BTreeMap::new(),
+            absence_window_reported: BTreeSet::new(),
             stall: Stall::default(),
             noticed: BTreeSet::new(),
             capture_in_flight: None,
@@ -511,6 +589,7 @@ impl Core {
             guard: ClockGuard::default(),
             supervisor: p.supervisor,
             failures_in_row: 0,
+            capture_outcomes: VecDeque::new(),
             capture_failing_reported: false,
             capture_failure_threshold: p.capture_failure_threshold,
             capture_permission: p.capture_permission,
@@ -520,6 +599,10 @@ impl Core {
             seen_permissions,
             recent_signals: HashMap::new(),
             asleep_awake_ms: 0,
+            claimed_locked: false,
+            locked_active_ms: 0,
+            lock_disbelieved: false,
+            next_timeline_save: 0,
             last_tick_mono: None,
             unsealed: Vec::new(),
             next_report_retry: 0,
@@ -695,6 +778,15 @@ impl Core {
             Latch::Absence(id) => {
                 if let Some(a) = self.absence.get_mut(&id) {
                     a.reported = true;
+                    a.reraise_at_ms = a.ms.saturating_add(ABSENCE_RERAISE_MS);
+                }
+                self.update_session_status();
+            }
+            Latch::AbsenceWindow(id) => {
+                // Only while the window still holds absence; otherwise the
+                // condition is already over.
+                if self.absent_history.get(&id).is_some_and(|h| !h.is_empty()) {
+                    self.absence_window_reported.insert(id);
                 }
             }
             Latch::Stall => self.stall.reported = true,
@@ -844,6 +936,7 @@ impl Core {
     /// `boot` event and announcement of any settings change since the last
     /// run (or since the defaults, on first start).
     pub async fn startup(&mut self) {
+        self.recover_timeline().await;
         let body = EventBody::Boot {
             os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -911,8 +1004,14 @@ impl Core {
         let now = self.clock.wall_ms();
         if now > self.journal.start_ms() {
             let j = self.journal.clone();
-            if !self.seal(&j, now.min(j.end_ms())).await {
-                tracing::error!("the partial report for this run could not be sealed; it is lost");
+            if self.seal(&j, now.min(j.end_ms())).await {
+                if let Err(e) = self.state_dir.remove(TIMELINE_FILE) {
+                    tracing::warn!(error = %e, "cannot remove the saved report timeline");
+                }
+            } else {
+                // Its timeline is recovered at the next start.
+                tracing::error!("the partial report for this run could not be sealed");
+                self.save_timeline();
             }
         }
         let _ = self.source_tx.try_send(SourceCommand::Shutdown);
@@ -991,9 +1090,61 @@ impl Core {
         };
         let done = std::mem::replace(&mut self.journal, next);
         self.reopen_activity();
+        // Saved first: a crash after sealing must not seal it again.
+        self.save_timeline();
         if !self.seal(&done, end).await {
             self.keep_unsealed(done, end);
         }
+    }
+
+    /// Save the current period's timeline ([`TIMELINE_FILE`]), so a power
+    /// cut or crash does not lose it (#193): unmonitored time in particular
+    /// is on the report only. Recovered by [`Self::recover_timeline`].
+    fn save_timeline(&mut self) {
+        self.next_timeline_save = self.clock.mono_ms().saturating_add(TIMELINE_SAVE_MS);
+        let saved = self.journal.saved_timeline(self.clock.wall_ms());
+        if let Err(e) = self.state_dir.write_json(TIMELINE_FILE, &saved) {
+            tracing::warn!(error = %e, "cannot save the report timeline");
+        }
+    }
+
+    /// The previous run ended without sealing its report (a crash or power
+    /// cut): put its saved timeline back. The same report day continues in
+    /// the current journal, with the time the service was not running as
+    /// `off`; an earlier day is sealed as its own report, up to when the
+    /// timeline was last saved. Counts and flags from before are not saved
+    /// (the flags were delivered as events).
+    async fn recover_timeline(&mut self) {
+        let saved: SavedTimeline = match self.state_dir.read_json(TIMELINE_FILE) {
+            Ok(Some(t)) => t,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "saved report timeline unreadable; dropped");
+                self.save_timeline();
+                return;
+            }
+        };
+        let now = self.clock.wall_ms();
+        let (start, end) = (self.journal.start_ms(), self.journal.end_ms());
+        if saved.end_ms == end && saved.start_ms < start {
+            tracing::info!("recovered today's report timeline from the last run");
+            self.journal = ReportJournal::recovered(
+                &saved,
+                saved.saved_ms.min(now),
+                self.settings.report_options(),
+            );
+            self.reopen_activity();
+        } else if saved.end_ms <= start && saved.saved_ms > saved.start_ms {
+            let until = saved.saved_ms.min(saved.end_ms);
+            let j = ReportJournal::recovered(&saved, until, self.settings.report_options());
+            tracing::info!("sealing the last run's unsealed report from its saved timeline");
+            if !self.seal(&j, until).await {
+                self.keep_unsealed(j, until);
+            }
+        } else {
+            tracing::warn!("saved report timeline does not fit the current period; dropped");
+        }
+        self.save_timeline();
     }
 
     /// A new journal opens in the current state; record its account too.
@@ -1056,6 +1207,7 @@ impl Core {
         );
         let done = std::mem::replace(&mut self.journal, next);
         self.reopen_activity();
+        self.save_timeline();
         self.seal(&done, end).await
     }
 
@@ -1076,6 +1228,7 @@ impl Core {
                 .state(self.clock.wall_ms(), state, account.clone());
             self.activity = state;
             self.activity_account = account;
+            self.save_timeline();
         }
     }
 
@@ -1115,8 +1268,12 @@ impl Core {
         self.capture_in_flight = None;
         self.last_answered = None;
         self.sleeping = false;
-        self.asleep_awake_ms = 0;
+        // `asleep_awake_ms` is kept: it is about the machine, and an agent
+        // restart must not renew it.
         self.session = Session::default();
+        self.claimed_locked = false;
+        self.locked_active_ms = 0;
+        self.lock_disbelieved = false;
         self.context = ContextSignals::default();
         self.screen_permission = None;
         self.screen_off_reported = false;
@@ -1171,7 +1328,7 @@ impl Core {
         let missing: Vec<String> = self
             .absence
             .iter()
-            .filter(|(_, a)| a.ms >= AGENT_ABSENT_MS)
+            .filter(|(_, a)| a.unmonitored())
             .map(|(id, _)| self.account_of(id))
             .collect();
         let sessions = self.sessions.as_ref().map_or(1, Vec::len);
@@ -1197,10 +1354,7 @@ impl Core {
             agent_connected: self.agents.contains_key(id),
             agent_version: self.agent_versions.get(id).cloned(),
             capture_target: target == Some(id),
-            unmonitored: self
-                .absence
-                .get(id)
-                .is_some_and(|a| a.ms >= AGENT_ABSENT_MS),
+            unmonitored: self.absence.get(id).is_some_and(Absence::unmonitored),
         };
         let listed = self.sessions.as_deref().unwrap_or_default();
         let mut out: Vec<SessionReport> = listed
@@ -1307,11 +1461,14 @@ impl Core {
         self.apply_swaps();
         let mono = self.clock.mono_ms();
         let wall = self.clock.wall_ms();
-        let awake = self
-            .last_tick_mono
-            .map_or(0, |t| mono.saturating_sub(t))
-            .min(MAX_TICK_GAP_MS);
+        let gap = self.last_tick_mono.map_or(0, |t| mono.saturating_sub(t));
+        let awake = gap.min(MAX_TICK_GAP_MS);
         self.last_tick_mono = Some(mono);
+        if gap >= SLEPT_GAP_MS {
+            // The machine really slept: a later sleep claim is believed
+            // again for a while.
+            self.asleep_awake_ms = 0;
+        }
         self.retry_queued().await;
         if let Some(sig) = self.guard.observe_clock(&*self.clock) {
             self.signal(sig).await;
@@ -1325,9 +1482,13 @@ impl Core {
                     awake_ms = self.asleep_awake_ms,
                     "the agent reported system sleep but the service kept running; resuming capture"
                 );
+                // The budget stays spent until the machine really sleeps.
                 self.sleeping = false;
-                self.asleep_awake_ms = 0;
             }
+        }
+        self.check_lock_claim(awake);
+        if mono >= self.next_timeline_save {
+            self.save_timeline();
         }
         if !self.unsealed.is_empty() && mono >= self.next_report_retry {
             self.retry_unsealed().await;
@@ -1395,9 +1556,91 @@ impl Core {
         }
     }
 
+    /// Set `session.locked` from the target's claim, unless the claim is
+    /// not believed ([`locked_active_max_ms`]). The doubt ends when the
+    /// session is idle or unlocked.
+    fn apply_lock_claim(&mut self) {
+        let idle_threshold = self.scheduler.config().idle_threshold_secs;
+        if !self.claimed_locked || self.session.idle_secs >= idle_threshold {
+            self.locked_active_ms = 0;
+            self.lock_disbelieved = false;
+        }
+        self.session.locked = self.claimed_locked && !self.lock_disbelieved;
+    }
+
+    /// Count awake time the session is claimed locked while input keeps
+    /// arriving, and stop believing the claim past
+    /// [`locked_active_max_ms`]: a locked screen that never goes idle is
+    /// someone using the computer.
+    fn check_lock_claim(&mut self, awake_ms: u64) {
+        let idle_threshold = self.scheduler.config().idle_threshold_secs;
+        if !self.claimed_locked
+            || self.lock_disbelieved
+            || self.sleeping
+            || self.session.idle_secs >= idle_threshold
+        {
+            return;
+        }
+        self.locked_active_ms = self.locked_active_ms.saturating_add(awake_ms);
+        if self.locked_active_ms > locked_active_max_ms(idle_threshold) {
+            tracing::warn!(
+                active_ms = self.locked_active_ms,
+                "the agent reports a locked screen that is in use; resuming capture"
+            );
+            self.lock_disbelieved = true;
+            self.apply_lock_claim();
+            self.publish_state();
+        }
+    }
+
+    /// Add `awake_ms` of absence to `session`'s window, and return the
+    /// window's total.
+    fn note_absent(&mut self, session: &str, now: u64, awake_ms: u64) -> u64 {
+        let h = self.absent_history.entry(session.to_owned()).or_default();
+        if awake_ms > 0 {
+            let bucket = now - now % ABSENCE_BUCKET_MS;
+            match h.back_mut() {
+                Some((b, ms)) if *b == bucket => *ms = ms.saturating_add(awake_ms),
+                _ => h.push_back((bucket, awake_ms)),
+            }
+        }
+        h.iter().map(|(_, ms)| *ms).sum()
+    }
+
+    /// Drop absence older than [`ABSENCE_WINDOW_MS`] and the windows of
+    /// sessions that ended; a window left empty re-arms its report.
+    fn trim_absence_windows(&mut self, now: u64) {
+        let listed: Vec<String> = match &self.sessions {
+            Some(list) => list.iter().map(|s| s.id.clone()).collect(),
+            None => vec![IMPLICIT_SESSION.to_owned()],
+        };
+        self.absent_history.retain(|id, h| {
+            while h
+                .front()
+                .is_some_and(|(b, _)| now.saturating_sub(*b) > ABSENCE_WINDOW_MS)
+            {
+                h.pop_front();
+            }
+            listed.contains(id) && !h.is_empty()
+        });
+        let over: Vec<String> = self
+            .absence_window_reported
+            .iter()
+            .filter(|id| !self.absent_history.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in over {
+            self.absence_window_reported.remove(&id);
+            self.cancel_latch(&Latch::AbsenceWindow(id));
+        }
+    }
+
     /// Count awake time each session has been without an agent, and raise
     /// `unmonitored_user_session` for its account once that passes
-    /// [`AGENT_ABSENT_MS`].
+    /// [`AGENT_ABSENT_MS`] in one go, or [`ABSENT_IN_WINDOW_MS`] within
+    /// [`ABSENCE_WINDOW_MS`]; again every [`ABSENCE_RERAISE_MS`] while one
+    /// absence lasts. Only awake time counts, and none during a member
+    /// pause.
     async fn check_agent_absence(&mut self, awake_ms: u64) {
         // A member pause is announced to allies, so a missing agent during
         // it hides nothing; the count resumes when the pause ends.
@@ -1419,13 +1662,20 @@ impl Core {
         };
         self.absence
             .retain(|id, _| missing.iter().any(|(m, _, _)| m == id));
+        let now = self.clock.mono_ms();
+        self.trim_absence_windows(now);
         let mut newly = Vec::new();
         for (id, account, active) in missing {
+            let in_window = self.note_absent(&id, now, awake_ms);
+            let window_open = !self.absence_window_reported.contains(&id);
             let a = self.absence.entry(id.clone()).or_default();
             a.ms = a.ms.saturating_add(awake_ms);
             // Latched once the event has committed; until then it is
             // raised again each tick, unless one is already waiting.
-            if a.ms >= AGENT_ABSENT_MS && !a.reported {
+            let first = !a.reported
+                && (a.ms >= AGENT_ABSENT_MS || (window_open && in_window >= ABSENT_IN_WINDOW_MS));
+            let again = a.reported && a.ms >= a.reraise_at_ms;
+            if first || again {
                 newly.push((id, account, active, a.ms));
             }
         }
@@ -1443,10 +1693,11 @@ impl Core {
                 "a session has had no Faro agent connected"
             );
             let user = label(&account).unwrap_or_else(|| "unknown".to_owned());
+            // Any report of a session's absence also covers its window.
             self.signal_latched(
                 TamperSignal::UnmonitoredUserSession { user },
                 label(&account),
-                vec![Latch::Absence(id)],
+                vec![Latch::Absence(id.clone()), Latch::AbsenceWindow(id)],
             )
             .await;
             if active && !self.capturing() {
@@ -1533,9 +1784,24 @@ impl Core {
         .await;
     }
 
+    /// Record one capture attempt's outcome in the window; returns the
+    /// failures in it.
+    fn note_capture_outcome(&mut self, failed: bool) -> u32 {
+        if self.capture_outcomes.len() >= CAPTURE_OUTCOME_WINDOW {
+            self.capture_outcomes.pop_front();
+        }
+        self.capture_outcomes.push_back(failed);
+        let n = self.capture_outcomes.iter().filter(|f| **f).count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// Count a failed capture, and raise `capture_failing` (or
+    /// `permission_revoked`) once `capture_failure_threshold` of the last
+    /// [`CAPTURE_OUTCOME_WINDOW`] attempts failed.
     async fn capture_failed(&mut self, reason: &str) {
         tracing::warn!(%reason, "capture failed");
         self.failures_in_row = self.failures_in_row.saturating_add(1);
+        let in_window = self.note_capture_outcome(true);
         self.journal.capture_failure();
         let failure = CaptureFailure {
             at_ms: self.clock.wall_ms(),
@@ -1547,7 +1813,7 @@ impl Core {
             s.capture.consecutive_failures = in_row;
             s.capture.last_failure = Some(failure);
         });
-        if self.failures_in_row >= self.capture_failure_threshold
+        if in_window >= self.capture_failure_threshold
             && !self.capture_failing_reported
             && !self.latch_pending(&Latch::CaptureFailing)
         {
@@ -1574,7 +1840,7 @@ impl Core {
                     }
                 }
                 (false, _) => TamperSignal::CaptureFailing {
-                    consecutive_failures: self.failures_in_row,
+                    consecutive_failures: self.failures_in_row.max(in_window),
                 },
             };
             self.signal_latched(sig, account, latches).await;
@@ -1701,8 +1967,14 @@ impl Core {
             return;
         };
         self.failures_in_row = 0;
-        self.capture_failing_reported = false;
-        self.cancel_latch(&Latch::CaptureFailing);
+        if !continuation {
+            let in_window = self.note_capture_outcome(false);
+            // Re-armed once the window no longer holds enough failures.
+            if in_window < self.capture_failure_threshold {
+                self.capture_failing_reported = false;
+                self.cancel_latch(&Latch::CaptureFailing);
+            }
+        }
         let mono = self.clock.mono_ms();
         let wall = self.clock.wall_ms();
         self.scheduler.on_result(mono, best.rating, borderline);
@@ -1852,23 +2124,32 @@ impl Core {
                     locked,
                     display_asleep,
                 };
+                self.claimed_locked = locked;
+                self.apply_lock_claim();
                 self.publish_state();
             }
             SourceEvent::SessionChanged(c) => {
                 match c {
-                    SessionChange::Locked => self.session.locked = true,
+                    SessionChange::Locked => {
+                        self.claimed_locked = true;
+                        self.apply_lock_claim();
+                    }
                     SessionChange::Unlocked => {
-                        self.session.locked = false;
+                        self.claimed_locked = false;
                         self.session.idle_secs = 0;
+                        self.apply_lock_claim();
                     }
                     SessionChange::DisplaySleep => self.session.display_asleep = true,
                     SessionChange::DisplayWake => self.session.display_asleep = false,
                     SessionChange::SystemSleep => {
-                        if !self.sleeping {
-                            self.asleep_awake_ms = 0;
+                        if self.asleep_awake_ms > SLEEP_CLAIM_MAX_AWAKE_MS {
+                            tracing::warn!(
+                                "the agent reported system sleep again without the machine sleeping; ignored"
+                            );
+                        } else {
+                            self.sleeping = true;
+                            self.set_activity(ActivityState::Asleep);
                         }
-                        self.sleeping = true;
-                        self.set_activity(ActivityState::Asleep);
                     }
                     SessionChange::SystemWake => {
                         self.sleeping = false;

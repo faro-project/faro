@@ -27,7 +27,7 @@ use faro_ipc::{hello, AgentHello, IpcClient};
 use faro_proto::api::DeviceState;
 use faro_proto::body::{EventBody, TamperSignal};
 use faro_proto::{EventKind, Urgency};
-use faro_service::runtime::AGENT_ABSENT_MS;
+use faro_service::runtime::{ABSENCE_RERAISE_MS, ABSENT_IN_WINDOW_MS, AGENT_ABSENT_MS};
 use faro_service::source::ipc::IpcFrameSource;
 use faro_service::source::sessions::SessionEntry;
 use faro_service::{AgentSpawn, Phase};
@@ -174,6 +174,15 @@ struct Setup {
 /// An endorsed, running device whose capture side is the IPC source, with
 /// `logins` as its sessions; no agent connected yet.
 async fn setup_with(logins: Logins, classifier: Box<dyn faro_detect::Classifier>) -> Setup {
+    setup_source(logins, classifier, |src, _| src).await
+}
+
+/// As [`setup_with`], with `tweak` applied to the source.
+async fn setup_source(
+    logins: Logins,
+    classifier: Box<dyn faro_detect::Classifier>,
+    tweak: impl FnOnce(IpcFrameSource, &Device) -> IpcFrameSource,
+) -> Setup {
     let w = World::new().await;
     let mut dev = w.enroll_device().await;
     // Private, whatever the umask: the socket checks refuse a group-writable
@@ -194,7 +203,8 @@ async fn setup_with(logins: Logins, classifier: Box<dyn faro_detect::Classifier>
         r"\\.\pipe\faro-test-{}\agent",
         sock_dir.path().file_name().unwrap().to_string_lossy()
     ));
-    dev.start_with(classifier, Box::new(ipc_source(&socket, &logins)));
+    let source = tweak(ipc_source(&socket, &logins), &dev);
+    dev.start_with(classifier, Box::new(source));
     dev.wait("awaiting endorsement", |s| {
         s.phase == Phase::AwaitingEndorsement
     })
@@ -617,4 +627,233 @@ fn agent_idle_threshold_matches_the_scheduler() {
     let agent = AgentConfig::new("/tmp/x.sock").idle_threshold.as_secs();
     let scheduler = faro_core::SchedulerConfig::default().idle_threshold_secs;
     assert_eq!(agent, scheduler);
+}
+
+/// Move the device clock forward by `ms` in `step` steps, letting the
+/// service tick (every 10 ms) between them, until `pred` holds. Returns
+/// the last status.
+async fn advance_in(
+    dev: &Device,
+    ms: u64,
+    step: u64,
+    mut pred: impl FnMut(&faro_service::ServiceStatus) -> bool,
+) -> faro_service::ServiceStatus {
+    let mut driven = 0;
+    loop {
+        let st = dev.status();
+        if pred(&st) || driven >= ms {
+            return st;
+        }
+        dev.clock.advance(step);
+        driven += step;
+        tokio::time::sleep(Duration::from_millis(12)).await;
+    }
+}
+
+/// The tamper signals of `dev`'s events, as the ally decrypts them.
+async fn tamper_signals(w: &World, dev: &Device) -> Vec<TamperSignal> {
+    let last = dev.upload_all().await;
+    assert!(last > 0);
+    let mut out = Vec::new();
+    for ev in w.feed_events(&w.ally.session).await {
+        if ev.kind != EventKind::Tamper {
+            continue;
+        }
+        if let EventBody::Tamper { signal, .. } = ally_body(w, dev, ev.seq).await {
+            out.push(signal);
+        }
+    }
+    out
+}
+
+/// #192: the moment of a capture is the schedule's, not the agent's. An
+/// agent that holds its captures for 20 s (stopped with `SIGSTOP`, say,
+/// while the screen is changed) answers promptly enough for the answer
+/// window, but the captures were taken 20 s after the request: each is a
+/// failed capture. Answering every third one on time does not reset the
+/// count: failures among the last attempts are `capture_failing`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_that_holds_its_captures_is_capture_failing() {
+    // The agent below stamps its captures with the device clock, so the
+    // source reads request times from it too.
+    let Setup {
+        w,
+        mut dev,
+        logins: _logins,
+        socket,
+        _sock_dir,
+    } = setup_source(Logins::alex(), quiet_classifier(), |src, dev| {
+        src.with_clock(Arc::new(dev.clock.clone()))
+    })
+    .await;
+    let mut agent = {
+        let mut tries = 0;
+        loop {
+            let mut c = IpcClient::connect(&socket).await.expect("connect");
+            match hello(
+                &mut c,
+                AgentHello::new(env!("CARGO_PKG_VERSION"), session_of("alex"), "alex"),
+                Duration::from_secs(5),
+            )
+            .await
+            {
+                Ok(_) => break c,
+                Err(e) if tries > 50 => panic!("handshake: {e}"),
+                Err(_) => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+    };
+    dev.wait("agent connected", |s| s.agent_connected).await;
+    let clock = dev.clock.clone();
+    let held = tokio::spawn(async move {
+        let mut answered = 0u32;
+        let mut asked = 0u32;
+        loop {
+            let Ok(m) = agent.recv().await else {
+                return answered;
+            };
+            match m {
+                faro_ipc::ServiceMsg::Ping { nonce } => {
+                    if agent
+                        .send(&faro_ipc::AgentMsg::Pong { nonce })
+                        .await
+                        .is_err()
+                    {
+                        return answered;
+                    }
+                }
+                faro_ipc::ServiceMsg::CaptureNow { .. } => {
+                    asked += 1;
+                    if !asked.is_multiple_of(3) {
+                        // Held for 20 s, then captured and sent at once.
+                        clock.advance(20_000);
+                    }
+                    let frame = faro_ipc::WireFrame::new(
+                        4,
+                        4,
+                        faro_ipc::WirePixelFormat::Rgba8,
+                        0,
+                        vec![7u8; 64],
+                    )
+                    .unwrap();
+                    let msg = faro_ipc::AgentMsg::Frames {
+                        captured_at_mono_ms: faro_core::clock::Clock::mono_ms(&clock),
+                        frames: vec![frame],
+                    };
+                    if agent.send(&msg).await.is_err() {
+                        return answered;
+                    }
+                    answered += 1;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let st = advance_in(&dev, 3_600_000, 500, |s| s.tamper_events >= 1).await;
+    assert!(st.tamper_events >= 1, "no tamper: {st:?}");
+    assert!(st.captures >= 1, "the prompt ones were accepted: {st:?}");
+    assert!(st.capture_failures >= 5, "{st:?}");
+    assert!(
+        st.capture_failures >= 2 * st.captures,
+        "only the held ones failed: {st:?}"
+    );
+    assert_eq!(
+        st.capture.last_failure.as_ref().map(|f| f.reason.as_str()),
+        Some("capture taken 20 s after the request"),
+        "{st:?}"
+    );
+    let signals = tamper_signals(&w, &dev).await;
+    assert!(
+        matches!(signals.as_slice(), [TamperSignal::CaptureFailing { consecutive_failures }] if *consecutive_failures >= 5),
+        "{signals:?}"
+    );
+    held.abort();
+    dev.shutdown().await;
+}
+
+/// #193: absences add up. An agent stopped for just under the absence
+/// limit, again and again (too rarely for the kill-loop signal), leaves
+/// its session unmonitored a good part of the time: once its absences
+/// within the hour pass the windowed limit, that is
+/// `unmonitored_user_session`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_short_absences_add_up() {
+    let Setup {
+        w,
+        mut dev,
+        logins: _logins,
+        socket,
+        _sock_dir,
+    } = setup().await;
+    let away = AGENT_ABSENT_MS - 10_000;
+    let mut agent = RealAgent::start(&dev, &socket, "alex");
+    dev.wait("agent connected", |s| s.agent_connected).await;
+    let mut absences: u64 = 0;
+    loop {
+        agent.stop().await;
+        dev.wait("agent gone", |s| !s.agent_connected).await;
+        // Let the source report the session as without its agent.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        absences += 1;
+        let st = advance(&dev, away, |s| !s.unmonitored_accounts.is_empty()).await;
+        agent = RealAgent::start(&dev, &socket, "alex");
+        dev.wait("agent back", |s| s.agent_connected).await;
+        if !st.unmonitored_accounts.is_empty() {
+            break;
+        }
+        assert!(
+            absences * away < ABSENT_IN_WINDOW_MS + away,
+            "no tamper after {absences} absences: {st:?}"
+        );
+        // Connected long enough that the departures stay below the
+        // kill-loop threshold (3 in 10 minutes).
+        advance(&dev, 250_000, |_| false).await;
+    }
+    assert_eq!(absences, 3, "caught during the third absence");
+    // More than ten minutes of device time ran ahead of the instance's
+    // clock here, which the device reports as clock manipulation (see
+    // e2e_support); that is the test's doing, not the agent's.
+    let mut signals = tamper_signals(&w, &dev).await;
+    signals.retain(|s| !matches!(s, TamperSignal::ClockManipulation { .. }));
+    assert!(
+        matches!(signals.as_slice(), [TamperSignal::UnmonitoredUserSession { user }] if user == "alex"),
+        "only the unmonitored session, not a kill loop: {signals:?}"
+    );
+    agent.stop().await;
+    dev.shutdown().await;
+}
+
+/// #193: while a reported absence lasts, it is reported again every
+/// [`ABSENCE_RERAISE_MS`] of awake time, not once for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lasting_absence_is_raised_again() {
+    let Setup {
+        w,
+        mut dev,
+        logins: _logins,
+        socket,
+        _sock_dir,
+    } = setup().await;
+    let agent = RealAgent::start(&dev, &socket, "alex");
+    dev.wait("agent connected", |s| s.agent_connected).await;
+    agent.stop().await;
+    dev.wait("agent gone", |s| !s.agent_connected).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let st = advance_in(&dev, AGENT_ABSENT_MS * 2, 2_000, |s| s.tamper_events >= 1).await;
+    assert_eq!(st.tamper_events, 1, "{st:?}");
+    let st = advance_in(&dev, ABSENCE_RERAISE_MS + 60_000, 2_000, |s| {
+        s.tamper_events >= 2
+    })
+    .await;
+    assert_eq!(st.tamper_events, 2, "raised again: {st:?}");
+    let signals = tamper_signals(&w, &dev).await;
+    assert_eq!(signals.len(), 2, "{signals:?}");
+    assert!(signals
+        .iter()
+        .all(|s| matches!(s, TamperSignal::UnmonitoredUserSession { user } if user == "alex")));
+    dev.shutdown().await;
 }

@@ -58,8 +58,18 @@
 //!   *late* answer (to a request whose answer window closed, or that was
 //!   withdrawn when the screen changed hands) is dropped too, but not held
 //!   against the agent: a slow agent is not a misbehaving one.
-//! * **Liveness.** Every agent is pinged every `ping_every`; a missed pong
-//!   drops the connection (a hung agent counts as a disconnect, §3.7).
+//! * **Captures on time.** The schedule is only as unpredictable as the
+//!   agent is prompt (§3.4), so an answer must arrive within
+//!   [`CAPTURE_ANSWER_WINDOW`] and its capture must have started within
+//!   [`CAPTURE_START_MAX_MS`] of the request, on the monotonic clock both
+//!   sides read. A capture stamped before the request answers an earlier
+//!   one and is dropped as late; one that started too late is a failed
+//!   capture (`CaptureFailed`, which counts towards `capture_failing`).
+//!   One capture carries at most [`MAX_FRAMES_PER_CAPTURE`] frames.
+//! * **Liveness.** Every agent is pinged every `ping_every`; a pong missing
+//!   after `ping_timeout` drops the connection (a hung agent counts as a
+//!   disconnect, §3.7). Deadlines are checked every second, not only when
+//!   the next ping is due.
 //!   The session list, with whether each session has an agent, is reported
 //!   to the core as [`SourceEvent::Sessions`], so it can raise tamper for a
 //!   session nobody monitors.
@@ -75,6 +85,7 @@ use super::sessions::{self, SessionEntry, SessionLister};
 use super::{
     BoxFuture, CaptureTarget, FrameSource, SessionStatus, SourceCommand, SourceEvent, SourceIo,
 };
+use faro_core::clock::{Clock, SystemClock};
 use faro_ipc::{
     limits, read_agent_hello, welcome_agent, AccountId, AgentHello, AgentMsg, BindOptions,
     IpcError, IpcServer, MemberStatus, PeerInfo, ServerStream, ServiceConnection, ServiceMsg,
@@ -90,8 +101,32 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-/// How long a `CaptureNow` stays answerable.
-const CAPTURE_ANSWER_WINDOW: Duration = Duration::from_secs(30);
+/// How long a `CaptureNow` stays answerable: a capture that starts within
+/// [`CAPTURE_START_MAX_MS`] and then waits out ScreenCaptureKit's 5 s
+/// deadline for the display list and for a display
+/// (`faro_platform_macos::bridge::DEFAULT_TIMEOUT`). A normal capture
+/// answers within a second; Windows' desktop duplication and GDI are
+/// faster still.
+const CAPTURE_ANSWER_WINDOW: Duration = Duration::from_secs(15);
+/// Latest an answering capture may *start* after its request, on the
+/// monotonic clock agents stamp captures with (the agent reads its clock
+/// before it captures, so the stamp does not include the capture itself).
+/// Between the two the request crosses the socket and waits for the
+/// agent's platform worker, which may be busy with one state poll: on
+/// macOS at most a few Accessibility reads of 0.25 s each and a 0.5 s
+/// browser read. Normally a few milliseconds. A later start is a capture
+/// moved away from the moment the schedule picked (§3.4: a held or stopped
+/// agent), and fails.
+pub const CAPTURE_START_MAX_MS: u64 = 5_000;
+/// Most displays one capture may carry. More batches or frames sharing a
+/// capture time are unsolicited.
+const MAX_FRAMES_PER_CAPTURE: usize = 16;
+/// Most `Frames` messages one capture may take.
+const MAX_BATCHES_PER_CAPTURE: usize =
+    MAX_FRAMES_PER_CAPTURE.div_ceil(faro_ipc::MAX_FRAMES_PER_MESSAGE);
+/// Longest wait between deadline checks (pong and capture-answer
+/// deadlines); shorter when those deadlines are.
+const DEADLINE_CHECK: Duration = Duration::from_secs(1);
 /// Unsolicited `Frames` tolerated per connection before disconnecting.
 const MAX_UNSOLICITED: u32 = 3;
 /// Late answers an agent can be owed at once (see [`Agent::late`]).
@@ -132,6 +167,9 @@ pub struct IpcFrameSource {
     /// hello names. On unless [`IpcFrameSource::with_sessions`] replaced the
     /// lister with a model.
     check_windows_session: bool,
+    /// The clock agents stamp captures with (`faro_agent::identity::mono_ms`
+    /// reads the same OS clock as [`SystemClock`]); tests share theirs.
+    clock: Arc<dyn Clock>,
 }
 
 impl fmt::Debug for IpcFrameSource {
@@ -163,7 +201,15 @@ impl IpcFrameSource {
             session_end_grace: SESSION_END_GRACE,
             recheck: SESSION_RECHECK,
             check_windows_session: true,
+            clock: Arc::new(SystemClock::new()),
         }
+    }
+
+    /// Read capture request times from `clock` instead of the OS clock
+    /// (tests whose agents stamp captures with the same clock).
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn with_ping(mut self, every: Duration, timeout: Duration) -> Self {
@@ -517,9 +563,8 @@ struct Agent {
     tx: mpsc::Sender<ServiceMsg>,
     session: String,
     account: String,
-    /// Outstanding `CaptureNow`: when sent, and the capture time of the
-    /// first answering batch (later batches of the same capture share it).
-    capture: Option<(Instant, Option<u64>)>,
+    /// The outstanding `CaptureNow`.
+    capture: Option<Request>,
     unsolicited: u32,
     /// Requests that closed before any frames came (window passed, or
     /// withdrawn): the agent may still answer each once, late. Capped, so
@@ -535,6 +580,37 @@ struct Agent {
     status_sent: Option<MemberStatus>,
     /// Which of its tamper signals are taken, and how many.
     tamper: TamperGate,
+}
+
+/// An outstanding `CaptureNow`.
+#[derive(Debug, Clone, Copy)]
+struct Request {
+    /// When it was sent; the answer window runs from here.
+    sent: Instant,
+    /// The same moment on the clock agents stamp captures with.
+    sent_mono_ms: u64,
+    /// The capture time of the first answering batch (later batches of the
+    /// same capture share it).
+    first: Option<u64>,
+    /// `Frames` messages and frames taken for it so far.
+    batches: usize,
+    frames: usize,
+}
+
+impl Request {
+    fn new(sent_mono_ms: u64) -> Self {
+        Request {
+            sent: Instant::now(),
+            sent_mono_ms,
+            first: None,
+            batches: 0,
+            frames: 0,
+        }
+    }
+
+    fn unanswered(&self) -> bool {
+        self.first.is_none()
+    }
 }
 
 /// Windows: the connection must come from the session it names, and, where
@@ -777,7 +853,7 @@ impl Run {
         // An answer to a capture sent to the old target no longer counts
         // (and arrives late, which is not the agent's fault).
         for a in self.agents.values_mut() {
-            if let Some((_, None)) = a.capture.take() {
+            if a.capture.take().is_some_and(|r| r.unanswered()) {
                 a.late = (a.late + 1).min(MAX_LATE);
             }
         }
@@ -1079,8 +1155,9 @@ impl Run {
                         })
                         .await;
                 };
+                let sent_mono_ms = self.cfg.clock.mono_ms();
                 if let Some(a) = self.agents.get_mut(&session) {
-                    a.capture = Some((Instant::now(), None));
+                    a.capture = Some(Request::new(sent_mono_ms));
                 }
                 self.send_to(&session, ServiceMsg::CaptureNow { reason })
                     .await
@@ -1109,7 +1186,10 @@ impl Run {
         }
     }
 
-    async fn on_ping(&mut self) -> Step {
+    /// Enforce the pong and capture-answer deadlines. Runs every
+    /// [`DEADLINE_CHECK`] (or sooner), not only when the next ping is due,
+    /// so an agent has the ping timeout to answer, not the ping interval.
+    async fn on_deadlines(&mut self) -> Step {
         let sessions: Vec<String> = self.agents.keys().cloned().collect();
         for session in sessions {
             let timeout = self.cfg.ping_timeout;
@@ -1127,34 +1207,42 @@ impl Run {
                 continue;
             }
             let mut unanswered = false;
-            if let Some((sent, first)) = a.capture {
-                if sent.elapsed() > window {
+            if let Some(r) = a.capture {
+                if r.sent.elapsed() > window {
                     // The answer window closed. Only a request that got no
                     // frames at all is a failure; an answered one just
                     // stops accepting continuation batches.
                     a.capture = None;
-                    unanswered = first.is_none();
+                    unanswered = r.unanswered();
                     if unanswered {
                         a.late = (a.late + 1).min(MAX_LATE);
                     }
                 }
             }
-            let ping = if a.ping.is_none() {
-                self.nonce = self.nonce.wrapping_add(1);
-                a.ping = Some((self.nonce, Instant::now()));
-                Some(self.nonce)
-            } else {
-                None
-            };
             if unanswered && self.is_target(&session) {
                 self.emit(SourceEvent::CaptureFailed {
                     reason: "agent did not answer the capture request".into(),
                 })
                 .await?;
             }
-            if let Some(nonce) = ping {
-                self.send_to(&session, ServiceMsg::Ping { nonce }).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_ping(&mut self) -> Step {
+        self.on_deadlines().await?;
+        let sessions: Vec<String> = self.agents.keys().cloned().collect();
+        for session in sessions {
+            let Some(a) = self.agents.get_mut(&session) else {
+                continue;
+            };
+            if a.ping.is_some() {
+                continue;
             }
+            self.nonce = self.nonce.wrapping_add(1);
+            let nonce = self.nonce;
+            a.ping = Some((nonce, Instant::now()));
+            self.send_to(&session, ServiceMsg::Ping { nonce }).await?;
         }
         Ok(())
     }
@@ -1252,6 +1340,13 @@ impl IpcFrameSource {
         let mut session_feed = session_change_feed();
         let mut recheck = tokio::time::interval(self.recheck);
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut deadlines = tokio::time::interval(
+            DEADLINE_CHECK
+                .min(self.ping_timeout / 4)
+                .min(self.capture_window / 4)
+                .max(Duration::from_millis(10)),
+        );
+        deadlines.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut run = Run {
             cfg: self,
             policy,
@@ -1286,6 +1381,7 @@ impl IpcFrameSource {
                 Some(a) = arrivals.recv() => run.on_arrival(a).await,
                 Some(m) = inbox.recv() => run.on_inbound(m).await,
                 _ = ping_tick.tick() => run.on_ping().await,
+                _ = deadlines.tick() => run.on_deadlines().await,
                 _ = recheck.tick() => run.on_recheck().await,
                 _ = session_changed(&mut session_feed) => run.on_recheck().await,
                 r = run.status.changed(), if run.status_open => {
@@ -1312,17 +1408,22 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
             frames,
         } => {
             let answers = match a.capture {
-                Some((sent, first)) if sent.elapsed() <= window => {
-                    first.is_none_or(|t| t == captured_at_mono_ms)
-                }
+                Some(r) if r.sent.elapsed() <= window => match r.first {
+                    // A capture taken before the request answers an earlier
+                    // one (the agent coalesces requests that arrive while
+                    // it captures), never this one.
+                    None => captured_at_mono_ms >= r.sent_mono_ms,
+                    Some(t) => t == captured_at_mono_ms,
+                },
                 _ => false,
             };
             if !answers {
                 // A late answer: to a request still open but past its window
-                // (the ping tick has not closed it yet), to one that closed
-                // unanswered, or more batches of such an answer.
-                let open_but_late =
-                    matches!(a.capture, Some((sent, None)) if sent.elapsed() > window);
+                // (the deadline check has not closed it yet), to one that
+                // closed unanswered, a capture taken before the request, or
+                // more batches of such an answer.
+                let open_but_late = matches!(a.capture,
+                    Some(r) if r.unanswered() && r.sent.elapsed() > window);
                 let excused = if open_but_late || a.late_ts == Some(captured_at_mono_ms) {
                     true
                 } else if a.late > 0 {
@@ -1352,8 +1453,45 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
                 a.capture = None;
                 return Handled::Nothing;
             }
-            if let Some(c) = a.capture.as_mut() {
-                c.1 = Some(captured_at_mono_ms);
+            let Some(r) = a.capture.as_mut() else {
+                // `answers` needs an outstanding request.
+                return Handled::Nothing;
+            };
+            if r.unanswered() {
+                let lag_ms = captured_at_mono_ms - r.sent_mono_ms;
+                if lag_ms > CAPTURE_START_MAX_MS {
+                    // Taken well after the moment the schedule picked: a
+                    // failed capture. Its other batches are dropped quietly.
+                    drop(frames);
+                    a.capture = None;
+                    a.late_ts = Some(captured_at_mono_ms);
+                    tracing::warn!(lag_ms, "capture taken long after the request; refused");
+                    return Handled::Forward(SourceEvent::CaptureFailed {
+                        reason: format!(
+                            "capture taken {} s after the request",
+                            lag_ms.div_ceil(1000)
+                        ),
+                    });
+                }
+                r.first = Some(captured_at_mono_ms);
+            }
+            r.batches += 1;
+            r.frames = r.frames.saturating_add(frames.len());
+            if r.batches > MAX_BATCHES_PER_CAPTURE || r.frames > MAX_FRAMES_PER_CAPTURE {
+                // More displays than a capture has: unsolicited frames under
+                // an answered capture's time.
+                drop(frames);
+                a.capture = None;
+                a.unsolicited += 1;
+                tracing::warn!(
+                    count = a.unsolicited,
+                    "agent sent more frames than a capture has"
+                );
+                return if a.unsolicited > MAX_UNSOLICITED {
+                    Handled::Violation("repeated unsolicited frames".into())
+                } else {
+                    Handled::Nothing
+                };
             }
             let mut out = Vec::with_capacity(frames.len());
             for wf in frames {
@@ -1554,11 +1692,23 @@ mod tests {
         ev: mpsc::Receiver<SourceEvent>,
         task: JoinHandle<()>,
         status: watch::Sender<Option<Arc<StatusReport>>>,
+        /// The clock the source reads request times from, which the test
+        /// agents stamp their captures with (it starts at 0).
+        clock: Arc<faro_core::ManualClock>,
         _dir: tempfile::TempDir,
     }
 
     impl Harness {
         async fn start(logins: &Logins, capture_window: Duration) -> Harness {
+            Self::start_with(logins, capture_window, |s| s).await
+        }
+
+        /// As [`start`](Self::start), with `configure` applied to the source.
+        async fn start_with(
+            logins: &Logins,
+            capture_window: Duration,
+            configure: impl FnOnce(IpcFrameSource) -> IpcFrameSource,
+        ) -> Harness {
             // Private, whatever the umask: the socket checks refuse a group-writable
             // directory, and tempfile leaves the mode to the umask (002 on many Linux
             // accounts).
@@ -1578,7 +1728,7 @@ mod tests {
                 r"\\.\pipe\faro-test-{}\agent",
                 dir.path().file_name().unwrap().to_string_lossy()
             ));
-            let mut src = IpcFrameSource::new(&sock, [])
+            let src = IpcFrameSource::new(&sock, [])
                 .with_ping(Duration::from_millis(50), Duration::from_secs(60))
                 .with_sessions(logins.lister())
                 .with_timings(
@@ -1586,6 +1736,8 @@ mod tests {
                     Duration::from_millis(1000),
                     Duration::from_millis(20),
                 );
+            let clock = Arc::new(faro_core::ManualClock::new(0, 0));
+            let mut src = configure(src.with_clock(clock.clone()));
             // Even when the tests run as root: one socket for everyone.
             src.per_account_sockets = false;
             // The made-up session ids are not Windows sessions.
@@ -1613,6 +1765,7 @@ mod tests {
                 ev,
                 task,
                 status,
+                clock,
                 _dir: dir,
             }
         }
@@ -1958,6 +2111,118 @@ mod tests {
                 reason, expected, ..
             } => {
                 assert!(!expected && reason.contains("unsolicited"), "{reason}")
+            }
+            _ => unreachable!(),
+        }
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// Ask the source for a capture and wait for the agent to receive it.
+    async fn request(h: &Harness, agent: &mut AgentConnection<faro_ipc::ClientStream>) {
+        h.cmd
+            .send(SourceCommand::CaptureNow(
+                faro_ipc::CaptureReason::Scheduled,
+            ))
+            .await
+            .unwrap();
+        serve_until(agent, |m| matches!(m, ServiceMsg::CaptureNow { .. })).await;
+    }
+
+    /// #192: an answer is judged by when its capture was taken. Taken
+    /// before the request, it answers an earlier one and is dropped; taken
+    /// more than a few seconds after, it is a failed capture, whenever it
+    /// arrives. One capture carries a bounded number of frames.
+    #[tokio::test]
+    async fn captures_must_be_taken_promptly_after_the_request() {
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+        h.clock.advance(10_000);
+
+        request(&h, &mut agent).await;
+        // Stamped before the request: not an answer.
+        agent
+            .send(&AgentMsg::Frames {
+                captured_at_mono_ms: 9_000,
+                frames: vec![wire_frame()],
+            })
+            .await
+            .unwrap();
+        // The agent was held for 6 s before capturing.
+        let late = 10_000 + CAPTURE_START_MAX_MS + 1_000;
+        for _ in 0..2 {
+            agent
+                .send(&AgentMsg::Frames {
+                    captured_at_mono_ms: late,
+                    frames: vec![wire_frame()],
+                })
+                .await
+                .unwrap();
+        }
+        match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+            SourceEvent::CaptureFailed { reason } => {
+                assert_eq!(reason, "capture taken 6 s after the request")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A prompt answer is forwarded, up to MAX_FRAMES_PER_CAPTURE frames.
+        request(&h, &mut agent).await;
+        let batches = MAX_BATCHES_PER_CAPTURE + 2;
+        for _ in 0..batches {
+            agent
+                .send(&AgentMsg::Frames {
+                    captured_at_mono_ms: 10_050,
+                    frames: (0..faro_ipc::MAX_FRAMES_PER_MESSAGE)
+                        .map(|_| wire_frame())
+                        .collect(),
+                })
+                .await
+                .unwrap();
+        }
+        let mut frames = 0;
+        while frames < MAX_FRAMES_PER_CAPTURE {
+            match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+                SourceEvent::Frames(f) => frames += f.len(),
+                other => panic!("{other:?}"),
+            }
+        }
+        serve_for(&mut agent, Duration::from_millis(300)).await;
+        while let Ok(ev) = h.ev.try_recv() {
+            assert!(
+                matches!(ev, SourceEvent::Sessions(_)),
+                "nothing past the bound, nothing else: {ev:?}"
+            );
+        }
+        assert_eq!(frames, MAX_FRAMES_PER_CAPTURE);
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// A pong is due within the ping timeout, not by the next ping.
+    #[tokio::test]
+    async fn a_missed_pong_is_noticed_before_the_next_ping() {
+        let logins = Logins::with(&[("s1", true)]);
+        // Pings every 30 s, answered within 200 ms.
+        let mut h = Harness::start_with(&logins, Duration::from_secs(30), |src| {
+            src.with_ping(Duration::from_secs(30), Duration::from_millis(200))
+        })
+        .await;
+        let mut agent = h.connect("s1").await;
+        // The first ping goes out at once; never answer it.
+        let m = agent.recv().await.unwrap();
+        assert!(matches!(m, ServiceMsg::Ping { .. }), "{m:?}");
+        let gone = tokio::time::timeout(
+            Duration::from_secs(5),
+            h.until(|e| matches!(e, SourceEvent::AgentDisconnected { .. })),
+        )
+        .await
+        .expect("dropped well before the next ping");
+        match gone {
+            SourceEvent::AgentDisconnected { reason, .. } => {
+                assert!(reason.contains("pings"), "{reason}")
             }
             _ => unreachable!(),
         }

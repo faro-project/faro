@@ -838,3 +838,160 @@ async fn wait_for_status_file(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// #193: a run that ended without sealing its report (a crash or a power
+/// cut) left its timeline in the state directory. The next run puts it
+/// back, so the day's report still shows the unmonitored stretch, with the
+/// time the service was not running as `off`. An orderly stop that sealed
+/// the report leaves nothing to recover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashed_runs_timeline_reaches_the_report() {
+    use faro_proto::report::ActivityState;
+    let instance_id = InstanceId::new("inst_mock");
+    let member_id = UserId::new("usr_member");
+    let member = SigningKey::generate();
+    let member_enc = EncryptionKeypair::generate();
+    let v1 = manifest_doc(&member, &instance_id, &member_id, 1, &member_enc, &[]);
+    let shared: Shared = Arc::new(Mutex::new(Mock {
+        instance_id: instance_id.clone(),
+        identity: SigningKey::generate().public(),
+        member_id: member_id.clone(),
+        member_sign: member.public(),
+        device_id: DeviceId::new("dev_mock"),
+        device_key: None,
+        endorsement: None,
+        manifest: v1.clone(),
+        head: None,
+        events: Vec::new(),
+        heartbeats: Vec::new(),
+        reports: Vec::new(),
+        auth_failures: Vec::new(),
+    }));
+    let app = Router::new()
+        .route("/.well-known/faro", get(well_known))
+        .route("/v1/devices/enroll", post(do_enroll))
+        .route("/v1/devices/self", get(device_self))
+        .route("/v1/members/{id}/recipient-manifest", get(manifest))
+        .route("/v1/events:batch", post(events))
+        .route("/v1/heartbeat", post(heartbeat))
+        .route("/v1/reports", post(reports))
+        .with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = parse_instance_url(&format!("http://{addr}")).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().join("state");
+    let dir = StateDir::open(&state_dir).unwrap();
+    let wall0 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let offset = Config::default().report.utc_offset_minutes;
+    let day = faro_service::runtime::journal::day_start(wall0, offset);
+    // The crashed run began ten minutes ago, the same report day.
+    let start = wall0 - 600_000;
+    if start <= day {
+        eprintln!("too close to the report day's start; skipped");
+        return;
+    }
+    let saved = serde_json::json!({
+        "start_ms": start,
+        "end_ms": day + 24 * 3600 * 1000,
+        "states": [
+            { "ts": start, "state": "active", "account": "alex" },
+            { "ts": start + 60_000, "state": "unmonitored", "account": "alex" },
+            { "ts": start + 180_000, "state": "active", "account": "alex" },
+        ],
+        "saved_ms": start + 240_000,
+    });
+    std::fs::write(
+        state_dir.join(faro_service::state::TIMELINE_FILE),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+
+    let clock = ManualClock::new(wall0, 5_000_000);
+    let params = EnrollParams {
+        instance: base.clone(),
+        code: EnrollCode::parse("abcd 1234").unwrap(),
+        device_name: "Test Laptop".into(),
+        client: ClientOptions::default(),
+        member_key: None,
+    };
+    enroll::enroll(&dir, Arc::new(clock.clone()), &params, |_| true)
+        .await
+        .unwrap();
+    let mut config = Config {
+        state_dir: state_dir.clone(),
+        ..Config::default()
+    };
+    config.network.endorsement_poll_secs = 1;
+    config.network.upload_interval_secs = 1;
+    let script = Script::new();
+    let classifier = ScriptedClassifier::new(ImageScores::new([("explicit", 0.0f32)]).unwrap());
+    let service = Service::builder(config)
+        .clock(Arc::new(clock.clone()))
+        .frame_source(InProcessFrameSource::new(
+            script.platform(),
+            Duration::from_millis(10),
+        ))
+        .classifier(Box::new(classifier))
+        .tick_interval(Duration::from_millis(10))
+        .scheduler_seed(7)
+        .build()
+        .unwrap();
+    let handle = service.spawn();
+    wait_for(&handle, "awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    {
+        let mut m = shared.lock().unwrap();
+        let e = DeviceEndorsement {
+            instance_id: instance_id.clone(),
+            member_id: member_id.clone(),
+            device_id: m.device_id.clone(),
+            device_sign_pubkey: m.device_key.unwrap(),
+            endorsed_at_ms: wall0,
+            min_manifest: v1.body.reference(),
+        };
+        m.endorsement = Some(member.endorse(e));
+    }
+    wait_for(&handle, "running", |s| s.phase == Phase::Running).await;
+    clock.advance(1_000);
+    assert!(handle.close_report().await);
+    wait_for(&handle, "report uploaded", |s| s.reports_uploaded >= 1).await;
+    {
+        let m = shared.lock().unwrap();
+        let pk = m.device_key.unwrap();
+        let r = open_report(&m.reports[0], &pk, &member_id, &member_enc).unwrap();
+        assert_eq!(
+            r.period_start_ms, start,
+            "the day goes on from the last run"
+        );
+        assert_eq!(r.health.unmonitored_secs, 120);
+        let spans: Vec<_> = r
+            .timeline
+            .iter()
+            .map(|s| (s.start_ms - start, s.state, s.account.clone()))
+            .collect();
+        let alex = Some("alex".to_owned());
+        assert_eq!(
+            spans[..4],
+            [
+                (0, ActivityState::Active, alex.clone()),
+                (60_000, ActivityState::Unmonitored, alex.clone()),
+                (180_000, ActivityState::Active, alex),
+                (240_000, ActivityState::Off, None),
+            ],
+            "{spans:?}"
+        );
+    }
+    let timeline = state_dir.join(faro_service::state::TIMELINE_FILE);
+    assert!(timeline.exists(), "the new period's timeline is saved");
+    clock.advance(1_000);
+    handle.shutdown().await.unwrap();
+    assert!(!timeline.exists(), "sealed at shutdown: nothing to recover");
+}

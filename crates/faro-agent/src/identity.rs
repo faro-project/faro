@@ -136,10 +136,9 @@ pub fn mono_ms() -> Option<u64> {
 /// Windows: `GetTickCount64`, milliseconds since boot, sleep included (the
 /// interrupt-time counter), so a stamp stays comparable across a suspend.
 ///
-/// NOTE: `faro_core::clock::SystemClock` currently reads `Instant` since
-/// *process* start on Windows, which is not this clock. The service only
-/// compares the agent's stamps with each other today; if it ever needs to
-/// compare them with its own clock, `SystemClock` must read this one.
+/// `faro_core::clock::SystemClock` reads the same clock on Windows: the
+/// service compares these stamps with its own request times (a capture
+/// must start promptly after the request, `source::ipc` in faro-service).
 #[cfg(windows)]
 pub fn mono_ms() -> Option<u64> {
     // SAFETY: no preconditions.
