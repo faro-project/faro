@@ -60,11 +60,18 @@
 //! Sizes are in the agent's coordinate space (DPI-virtualized logical
 //! pixels unless the agent is DPI aware), which is close to macOS points.
 //!
-//! Allowed: Windows' own binaries, an executable directly under
-//! `%SystemRoot%\System32` or `%SystemRoot%\SystemApps` (owned by
-//! TrustedInstaller; a standard user can't put a program there), which use
-//! affinity for some of their own UI (credential prompts, for example). Not
-//! allowed even there: hosts that run the member's own code (`rundll32`,
+//! Allowed: Windows' own binaries, an executable directly in
+//! `<Windows>\System32` (not a subfolder: `System32\spool\drivers\color`
+//! and others are writable by standard users) or directly in one package
+//! folder of `<Windows>\SystemApps` (`SystemApps\<package>\x.exe`), which
+//! use affinity for some of their own UI (credential prompts, for example).
+//! `<Windows>` is read with `GetSystemWindowsDirectoryW`, not from the
+//! environment, which a member controls for their own processes. The
+//! executable and its folder must also be protected by
+//! [`crate::acl::writable_by_others`] (owned by TrustedInstaller or another
+//! trusted owner, no write access for others), checked when the owner of a
+//! hidden window is looked up ([`Process::os_protected`]). Not allowed even
+//! there: hosts that run the member's own code (`rundll32`,
 //! `mshta`, script hosts, PowerShell, `cmd`, `conhost`, `dllhost`,
 //! `regsvr32`), since any DLL loaded into them can set the affinity. Faro's
 //! own process is skipped. No third-party app is allowed: password
@@ -91,6 +98,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::Networking::WinSock::AF_UNSPEC;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowDisplayAffinity, GetWindowRect, IsIconic, IsWindowVisible,
 };
@@ -461,6 +469,10 @@ pub struct Process {
     pub exe_path: Option<String>,
     /// Display name (the version resource's `FileDescription`).
     pub name: Option<String>,
+    /// The executable and its folder are owned by a trusted owner and not
+    /// writable by others ([`crate::acl`]). Only checked for paths that
+    /// pass [`os_binary_location`].
+    pub os_protected: bool,
 }
 
 /// An app with enough hidden window area this poll.
@@ -490,9 +502,11 @@ const RUNS_USER_CODE: &[&str] = &[
     "msbuild.exe",
 ];
 
-/// Whether `exe` is one of Windows' own binaries that may keep windows out
-/// of captures (see module docs). `system_root` is `%SystemRoot%`.
-pub fn is_allowed_os_process(exe: &str, system_root: &str) -> bool {
+/// Whether `exe` is where Windows' own binaries live, judged by the path
+/// alone: directly in `<system_root>\System32`, or directly in one package
+/// folder of `<system_root>\SystemApps`, and not a host that runs the
+/// member's code. `system_root` is `GetSystemWindowsDirectoryW`.
+pub fn os_binary_location(exe: &str, system_root: &str) -> bool {
     let exe = exe.to_ascii_lowercase().replace('/', "\\");
     if exe.contains("\\..\\") || exe.contains("\\.\\") || exe.starts_with("\\\\") {
         return false;
@@ -503,14 +517,32 @@ pub fn is_allowed_os_process(exe: &str, system_root: &str) -> bool {
     if root.is_empty() {
         return false;
     }
-    let in_folder = ["system32", "systemapps"]
+    let Some(rest) = exe.strip_prefix(&root).and_then(|r| r.strip_prefix('\\')) else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('\\').collect();
+    if parts
         .iter()
-        .any(|f| exe.starts_with(&format!("{root}\\{f}\\")));
-    if !in_folder {
+        .any(|p| p.is_empty() || p.ends_with([' ', '.']) || p.contains([':', '?', '*']))
+    {
         return false;
     }
-    let file = exe.rsplit('\\').next().unwrap_or("");
-    !RUNS_USER_CODE.contains(&file)
+    let file = match parts.as_slice() {
+        ["system32", file] => file,
+        ["systemapps", _package, file] => file,
+        _ => return false,
+    };
+    !RUNS_USER_CODE.contains(file)
+}
+
+/// Whether `p` is one of Windows' own binaries that may keep windows out of
+/// captures (see module docs): in the right place, and protected from
+/// standard users.
+pub fn is_allowed_os_process(p: &Process, system_root: &str) -> bool {
+    p.os_protected
+        && p.exe_path
+            .as_deref()
+            .is_some_and(|e| os_binary_location(e, system_root))
 }
 
 /// Control characters removed, trimmed, at most [`MAX_APP_LABEL`] chars.
@@ -573,10 +605,7 @@ pub fn read(
     let mut per_app: Vec<(HiddenApp, i64)> = Vec::new();
     for (pid, area) in per_pid {
         let p = resolve(pid);
-        if p.exe_path
-            .as_deref()
-            .is_some_and(|e| is_allowed_os_process(e, system_root))
-        {
+        if is_allowed_os_process(&p, system_root) {
             continue;
         }
         let app = hidden_app(pid, &p);
@@ -709,18 +738,40 @@ pub fn resolve_process(pid: u32) -> Process {
         return Process::default();
     };
     let name = display_name(file_description(&path), &path);
+    let exe_path = path.to_string_lossy().into_owned();
+    // Only a path that could be Windows' own is worth the ACL reads.
+    let os_protected =
+        os_binary_location(&exe_path, &system_root()) && is_protected_system_file(&path);
     Process {
-        exe_path: Some(path.to_string_lossy().into_owned()),
+        exe_path: Some(exe_path),
         name,
+        os_protected,
     }
 }
 
-/// `%SystemRoot%`, normally `C:\Windows`.
+/// The file is owned by a trusted owner with no write access for others, and
+/// so is its folder (nobody else can rename or replace either). Any error
+/// reading either ACL counts as not protected.
+fn is_protected_system_file(path: &Path) -> bool {
+    let file_ok = crate::acl::writable_by_others(path).is_ok_and(|w| !w);
+    let dir_ok = path
+        .parent()
+        .is_some_and(|d| crate::acl::replaceable_by_others(d).is_ok_and(|w| !w));
+    file_ok && dir_ok
+}
+
+/// The Windows folder, normally `C:\Windows`, from
+/// `GetSystemWindowsDirectoryW` (not `%SystemRoot%`, which the member
+/// controls in their own processes). Empty if the call fails, in which case
+/// nothing is allowed.
 pub fn system_root() -> String {
-    std::env::var("SystemRoot")
-        .ok()
-        .filter(|s| Path::new(s).is_absolute())
-        .unwrap_or_else(|| r"C:\Windows".to_owned())
+    let mut buf = [0u16; 260];
+    // SAFETY: `buf` is a writable buffer of the length passed.
+    let n = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n])
 }
 
 /// One live reading of hidden-window apps.
@@ -946,39 +997,71 @@ mod tests {
 
     const ROOT: &str = r"C:\Windows";
 
+    fn protected(exe: &str) -> Process {
+        Process {
+            exe_path: Some(exe.into()),
+            name: None,
+            os_protected: true,
+        }
+    }
+
     #[test]
     fn os_allowlist() {
-        assert!(is_allowed_os_process(
+        for ok in [
             r"C:\Windows\System32\CredentialUIBroker.exe",
-            ROOT
-        ));
-        assert!(is_allowed_os_process(
+            r"C:\Windows\System32\consent.exe",
+            r"c:\windows\system32\CONSENT.EXE",
+            r"C:/Windows/System32/consent.exe",
             r"c:\windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\TextInputHost.exe",
-            ROOT
-        ));
-        assert!(!is_allowed_os_process(
+        ] {
+            assert!(is_allowed_os_process(&protected(ok), ROOT), "{ok}");
+        }
+        for bad in [
             r"C:\Windows\System32\rundll32.exe",
-            ROOT
-        ));
-        assert!(!is_allowed_os_process(
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            ROOT
-        ));
-        assert!(!is_allowed_os_process(r"C:\Windows\explorer.exe", ROOT));
-        assert!(!is_allowed_os_process(
+            r"C:\Windows\explorer.exe",
             r"C:\Windows\System32\..\Temp\x.exe",
-            ROOT
-        ));
-        assert!(!is_allowed_os_process(r"C:\Users\sam\System32\x.exe", ROOT));
-        assert!(!is_allowed_os_process(
+            r"C:\Users\sam\System32\x.exe",
             r"C:\Program Files\Viewer\viewer.exe",
-            ROOT
-        ));
-        assert!(!is_allowed_os_process(
             r"\\server\c$\Windows\System32\x.exe",
+            // Subfolders of System32 (several are writable by standard
+            // users: spool\drivers\color, Tasks, Com\dmp, ...).
+            r"C:\Windows\System32\spool\drivers\color\x.exe",
+            r"C:\Windows\System32\Tasks\x.exe",
+            r"C:\Windows\System32\Com\dmp\x.exe",
+            r"C:\Windows\System32\drivers\x.exe",
+            r"C:\Windows\System32\config\systemprofile\x.exe",
+            // SystemApps: exactly one package folder.
+            r"C:\Windows\SystemApps\x.exe",
+            r"C:\Windows\SystemApps\Pkg_x\sub\x.exe",
+            r"C:\Windows\SystemApps\Pkg_x\sub\deeper\x.exe",
+            // Look-alikes and odd names.
+            r"C:\Windows\System32.evil\x.exe",
+            r"C:\Windows\System32 \x.exe",
+            r"C:\Windows\System32\\x.exe",
+            r"C:\Windows\System32\x.exe:stream",
+            r"C:\Windows\System32",
+            r"C:\Windows\System32\",
+            r"C:\Windows.old\System32\x.exe",
+            r"C:\Windows\SystemApps",
+        ] {
+            assert!(!is_allowed_os_process(&protected(bad), ROOT), "{bad}");
+        }
+        // The right place is not enough without the ACL proof.
+        let mut p = protected(r"C:\Windows\System32\consent.exe");
+        p.os_protected = false;
+        assert!(!is_allowed_os_process(&p, ROOT));
+        // No root, no allowlist.
+        assert!(!is_allowed_os_process(
+            &protected(r"C:\Windows\System32\x.exe"),
+            ""
+        ));
+        // A root other than the real one.
+        assert!(!is_allowed_os_process(
+            &protected(r"C:\Temp\Windows\System32\x.exe"),
             ROOT
         ));
-        assert!(!is_allowed_os_process(r"C:\Windows\System32\x.exe", ""));
+        assert!(!is_allowed_os_process(&Process::default(), ROOT));
     }
 
     fn win(pid: u32, affinity: u32, w: i32, h: i32) -> WindowInfo {
@@ -995,18 +1078,22 @@ mod tests {
             10 => Process {
                 exe_path: Some(r"C:\Program Files\Viewer\viewer.exe".into()),
                 name: Some("Viewer".into()),
+                os_protected: false,
             },
             11 => Process {
                 exe_path: Some(r"C:\Program Files\Viewer\VIEWER.exe".into()),
                 name: Some("Viewer".into()),
+                os_protected: false,
             },
             20 => Process {
                 exe_path: Some(r"C:\Windows\System32\consent.exe".into()),
                 name: Some("Consent UI".into()),
+                os_protected: true,
             },
             30 => Process {
                 exe_path: Some(r"C:\Tools\nameless.exe".into()),
                 name: None,
+                os_protected: false,
             },
             _ => Process::default(),
         }
