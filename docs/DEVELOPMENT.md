@@ -425,6 +425,7 @@ Most licences of the software Faro is built from (MIT, Apache-2.0, BSD, ISC, Zli
 | macOS package | `/Library/Faro/notices/third-party.txt` | `release/notices/third-party.sh macos`, from `build-pkg.sh` | the crates in `faro-service` (with `onnx`) and `faro-agent`, for the two macOS targets |
 | `faro-server` image | `/usr/share/faro/notices/third-party.txt` | `release/notices/third-party.sh server`, in the Dockerfile's `notices` stage | the crates in `faro-server`, for the two Linux targets |
 | `faro-server` binaries | `faro-server-<version>-linux-<arch>-third-party.txt`, next to each binary in the GitHub Release | the same file, copied out of the image by `release.yml` | |
+| iOS app | `third-party.txt` and `domains.txt` in the app bundle, shown on the Licences screen | `apps/ios/build-notices.sh`: `release/notices/third-party.sh ios`, and the domain list's notice | the crates in `faro-mobile`, for the two iOS targets |
 | Web app | `/third-party-licenses.txt`, shown at `/licenses` (footer, `/privacy`); in the image also as `/usr/share/faro/notices/third-party-web.txt` | `npm run build` (`web/scripts/third-party.ts`) | the npm packages whose code is in the browser bundle |
 
 - **Rust.** `third-party.sh` runs `cargo-about`, pinned in the script (`CARGO_ABOUT_VERSION`, 0.9.3), with `--locked` and the template `release/notices/about.hbs`. Its config is written on the fly: the accepted licences are `deny.toml`'s `[licenses] allow` list, so there is only one allowlist. Build and dev dependencies are left out. Each licence is printed once with the crates that use it. For a crate whose package lacks its licence file, `cargo-about` fetches the file from the crate's repository at the packaged commit, so a first run needs network access. Faro's own crates appear under Apache-2.0.
@@ -703,7 +704,7 @@ agent (user session)                       faro-service (root)
 cargo test -p faro-mobile
 ```
 
-The iOS targets, the XCFramework and the Swift bindings are built by the app scaffold. To look at the bindings on a Mac, build a `uniffi-bindgen` of the same UniFFI version (a `bin` that calls `uniffi::uniffi_bindgen_main()`, with UniFFI's `cli` feature) and run `uniffi-bindgen generate --library target/debug/libfaro_mobile.a --language swift --out-dir bindings`.
+The iOS targets, the XCFramework and the Swift bindings are built by `apps/ios/build-rust.sh` ([The iOS app](#the-ios-app)), which also builds the `uniffi-bindgen` of the same UniFFI version.
 
 - **One object per process.** The app and the packet tunnel each make a `FaroCore` on the app group container. Every method blocks on the core's own Tokio runtime, so Swift calls it from a background queue.
 - **One database, several processes.** Everything is in `faro_core`'s `outbox.sqlite3` in that directory, in WAL mode with a 30 second busy timeout, plus two tables of `faro-mobile`'s own (`mobile_state`, `mobile_context`; `faro_mobile::store`). Every chain append is `Outbox::append_exclusive`: one `BEGIN EXCLUSIVE` transaction reads the stored head and recipient checkpoint, seals and signs the event on them, checks it as `commit` does and stores it with the new head. No other process can write in between, so `seq` and `prev_hash` stay strict and an event is always sealed to the current recipients. Nothing about the chain is cached between calls, and no transaction is held across a call (iOS ends a suspended app that holds a lock on a file in a shared container).
@@ -713,13 +714,63 @@ The iOS targets, the XCFramework and the Swift bindings are built by the app sca
 - **Domain bundles.** `update_domains(root)` verifies the instance mirror's metadata against the root the app passes in, selects the newest `blocklist` target, checks the bundle with `load_domains` and installs it under `domains/<blake3>/`, with the same rules as the service ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)). `installed_domains` checks it again on each load; one that changed is removed and reported as an urgent `integrity_failure`.
 - **Tests** run the real instance in-process, as faro-service's end-to-end tests do (`crates/faro-mobile/tests/support`). `tests/processes.rs` starts copies of its own test binary as child processes that append to one chain at once with the parent, then verifies the whole chain and uploads it.
 
+## The iOS app
+
+`apps/ios` is the Xcode project for the iPhone client (IOS.md §13). The Rust core is `crates/faro-mobile` ([The iOS core](#the-ios-core)); everything iOS-specific (FamilyControls, ManagedSettings, DeviceActivity, NetworkExtension, the UI) is Swift.
+
+**Tools.** A Mac with Xcode (the full app, not only the Command Line Tools), [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) and a Rust toolchain that has the iOS targets: `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`. `build-rust.sh` uses plain `cargo` when it has those targets. Otherwise it looks for rustup (on `PATH`, or Homebrew's keg-only one in `/opt/homebrew/opt/rustup/bin`) and runs `cargo +stable`, or the toolchain named in `FARO_RUST_TOOLCHAIN`. `cargo-about` is only needed for the licence notices.
+
+**Building.**
+
+```sh
+apps/ios/build-rust.sh                  # FaroCore.xcframework and the Swift bindings
+apps/ios/build-notices.sh               # optional: the licences the app shows (needs cargo-about, network)
+cd apps/ios && xcodegen generate        # Faro.xcodeproj (git-ignored)
+xcodebuild build -project Faro.xcodeproj -scheme Faro \
+    -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+xcodebuild build -project Faro.xcodeproj -scheme Faro -configuration Release \
+    -destination 'generic/platform=iOS' -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO
+check-extension-sizes.sh build/device/Build/Products/Release-iphoneos/Faro.app
+```
+
+Run `build-rust.sh` again after changing `faro-mobile`'s interface, and `xcodegen generate` after changing `project.yml` or adding a Swift file. The project is arm64 only (devices and Apple Silicon Simulators), with iOS 17.0 as the deployment target.
+
+**What is where.**
+
+| Target | Bundle ID | Links FaroCore | What it is |
+|---|---|---|---|
+| `Faro` | `org.faro.ios` | yes | The app (SwiftUI). Embeds the four extensions. Registers the `faro` URL scheme |
+| `FaroTunnel` | `org.faro.ios.tunnel` | yes | `NEPacketTunnelProvider`, the DNS filter (stub: refuses to start) |
+| `FaroMonitor` | `org.faro.ios.monitor` | no | `DeviceActivityMonitor` (stub) |
+| `FaroShield` | `org.faro.ios.shield` | no | `ShieldConfigurationDataSource` (block screen wording; counts how often it is shown) |
+| `FaroShieldAction` | `org.faro.ios.shieldaction` | no | `ShieldActionDelegate` (Close button; counts presses) |
+
+The monitor and the two shield extensions run under a 6 MB memory limit, so they never link the Rust core (IOS.md §13): they link `FaroKit` and Apple frameworks only, and write counters and markers to the app group for the app or tunnel to turn into events. `check-extension-sizes.sh` fails if one of their Release binaries is over 512 KiB (`FARO_EXTENSION_BUDGET`, in bytes) or contains the core's symbol names. The stubs are about 150 KB each. The budget is a tripwire: raise it deliberately.
+
+- **`FaroKit`** (`apps/ios/FaroKit`) is a local Swift package, Foundation only, for what the targets share and what can be tested: the app group's paths (`AppGroup`), the settings file model the monitor re-applies (`FaroSettings`, `SettingsStore`), marker files and `flock`-protected counters. Its XCTest tests run on the host and the Simulator: `swift test --package-path apps/ios/FaroKit`, or `xcodebuild test -scheme FaroKit -destination 'platform=iOS Simulator,name=iPhone 17'` in that directory (use any Simulator you have). Put logic here, not in a target, when it can run without Screen Time or a tunnel.
+- **Identifiers.** App group `group.org.faro.ios` in all five targets; Keychain access group `$(AppIdentifierPrefix)org.faro.ios.shared` in the app and the tunnel, the two that hold keys. `com.apple.developer.family-controls` is on all five, and `packet-tunnel-provider` on the app and the tunnel. The `Info.plist` and `.entitlements` files are written by `xcodegen generate` from `project.yml` and checked in, so a change shows in review; CI fails if regenerating changes them.
+- **`uniffi-bindgen`** is `apps/ios/uniffi-bindgen`, a small crate outside the root workspace with its own lockfile, `uniffi` pinned to the version `faro-mobile` uses. `build-rust.sh` fails if the two lockfiles disagree. When you bump UniFFI, change both.
+- **Licences.** The app has a Licences screen that shows `third-party.txt` (the crates in `faro-mobile`'s tree, `release/notices/third-party.sh ios`) and `domains.txt` (the domain list's notice), both made by `build-notices.sh` into `apps/ios/Generated/Notices` and bundled as resources. A build without them still works, and the screen says so. A release build must have both ([Third-party notices](#third-party-notices)). The Swift package dependencies, if any are added later, need their notices there too.
+- **Signing.** `DEVELOPMENT_TEAM` is empty in `project.yml` and CI builds with `CODE_SIGNING_ALLOWED=NO`. To run on a device, set your team in Xcode or pass `DEVELOPMENT_TEAM=...`. Family Controls and the packet tunnel need entitlements Apple grants per App ID, which the project doesn't have yet (IOS.md §14).
+
+**What runs where.**
+
+| Runs on | What |
+|---|---|
+| Host (`cargo test -p faro-mobile`, `swift test`) | The core's logic and `FaroKit` |
+| Simulator | The `FaroKit` tests; the app launches. Screen Time authorization, the monitor, the shields and the packet tunnel **don't run in the Simulator** |
+| Compiled only (CI, unsigned) | All five targets for the Simulator and for a device, the entitlements (not checked without signing) and the extensions |
+| A real iPhone with the entitlements | Everything else (IOS.md §17 spikes) |
+
+CI runs this as the `ios` job on the Apple Silicon Mac runner: it skips with a notice when the runner has no Xcode or no xcodegen.
+
 ## CI runners
 
 CI runs on the project's self-hosted runners, registered to the `faro-project` org and matched by label:
 
 | Labels | Machine | Jobs |
 |---|---|---|
-| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
+| `self-hosted, macOS, ARM64` | Apple Silicon Mac | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `ios`, `model-eval`, the release package (`release.yml`) |
 | `self-hosted, macOS, X64` | Intel Mac | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel`, the amd64 container build (in colima's x86_64 Linux VM) |
 | `self-hosted, Linux, ARM64` | Raspberry Pi | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the arm64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` the arm64 server build, a dry run's signing, and the image tags and GitHub Release; the `check` and `alert` jobs of `update-timestamp.yml` |
 | `self-hosted, Windows, X64` | Windows PC | `test (windows)`, `windows-msi`, the release MSI (`release.yml`) |
@@ -737,7 +788,7 @@ Each runner runs one job at a time, and a new push to a pull request cancels its
 - **All:** `git`, `curl`, and a C compiler and linker for the crates with C code.
 - **Linux:** `build-essential`, `pkg-config` and `jq` (for the release scripts and the image publish). Docker with Buildx for the container build, usable by the runner's user without `sudo` (the `docker` group). If `rustup` is missing, the first job installs it with its default profile edits; give the runner its own user.
 - **Windows:** Git for Windows in its default location (the `test` job puts `C:\Program Files\Git\bin` first on `PATH`, ahead of WSL's `bash`, for the toolchain action's bash steps), and the Visual Studio Build Tools C++ workload for the MSVC linker.
-- **macOS:** Xcode Command Line Tools. On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
+- **macOS:** Xcode Command Line Tools (the `ios` job also needs full Xcode and `xcodegen`, and skips without them). On a Mac someone also develops on, give the runner its own rustup so CI doesn't edit their shell profile: install it with `--no-modify-path` under the runner directory, set `CARGO_HOME` and `RUSTUP_HOME` in the runner's `.env`, prepend `$CARGO_HOME/bin` to its `.path`, and restart the runner.
 - **Intel Mac, for the amd64 container build:** colima, the Docker CLI and Buildx: `brew install colima docker docker-buildx`, then add `"cliPluginsExtraDirs": ["/usr/local/lib/docker/cli-plugins"]` to the runner user's `~/.docker/config.json` so `docker buildx` is found, with no `credsStore` there (the keychain helper can't be used from the runner's service). Start the VM with enough memory for a release build, `colima start --cpu 4 --memory 6 --disk 60`, and keep it running across reboots with `brew services start colima`. The VM is x86_64 because the Mac is. Check with `docker version --format '{{.Server.Arch}}'` (`amd64`) as the runner's user; the job's `Docker` step runs the same check.
 
 Jobs aren't sandboxed: anyone who can push a branch can run code on these machines as the runner's user, and files stay between jobs. Keep the runners in an account with nothing else on it where you can, and never let them take jobs from a public repository.
