@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Faro</string>
+
+    <!-- Shown by the system next to the foreground service (Play-style declaration of its use). -->
+    <string name="fgs_special_use_explanation">Keeps Faro running so it can check this device\'s screen and tell the member\'s allies if monitoring stops. Nothing runs in the background that the member has not agreed to.</string>
+
+    <!-- Notification (the "this device is monitored" notice, always visible) -->
+    <string name="channel_monitor_name">Faro is running</string>
+    <string name="channel_monitor_description">The notice that this device is monitored by Faro. It stays while Faro runs.</string>
+    <string name="channel_notice_name">Faro notices</string>
+    <string name="channel_notice_description">Important notices from Faro, such as who your allies are.</string>
+    <string name="notification_starting">Starting Faro…</string>
+    <string name="notification_monitored">This device is monitored by Faro. Screenshots are blurred and shared with your allies.</string>
+    <string name="notification_not_monitored">Faro is not set up on this device yet. It monitors nothing.</string>
+    <string name="notification_notice_title">A notice from Faro</string>
+    <string name="notification_notice_text">Tap to read it.</string>
+
+    <!-- Status screen -->
+    <string name="status_loading">Connecting to Faro…</string>
+    <string name="status_nothing_to_do">Faro is working on this phone. There is nothing to do.</string>
+    <string name="status_unavailable_title">Faro isn\'t running</string>
+    <string name="status_unavailable_detail">Faro couldn\'t start on this phone. Restart the phone. If it still says so, tell whoever runs your instance.</string>
+    <string name="status_unread_notice">There is a notice from Faro you have not read.</string>
+    <string name="status_read_notice">Read the notice</string>
+    <string name="status_about">About Faro</string>
+    <string name="status_enroll">Enroll this phone…</string>
+    <string name="status_state_only">This screen only shows what Faro is doing. Nothing here can stop, pause or hide monitoring.</string>
+
+    <string name="fix_notifications">Allow notifications…</string>
+    <string name="fix_accessibility">Open Accessibility settings…</string>
+    <string name="fix_device_admin">Turn on device protection…</string>
+    <string name="fix_battery">Stop battery saving for Faro…</string>
+
+    <string name="problem_notifications">Notifications are off for Faro, so the notice that this phone is monitored can\'t be shown. Your allies are not told, but turn them on.</string>
+    <string name="problem_accessibility">Accessibility is off for Faro, so Faro can\'t see the screen, and your allies are told. Open Accessibility settings, choose Faro and switch it on.</string>
+    <string name="problem_device_admin">Device protection is off, so Faro can be uninstalled without a warning to your allies first. Turn it on.</string>
+    <string name="problem_battery">Battery saving is on for Faro, so Android may stop it. Your allies are told if it does. Choose Don\'t optimize for Faro.</string>
+
+    <!-- About -->
+    <string name="about_title">About Faro</string>
+    <string name="about_version">Faro for Android, version %1$s</string>
+    <string name="about_body">Faro helps someone stay accountable about what they look at on their devices. Screenshots are blurred on this phone before anything leaves it, and only the member\'s chosen allies can open them. Your Faro instance can\'t read them.\n\nThis phone is monitored for as long as Faro is installed. Removing Faro is allowed, but it is never silent: your allies are told.</string>
+    <string name="about_licences">Licences and source code</string>
+    <string name="about_licences_url">https://github.com/faro-project/faro/blob/main/LICENSE</string>
+
+    <!-- Enrollment -->
+    <string name="enroll_title">Enroll this phone</string>
+    <string name="enroll_intro">Open the Computers page of your Faro web app, add a device and copy the link. Paste it here. If you only have the address of your instance, paste that and type the code the web app shows.</string>
+    <string name="enroll_link_hint">faro://enroll…  or  faro.example.org</string>
+    <string name="enroll_code_hint">Code (only with an address), like 7Q2K-M9XD</string>
+    <string name="enroll_continue">Continue</string>
+    <string name="enroll_need_link">Paste the link first.</string>
+    <string name="enroll_need_code">With a Faro address, also type the code the web app shows next to it.</string>
+    <string name="enroll_checking">Checking with your instance…</string>
+    <string name="enroll_confirm_title">Enroll with “%1$s”?</string>
+    <string name="enroll_confirm_body">This phone will be monitored by Faro for as long as it is enrolled, and your allies will be told if that stops. The instance is at %1$s.</string>
+    <string name="enroll_member_fingerprint">The member key in the link: %1$s</string>
+    <string name="enroll_confirm_yes">Enroll this phone</string>
+    <string name="enroll_cancel">Cancel</string>
+    <string name="enroll_enrolling">Enrolling…</string>
+    <string name="enroll_waiting_title">Waiting for approval in the web app</string>
+    <string name="enroll_waiting_body">Open the Computers page of your Faro web app and check that this code matches, then approve the device. Monitoring starts then.</string>
+    <string name="enroll_fingerprint_label">This phone\'s code</string>
+    <string name="enroll_refused_title">The enrollment was refused</string>
+    <string name="enroll_refused_body">The device was refused in the web app. Faro monitors nothing on this phone. To try again, create a new enrollment link.</string>
+    <string name="enroll_approved_title">Approved</string>
+    <string name="enroll_approved_body">One more thing: Faro needs a few permissions to do its job.</string>
+    <string name="enroll_continue_setup">Continue to setup</string>
+    <string name="enroll_failed">Faro couldn\'t do that: %1$s</string>
+    <string name="enroll_try_again">Try again</string>
+
+    <!-- Setup -->
+    <string name="setup_title">Set up Faro</string>
+    <string name="setup_progress">%1$d of %2$d done</string>
+    <string name="setup_notifications_title">Allow notifications</string>
+    <string name="setup_notifications_body">Android shows a notice for as long as Faro runs. It says that this phone is monitored. Faro needs permission to show it.</string>
+    <string name="setup_notifications_button">Allow notifications</string>
+    <string name="setup_notifications_settings">Open notification settings</string>
+    <string name="setup_accessibility_title">Turn on Faro in Accessibility</string>
+    <string name="setup_accessibility_body">Faro uses Android\'s Accessibility service to take screenshots and to see which app or website is in front. Open Accessibility settings, choose Faro (under Installed apps or Downloaded apps) and switch it on.\n\nFaro doesn\'t come from the Play Store, so Android 13 and later may grey the switch out and say it is a restricted setting. To allow it: tap Open app info below, tap the three-dot menu at the top right, choose Allow restricted settings and confirm. The menu only appears after you have tried to switch Faro on once. Then come back and switch it on.</string>
+    <string name="setup_accessibility_app_info">Open app info</string>
+    <string name="setup_accessibility_settings">Open Accessibility settings</string>
+    <string name="setup_admin_title">Turn on device protection</string>
+    <string name="setup_admin_body">Faro becomes a device administrator so that removing Faro is never silent: before it can be uninstalled, your allies are told. It can\'t lock, wipe or change anything on this phone.</string>
+    <string name="setup_admin_button">Turn on device protection</string>
+    <string name="setup_admin_explanation">Faro can then tell your allies before it is uninstalled. It asks for no other control of this phone.</string>
+    <string name="setup_battery_title">Stop battery saving for Faro</string>
+    <string name="setup_battery_body">Android can stop apps that run all the time to save battery. Faro has to keep running. Choose Allow on the next screen.</string>
+    <string name="setup_battery_button">Stop battery saving for Faro</string>
+    <string name="setup_done_title">Faro is set up</string>
+    <string name="setup_done_body">Everything Faro needs is on. You can close this. The Faro notice stays at the top of the screen while it runs.</string>
+    <string name="setup_done_button">Done</string>
+
+    <!-- Accessibility service description (shown in Settings) -->
+    <string name="accessibility_description">Lets Faro take blurred screenshots and see which app or website is in front, for the accountability partners of the member who enrolled this phone. The member agreed to this, and it is never hidden.</string>
+
+    <!-- Device admin -->
+    <string name="admin_disable_warning">Turning this off lets Faro be removed. Your allies are told that you are doing it, right now.</string>
+
+    <!-- Notice screen -->
+    <string name="notice_title">Notice from Faro</string>
+    <string name="notice_ok">OK</string>
+</resources>
