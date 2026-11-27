@@ -374,3 +374,51 @@ async fn the_tunnel_switches_to_a_newer_installed_bundle() {
     assert_eq!(kept, None);
     assert_eq!(f2.status().domains_version.as_deref(), Some("2.0.0"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn never_goes_below_the_installed_version() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.1.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let up = blocking(move || c.update_domains(root).unwrap()).await;
+    assert!(matches!(up, DomainsUpdate::Installed { .. }), "{up:?}");
+
+    // The mirror now lists only an older bundle (a stale or rolled back
+    // instance): older, and then equal, are both left alone.
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let (older, equal, installed) = blocking(move || {
+        let older = c.update_domains(root.clone());
+        let equal = c.update_domains(root);
+        (older, equal, c.installed_domains().unwrap())
+    })
+    .await;
+    assert!(matches!(older, Ok(DomainsUpdate::UpToDate)), "{older:?}");
+    assert!(matches!(equal, Ok(DomainsUpdate::UpToDate)), "{equal:?}");
+    assert_eq!(installed.unwrap().version, "1.1.0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bundle_the_instance_altered_is_never_installed() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.0.0")]).await;
+    // The instance swaps the stored bundle for its own bytes; the signed
+    // metadata still names the project's length and BLAKE3.
+    let mut swapped = 0;
+    let artifacts = ch.w.t.dir.path().join("data/updates/artifacts");
+    for e in std::fs::read_dir(&artifacts).unwrap().flatten() {
+        let len = e.metadata().unwrap().len() as usize;
+        std::fs::write(e.path(), vec![0u8; len]).unwrap();
+        swapped += 1;
+    }
+    assert!(swapped > 0, "found no stored bundle to alter");
+    let (c, root) = (core.clone(), ch.root());
+    let (got, installed) =
+        blocking(move || (c.update_domains(root), c.installed_domains().unwrap())).await;
+    assert!(got.is_err(), "{got:?}");
+    assert_eq!(installed, None);
+}

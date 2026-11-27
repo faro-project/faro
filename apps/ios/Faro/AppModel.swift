@@ -41,7 +41,7 @@ final class AppModel: ObservableObject {
     /// Unsigned builds (and the Simulator without the entitlement) have no
     /// app group container; use a folder in Application Support so the app
     /// still runs. A signed build never takes this path.
-    private static func fallbackGroup() -> AppGroup? {
+    static func fallbackGroup() -> AppGroup? {
         guard let base = try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         else { return nil }
