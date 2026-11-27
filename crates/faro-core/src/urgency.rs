@@ -148,7 +148,7 @@ impl UrgencyPolicy {
     /// | `flag` | from the rating mapping |
     /// | `tamper`, `goodbye` | urgent |
     /// | `settings_change`, `paused`, `resumed` | normal |
-    /// | `capture`, `agent_restarted`, `boot`, `shutdown` | none |
+    /// | `capture`, `blocked_summary`, `shield_summary`, `agent_restarted`, `boot`, `shutdown` | none |
     ///
     /// A single `agent_restarted` is routine (updates, crashes); repeated
     /// kills are escalated separately as the `agent_killed_repeatedly` tamper
@@ -161,6 +161,8 @@ impl UrgencyPolicy {
                 Urgency::Normal
             }
             EventBody::Capture { .. }
+            | EventBody::BlockedSummary { .. }
+            | EventBody::ShieldSummary { .. }
             | EventBody::AgentRestarted { .. }
             | EventBody::Boot { .. }
             | EventBody::Shutdown => Urgency::None,
@@ -243,7 +245,7 @@ mod tests {
                 signal: TamperSignal::WaylandTokenLost,
                 account: None,
             },
-            EventBody::SettingsChange { changes: vec![] },
+            EventBody::settings_change(vec![]),
             EventBody::AgentRestarted { count_last_hour: 9 },
             EventBody::Paused {
                 reason: None,
@@ -269,7 +271,7 @@ mod tests {
         assert_eq!(p.urgency_for(&flag(Rating::Medium)), Urgency::Urgent);
         assert_eq!(p.urgency_for(&flag(Rating::High)), Urgency::Urgent);
         assert_eq!(
-            p.urgency_for(&EventBody::SettingsChange { changes: vec![] }),
+            p.urgency_for(&EventBody::settings_change(vec![])),
             Urgency::Normal
         );
         assert_eq!(p.urgency_for(&EventBody::Shutdown), Urgency::None);
@@ -301,7 +303,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            p.urgency_for(&EventBody::SettingsChange { changes }),
+            p.urgency_for(&EventBody::settings_change(changes)),
             Urgency::Normal
         );
         // ...and it can't go below the floor.

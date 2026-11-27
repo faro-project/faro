@@ -51,6 +51,9 @@ pub enum Platform {
     Macos,
     Windows,
     Linux,
+    /// An iPhone. It blocks rather than watches (docs/IOS.md): no captures,
+    /// and it takes data bundles with platform `any`, never packages.
+    Ios,
 }
 
 impl Platform {
@@ -59,6 +62,7 @@ impl Platform {
             Platform::Macos => "macos",
             Platform::Windows => "windows",
             Platform::Linux => "linux",
+            Platform::Ios => "ios",
         }
     }
 
@@ -67,6 +71,7 @@ impl Platform {
             "macos" => Some(Self::Macos),
             "windows" => Some(Self::Windows),
             "linux" => Some(Self::Linux),
+            "ios" => Some(Self::Ios),
             _ => None,
         }
     }
@@ -425,6 +430,24 @@ pub struct AllyKeyUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_names_round_trip_including_ios() {
+        for p in [
+            Platform::Macos,
+            Platform::Windows,
+            Platform::Linux,
+            Platform::Ios,
+        ] {
+            assert_eq!(Platform::parse(p.as_str()), Some(p));
+            assert_eq!(
+                serde_json::to_value(p).unwrap(),
+                serde_json::json!(p.as_str())
+            );
+        }
+        assert_eq!(Platform::Ios.as_str(), "ios");
+        assert_eq!(Platform::parse("android"), None);
+    }
 
     #[test]
     fn request_bytes_bind_everything() {

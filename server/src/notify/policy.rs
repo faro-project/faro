@@ -230,6 +230,9 @@ mod tests {
     fn tamper_class_membership() {
         assert!(is_tamper_class("device", "tamper", Urgency::Urgent));
         assert!(is_tamper_class("device", "goodbye", Urgency::Urgent));
+        // iPhone signals (screen_time_revoked, filter_off, settings_cleared)
+        // are `tamper` events, so they are tamper-class by kind.
+        assert!(is_tamper_class("device", "tamper", Urgency::None));
         assert!(!is_tamper_class("device", "flag", Urgency::Urgent));
         assert!(!is_tamper_class(
             "device",

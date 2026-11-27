@@ -497,6 +497,30 @@ fn bodies() -> Vec<EventBody> {
                 old: Some("60".into()),
                 new: None,
             }],
+            requested_at: Some(1),
+            takes_effect_at: Some(2),
+            cancelled_at: None,
+            delay_secs: Some(86_400),
+        },
+        EventBody::tamper(TamperSignal::FilterOff {
+            cause: faro_proto::body::FilterOffCause::OnDemandOff,
+        }),
+        EventBody::BlockedSummary {
+            bucket_start: 0,
+            bucket_secs: 300,
+            by_category: [("adult".to_owned(), 2)].into(),
+            hosts: vec![faro_proto::body::BlockedHost {
+                host: "example.test".into(),
+                category: "adult".into(),
+                count: 2,
+            }],
+            other_hosts: 0,
+        },
+        EventBody::ShieldSummary {
+            bucket_start: 0,
+            bucket_secs: 300,
+            shown: 1,
+            closed: 1,
         },
         EventBody::AgentRestarted { count_last_hour: 3 },
         EventBody::Paused {
