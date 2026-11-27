@@ -29,6 +29,7 @@ cargo deny check                                        # licenses, bans, source
 | `faro-platform-macos` | macOS implementation of the platform traits | `faro-platform` |
 | `faro-platform-windows` | Windows implementation of the platform traits: capture, foreground window, browser, session, tamper, the service host and SCM, ACLs, Authenticode, tray UI | `faro-platform` |
 | `faro-detect` | dHash, classifier, domain categories, fusion, blurred thumbnails | `faro-platform`, `faro-proto` |
+| `faro-dnsfilter` | The iOS on-device DNS filter engine (IOS.md §7): parses DNS queries from raw IP packets, decides with the domain bundle, builds `NXDOMAIN` replies, counts blocked lookups and detects bursts. No I/O, no unsafe code | `faro-detect` |
 | `faro-ipc` | Agent ↔ service protocol and transport (Unix sockets on macOS, named pipes on Windows) | `faro-platform`, `faro-proto` |
 | `faro-core` | Scheduler, urgency, recipients, event writer, outbox, reports | `faro-proto`, `faro-crypto` |
 | `faro-update` | TUF-style signed update verification | `faro-proto`, `faro-crypto` |
@@ -140,10 +141,13 @@ cargo test --release --lib                              # the seeds still decode
 | | `report` | Report uploads (`ReportUpload`) and decrypted `DailyReport`s |
 | | `api` | The HTTP API types the server reads from devices and browsers and the client reads from its instance; the first byte picks the type |
 | `faro-ipc` | `decode_agent_msg`, `decode_service_msg`, `stream_decoder` | Agent ↔ service messages |
+| `faro-dnsfilter` | `packet` | A raw IP packet from the tunnel through the engine. A reply must be a well-formed `NXDOMAIN` packet back to the sender, a forwarded query must be the payload unchanged, and an allowed name must never be counted. The packets are read back by the harness's own parser and checksum, not the crate's |
+| | `response` | An upstream answer wrapped back to the client |
+| | `state` | Saved counters and filter configs, as the tunnel loads them from the app group |
 
 Every target fails on a panic. Beyond that, every faro-proto decoder must round-trip (decode, encode, decode to an equal value, encode to the same bytes), and the faro-update targets check the state machine's rules after every call: nothing trusted rolls back, a failed call changes nothing but the observed time, and the persisted state loads back unchanged and stays small.
 
-- **Seeds.** `faro-update`'s seeds are documents signed by `ToyProject::from_seed`, a toy project with fixed keys whose first root every target trusts, so a seed written by one process verifies in another. `faro-proto`'s are sample values of each type. Both are written by the crate's `seed_corpus` example, and `corpus/` is not checked in. The `src/lib.rs` tests check that the seeds still decode and reach as far into the verifier as they should, so run them after changing a type.
+- **Seeds.** `faro-update`'s seeds are documents signed by `ToyProject::from_seed`, a toy project with fixed keys whose first root every target trusts, so a seed written by one process verifies in another. `faro-proto`'s are sample values of each type. `faro-dnsfilter`'s are query packets (IPv4 and IPv6, blocked, allowed, malformed), answers and saved state. Each is written by the crate's `seed_corpus` example, and `corpus/` is not checked in. The `src/lib.rs` tests check that the seeds still decode and reach as far into the verifier as they should, so run them after changing a type. `faro-dnsfilter`'s also run the target checks on random mutations of the seeds, which needs no nightly (`FARO_FUZZ_ITERS=1000000 cargo test --release --lib` for a longer run).
 - **A shared machine.** libFuzzer uses one process unless asked for more; keep it that way (`-jobs=1`) and fuzz one target at a time.
 - **Findings.** Fix the bug with a regression test in the crate's normal test suite, not only in the corpus. A finding in `faro-update` is a security issue: describe it in the pull request that fixes it, never in a public issue.
 - **CI.** `.github/workflows/fuzz.yml` runs every target nightly and on demand (`workflow_dispatch`, with the seconds per target as input; 300 by default) on the Linux runner, and never on pull requests. Each run starts from the corpus the previous one grew (kept in the Actions cache), and a crashing input is uploaded as the `fuzz-crashes-<crate>-<run id>` artifact, kept for 30 days.
@@ -174,6 +178,21 @@ cargo run -p faro-detect --example domains-compile -- build --config crates/faro
 **In the package.** The macOS package ships the list, so category detection (adult and gambling sites) works from the first start, before the update channel has been reached. `build-pkg.sh` runs `fetch`, `build` and `notice` above, with the downloads kept in `target/domains/sources` and checked against their pins on every build. It installs `domains.bin` and `domains.manifest.json` in `/Library/Faro/domains` (`pkg_layout::DOMAINS_MANIFEST`) and the notice as `/Library/Faro/notices/domains.txt`. `check-pkg.sh` fails if any of them is missing, if the version isn't `sources.toml`'s `bundle_version`, if a refused source is named, if the notice lacks the MIT text, the CC BY 4.0 link or any source, or if this Mac's slice of `faro-service` can't load the list (`faro-service domains-check [--manifest PATH]`, which loads it as the service does and prints its version and sources) or it has no adult or no gambling source.
 
 **In the service.** It loads the packaged list with `load_domains`. When the packaged service's list is missing or doesn't load, it runs without domain categories and reports an urgent `integrity_failure` (`domain list (missing)` or `(changed)`). Each release also compiles the bundle in the `blocklist` job of `release.yml` and lists it on the update channel ([Models and blocklists on the update channel](#models-and-blocklists-on-the-update-channel)). A newer list from the channel replaces the packaged one without a restart; the packaged one stays as the fallback. The release fails unless the package's manifest is byte for byte the one `blocklist` built, so the two copies of a version are always the same. Tests hand a list to the service with the `domains` builder method.
+
+## The DNS filter
+
+`faro-dnsfilter` is the engine of the iOS packet tunnel (IOS.md §7). The extension hands it each packet with `Engine::handle_packet(packet, now_ms, screen_on)` and does what the returned `Action` says: write the `NXDOMAIN` reply back, send the DNS payload upstream and wrap the answer with `ReplyTo::wrap`, or drop the packet. The crate documentation has the rules. In short:
+
+- **Only UDP to port 53 is handled.** TCP gets no answer, so clients retry over UDP, and DNS over HTTPS, TLS or QUIC to the routed resolver addresses (`RESOLVER_ADDRS`) is dropped. Malformed queries are dropped too: several questions, compression pointers in the question, labels over 63 bytes, names over 255, bytes other than letters, digits, `-` and `_`.
+- **The decision**, first match wins: the always-blocked list (`ALWAYS_BLOCKED`, encrypted-DNS bootstrap names and iCloud Private Relay), the instance host (always allowed), the member's block list, the member's allow list, then the bundle's categories (`adult` always on). Names match their parents on label boundaries. Both constant lists carry a version (`ALWAYS_BLOCKED_VERSION`, `RESOLVER_LIST_VERSION`): bump it when a list changes.
+- **Counters and bursts** only ever see blocked lookups. The thresholds are constants in `burst.rs`.
+
+`cargo test -p faro-dnsfilter` checks the packet fixtures against checksums computed outside the crate, and a privacy test checks that no allowed name reaches the counters. To measure memory and time per query against a real bundle, build it ([The domain category bundle](#the-domain-category-bundle)), then:
+
+```sh
+cargo run --release -p faro-dnsfilter --example dnsfilter-measure -- \
+    target/domains/domains.manifest.json target/domains/sources
+```
 
 ## Testing without real hardware
 
