@@ -6,7 +6,11 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { b64, hex, unb64, utf8 } from '../src/lib/crypto/bytes.ts';
-import { sealGroupMessage } from '../src/lib/crypto/group.ts';
+import {
+	checkInBytes,
+	sealGroupMessage,
+	sealGroupMessageToEpoch
+} from '../src/lib/crypto/group.ts';
 import { sign, signPublicKey } from '../src/lib/crypto/keys.ts';
 import { deriveWrapKey, wrapSecret, wrapWithKey } from '../src/lib/crypto/passphrase.ts';
 import {
@@ -82,6 +86,41 @@ const groupMessage = sealGroupMessage(
 		]
 	},
 	messageText
+);
+// A check-in to the whole group, sealed here with an epoch key.
+const checkIn = { scale: 2 as const, was_hard: 'Sealed in the browser ✓', ask: 'A call' };
+const epochKey = new Uint8Array(32).fill(0x5a);
+const wholeGroup = sealGroupMessageToEpoch(
+	seed,
+	epochKey,
+	{
+		instance_id: ids.instance,
+		group_id: 'fedcba9876543210fedcba9876543210',
+		item_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+		kind: 'check_in',
+		author_id: ids.member,
+		issued_at_ms: 1_790_000_700_000,
+		recipients: [],
+		epoch: 3
+	},
+	checkInBytes(checkIn)
+);
+// A private reply to a check-in, to ally A.
+const replyText = 'Proud of you. Calling Sunday ✓';
+const reply = sealGroupMessage(
+	seed,
+	unb64(memberEnc),
+	{
+		instance_id: ids.instance,
+		group_id: 'fedcba9876543210fedcba9876543210',
+		item_id: 'cccccccccccccccccccccccccccccccc',
+		kind: 'check_in_reply',
+		author_id: ids.member,
+		issued_at_ms: 1_790_000_800_000,
+		recipients: [{ user_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey }],
+		parent_id: 'aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb'
+	},
+	replyText
 );
 // What an ally's browser opens from the instance's sealed challenge.
 const challenge = new Uint8Array(32).fill(0x44);
@@ -163,6 +202,15 @@ v.from_web = {
 	group_message: {
 		sealed: groupMessage,
 		plaintext: JSON.stringify({ text: messageText })
+	},
+	group_message_epoch: {
+		sealed: wholeGroup,
+		epoch_key_hex: hex(epochKey),
+		plaintext: JSON.stringify(checkIn)
+	},
+	group_message_reply: {
+		sealed: reply,
+		plaintext: JSON.stringify({ text: replyText })
 	}
 };
 // A roster log signed by the web app: its creator (the web seed) and ally A

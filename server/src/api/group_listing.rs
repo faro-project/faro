@@ -312,6 +312,7 @@ pub async fn create_request(
                     kind: GroupMessageKind::JoinRequestNote,
                     group_id: Some(&id),
                     allowed: &facilitators,
+                    whole_group: false,
                 },
             )
             .await?;

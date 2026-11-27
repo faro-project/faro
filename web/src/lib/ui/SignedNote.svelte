@@ -4,10 +4,12 @@
 	// §10.2). It is shown only if the author's signature checks out; the
 	// server can't read it or write one in someone's name. Whether the key
 	// is really the author's is what comparing safety codes tells you.
+	import { epochKeyFor } from '../check-in-api.ts';
 	import { instance } from '../instance.svelte.ts';
 	import { keyring } from '../keys/keyring.svelte.ts';
 	import { getMessage, reachOutError } from '../reach-out-api.ts';
 	import { readMessage, type MessageView } from '../reach-out.ts';
+	import { loadRoster } from '../roster-api.ts';
 	import type { User } from '../types.ts';
 	import UnlockKeys from './UnlockKeys.svelte';
 
@@ -27,6 +29,9 @@
 	let unlocking = $state(false);
 	let unlockKind = $state<'member' | 'ally'>('member');
 	let loadedFor = '';
+	/** The key of a whole-group message's epoch, opened against the verified roster. */
+	let epochKey = $state.raw<Uint8Array | null>(null);
+	let epochTried = '';
 
 	$effect(() => {
 		if (messageId === loadedFor) return;
@@ -43,12 +48,30 @@
 		unlockKind = user.roles.member ? 'member' : 'ally';
 	});
 
+	// A whole-group message opens with its epoch's key: once something is
+	// unlocked, check the group's roster and open this browser's copy of it.
+	$effect(() => {
+		const m = view?.message;
+		const unlockedNow = !!keyring.memberFor(user.id) || !!keyring.allyFor(user.id);
+		if (!m || m.epoch == null || !m.group_id || !unlockedNow) return;
+		const key = `${m.item_id}:${m.epoch}`;
+		if (epochTried === key) return;
+		epochTried = key;
+		const { group_id, epoch } = m;
+		void loadRoster(group_id, user.id)
+			.then((r) => epochKeyFor(group_id, user.id, r.state, epoch))
+			.then((k) => (epochKey = k?.key ?? null))
+			.catch(() => {
+				epochTried = '';
+			});
+	});
+
 	let result = $derived(
 		view
 			? readMessage(
 					view,
 					user.id,
-					{ member: keyring.member, ally: keyring.ally },
+					{ member: keyring.member, ally: keyring.ally, epochKey },
 					instance.info?.instance_id,
 					author
 				)

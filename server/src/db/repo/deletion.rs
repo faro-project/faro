@@ -79,6 +79,8 @@ pub const USER_COLUMNS: &[(&str, &str, Clears)] = &[
     ("quiet_hours_bypass", "sender_id", Clears::Rows),
     ("reach_out_prefs", "user_id", Clears::Rows),
     ("reach_out_prefs", "sender_id", Clears::Rows),
+    ("group_posts", "author_id", Clears::Rows),
+    ("group_post_recipients", "recipient_id", Clears::Rows),
 ];
 
 /// Columns holding the user's email address rather than their id.
@@ -177,6 +179,10 @@ pub const PURGE_BY_ID: &[&str] = &[
     "DELETE FROM group_messages WHERE author_id = $1",
     "DELETE FROM quiet_hours_bypass WHERE user_id = $1 OR sender_id = $1",
     "DELETE FROM reach_out_prefs WHERE user_id = $1 OR sender_id = $1",
+    // Check-ins and replies (§18): their copies of others' posts, then
+    // their own posts (replies to them go with them).
+    "DELETE FROM group_post_recipients WHERE recipient_id = $1",
+    "DELETE FROM group_posts WHERE author_id = $1",
 ];
 
 /// The purge's statements on the user's email address (`$1`): invitations

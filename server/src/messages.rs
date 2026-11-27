@@ -4,8 +4,12 @@
 //! * **Who a message may go to** ([`resolve_audience`]): the sender's own
 //!   allies, a group's facilitators, or up to 32 named people (active
 //!   participants of a group the sender is in, or, outside any group,
-//!   people the sender has an active link with). Never "the whole group"
-//!   (that is a later phase, and only for groups of 32 or fewer).
+//!   people the sender has an active link with), or the whole group, only
+//!   in a group of 32 or fewer (decision 10): those messages are sealed
+//!   with the group's epoch key and name nobody (PROTOCOL.md §11). Check-ins
+//!   ([`resolve_check_in_audience`]) use the same audiences, with "my allies"
+//!   meaning the sender's allies in that group, and the whole group at any
+//!   size.
 //! * **Which key to seal to** ([`recipient_keys`]): an ally's key from the
 //!   sender's own manifest, otherwise the person's member encryption key,
 //!   otherwise their ally key. The browser trusts only the first without
@@ -23,6 +27,7 @@
 
 use crate::api::groups::{load_in_tx, require_writable};
 use crate::db::repo::group_messages::{self, Audience, NewReachOut, MAX_REACH_OUTS_PER_HOUR};
+use crate::db::repo::groups::LARGE_GROUP;
 use crate::db::repo::{allies, groups, is_unique_violation, member_keys, users};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -228,6 +233,28 @@ pub async fn resolve_audience(
             }
             named.to_vec()
         }
+        Audience::Group => {
+            let gid = group_id.ok_or_else(|| {
+                AppError::bad_request("group_required", "say which group to reach out to")
+            })?;
+            let (group, _) = load_in_tx(conn, sender, gid).await?;
+            require_writable(state, &group)?;
+            if groups::count_active(&mut *conn, gid).await? > LARGE_GROUP {
+                return Err(AppError::conflict(
+                    "group_too_large",
+                    format!(
+                        "a reach out to the whole group is only for groups of {LARGE_GROUP} \
+                         people or fewer: choose your allies, the facilitators or people by name"
+                    ),
+                ));
+            }
+            require_group_key(conn, state, gid).await?;
+            groups::active_user_ids(&mut *conn, gid, false)
+                .await?
+                .into_iter()
+                .filter(|p| p != sender)
+                .collect()
+        }
     };
     let people = reachable(conn, people).await?;
     if people.is_empty() {
@@ -242,6 +269,87 @@ pub async fn resolve_audience(
     Ok(people)
 }
 
+/// Whole-group posting needs the group's encryption set up, and waits while
+/// a facilitator has roster work to do ("Waiting for a facilitator to
+/// update the group", PROTOCOL.md §10.7). Returns the current epoch.
+pub async fn require_group_key(
+    conn: &mut sqlx::AnyConnection,
+    state: &AppState,
+    group_id: &str,
+) -> AppResult<u64> {
+    let (pending, _) = crate::api::group_roster::pending_changes(conn, state, group_id).await?;
+    if pending.epoch == 0 {
+        return Err(AppError::conflict(
+            "group_key_missing",
+            "this group's encryption isn't set up yet: a facilitator's browser does it \
+             when they open the group",
+        ));
+    }
+    if pending.posting_paused {
+        return Err(AppError::conflict(
+            "posting_paused",
+            "waiting for a facilitator to update the group: send to people by name for now",
+        ));
+    }
+    Ok(pending.epoch)
+}
+
+/// Everyone a check-in from `sender` to `audience` in `group_id` goes to,
+/// by the same rules as [`resolve_audience`], except that "my allies" means
+/// the sender's allies who are in this group, and "the whole group" has no
+/// size limit and names nobody (the empty list: it is sealed with the epoch
+/// key, and whoever is in the group when it arrives may read it).
+pub async fn resolve_check_in_audience(
+    conn: &mut sqlx::AnyConnection,
+    state: &AppState,
+    sender: &UserId,
+    audience: Audience,
+    group_id: &str,
+    named: &[UserId],
+) -> AppResult<Vec<UserId>> {
+    match audience {
+        Audience::Allies => {
+            if !named.is_empty() {
+                return Err(AppError::bad_request(
+                    "user_ids_not_needed",
+                    "only a post to named people lists them",
+                ));
+            }
+            let (group, _) = load_in_tx(conn, sender, group_id).await?;
+            require_writable(state, &group)?;
+            let mut people = Vec::new();
+            for a in allies::active_ally_ids(&mut *conn, sender).await? {
+                if groups::active_participant(&mut *conn, group_id, &a)
+                    .await?
+                    .is_some()
+                {
+                    people.push(a);
+                }
+            }
+            let people = reachable(conn, people).await?;
+            if people.is_empty() {
+                return Err(no_recipients());
+            }
+            Ok(people)
+        }
+        Audience::Group => {
+            if !named.is_empty() {
+                return Err(AppError::bad_request(
+                    "user_ids_not_needed",
+                    "only a post to named people lists them",
+                ));
+            }
+            let (group, _) = load_in_tx(conn, sender, group_id).await?;
+            require_writable(state, &group)?;
+            require_group_key(conn, state, group_id).await?;
+            Ok(Vec::new())
+        }
+        Audience::Facilitators | Audience::People => {
+            resolve_audience(conn, state, sender, audience, Some(group_id), named).await
+        }
+    }
+}
+
 /// What an uploaded message must be, for where it is uploaded.
 pub struct Expect<'a> {
     pub kind: GroupMessageKind,
@@ -249,6 +357,9 @@ pub struct Expect<'a> {
     /// Who it may be sealed to (a subset is fine: people without keys
     /// can't be).
     pub allowed: &'a [UserId],
+    /// Sealed with the group's current epoch key and naming nobody
+    /// (otherwise sealed to people, with no epoch).
+    pub whole_group: bool,
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -279,6 +390,23 @@ pub async fn check_message(
     if m.group_id.as_deref() != expect.group_id {
         return Err(invalid("the message names another group"));
     }
+    match (expect.whole_group, m.epoch) {
+        (false, None) => {}
+        (true, Some(epoch)) => {
+            let gid = expect
+                .group_id
+                .ok_or_else(|| invalid("a whole-group message names its group"))?;
+            let current = require_group_key(conn, state, gid).await?;
+            if epoch != current {
+                return Err(AppError::conflict(
+                    "stale_epoch",
+                    "the group's key changed: send it again",
+                ));
+            }
+        }
+        (true, None) => return Err(invalid("expected a message sealed with the group's key")),
+        (false, Some(_)) => return Err(invalid("this message can't go to the whole group")),
+    }
     if (state.now_ms() - m.issued_at_ms).abs() > REQUEST_MAX_SKEW_MS {
         return Err(AppError::bad_request(
             "clock_skew",
@@ -297,7 +425,7 @@ pub async fn check_message(
             "the message isn't signed with your member key",
         )
     })?;
-    if let Some(body) = &sealed.body {
+    if let (Some(body), None) = (&sealed.body, m.epoch) {
         let mine = key_id(keys.enc_pubkey.as_bytes());
         if !body
             .envelopes
@@ -353,8 +481,9 @@ pub async fn accept_message(
 /// most 32), with an optional signed message: the rate limit, the message,
 /// the rows, and an urgent notice to each recipient. Returns its id.
 ///
-/// A whole-group reach out (a later phase) resolves its recipients its own
-/// way and calls this the same way.
+/// A whole-group reach out resolves its recipients (every active
+/// participant but the sender, in a group of 32 or fewer) in
+/// [`resolve_audience`] and calls this the same way.
 pub async fn send_reach_out(
     conn: &mut sqlx::AnyConnection,
     state: &AppState,
@@ -392,6 +521,7 @@ pub async fn send_reach_out(
                 kind: GroupMessageKind::ReachOut,
                 group_id,
                 allowed: recipients,
+                whole_group: audience == Audience::Group,
             },
         )
         .await?;

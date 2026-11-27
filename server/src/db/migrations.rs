@@ -94,6 +94,11 @@ fn sources(backend: Backend) -> Vec<(i64, &'static str, &'static str)> {
                     "group_sharing",
                     include_str!("../../migrations/0015_group_sharing.sql"),
                 ),
+                (
+                    16,
+                    "group_posts",
+                    include_str!("../../migrations/0016_group_posts.sql"),
+                ),
             ]
         }
     }
@@ -142,6 +147,127 @@ mod tests {
             assert!(v.windows(2).all(|w| w[0] < w[1]));
             assert!(v.iter().all(|&x| x > 0));
         }
+    }
+
+    /// Migration 16 rebuilds `reach_outs` to widen its `audience` CHECK.
+    /// SQLite enforces foreign keys, so dropping the parent must not cascade
+    /// over `reach_out_recipients`: rows, answers, links and indexes survive.
+    #[tokio::test]
+    async fn rebuilding_reach_outs_keeps_its_data() {
+        use sqlx::{Connection, Row};
+        let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let all = sources(Backend::Sqlite);
+        let (last, before) = all.split_last().unwrap();
+        assert_eq!(last.0, 16);
+        for (_, _, sql) in before {
+            sqlx::raw_sql(*sql).execute(&mut conn).await.unwrap();
+        }
+        for sql in [
+            "INSERT INTO users (id, email, display_name, created_at)
+             VALUES ('usr_a', 'a@x', 'A', 1), ('usr_b', 'b@x', 'B', 1)",
+            "INSERT INTO accountability_groups (id, name, created_at) VALUES ('g1', 'G', 1)",
+            "INSERT INTO group_messages (id, kind, author_id, group_id, message_json, created_at)
+             VALUES ('m1', 'reach_out', 'usr_a', 'g1', '{}', 1)",
+            "INSERT INTO reach_outs (id, sender_id, group_id, audience, created_at, sig, blob_ref)
+             VALUES ('r1', 'usr_a', 'g1', 'people', 10, 'sig', 'm1'),
+                    ('r2', 'usr_a', NULL, 'allies', 20, NULL, NULL)",
+            "INSERT INTO reach_out_recipients (reach_out_id, recipient_id, answered_at, answer)
+             VALUES ('r1', 'usr_b', 15, 'call'), ('r2', 'usr_b', NULL, NULL)",
+        ] {
+            sqlx::query(sql).execute(&mut conn).await.unwrap();
+        }
+
+        sqlx::raw_sql(last.2).execute(&mut conn).await.unwrap();
+
+        let rows =
+            sqlx::query("SELECT id, audience, group_id, blob_ref, sig FROM reach_outs ORDER BY id")
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<String, _>("audience"), "people");
+        assert_eq!(
+            rows[0].get::<Option<String>, _>("blob_ref").as_deref(),
+            Some("m1")
+        );
+        assert_eq!(
+            rows[0].get::<Option<String>, _>("group_id").as_deref(),
+            Some("g1")
+        );
+        let rec = sqlx::query(
+            "SELECT reach_out_id, answered_at, answer FROM reach_out_recipients
+             ORDER BY reach_out_id",
+        )
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+        assert_eq!(rec.len(), 2);
+        assert_eq!(rec[0].get::<Option<i64>, _>("answered_at"), Some(15));
+        assert_eq!(
+            rec[0].get::<Option<String>, _>("answer").as_deref(),
+            Some("call")
+        );
+        assert_eq!(rec[1].get::<Option<String>, _>("answer"), None);
+
+        // The new audience is allowed, a bad one isn't, the links still
+        // cascade, and the helper tables and indexes are as they were.
+        sqlx::query(
+            "INSERT INTO reach_outs (id, sender_id, group_id, audience, created_at)
+             VALUES ('r3', 'usr_a', 'g1', 'group', 30)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        assert!(sqlx::query(
+            "INSERT INTO reach_outs (id, sender_id, audience, created_at)
+             VALUES ('r4', 'usr_a', 'everyone', 30)"
+        )
+        .execute(&mut conn)
+        .await
+        .is_err());
+        sqlx::query("DELETE FROM reach_outs WHERE id = 'r1'")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let left: i64 = sqlx::query("SELECT COUNT(*) AS n FROM reach_out_recipients")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(left, 1, "deleting a reach out deletes its recipients");
+        let names: Vec<String> = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE tbl_name IN ('reach_outs', 'reach_out_recipients')
+               AND type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .fetch_all(&mut conn)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get("name"))
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "reach_out_recipients_recipient",
+                "reach_outs_created",
+                "reach_outs_sender"
+            ]
+        );
+        let leftovers: i64 = sqlx::query(
+            "SELECT COUNT(*) AS n FROM sqlite_master
+             WHERE name IN ('reach_outs_new', 'reach_out_recipients_save')",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .unwrap()
+        .get("n");
+        assert_eq!(leftovers, 0);
     }
 
     #[test]

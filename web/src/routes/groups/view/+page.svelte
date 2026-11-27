@@ -23,10 +23,13 @@
 	import { groupError } from '#lib/groups-api.ts';
 	import { proposals } from '#lib/proposals.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
+	import type { RosterState } from '#lib/crypto/roster.ts';
 	import type { GroupAlly, GroupView } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
+	import CheckIns from '#lib/ui/groups/CheckIns.svelte';
 	import GroupHistory from '#lib/ui/groups/GroupHistory.svelte';
 	import GroupKeys from '#lib/ui/groups/GroupKeys.svelte';
+	import GroupSafetyCode from '#lib/ui/groups/GroupSafetyCode.svelte';
 	import InvitePeople from '#lib/ui/groups/InvitePeople.svelte';
 	import ManageGroup from '#lib/ui/groups/ManageGroup.svelte';
 	import MeetingCard from '#lib/ui/groups/MeetingCard.svelte';
@@ -43,6 +46,9 @@
 	let error = $state('');
 	let tab = $state<'group' | 'manage'>('group');
 	let historyVersion = $state(0);
+	/** From GroupKeys: the roster this browser verified, and whether whole-group posting waits. */
+	let postingPaused = $state(false);
+	let roster = $state.raw<RosterState | null>(null);
 	let loadedFor = '';
 
 	onMount(() => {
@@ -301,12 +307,19 @@
 								without any details. Answers show on your <a href={resolve('/')}>home page</a>.
 							</p>
 						</div>
-						<ReachOut {user} groupId={group.id} />
+						<ReachOut
+							{user}
+							groupId={group.id}
+							participants={group.participant_count}
+							{roster}
+							{postingPaused}
+						/>
 					</section>
 				{/if}
 				<PairingCards groupId={group.id} {readOnly} />
 				<WaitingForYou groupId={group.id} {readOnly} />
 				<MeetingCard {group} />
+				<CheckIns {group} {user} {roster} {postingPaused} {readOnly} />
 
 				<section class="section" aria-labelledby="roster-h">
 					<h2 id="roster-h">People</h2>
@@ -330,7 +343,15 @@
 					<GroupHistory groupId={group.id} version={historyVersion} />
 				</section>
 
-				<GroupKeys {group} {user} />
+				<GroupKeys
+					{group}
+					{user}
+					onstatus={(s) => {
+						postingPaused = s.postingPaused;
+						roster = s.roster;
+					}}
+				/>
+				<GroupSafetyCode {roster} />
 
 				<SharingSettings
 					groupId={group.id}

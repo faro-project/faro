@@ -176,7 +176,7 @@ pub struct RosterPending {
 
 /// The diff behind [`RosterPending`]: the instance's roster mirror against
 /// the group's active participants and their current keys.
-async fn pending_changes(
+pub(crate) async fn pending_changes(
     conn: &mut sqlx::AnyConnection,
     state: &AppState,
     group: &str,

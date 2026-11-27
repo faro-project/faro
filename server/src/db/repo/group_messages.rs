@@ -30,8 +30,8 @@ pub async fn insert_message(
     let m = &sealed.message.body;
     sqlx::query(
         "INSERT INTO group_messages (id, kind, author_id, group_id, message_json, body_json,
-                                     created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                                     created_at, epoch)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&m.item_id)
     .bind(m.kind.as_str())
@@ -40,6 +40,7 @@ pub async fn insert_message(
     .bind(encode(&sealed.message))
     .bind(sealed.body.as_ref().map(encode))
     .bind(now_ms)
+    .bind(m.epoch.map(|e| i64::try_from(e).unwrap_or(i64::MAX)))
     .execute(&mut *conn)
     .await?;
     for r in &m.recipients {
@@ -169,6 +170,9 @@ pub enum Audience {
     Facilitators,
     /// Up to 32 named people.
     People,
+    /// The whole group, in a group of 32 or fewer (decision 10). The
+    /// message is sealed with the group's epoch key.
+    Group,
 }
 
 impl Audience {
@@ -177,13 +181,19 @@ impl Audience {
             Audience::Allies => "allies",
             Audience::Facilitators => "facilitators",
             Audience::People => "people",
+            Audience::Group => "group",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [Audience::Allies, Audience::Facilitators, Audience::People]
-            .into_iter()
-            .find(|a| a.as_str() == s)
+        [
+            Audience::Allies,
+            Audience::Facilitators,
+            Audience::People,
+            Audience::Group,
+        ]
+        .into_iter()
+        .find(|a| a.as_str() == s)
     }
 }
 
