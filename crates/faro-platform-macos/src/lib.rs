@@ -70,8 +70,9 @@ pub mod update_job;
 pub use bridge::{BridgeError, DEFAULT_TIMEOUT as CAPTURE_TIMEOUT};
 #[cfg(target_os = "macos")]
 pub use capture::{
-    active_displays, request_screen_capture_access, screen_capture_permission, CaptureBackend,
-    CaptureError, DisplayCapture, DisplayFailure, MacScreenCapture,
+    active_displays, request_screen_capture_access, request_screen_capture_access_once,
+    screen_capture_permission, CaptureBackend, CaptureError, DisplayCapture, DisplayFailure,
+    MacScreenCapture,
 };
 #[cfg(target_os = "macos")]
 pub use foreground::{accessibility_trusted, MacForeground};

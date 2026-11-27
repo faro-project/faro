@@ -56,10 +56,11 @@ die() { echo "faro-uninstall: $*" >&2; exit 1; }
 
 [[ "$(id -u)" == 0 ]] || die "run it as root: sudo $0"
 
-# The uids of every account with a GUI login session (also in the package's
+# The uids of every account with a GUI login session, whatever its uid, but
+# not the login window (uid 0) or _mbsetupuser (also in the package's
 # scripts/lib.sh, which is not installed).
 gui_uids() {
-    ps -axo uid=,comm= | awk '$2 ~ /\/loginwindow$/ && $1 >= 501 { print $1 }' | sort -un
+    ps -axo uid=,comm= | awk -v skip="$(id -u _mbsetupuser 2>/dev/null || echo 0)" '$2 ~ /\/loginwindow$/ && $1 != 0 && $1 != skip { print $1 }' | sort -un
 }
 
 start_service() {

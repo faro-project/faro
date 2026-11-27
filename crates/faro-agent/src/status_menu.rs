@@ -202,8 +202,10 @@ fn connected(m: &MemberStatus, now_ms: i64, offset: i64) -> StatusMenu {
                 "Screen Recording is off",
                 "Faro can't see the screen, and your allies are told. Open System Settings \
                  \u{2192} Privacy & Security \u{2192} Screen & System Audio Recording and switch \
-                 on Faro Agent. If it is on already (after Faro was reinstalled, for \
-                 example), select it, remove it with the \u{2212} button and add it again.",
+                 on Faro Agent. If Faro Agent is not in the list, or it is on but this \
+                 message stays (after Faro was reinstalled, for example), remove it with \
+                 the \u{2212} button if it is there, then click + and add \"Faro Agent\" \
+                 from the Faro folder on the startup disk.",
             )
         }
     } else if m.consecutive_failures >= FAILING_AFTER {

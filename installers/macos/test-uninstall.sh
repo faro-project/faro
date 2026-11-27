@@ -18,7 +18,7 @@ for cmd in launchctl pkgutil; do
     printf '#!/bin/bash\necho "%s $*" >> "$CALLS"\n' "$cmd" > "$stubs/$cmd"
 done
 printf '#!/bin/bash\necho 0\n' > "$stubs/id"
-printf '#!/bin/bash\necho "  501 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"\necho "    0 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"\n' > "$stubs/ps"
+printf '#!/bin/bash\necho "  501 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"\necho "    0 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"\necho "  201 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"\n' > "$stubs/ps"
 chmod 755 "$stubs"/*
 
 # Lay out a fake installation under $1 and print the path of the copied
@@ -81,6 +81,7 @@ removed() {
     [[ ! -e "$root/Users/ana/Library/Logs/Faro" ]] || fail "$1: an account's agent log is still there"
     [[ -e "$root/elsewhere/Faro/keep" ]] || fail "$1: followed a symbolic link in an account's home"
     grep -q "^launchctl bootout gui/501/org.faro.agent" <<< "$calls" || fail "$1: the agent was not stopped"
+    grep -q "^launchctl bootout gui/201/org.faro.agent" <<< "$calls" || fail "$1: the Guest agent was not stopped"
     if grep -q "gui/0/" <<< "$calls"; then fail "$1: touched the login window's session"; fi
     grep -q "^pkgutil --forget org.faro.pkg" <<< "$calls" || fail "$1: the receipt was not forgotten"
 }
