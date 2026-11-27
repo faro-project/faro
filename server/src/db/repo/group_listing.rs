@@ -8,6 +8,15 @@
 //! for the first two, for the same window ([`COOLDOWN_MS`] after the request
 //! would have expired), with the same fields, so a decline can't be told
 //! from an expiry (§8.8).
+//!
+//! The requester's view comes from the clock alone, as for a proposal's
+//! sender: a declined request (`not_accepted` before `expires_at`) still
+//! reads as open to its requester until `expires_at`, in the list of their
+//! requests, in the directory's `requested` flag, in the open-request count
+//! and in the refusal to ask again. Withdrawing it works as for an open one.
+//! Only facilitators' views ([`list_for_group`], [`open_by_id`]) tell a
+//! decline from an open request. An unlisting (`void`) is public (the group
+//! leaves the directory), so it ends the request for the requester at once.
 
 use super::groups::{Page, PAGE_SIZE};
 use crate::tokens::new_hex_id;
@@ -97,7 +106,7 @@ pub async fn count_open<'e>(
 ) -> Result<i64, sqlx::Error> {
     sqlx::query(
         "SELECT COUNT(*) AS n FROM group_join_requests
-         WHERE user_id = $1 AND state = 'open' AND expires_at > $2",
+         WHERE user_id = $1 AND state IN ('open', 'not_accepted') AND expires_at > $2",
     )
     .bind(user.as_str())
     .bind(now_ms)
@@ -126,6 +135,9 @@ pub async fn in_cooldown<'e>(
     Ok(n > 0)
 }
 
+/// The request `user` has made to `group` that still reads as open to them:
+/// open, or declined and not yet expired (a decline is not shown to the
+/// requester before the request would have expired).
 pub async fn open_of<'e>(
     e: impl Executor<'e, Database = Any>,
     group: &str,
@@ -136,7 +148,8 @@ pub async fn open_of<'e>(
         "SELECT ",
         cols!(),
         " FROM group_join_requests r
-         WHERE r.group_id = $1 AND r.user_id = $2 AND r.state = 'open' AND r.expires_at > $3"
+         WHERE r.group_id = $1 AND r.user_id = $2 AND r.state IN ('open', 'not_accepted')
+           AND r.expires_at > $3"
     ))
     .bind(group)
     .bind(user.as_str())
@@ -239,6 +252,7 @@ pub async fn decide(
 }
 
 /// The person takes their request back: it is removed, with no cool-down.
+/// A declined request they can't tell from an open one goes the same way.
 pub async fn withdraw<'e>(
     e: impl Executor<'e, Database = Any>,
     group: &str,
@@ -247,7 +261,8 @@ pub async fn withdraw<'e>(
 ) -> Result<bool, sqlx::Error> {
     let r = sqlx::query(
         "UPDATE group_join_requests SET state = 'withdrawn', decided_at = $1
-         WHERE group_id = $2 AND user_id = $3 AND state = 'open' AND expires_at > $1",
+         WHERE group_id = $2 AND user_id = $3 AND state IN ('open', 'not_accepted')
+           AND expires_at > $1",
     )
     .bind(now_ms)
     .bind(group)
@@ -316,8 +331,9 @@ pub async fn list_for_group<'e>(
 }
 
 /// A person's own request, for them: `open` with the group's name, or
-/// `not_accepted` with nothing else (a decline, an expiry and an unlisting
-/// look the same).
+/// `not_accepted` with nothing else. Open until `expires_at` whether or not
+/// a facilitator declined it; after that a decline and an expiry look the
+/// same.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MyRequest {
     pub id: String,
@@ -355,7 +371,8 @@ pub async fn mine<'e>(
         .map(|r| {
             let state: String = r.try_get("state")?;
             let expires: i64 = r.try_get("expires_at")?;
-            let open = state == "open" && expires > now_ms;
+            // A decline reads as open until the request would have expired.
+            let open = matches!(state.as_str(), "open" | "not_accepted") && expires > now_ms;
             Ok(MyRequest {
                 id: r.try_get("id")?,
                 group_id: r.try_get("group_id")?,
@@ -384,7 +401,8 @@ pub struct DirectoryRow {
     /// A participant limit is set and reached. The count itself never
     /// leaves the database.
     pub full: bool,
-    /// The viewer asked and the request is open.
+    /// The viewer asked and the request reads as open to them (a declined
+    /// one does until it would have expired).
     pub requested: bool,
     /// The viewer is already in the group (their own information).
     pub joined: bool,
@@ -420,8 +438,8 @@ pub async fn directory<'e>(
                       WHERE c.group_id = g.id AND c.state = 'active')
                      THEN 1 ELSE 0 END AS is_full,
                 (SELECT COUNT(*) FROM group_join_requests r
-                 WHERE r.group_id = g.id AND r.user_id = $1 AND r.state = 'open'
-                   AND r.expires_at > $2) AS requested,
+                 WHERE r.group_id = g.id AND r.user_id = $1
+                   AND r.state IN ('open', 'not_accepted') AND r.expires_at > $2) AS requested,
                 (SELECT COUNT(*) FROM group_participants m
                  WHERE m.group_id = g.id AND m.user_id = $1 AND m.state = 'active') AS joined
          FROM accountability_groups g

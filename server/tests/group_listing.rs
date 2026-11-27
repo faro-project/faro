@@ -711,6 +711,30 @@ async fn decline_and_expiry_look_the_same_and_cool_down_for_30_days() {
         StatusCode::NOT_FOUND
     );
 
+    // Right after the decline the requester still sees an open request, in
+    // their list, in the directory, and as a refusal to ask again.
+    let mine = t.get("/v1/me/join-requests", Some(&b.s)).await;
+    assert_eq!(mine.body[0]["state"], "open", "{:?}", mine.body);
+    assert_eq!(mine.body[0]["group_name"], json!(NAME));
+    assert!(mine.body[0]["expires_at_ms"].is_i64());
+    let dir = t.get("/v1/group-directory", Some(&b.s)).await;
+    let entry = dir.body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == json!(gid))
+        .unwrap();
+    assert_eq!(entry["requested"], true);
+    assert_eq!(ask(&t, &gid, &b).await.error_code(), "already_requested");
+    // The facilitators' list no longer holds it.
+    assert_eq!(
+        requests(&t, &gid, &a).await.body["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
     // Cat's request runs out after 14 days.
     t.clock.advance_ms(15 * DAY);
     // dan's group is unlisted by its facilitator.
