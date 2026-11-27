@@ -524,10 +524,24 @@ export function describeBody(b: EventBody, device = 'this device', now = Date.no
 
 /** Highlights of a daily report for its summary line. */
 export function reportSummary(r: DailyReport): string {
-	const total = r.counts.clean + r.counts.low + r.counts.medium + r.counts.high;
-	const parts = [`${total} screen check${total === 1 ? '' : 's'}`];
-	const flagged = r.counts.medium + r.counts.high;
-	parts.push(flagged ? `${flagged} flagged` : 'nothing flagged');
+	const parts: string[] = [];
+	if (r.ios) {
+		// An iPhone blocks; it has no screen checks to count.
+		const blocked = r.ios.blocked.reduce(
+			(n, d) => n + Object.values(d.by_category).reduce((a, b) => a + b, 0),
+			0
+		);
+		const opened = r.ios.shields.reduce((n, d) => n + d.shown, 0);
+		parts.push(`${blocked} blocked lookup${blocked === 1 ? '' : 's'}`);
+		parts.push(`${opened} blocked app${opened === 1 ? '' : 's'} opened`);
+		const bursts = r.flagged.length;
+		parts.push(bursts ? `${bursts} burst${bursts === 1 ? '' : 's'} flagged` : 'nothing flagged');
+	} else {
+		const total = r.counts.clean + r.counts.low + r.counts.medium + r.counts.high;
+		parts.push(`${total} screen check${total === 1 ? '' : 's'}`);
+		const flagged = r.counts.medium + r.counts.high;
+		parts.push(flagged ? `${flagged} flagged` : 'nothing flagged');
+	}
 	if (r.health.tamper.length)
 		parts.push(`${r.health.tamper.length} tamper signal${r.health.tamper.length === 1 ? '' : 's'}`);
 	return parts.join(' · ');

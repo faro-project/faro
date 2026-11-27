@@ -29,6 +29,7 @@ final class FaroKitTests: XCTestCase {
         // The DNS filter's files: its counters next to the others.
         XCTAssertEqual(group.filterConfigFile.deletingLastPathComponent().path, root.path)
         XCTAssertEqual(group.dnsCountersFile.deletingLastPathComponent().path, group.countersDirectory.path)
+        XCTAssertEqual(group.devThresholdsFile.lastPathComponent, "dev_thresholds.json")
         XCTAssertNoThrow(try Markers.check(MarkerName.tunnelAlive))
     }
 

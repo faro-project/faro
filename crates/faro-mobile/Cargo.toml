@@ -9,6 +9,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# A development build: a `dev_thresholds.json` may lower the burst
+# thresholds (docs/DEVELOPMENT.md, "lower only"). Never in a release build.
+dev = ["faro-dnsfilter/dev"]
+
 [lib]
 # `staticlib` for the XCFramework the app links (docs/IOS.md §13); `lib`
 # for the tests and for Rust callers such as the DNS filter.

@@ -167,6 +167,8 @@ The bundle ships in the app and updates through the instance's update mirror as 
 
 The provider counts blocked lookups per category, and per host for adult and gambling, in 10-minute buckets in the app group. It never writes allowed lookups anywhere. Every few minutes it turns the counts into chain events (§11) through the Rust core.
 
+Each bucket becomes one `blocked_summary` event when it has ended, and only once: the core remembers which bucket starts it has reported, so a flush repeated, run from the app as well as the tunnel, or offered again after the tunnel died before saving its counters, never counts a lookup twice. The shields' two counter files (shown and closed, never which app) become a `shield_summary` the same way: the core keeps the totals it last reported and records the difference. Both are `capture`-class events with header urgency `none`, so the instance learns nothing it didn't know.
+
 ---
 
 ## 8. Later: Apple's URL filter (iOS 26+)
@@ -237,6 +239,10 @@ An iPhone appears in the member's reports next to their computers, marked as blo
 - **Blocked lookups by category per day**, from layer 2. Adult and gambling hosts are listed (only the host, like desktop's `scheme://host/`), grouped and counted.
 - **Blocked apps opened:** a count from the shields, with no app names (§2).
 - **Flags.** One blocked lookup isn't intent: link previews, ads and prefetching make lookups the member never saw. A **burst** is, so `blocked_burst` becomes a `flag` event with explainable reasons (`dns:adult ×6, 4 hosts, 3 min, screen on`), rated `medium`, which maps to `urgent` by default (ARCHITECTURE.md §14). The thresholds go next to the desktop ones and follow the same "lower only" rule for development builds.
+  - **Screen on** comes from the tunnel's view of the device: it is true from `wake` and false from `sleep`, the only two things a packet tunnel is told. A phone that is awake counts as having its screen on, so lookups made while it sleeps (background refreshes) never count toward a burst. The label says "screen on" because of that.
+  - **Development builds** can lower the thresholds (6 lookups, 3 domains, a 10 minute cooldown) with a `dev_thresholds.json`: each value must be at least 1 and at most its default, and the window can't be touched. A release build ignores the file, and a refused file changes nothing (docs/DEVELOPMENT.md).
+  - **The reason holds counts only**, never a host. Hosts are in the blocked summaries.
+- **The daily report** has an iPhone section built on the device from the same facts: when each layer was on (Screen Time can be `unknown` when the tunnel can't read it), blocked lookups per day with the adult and gambling hosts, shield counts per day, and loosenings asked for, applied or cancelled. There is no activity timeline and no screen checks, and bursts appear as flagged moments.
 - **Limits, stated plainly in the report:** "Faro on iPhone blocks; it doesn't see the screen. It can't block sites reached through some private DNS services or apps."
 - **No thumbnails, ever.** There are none to send.
 

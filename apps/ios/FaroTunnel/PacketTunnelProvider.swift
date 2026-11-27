@@ -17,9 +17,16 @@ private let log = Logger(subsystem: "org.faro.ios.tunnel", category: "tunnel")
 ///   (skipped while the keys are locked: the filter never waits for them);
 /// * the "tunnel alive" marker every minute, which the monitor extension
 ///   and the app watch;
-/// * every 10 minutes: the counters saved to the app group, the member's
-///   choices and a newer installed domain list picked up, and the memory
-///   left logged.
+/// * every minute: bursts of blocked lookups recorded as `flag` events;
+/// * every 10 minutes: the ended counter buckets recorded as
+///   `blocked_summary` events and the shield counters as `shield_summary`
+///   (docs/IOS.md §7.5, once each however many processes or restarts), the
+///   counters saved to the app group, the member's choices and a newer
+///   installed domain list picked up, and the memory left logged.
+///
+/// "Screen on" for a burst is `awake`: true from `wake`, false from `sleep`.
+/// The tunnel sees the device only through those two callbacks, so a lookup
+/// made while the phone is awake counts as made with the screen on.
 ///
 /// Nothing here writes, logs or keeps a looked-up name.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -63,6 +70,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             self.filter = filter
+            applyDevThresholds(filter)
             logStatus("started")
             upstream = Upstream(
                 queue: queue,
@@ -113,7 +121,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // No `shutting_down` heartbeat: the tunnel stopping while the
             // phone runs is what the monitor reports as the filter being off,
             // and the instance should not read it as an expected silence.
-            completionHandler()
+            // The last counts and a "filter off" sample go out first, within
+            // the same few seconds `sleep` allows itself.
+            let once = Once()
+            let finish = { once.run(completionHandler) }
+            queue.asyncAfter(deadline: .now() + Self.sleepHeartbeatWait, execute: finish)
+            coreQueue.async {
+                self.flushReports(filterOn: false)
+                finish()
+            }
         }
     }
 
@@ -126,6 +142,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             queue.asyncAfter(deadline: .now() + Self.sleepHeartbeatWait, execute: finish)
             coreQueue.async {
                 self.heartbeat(.sleeping)
+                self.flushReports(filterOn: true)
                 finish()
             }
         }
@@ -297,6 +314,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 if self.filter?.status().upstreams == 0, Date().timeIntervalSince(self.lastReread) > 300 {
                     self.rereadResolvers(reason: "retry")
                 }
+                // A burst is an alert: it waits a minute at most, not ten.
+                self.coreQueue.async { self.flushBursts() }
             },
             timer(every: Self.heartbeatInterval) { [weak self] in
                 guard let self, self.awake else { return }
@@ -306,7 +325,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard let self else { return }
                 self.flushCounters()
                 self.logStatus("periodic")
-                self.coreQueue.async { self.refreshFromCore() }
+                self.coreQueue.async {
+                    self.refreshFromCore()
+                    self.flushReports(filterOn: true)
+                }
             },
         ]
     }
@@ -400,6 +422,80 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: Reports (on coreQueue)
+
+    /// Record the bursts seen so far as `flag` events. A locked key store
+    /// (before the first unlock) or a device not yet approved leaves them in
+    /// the filter for the next minute.
+    private func flushBursts() {
+        if core == nil {
+            refreshFromCore()
+        }
+        guard let core, let filter = queue.sync(execute: { self.filter }) else { return }
+        do {
+            let n = try filter.flushBursts(core: core)
+            if n > 0 {
+                log.notice("recorded \(n, privacy: .public) burst(s)")
+            }
+        } catch FaroError.KeysLocked {
+            log.info("keys locked: bursts wait")
+        } catch FaroError.NotEnrolled, FaroError.NotApproved {
+            // Nothing to report to yet.
+        } catch {
+            log.error("bursts not recorded: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Everything that turns counts into events and the report: ended
+    /// buckets, the shield counters, a protection sample and, once a day,
+    /// the report. Each step is safe to repeat and to run from another
+    /// process (the core records each bucket, and each shield count, once).
+    private func flushReports(filterOn: Bool) {
+        if core == nil {
+            refreshFromCore()
+        }
+        guard let core, let filter = queue.sync(execute: { self.filter }), let group else { return }
+        let now = Self.nowMs()
+        do {
+            // Screen Time's state isn't known here (spike S6); the report
+            // says so rather than guessing.
+            try core.recordProtectionSample(screenTimeOn: nil, filterOn: filterOn)
+            _ = try filter.flushSummaries(core: core, nowMs: now)
+            let shown = (try? Counter(group: group, name: CounterName.shieldShown))?.value() ?? 0
+            let closed = (try? Counter(group: group, name: CounterName.shieldClosed))?.value() ?? 0
+            _ = try core.recordShieldTotals(shownTotal: shown, closedTotal: closed)
+            _ = try core.queueDailyReport(
+                nowMs: now, utcOffsetSecs: Int32(TimeZone.current.secondsFromGMT()))
+        } catch FaroError.KeysLocked {
+            log.info("keys locked: reports wait")
+        } catch FaroError.NotEnrolled, FaroError.NotApproved {
+            // Nothing to report to yet.
+        } catch {
+            log.error("reports not recorded: \(String(describing: error), privacy: .public)")
+        }
+        // The recorded buckets are gone from the counters: save that.
+        queue.async { self.flushCounters() }
+    }
+
+    /// Read `dev_thresholds.json` (development builds only; a release core
+    /// ignores it, and a file that would raise a threshold is refused).
+    private func applyDevThresholds(_ filter: DnsFilter) {
+        let json = readText(group?.devThresholdsFile)
+        do {
+            let using = try filter.setDevThresholds(json: json)
+            if using.hasPrefix("LOWERED") {
+                log.warning("""
+                    DEVELOPMENT THRESHOLDS: \(using, privacy: .public). Flags from this phone are made \
+                    with them, not with the defaults. Never use this build to monitor anyone.
+                    """)
+            } else if json != nil {
+                log.notice("dev_thresholds.json: \(using, privacy: .public)")
+            }
+        } catch {
+            log.error("dev_thresholds.json refused: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: Logging
 
     private func logStatus(_ when: String) {
@@ -408,7 +504,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             \(when, privacy: .public): domains \(s.domainsVersion ?? "none", privacy: .public) \
             (\(s.domainsSource, privacy: .public)), blocking \(s.blockedCategories.joined(separator: ","), privacy: .public), \
             \(s.upstreams, privacy: .public) resolver(s), \(s.pending, privacy: .public) in flight, \
-            \(s.counterBuckets, privacy: .public) bucket(s), \
+            \(s.counterBuckets, privacy: .public) bucket(s), thresholds \(s.thresholds, privacy: .public), \
             memory available \(os_proc_available_memory(), privacy: .public) bytes
             """)
         if let e = s.domainsError {

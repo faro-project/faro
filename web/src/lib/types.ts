@@ -681,12 +681,20 @@ export interface TamperRecord {
 
 /**
  * The iPhone part of a daily report (docs/IOS.md §11). Present only in an
- * iPhone's report, which has no screen checks. Provisional: the report
- * builder that fills it is a later issue, so every part may be empty.
+ * iPhone's report, which has no screen checks. The device builds it
+ * (`faro_proto::report::IosReport`, `faro_core::IosReportBuilder`); the
+ * fixture `crates/faro-core/tests/data/ios-reports.json` is written by that
+ * code and read by `feed/ios.test.ts`, so the two can't drift.
  */
 export interface IosReport {
 	/** When each layer was on, in order. */
-	protection: { start_ms: number; end_ms: number; screen_time: boolean; filter: boolean }[];
+	protection: {
+		start_ms: number;
+		end_ms: number;
+		/** `null` when the phone couldn't tell. */
+		screen_time: boolean | null;
+		filter: boolean;
+	}[];
 	/** Blocked lookups, one entry per day. */
 	blocked: {
 		day_start_ms: number;
