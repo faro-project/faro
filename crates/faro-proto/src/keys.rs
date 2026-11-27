@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 const TAG_RECIPIENT_MANIFEST_V1: &str = "faro/recipient-manifest/v1";
 const TAG_RECIPIENT_MANIFEST_V2: &str = "faro/recipient-manifest/v2";
+const TAG_RECIPIENT_MANIFEST_V3: &str = "faro/recipient-manifest/v3";
 const TAG_ALLY_ENDORSEMENT: &str = "faro/ally-endorsement/v1";
 const TAG_DEVICE_ENDORSEMENT: &str = "faro/device-endorsement/v2";
 const TAG_MEMBER_SELF: &str = "faro/member-enc-key/v1";
@@ -42,6 +43,10 @@ pub const MAX_MANIFEST_ALLIES: usize = 32;
 pub const MANIFEST_FORMAT_V1: u16 = 1;
 /// Format 2 adds each ally's display name, inside the signed bytes.
 pub const MANIFEST_FORMAT_V2: u16 = 2;
+/// Format 3 is format 2 plus `prev_hash`, the hash of the version it
+/// follows, so a device can tell a fork from a successor
+/// ([`RecipientManifest::prev_hash`]).
+pub const MANIFEST_FORMAT_V3: u16 = 3;
 
 /// Most characters (Unicode scalar values) [`sanitize_ally_name`] keeps:
 /// the instance's own display-name limit.
@@ -152,20 +157,32 @@ pub fn sanitize_ally_name(input: &str) -> String {
 /// * Allies are sorted strictly ascending by `ally_id`, so one logical set has
 ///   exactly one encoding, and duplicates are impossible.
 ///
-/// There are two formats (PROTOCOL.md §5.1). Format 1 lists ids and keys.
-/// Format 2 also carries each ally's display name inside the signed bytes,
-/// under its own domain-separation tag, so devices can name allies without
-/// trusting the instance. Format 1 documents keep their exact JSON and
-/// bytes: `format` is left out of their JSON, and a missing `format` reads
-/// as 1.
+/// There are three formats (PROTOCOL.md §5.1). Format 1 lists ids and
+/// keys. Format 2 also carries each ally's display name inside the signed
+/// bytes, under its own domain-separation tag, so devices can name allies
+/// without trusting the instance. Format 3 adds [`prev_hash`], which links
+/// each version to the one it was built on. Format 1 documents keep their
+/// exact JSON and bytes: `format` is left out of their JSON, and a missing
+/// `format` reads as 1.
+///
+/// [`prev_hash`]: Self::prev_hash
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipientManifest {
-    /// [`MANIFEST_FORMAT_V1`] or [`MANIFEST_FORMAT_V2`].
+    /// [`MANIFEST_FORMAT_V1`], [`MANIFEST_FORMAT_V2`] or [`MANIFEST_FORMAT_V3`].
     #[serde(default = "manifest_format_v1", skip_serializing_if = "is_format_v1")]
     pub format: u16,
     pub instance_id: InstanceId,
     pub member_id: UserId,
     pub version: u64,
+    /// Format 3 only: the hash of version `version - 1`, the manifest the
+    /// member built this one from. Present in every format 3 document above
+    /// version 1, absent at version 1 and in formats 1 and 2
+    /// ([`RecipientManifest::validate`]). A device whose checkpoint is the
+    /// previous version refuses a successor that names another predecessor
+    /// as a **fork** (PROTOCOL.md §5.1): an instance that served the
+    /// member's page an older list got a second branch signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<Hash32>,
     pub issued_at_ms: i64,
     pub member_enc_pubkey: EncPublicKey,
     pub allies: Vec<ManifestAlly>,
@@ -192,6 +209,10 @@ pub enum ManifestError {
     NameTooLong(UserId),
     #[error("manifest version must be at least 1")]
     ZeroVersion,
+    #[error("a format 3 manifest above version 1 must name the version it follows (prev_hash)")]
+    MissingPrevHash,
+    #[error("only a format 3 manifest above version 1 carries a prev_hash")]
+    UnexpectedPrevHash,
     #[error("manifest lists {0} allies, more than the maximum of {MAX_MANIFEST_ALLIES}")]
     TooManyAllies(usize),
     #[error("manifest allies are not sorted strictly by ally_id (unsorted or duplicate: {0})")]
@@ -211,11 +232,20 @@ impl RecipientManifest {
     /// manifest over a name would make every recipient change, removals
     /// included, depend on two Unicode implementations agreeing.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if self.format != MANIFEST_FORMAT_V1 && self.format != MANIFEST_FORMAT_V2 {
+        if !matches!(
+            self.format,
+            MANIFEST_FORMAT_V1 | MANIFEST_FORMAT_V2 | MANIFEST_FORMAT_V3
+        ) {
             return Err(ManifestError::UnknownFormat(self.format));
         }
         if self.version == 0 {
             return Err(ManifestError::ZeroVersion);
+        }
+        let links = self.format == MANIFEST_FORMAT_V3 && self.version > 1;
+        match (links, self.prev_hash.is_some()) {
+            (true, false) => return Err(ManifestError::MissingPrevHash),
+            (false, true) => return Err(ManifestError::UnexpectedPrevHash),
+            _ => {}
         }
         if self.allies.len() > MAX_MANIFEST_ALLIES {
             return Err(ManifestError::TooManyAllies(self.allies.len()));
@@ -240,7 +270,7 @@ impl RecipientManifest {
                 (MANIFEST_FORMAT_V1, Some(_)) => {
                     return Err(ManifestError::UnsignedName(a.ally_id.clone()))
                 }
-                (MANIFEST_FORMAT_V2, None) => {
+                (MANIFEST_FORMAT_V2 | MANIFEST_FORMAT_V3, None) => {
                     return Err(ManifestError::MissingName(a.ally_id.clone()))
                 }
                 (_, Some(n)) if n.len() > MAX_ALLY_NAME_BYTES => {
@@ -260,19 +290,27 @@ impl RecipientManifest {
     /// Format 1 is tagged `faro/recipient-manifest/v1`, and each ally is its
     /// id and key. Every other format is encoded like format 2, tagged
     /// `faro/recipient-manifest/v<format>`, with each ally's id, key and name
-    /// (an absent name, which `validate` refuses in format 2, as empty). So
-    /// the formats can never share bytes, and neither can a format 1
-    /// document and a format 2 one whose allies all have empty names.
+    /// (an absent name, which `validate` refuses in formats 2 and 3, as
+    /// empty). Format 3 also has `prev_hash` right after `version`, as 32
+    /// zero bytes when absent (at version 1, where `validate` requires it
+    /// absent). So the formats can never share bytes, and neither can a
+    /// format 1 document and a format 2 one whose allies all have empty
+    /// names.
     pub fn signing_bytes(&self) -> Vec<u8> {
         let tag = match self.format {
             MANIFEST_FORMAT_V1 => TAG_RECIPIENT_MANIFEST_V1.to_owned(),
             MANIFEST_FORMAT_V2 => TAG_RECIPIENT_MANIFEST_V2.to_owned(),
+            MANIFEST_FORMAT_V3 => TAG_RECIPIENT_MANIFEST_V3.to_owned(),
             other => format!("faro/recipient-manifest/v{other}"),
         };
         let mut c = Canonical::new(&tag)
             .str(self.instance_id.as_str())
             .str(self.member_id.as_str())
-            .u64(self.version)
+            .u64(self.version);
+        if self.format == MANIFEST_FORMAT_V3 {
+            c = c.fixed(self.prev_hash.unwrap_or(Hash32::ZERO).as_bytes());
+        }
+        let mut c = c
             .i64(self.issued_at_ms)
             .fixed(self.member_enc_pubkey.as_bytes())
             .u64(self.allies.len() as u64);
@@ -512,6 +550,7 @@ mod tests {
             instance_id: InstanceId::new("inst_a"),
             member_id: UserId::new("usr_m"),
             version: 1,
+            prev_hash: None,
             issued_at_ms: 1,
             member_enc_pubkey: EncPublicKey([1; 32]),
             allies: allies
@@ -600,6 +639,95 @@ mod tests {
         assert_ne!(two.signing_bytes(), one.signing_bytes());
     }
 
+    /// `named` in format 3 at `version`, following `prev` (none at 1).
+    fn linked(allies: &[&str], version: u64, prev: Option<Hash32>) -> RecipientManifest {
+        let mut m = named(allies);
+        m.format = MANIFEST_FORMAT_V3;
+        m.version = version;
+        m.prev_hash = prev;
+        m
+    }
+
+    #[test]
+    fn format_3_links_to_the_previous_version() {
+        let first = linked(&["usr_a"], 1, None);
+        assert_eq!(first.validate(), Ok(()));
+        let want = Canonical::new("faro/recipient-manifest/v3")
+            .str("inst_a")
+            .str("usr_m")
+            .u64(1)
+            .fixed(&[0; 32])
+            .i64(1)
+            .fixed(&[1; 32])
+            .u64(1)
+            .str("usr_a")
+            .fixed(&[2; 32])
+            .str("Name of usr_a")
+            .finish();
+        assert_eq!(first.signing_bytes(), want);
+        let v = serde_json::to_value(&first).unwrap();
+        assert_eq!(v["format"], 3);
+        assert!(v.get("prev_hash").is_none(), "{v}");
+
+        let second = linked(&["usr_a"], 2, Some(first.hash()));
+        assert_eq!(second.validate(), Ok(()));
+        let want = Canonical::new("faro/recipient-manifest/v3")
+            .str("inst_a")
+            .str("usr_m")
+            .u64(2)
+            .fixed(first.hash().as_bytes())
+            .i64(1)
+            .fixed(&[1; 32])
+            .u64(1)
+            .str("usr_a")
+            .fixed(&[2; 32])
+            .str("Name of usr_a")
+            .finish();
+        assert_eq!(second.signing_bytes(), want);
+        let v = serde_json::to_value(&second).unwrap();
+        assert_eq!(v["prev_hash"], first.hash().to_prefixed_hex());
+        let back: RecipientManifest = serde_json::from_value(v).unwrap();
+        assert_eq!(back, second);
+
+        // The link is signed: another predecessor is another document.
+        let fork = linked(&["usr_a"], 2, Some(Hash32([7; 32])));
+        assert_ne!(fork.hash(), second.hash());
+        // And format 3 never shares bytes with format 2.
+        let mut v2 = second.clone();
+        v2.format = MANIFEST_FORMAT_V2;
+        v2.prev_hash = None;
+        assert_ne!(v2.signing_bytes(), second.signing_bytes());
+    }
+
+    #[test]
+    fn prev_hash_must_match_the_format_and_version() {
+        assert_eq!(
+            linked(&[], 2, None).validate(),
+            Err(ManifestError::MissingPrevHash)
+        );
+        assert_eq!(
+            linked(&[], 1, Some(Hash32([1; 32]))).validate(),
+            Err(ManifestError::UnexpectedPrevHash)
+        );
+        for format in [MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2] {
+            let mut m = if format == MANIFEST_FORMAT_V1 {
+                manifest(&[])
+            } else {
+                named(&[])
+            };
+            m.version = 2;
+            m.prev_hash = Some(Hash32([1; 32]));
+            assert_eq!(m.validate(), Err(ManifestError::UnexpectedPrevHash));
+        }
+        // Format 3 names every ally, as format 2 does.
+        let mut m = linked(&["usr_a"], 1, None);
+        m.allies[0].name = None;
+        assert_eq!(
+            m.validate(),
+            Err(ManifestError::MissingName(UserId::new("usr_a")))
+        );
+    }
+
     #[test]
     fn names_must_match_the_format() {
         // A name in format 1 isn't signed, so the document is refused.
@@ -623,7 +751,7 @@ mod tests {
             m.validate(),
             Err(ManifestError::NameTooLong(UserId::new("usr_a")))
         );
-        for f in [0, 3, u16::MAX] {
+        for f in [0, 4, u16::MAX] {
             let mut m = named(&["usr_a"]);
             m.format = f;
             assert_eq!(m.validate(), Err(ManifestError::UnknownFormat(f)));

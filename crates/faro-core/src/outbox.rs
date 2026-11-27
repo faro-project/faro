@@ -2137,6 +2137,56 @@ mod tests {
         );
     }
 
+    /// #180: a new computer is anchored to version 2 (the ally was removed
+    /// there), but the instance had the member's page build a version 3 on
+    /// the pre-removal version 1. Its format 3 link gives it away.
+    #[test]
+    fn bootstrap_refuses_a_successor_from_another_branch() {
+        use faro_proto::keys::MANIFEST_FORMAT_V3;
+        let f = Fixture::new(1);
+        let pinned = f.member_sign.public();
+        let linked = |version: u64, prev: Hash32, allies: bool| {
+            let mut b = f.named_body(version);
+            b.format = MANIFEST_FORMAT_V3;
+            b.prev_hash = Some(prev);
+            if !allies {
+                b.allies.clear();
+            }
+            f.sign(b)
+        };
+        let mut v1 = f.named_body(1);
+        v1.format = MANIFEST_FORMAT_V3;
+        let v1 = f.sign(v1);
+        let v2 = linked(2, v1.body.hash(), false);
+        let fork3 = linked(3, v1.body.hash(), true);
+        let anchor = ManifestAnchor::AtLeast(v2.body.reference());
+        let td = tempfile::tempdir().unwrap();
+        let mut ob = Outbox::open(td.path(), &f.inst, &DeviceId::new("dev_new")).unwrap();
+        assert!(matches!(
+            ob.bootstrap_manifest(&fork3, &pinned, &f.member, anchor),
+            Err(OutboxError::Manifest(RecipientError::Fork {
+                version: 3,
+                ..
+            }))
+        ));
+        assert_eq!(ob.manifest_checkpoint().unwrap(), None);
+        let v3 = linked(3, v2.body.hash(), false);
+        let set = ob
+            .bootstrap_manifest(&v3, &pinned, &f.member, anchor)
+            .unwrap();
+        assert!(set.allies().is_empty());
+        // And once bootstrapped, the next version is held to the link too.
+        let fork4 = linked(4, fork3.body.hash(), true);
+        assert!(matches!(
+            ob.accept_manifest(&fork4, &pinned, &f.member),
+            Err(OutboxError::Manifest(RecipientError::Fork {
+                version: 4,
+                ..
+            }))
+        ));
+        assert_eq!(ob.manifest_checkpoint().unwrap(), Some(v3.body.reference()));
+    }
+
     /// Regression: a set obtained before another component accepted a
     /// manifest removing an ally could still be committed, so the removed
     /// ally kept receiving new items.

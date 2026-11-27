@@ -33,6 +33,14 @@ export interface ManifestAlly {
 export const MANIFEST_FORMAT_V1 = 1;
 /** Format 2 adds each ally's display name, inside the signed bytes. */
 export const MANIFEST_FORMAT_V2 = 2;
+/**
+ * Format 3 is format 2 plus `prev_hash`, the hash of the version it was
+ * built on, so a device can tell a fork from a successor.
+ */
+export const MANIFEST_FORMAT_V3 = 3;
+
+/** The 32 zero bytes format 3 signs for "no previous version" (version 1). */
+const NO_PREV = new Uint8Array(32);
 
 export interface RecipientManifest {
 	/** Absent means format 1 (`MANIFEST_FORMAT_V1`). */
@@ -40,6 +48,11 @@ export interface RecipientManifest {
 	instance_id: string;
 	member_id: string;
 	version: number;
+	/**
+	 * Format 3: `b3:<hex>` of version `version - 1`, the list this one was
+	 * built on. Present above version 1, absent at 1 and in formats 1 and 2.
+	 */
+	prev_hash?: string;
 	issued_at_ms: number;
 	member_enc_pubkey: string;
 	allies: ManifestAlly[];
@@ -131,10 +144,24 @@ export function sanitizeAllyName(input: string): string {
 /** `RecipientManifest::validate`: the structural checks that need no keys. */
 export function validateManifest(m: RecipientManifest): string | null {
 	const format = m.format ?? MANIFEST_FORMAT_V1;
-	if (format !== MANIFEST_FORMAT_V1 && format !== MANIFEST_FORMAT_V2) {
+	if (
+		format !== MANIFEST_FORMAT_V1 &&
+		format !== MANIFEST_FORMAT_V2 &&
+		format !== MANIFEST_FORMAT_V3
+	) {
 		return `unknown format ${format}`;
 	}
 	if (!Number.isSafeInteger(m.version) || m.version < 1) return 'version must be at least 1';
+	const links = format === MANIFEST_FORMAT_V3 && m.version > 1;
+	if (links && m.prev_hash == null) return 'it does not name the version it follows';
+	if (!links && m.prev_hash != null) return 'it carries an unexpected prev_hash';
+	if (m.prev_hash != null) {
+		try {
+			hashFromString(m.prev_hash);
+		} catch {
+			return 'it carries a malformed prev_hash';
+		}
+	}
 	if (m.allies.length > MAX_MANIFEST_ALLIES) return 'too many allies';
 	if (!isWellFormedId(m.instance_id, 'inst_')) return 'malformed instance id';
 	if (!isWellFormedId(m.member_id, 'usr_')) return 'malformed member id';
@@ -147,7 +174,7 @@ export function validateManifest(m: RecipientManifest): string | null {
 		}
 		// A name in format 1 isn't covered by the signature.
 		if (format === MANIFEST_FORMAT_V1 && a.name != null) return 'it carries unsigned names';
-		if (format === MANIFEST_FORMAT_V2) {
+		if (format !== MANIFEST_FORMAT_V1) {
 			if (typeof a.name !== 'string') return 'an ally has no name';
 			if (utf8(a.name).length > MAX_ALLY_NAME_BYTES) return 'an ally name is too long';
 		}
@@ -158,16 +185,19 @@ export function validateManifest(m: RecipientManifest): string | null {
 /**
  * Format 1: tag `faro/recipient-manifest/v1`, each ally its id and key.
  * Format 2: tag `faro/recipient-manifest/v2`, each ally its id, key and name.
+ * Format 3: tag `faro/recipient-manifest/v3`, as format 2 with `prev_hash`
+ * after `version` (32 zero bytes at version 1).
  */
 export function manifestSigningBytes(m: RecipientManifest): Bytes {
 	const format = m.format ?? MANIFEST_FORMAT_V1;
 	const c = new Canonical(`faro/recipient-manifest/v${format}`)
 		.str(m.instance_id)
 		.str(m.member_id)
-		.u64(m.version)
-		.i64(m.issued_at_ms)
-		.fixed(key32(m.member_enc_pubkey, 'member_enc_pubkey'))
-		.u64(m.allies.length);
+		.u64(m.version);
+	if (format === MANIFEST_FORMAT_V3) {
+		c.fixed(m.prev_hash == null ? NO_PREV : hashFromString(m.prev_hash));
+	}
+	c.i64(m.issued_at_ms).fixed(key32(m.member_enc_pubkey, 'member_enc_pubkey')).u64(m.allies.length);
 	for (const a of m.allies) {
 		c.str(a.ally_id).fixed(key32(a.enc_pubkey, 'ally enc_pubkey'));
 		if (format !== MANIFEST_FORMAT_V1) c.str(a.name ?? '');
@@ -333,6 +363,7 @@ export function manifestBody(m: RecipientManifest): RecipientManifest {
 		instance_id: m.instance_id,
 		member_id: m.member_id,
 		version: m.version,
+		...(m.prev_hash != null ? { prev_hash: m.prev_hash } : {}),
 		issued_at_ms: m.issued_at_ms,
 		member_enc_pubkey: m.member_enc_pubkey,
 		allies: m.allies.map((a) => ({
@@ -345,9 +376,10 @@ export function manifestBody(m: RecipientManifest): RecipientManifest {
 
 /**
  * The next version of `prev` with `allies` (sorted here), issued now. It is
- * always format 2: each ally's `name` is the display name to sign (the
- * caller passes the ally's current one, so a rename is picked up by any
- * re-sign), sanitized here; a missing name is signed as empty.
+ * always format 3, linked to `prev` by its hash. Each ally's `name` is the
+ * display name to sign (the caller decides which: the name the last list
+ * signed, unless the member confirmed a new one), sanitized here; a missing
+ * name is signed as empty.
  */
 export function nextManifest(
 	prev: RecipientManifest,
@@ -356,10 +388,11 @@ export function nextManifest(
 ): RecipientManifest {
 	const base = manifestBody(prev);
 	return {
-		format: MANIFEST_FORMAT_V2,
+		format: MANIFEST_FORMAT_V3,
 		instance_id: base.instance_id,
 		member_id: base.member_id,
 		version: prev.version + 1,
+		prev_hash: manifestRef(base).hash,
 		// Never go backwards, even with a skewed clock.
 		issued_at_ms: Math.max(now, prev.issued_at_ms + 1),
 		member_enc_pubkey: base.member_enc_pubkey,

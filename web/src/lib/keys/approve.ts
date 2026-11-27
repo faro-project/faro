@@ -8,18 +8,16 @@
 import { api, ApiError, describeError, seg } from '../api.ts';
 import { unb64 } from '../crypto/bytes.ts';
 import { safetyCode } from '../crypto/keys.ts';
-import { allyEndorsementSigningBytes, nextManifest, signWith } from '../crypto/proto.ts';
+import {
+	allyEndorsementSigningBytes,
+	signWith,
+	type RecipientManifest,
+	type Signed
+} from '../crypto/proto.ts';
 import type { ApproveAlly } from '../types.ts';
 import type { MemberKeys } from './keyring.svelte.ts';
-import { ensureManifest, ManifestTrustError, signManifest } from './member.ts';
-
-/** An active ally, as the recipient list names them. */
-export interface ActiveAllyEntry {
-	ally_id: string;
-	enc_pubkey: string;
-	/** The ally's current display name, signed into a format 2 list. */
-	name?: string;
-}
+import { ManifestTrustError, planNext } from './manifest-trust.ts';
+import { signAndSend } from './member.ts';
 
 /** The pending ally being approved: who, and the key whose code was compared. */
 export interface ApprovalTarget {
@@ -36,24 +34,46 @@ export function codeForAlly(keys: MemberKeys | null, ally: ApprovalTarget): stri
 }
 
 /**
- * Endorse the ally's key and sign the recipient list with them added.
- * `activeAllies` lists the member's other active allies, to start a list if
- * there is none yet. `currentNames` maps ally ids to the names the caller
- * shows now, so the signed list names every ally as they are called today (a
- * rename is picked up here and never forces a re-sign); without an entry an
- * ally keeps the name the last list signed. Throws on failure; see
- * [approveErrorMessage].
+ * The list approving `ally` signs: `base` (the checked latest list, from
+ * `ensureManifest`) plus the ally, named as the member sees them now. The
+ * other allies are named as `names` says, by default the names `base`
+ * signed (`namesToSign`). The page shows this before the member approves.
+ */
+export function approvalManifest(
+	base: RecipientManifest,
+	ally: ApprovalTarget,
+	names?: ReadonlyMap<string, string>
+): RecipientManifest {
+	if (!ally.ally_enc_pubkey) throw new Error('The ally has no key yet.');
+	return planNext(
+		base,
+		{
+			kind: 'add',
+			ally: {
+				ally_id: ally.ally_id,
+				enc_pubkey: ally.ally_enc_pubkey,
+				name: ally.display_name ?? ''
+			}
+		},
+		names
+	);
+}
+
+/**
+ * Endorse the ally's key and sign the recipient list with them added
+ * ([approvalManifest] of `base` and `names`, the list the page showed).
+ * Throws on failure; see [approveErrorMessage].
  */
 export async function approveAlly(
 	keys: MemberKeys,
 	instanceId: string,
 	ally: ApprovalTarget,
-	activeAllies: () => Promise<ActiveAllyEntry[]>,
-	currentNames: ReadonlyMap<string, string> = new Map()
+	base: Signed<RecipientManifest>,
+	names?: ReadonlyMap<string, string>
 ): Promise<void> {
 	const encPubkey = ally.ally_enc_pubkey;
 	if (!encPubkey) throw new Error('The ally has no key yet.');
-	const latest = await ensureManifest(keys, instanceId, activeAllies);
+	const next = approvalManifest(base, ally, names);
 	const endorsement = signWith(
 		keys.signSeed,
 		{
@@ -65,19 +85,10 @@ export async function approveAlly(
 		},
 		allyEndorsementSigningBytes
 	);
-	const manifest = signManifest(
-		keys,
-		nextManifest(latest, [
-			...latest.allies.map((a) => ({ ...a, name: currentNames.get(a.ally_id) ?? a.name ?? '' })),
-			{
-				ally_id: ally.ally_id,
-				enc_pubkey: encPubkey,
-				name: currentNames.get(ally.ally_id) ?? ally.display_name ?? ''
-			}
-		])
-	);
-	const body: ApproveAlly = { endorsement, manifest };
-	await api.post(`/v1/me/allies/${seg(ally.ally_id)}/approve`, body);
+	await signAndSend(keys, instanceId, next, (manifest) => {
+		const body: ApproveAlly = { endorsement, manifest };
+		return api.post(`/v1/me/allies/${seg(ally.ally_id)}/approve`, body);
+	});
 }
 
 /** A sentence for what can go wrong approving. */
@@ -89,6 +100,7 @@ export function approveErrorMessage(e: unknown): string {
 			case 'ally_already_in_manifest':
 				return 'Your recipient list still names an ally who left. Confirm the updated list on the Allies page first.';
 			case 'manifest_version_mismatch':
+			case 'manifest_prev_mismatch':
 				return 'Your recipient list changed in another tab. Reload this page and try again.';
 			case 'not_pending':
 			case 'already_active':

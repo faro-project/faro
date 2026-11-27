@@ -17,6 +17,7 @@ import {
 	allyEndorsementSigningBytes,
 	deviceEndorsementSigningBytes,
 	keyRewrapSigningBytes,
+	MANIFEST_FORMAT_V2,
 	manifestRef,
 	manifestSigningBytes,
 	memberBindingSigningBytes,
@@ -56,20 +57,24 @@ const manifest = signWith(
 	manifestSigningBytes
 );
 
-// A format 2 manifest as the allies page signs it: the next version, with
-// display names as the instance stores them, sanitized by `nextManifest`.
-// Rust checks it verifies and that its own sanitizer makes the same names.
+// A format 2 manifest as the allies page signed it before format 3: the
+// next version, with display names as the instance stores them, sanitized
+// by `nextManifest`. Rust checks it verifies and that its own sanitizer
+// makes the same names.
 const rawNames = [' Zoe\u0308\u202e  Smith\n', '\u200f\u{1F64F} Lee\u0000'];
-const manifestV2 = signWith(
+const { prev_hash: _unlinked, ...v2Body } = nextManifest(
+	manifest,
+	[
+		{ ally_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey, name: rawNames[0] },
+		{ ally_id: ids.ally_b, enc_pubkey: v.keys.ally_b_pubkey, name: rawNames[1] }
+	],
+	1_790_000_000_500
+);
+const manifestV2 = signWith(seed, { ...v2Body, format: MANIFEST_FORMAT_V2 }, manifestSigningBytes);
+// The version after it as the page signs it now: format 3, linked to it.
+const manifestV3 = signWith(
 	seed,
-	nextManifest(
-		manifest,
-		[
-			{ ally_id: ids.ally_a, enc_pubkey: v.keys.ally_a_pubkey, name: rawNames[0] },
-			{ ally_id: ids.ally_b, enc_pubkey: v.keys.ally_b_pubkey, name: rawNames[1] }
-		],
-		1_790_000_000_500
-	),
+	nextManifest(manifestV2, manifestV2.allies, 1_790_000_000_600),
 	manifestSigningBytes
 );
 
@@ -160,6 +165,7 @@ v.from_web = {
 	manifest,
 	manifest_v2: manifestV2,
 	manifest_v2_raw_names_hex: rawNames.map((n) => hex(utf8(n))),
+	manifest_v3: manifestV3,
 	device_endorsement: signWith(
 		seed,
 		{

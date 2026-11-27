@@ -313,6 +313,7 @@ fn manifest_doc(
         instance_id: inst.clone(),
         member_id: mid.clone(),
         version,
+        prev_hash: None,
         issued_at_ms: 1_000 + version as i64,
         member_enc_pubkey: member_enc.public(),
         allies: allies

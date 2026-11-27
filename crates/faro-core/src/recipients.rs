@@ -33,8 +33,10 @@
 //! The manifest fixes this by making "who may read" one signed document with
 //! a version. The device remembers the highest version it accepted (the
 //! *checkpoint*, persisted by [`crate::outbox::Outbox`]) and refuses
-//! anything older ([`RecipientError::Rollback`]) or a different document
-//! claiming the same version ([`RecipientError::Equivocation`]). There is
+//! anything older ([`RecipientError::Rollback`]), a different document
+//! claiming the same version ([`RecipientError::Equivocation`]), or a
+//! format 3 successor that names another predecessor
+//! ([`RecipientError::Fork`]). There is
 //! deliberately no endorsement-based constructor any more: leaving one
 //! around would invite a "fallback" that reintroduces the bug.
 
@@ -87,6 +89,17 @@ pub enum RecipientError {
         have: Hash32,
         got: Hash32,
     },
+    /// The next version after the checkpoint, but built on another
+    /// predecessor: its format 3 `prev_hash` isn't the checkpoint's hash. The
+    /// member's key signed a second branch, typically because the instance
+    /// served their web app an older list to build on, so this document may
+    /// list an ally the member removed.
+    #[error("recipient manifest fork at version {version}: it follows {got_prev}, but this device has {have}")]
+    Fork {
+        version: u64,
+        have: Hash32,
+        got_prev: Hash32,
+    },
 }
 
 /// What accepting a manifest means for the stored checkpoint.
@@ -122,6 +135,28 @@ pub fn compare_to_checkpoint(
         }),
         std::cmp::Ordering::Equal => Ok(ManifestDecision::Unchanged),
         std::cmp::Ordering::Greater => Ok(ManifestDecision::Advanced(got)),
+    }
+}
+
+/// Check a format 3 manifest's link to the checkpoint (§5.1 rule 5): the
+/// version right after the checkpoint must name the checkpoint as its
+/// predecessor, or it is [`RecipientError::Fork`]. A manifest further ahead
+/// can't be checked (the versions in between were never seen), nor can one
+/// in format 1 or 2, which carry no link.
+pub fn check_link(
+    checkpoint: Option<ManifestRef>,
+    version: u64,
+    prev_hash: Option<Hash32>,
+) -> Result<(), RecipientError> {
+    match (checkpoint, prev_hash) {
+        (Some(have), Some(p)) if have.version.checked_add(1) == Some(version) && p != have.hash => {
+            Err(RecipientError::Fork {
+                version,
+                have: have.hash,
+                got_prev: p,
+            })
+        }
+        _ => Ok(()),
     }
 }
 
@@ -177,7 +212,8 @@ impl RecipientSet {
     /// 3. `instance_id` and `member_id` match the enrollment.
     /// 4. Neither the member key nor any ally key is a small-order point.
     /// 5. The manifest's [`ManifestRef`] does not move backwards from, or
-    ///    fork at, `checkpoint` ([`compare_to_checkpoint`]).
+    ///    fork at, `checkpoint` ([`compare_to_checkpoint`]), and the version
+    ///    right after it names it as its predecessor ([`check_link`]).
     ///
     /// This function is pure and persists nothing, which is why it is
     /// crate-private: handing out a set whose checkpoint is not yet on disk
@@ -216,6 +252,7 @@ impl RecipientSet {
         }
         let reference = m.reference();
         let decision = compare_to_checkpoint(checkpoint, reference)?;
+        check_link(checkpoint, m.version, m.prev_hash)?;
         Ok((
             RecipientSet {
                 instance_id: m.instance_id.clone(),
@@ -282,7 +319,8 @@ pub(crate) mod tests {
     use faro_crypto::{ChainHead, EncryptionKeypair, SigningKey};
     use faro_proto::body::EventBody;
     use faro_proto::keys::{
-        RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MAX_MANIFEST_ALLIES,
+        RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3,
+        MAX_MANIFEST_ALLIES,
     };
     use faro_proto::{DeviceId, Signature, SignedEvent, Urgency};
 
@@ -320,6 +358,7 @@ pub(crate) mod tests {
                 instance_id: self.inst.clone(),
                 member_id: self.member.clone(),
                 version,
+                prev_hash: None,
                 issued_at_ms: 1_000 + version as i64,
                 member_enc_pubkey: self.member_enc.public(),
                 allies: self
@@ -493,6 +532,98 @@ pub(crate) mod tests {
         // names).
         let v3 = f.manifest(3);
         assert!(f.accept(&v3, Some(v2.body.reference())).is_ok());
+    }
+
+    /// `named_body` in format 3 at `version`, following `prev`.
+    fn linked_body(f: &Fixture, version: u64, prev: Option<Hash32>) -> RecipientManifest {
+        let mut b = f.named_body(version);
+        b.format = MANIFEST_FORMAT_V3;
+        b.prev_hash = prev;
+        b
+    }
+
+    /// #180: ally Eve was removed at version 3. The instance served the
+    /// member's page version 2 (which lists her), the page signed a second
+    /// version 3 on it, then version 4 on that. A device holding the real
+    /// version 3 refuses the first as equivocation (as before) and the
+    /// second as a fork, which formats 1 and 2 could not show.
+    #[test]
+    fn a_successor_built_on_another_branch_is_a_fork() {
+        let f = Fixture::new(1);
+        let eve = EncryptionKeypair::generate();
+        let with_eve = |version: u64, prev: Option<Hash32>| {
+            let mut b = linked_body(&f, version, prev);
+            b.allies.push(ManifestAlly {
+                ally_id: UserId::new("usr_zz_eve"),
+                enc_pubkey: eve.public(),
+                name: Some("Eve".into()),
+            });
+            f.sign(b)
+        };
+        let v1 = f.sign(linked_body(&f, 1, None));
+        let v2 = with_eve(2, Some(v1.body.hash()));
+        let v3 = f.sign(linked_body(&f, 3, Some(v2.body.hash())));
+        let cp3 = v3.body.reference();
+        // The genuine chain advances.
+        let (_, d) = f.accept(&v2, Some(v1.body.reference())).unwrap();
+        assert_eq!(d, ManifestDecision::Advanced(v2.body.reference()));
+        assert_eq!(
+            f.accept(&v3, Some(v2.body.reference())).unwrap().1,
+            ManifestDecision::Advanced(cp3)
+        );
+        // The branch built on version 2.
+        let fork3 = with_eve(3, Some(v2.body.hash()));
+        let fork4 = with_eve(4, Some(fork3.body.hash()));
+        assert!(matches!(
+            f.accept(&fork3, Some(cp3)),
+            Err(RecipientError::Equivocation { version: 3, .. })
+        ));
+        assert_eq!(
+            f.accept(&fork4, Some(cp3)),
+            Err(RecipientError::Fork {
+                version: 4,
+                have: cp3.hash,
+                got_prev: fork3.body.hash()
+            })
+        );
+        // The genuine successor is accepted.
+        let v4 = f.sign(linked_body(&f, 4, Some(cp3.hash)));
+        assert!(f.accept(&v4, Some(cp3)).is_ok());
+    }
+
+    #[test]
+    fn links_are_checked_only_where_they_can_be() {
+        let f = Fixture::new(1);
+        let v2 = f.sign(f.named_body(2));
+        let cp2 = v2.body.reference();
+        // Format 2 after format 2: no link to check.
+        assert!(f.accept(&f.sign(f.named_body(3)), Some(cp2)).is_ok());
+        // The first format 3 version after a format 2 one names it.
+        let v3 = f.sign(linked_body(&f, 3, Some(cp2.hash)));
+        assert!(f.accept(&v3, Some(cp2)).is_ok());
+        // A gap: the versions in between were never seen, so any link is
+        // accepted, as any newer version is.
+        let v9 = f.sign(linked_body(&f, 9, Some(Hash32([7; 32]))));
+        assert!(f.accept(&v9, Some(cp2)).is_ok());
+        // No checkpoint (trust on first use): nothing to compare with.
+        assert!(f.accept(&v3, None).is_ok());
+        // The stored checkpoint re-verified against itself is unchanged.
+        assert_eq!(
+            f.accept(&v3, Some(v3.body.reference())).unwrap().1,
+            ManifestDecision::Unchanged
+        );
+        assert_eq!(check_link(Some(cp2), 3, None), Ok(()));
+        assert_eq!(
+            check_link(
+                Some(ManifestRef {
+                    version: u64::MAX,
+                    hash: Hash32::ZERO
+                }),
+                0,
+                Some(Hash32([1; 32]))
+            ),
+            Ok(())
+        );
     }
 
     #[test]
