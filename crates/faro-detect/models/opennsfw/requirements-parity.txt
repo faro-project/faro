@@ -1,0 +1,5 @@
+# parity.py's reference implementation (OpenCV's Caffe importer), on top
+# of requirements.txt. Pinned like it; `build.sh --parity` installs both.
+opencv-python-headless==4.10.0.84 \
+    --hash=sha256:a4f4bcb07d8f8a7704d9c8564c224c8b064c63f430e95b61ac0bffaa374d330e \
+    --hash=sha256:5ae454ebac0eb0a0b932e3406370aaf4212e6a3fdb5038cc86c7aea15a6851da

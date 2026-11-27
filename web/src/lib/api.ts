@@ -12,6 +12,11 @@ function apiBase(): string {
 	return resolve('/').replace(/\/$/, '');
 }
 
+/** The full URL of an API path on this instance, e.g. for an `<img>`. */
+export function apiUrl(path: string): string {
+	return `${apiBase()}${path}`;
+}
+
 export class ApiError extends Error {
 	constructor(
 		/** HTTP status, or 0 when the server could not be reached. */
@@ -27,14 +32,29 @@ export class ApiError extends Error {
 	}
 }
 
+/** A raw request body with its own content type (a file upload). */
+class RawBody {
+	constructor(
+		readonly data: Blob,
+		readonly contentType: string
+	) {}
+}
+
+function encodeBody(body: unknown): { headers: Record<string, string>; body?: BodyInit } {
+	if (body === undefined) return { headers: {} };
+	if (body instanceof RawBody) {
+		return { headers: { 'content-type': body.contentType }, body: body.data };
+	}
+	return { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) };
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
 	let res: Response;
 	try {
 		res = await fetch(`${apiBase()}${path}`, {
 			method,
 			credentials: 'same-origin',
-			headers: body === undefined ? {} : { 'content-type': 'application/json' },
-			body: body === undefined ? undefined : JSON.stringify(body)
+			...encodeBody(body)
 		});
 	} catch {
 		throw new ApiError(0, 'network', 'Could not reach the Faro server.');
@@ -69,12 +89,74 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 	return data as T;
 }
 
+/**
+ * GET a JSON response, refusing to read more than `maxBytes` of it: for
+ * documents a hostile instance could make arbitrarily large (a group's
+ * roster snapshot), the cap applies before parsing.
+ */
+async function getCapped<T>(path: string, maxBytes: number): Promise<T> {
+	let res: Response;
+	try {
+		res = await fetch(`${apiBase()}${path}`, { credentials: 'same-origin' });
+	} catch {
+		throw new ApiError(0, 'network', 'Could not reach the Faro server.');
+	}
+	const declared = Number(res.headers.get('content-length'));
+	if (Number.isFinite(declared) && declared > maxBytes) {
+		await res.body?.cancel();
+		throw new ApiError(res.status, 'too_large', 'The server sent more than this page accepts.');
+	}
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	const reader = res.body?.getReader();
+	if (reader) {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.length;
+			if (total > maxBytes) {
+				await reader.cancel();
+				throw new ApiError(res.status, 'too_large', 'The server sent more than this page accepts.');
+			}
+			chunks.push(value);
+		}
+	}
+	const bytes = new Uint8Array(total);
+	let o = 0;
+	for (const c of chunks) {
+		bytes.set(c, o);
+		o += c.length;
+	}
+	let data: unknown = null;
+	try {
+		data = JSON.parse(new TextDecoder().decode(bytes));
+	} catch {
+		data = null;
+	}
+	if (!res.ok) {
+		const err = data as Partial<ApiErrorBody> | null;
+		throw new ApiError(
+			res.status,
+			err?.error ?? `http_${res.status}`,
+			err?.message ?? (res.statusText || `HTTP ${res.status}`)
+		);
+	}
+	if (data === null) {
+		throw new ApiError(res.status, 'bad_response', 'The server sent an unexpected response.');
+	}
+	return data as T;
+}
+
 export const api = {
+	getCapped,
 	get: <T>(path: string) => request<T>('GET', path),
 	/** For a `204 No Content` answer, use `T = void`. */
 	post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
 	patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, body),
 	put: <T>(path: string, body: unknown) => request<T>('PUT', path, body),
+	/** `PUT` a file as the raw body, with its own `Content-Type`. */
+	putFile: <T>(path: string, data: Blob, contentType: string) =>
+		request<T>('PUT', path, new RawBody(data, contentType)),
 	/** For a `204 No Content` answer, use `T = void`. */
 	delete: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body)
 };

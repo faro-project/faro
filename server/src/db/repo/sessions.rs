@@ -23,13 +23,18 @@ pub async fn insert<'e>(
     Ok(())
 }
 
-/// A live session's user, plus when the session was last touched.
+/// A live session's user, plus when the session was created and last
+/// touched.
 pub struct LiveSession {
     pub user: User,
+    /// When the person signed in (deleting an account needs a recent one).
+    pub created_at_ms: i64,
     pub last_seen_at_ms: i64,
 }
 
-/// Look up an unexpired session whose user is not disabled.
+/// Look up an unexpired session whose user is not disabled. A person whose
+/// account is being deleted can still sign in: they may cancel during the
+/// hold (§12).
 pub async fn lookup<'e>(
     e: impl Executor<'e, Database = Any>,
     id_hash: &str,
@@ -37,7 +42,8 @@ pub async fn lookup<'e>(
 ) -> Result<Option<LiveSession>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT u.id, u.email, u.display_name, u.is_admin, u.is_member, u.is_ally,
-                u.disabled, u.created_at, s.last_seen_at
+                u.disabled, u.created_at, u.deletion_requested_at, u.deletion_purge_after,
+                u.deletion_started_at, u.deletion_by_admin, s.created_at AS session_created_at, s.last_seen_at
          FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.id_hash = $1 AND s.expires_at > $2 AND u.disabled = 0",
     )
@@ -49,6 +55,7 @@ pub async fn lookup<'e>(
         None => Ok(None),
         Some(r) => Ok(Some(LiveSession {
             user: users::from_row(&r)?,
+            created_at_ms: r.try_get("session_created_at")?,
             last_seen_at_ms: r.try_get("last_seen_at")?,
         })),
     }
@@ -76,6 +83,21 @@ pub async fn delete<'e>(
         .execute(e)
         .await?;
     Ok(())
+}
+
+/// End every session of a user except `keep` (they asked for their account
+/// to be deleted from that one).
+pub async fn delete_others_for_user<'e>(
+    e: impl Executor<'e, Database = Any>,
+    user: &faro_proto::UserId,
+    keep: &str,
+) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id_hash <> $2")
+        .bind(user.as_str())
+        .bind(keep)
+        .execute(e)
+        .await?;
+    Ok(r.rows_affected())
 }
 
 /// End every session of a user (their account was disabled).

@@ -6,7 +6,11 @@
 //!    directory (after resolving symlinks) must be owned by root or our
 //!    effective uid and must not be group/world-writable; every ancestor must
 //!    be owned by root or us and be either not group/world-writable or
-//!    sticky (like `/tmp`). Otherwise another user could swap the socket for
+//!    sticky (like `/tmp`). One exception: a root-owned ancestor may be
+//!    writable by a group that only the system uses (`wheel`, gid 0, and on
+//!    macOS `daemon`, gid 1, whose only member is root). macOS ships
+//!    `/var/run` as `root:daemon` mode 775, the parent of the service's
+//!    socket directory. Otherwise another user could swap the socket for
 //!    their own and impersonate the service.
 //! 2. **The socket never exists with loose permissions.** It is bound inside
 //!    a fresh private (0700) staging directory, chmod/chowned there, and then
@@ -22,6 +26,10 @@
 //! The agent side should also verify the *server* (`connect_verified` with
 //! [`AllowUids::root`](crate::AllowUids::root)) so it never streams frames
 //! to an impostor.
+//!
+//! The per-account naming ([`session_socket_path`](crate::session_socket_path),
+//! [`resolve_agent_socket`](crate::resolve_agent_socket)) is shared with the
+//! Windows named-pipe transport and lives in [`crate::endpoint`].
 //!
 //! Linux credential code is written against `libc` but could not be compiled
 //! on the macOS host this crate was developed on; it is small and mirrors
@@ -40,39 +48,8 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::connection::{AgentConnection, Connection, ServiceConnection};
 use crate::error::{IpcError, Result};
+use crate::messages::WireMessage;
 use crate::peer::{PeerInfo, PeerVerifier};
-
-/// The per-account socket a root service binds for `uid`, next to `base`:
-/// `agent.sock` becomes `agent.<uid>.sock`.
-///
-/// Every OS account is monitored (ARCHITECTURE.md §3.1), so agents of
-/// several users connect to one service. Rather than open one socket to
-/// everyone (this module refuses modes beyond owner/group), a root service
-/// binds one `0600` socket per account, owned by that account; an agent
-/// connects to its own ([`resolve_agent_socket`]). A non-root development
-/// service binds `base` itself.
-pub fn session_socket_path(base: &Path, uid: u32) -> PathBuf {
-    let stem = base
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "agent".to_owned());
-    let name = match base.extension() {
-        Some(ext) => format!("{stem}.{uid}.{}", ext.to_string_lossy()),
-        None => format!("{stem}.{uid}"),
-    };
-    base.with_file_name(name)
-}
-
-/// Where an agent running as `uid` should connect: its per-account socket
-/// ([`session_socket_path`]) if the service has bound one, else `base`
-/// (a development service running as the user).
-pub fn resolve_agent_socket(base: &Path, uid: u32) -> PathBuf {
-    let own = session_socket_path(base, uid);
-    match fs::symlink_metadata(&own) {
-        Ok(md) if md.file_type().is_socket() => own,
-        _ => base.to_path_buf(),
-    }
-}
 
 /// Ownership and mode applied to the socket file before it becomes visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +192,14 @@ impl IpcServer {
     /// error; callers running an accept loop should log it and continue
     /// rather than stop listening.
     pub async fn accept(&self) -> Result<ServiceConnection<UnixStream>> {
+        self.accept_typed().await
+    }
+
+    /// [`accept`](Self::accept) for a connection carrying other message
+    /// types (the enroll socket's [`EnrollServerConnection`](crate::EnrollServerConnection)).
+    pub async fn accept_typed<Out: WireMessage, In: WireMessage>(
+        &self,
+    ) -> Result<Connection<UnixStream, Out, In>> {
         let (stream, _addr) = self.listener.accept().await?;
         let peer = peer_credentials(&stream).map_err(IpcError::PeerCredentials)?;
         // On rejection `stream` is dropped here, closing the connection
@@ -242,9 +227,30 @@ impl IpcClient {
     /// Connect without checking who is listening. Prefer
     /// [`connect_verified`](Self::connect_verified) in production.
     pub async fn connect(path: impl AsRef<Path>) -> Result<AgentConnection<UnixStream>> {
+        Self::connect_typed(path).await
+    }
+
+    /// [`connect`](Self::connect) for a connection carrying other message
+    /// types (the enroll socket's [`EnrollClientConnection`](crate::EnrollClientConnection)).
+    pub async fn connect_typed<Out: WireMessage, In: WireMessage>(
+        path: impl AsRef<Path>,
+    ) -> Result<Connection<UnixStream, Out, In>> {
         let stream = UnixStream::connect(path.as_ref()).await?;
         let peer = peer_credentials(&stream).map_err(IpcError::PeerCredentials)?;
         Ok(Connection::with_peer(stream, Some(peer)))
+    }
+
+    /// [`connect_verified`](Self::connect_verified) for other message types.
+    pub async fn connect_verified_typed<Out: WireMessage, In: WireMessage>(
+        path: impl AsRef<Path>,
+        verifier: &dyn PeerVerifier,
+    ) -> Result<Connection<UnixStream, Out, In>> {
+        let conn = Self::connect_typed(path).await?;
+        let peer = conn
+            .peer()
+            .ok_or_else(|| IpcError::peer_rejected("server credentials unavailable"))?;
+        verifier.verify(peer)?;
+        Ok(conn)
     }
 
     /// Connect and require the listening process to pass `verifier`
@@ -312,18 +318,34 @@ fn check_secure_dir(dir: &Path) -> Result<()> {
                 format!("ancestor owned by uid {}, expected root or {me}", md.uid()),
             ));
         }
-        let sticky = md.mode() & S_ISVTX != 0;
-        if md.mode() & 0o022 != 0 && !sticky {
-            return Err(insecure(
-                anc,
-                format!(
-                    "ancestor mode {:o} is group- or world-writable without the sticky bit",
-                    md.mode() & 0o7777
-                ),
-            ));
+        if let Some(reason) = ancestor_write_problem(md.mode(), md.uid(), md.gid()) {
+            return Err(insecure(anc, reason));
         }
     }
     Ok(())
+}
+
+/// Groups only the system uses: `wheel` (gid 0) everywhere, and on macOS
+/// `daemon` (gid 1), whose only member is root. A root-owned ancestor that
+/// only such a group can also write is as safe as one only root can write.
+fn is_system_group(gid: u32) -> bool {
+    gid == 0 || (cfg!(target_os = "macos") && gid == 1)
+}
+
+/// Why an ancestor directory with this mode, owner and group would let
+/// someone other than root or us replace the socket directory, if it would.
+fn ancestor_write_problem(mode: u32, uid: u32, gid: u32) -> Option<String> {
+    if mode & S_ISVTX != 0 || mode & 0o022 == 0 {
+        return None;
+    }
+    let world = mode & 0o002 != 0;
+    if !world && uid == 0 && is_system_group(gid) {
+        return None;
+    }
+    Some(format!(
+        "ancestor mode {:o} is group- or world-writable without the sticky bit",
+        mode & 0o7777
+    ))
 }
 
 /// See the module docs, point 2. Leaves a dead socket in place (the atomic
@@ -409,6 +431,8 @@ mod os {
             gid,
             pid,
             macos_audit_token,
+            windows_sid: None,
+            windows_session_id: None,
         })
     }
 
@@ -477,6 +501,8 @@ mod os {
             gid: cred.gid,
             pid: (cred.pid > 0).then_some(cred.pid as u32),
             macos_audit_token: None,
+            windows_sid: None,
+            windows_session_id: None,
         })
     }
 }
@@ -518,19 +544,51 @@ mod tests {
         let r = IpcServer::bind(dir.path().join("s.sock"), crate::AllowSameUid);
         assert!(matches!(r, Err(IpcError::NoRuntime)));
     }
+}
+
+#[cfg(test)]
+mod ancestor_tests {
+    use super::ancestor_write_problem;
 
     #[test]
-    fn per_account_socket_names() {
-        assert_eq!(
-            session_socket_path(Path::new("/var/run/faro/agent.sock"), 501),
-            Path::new("/var/run/faro/agent.501.sock")
+    fn private_and_sticky_ancestors_are_fine() {
+        assert!(ancestor_write_problem(0o40755, 0, 0).is_none());
+        assert!(ancestor_write_problem(0o41777, 0, 0).is_none(), "/tmp");
+        assert!(ancestor_write_problem(0o40755, 501, 20).is_none());
+    }
+
+    #[test]
+    fn root_owned_system_group_writable_is_fine() {
+        assert!(
+            ancestor_write_problem(0o40775, 0, 0).is_none(),
+            "root:wheel 775"
         );
-        assert_eq!(
-            session_socket_path(Path::new("/run/faro/agent"), 1000),
-            Path::new("/run/faro/agent.1000")
+        if cfg!(target_os = "macos") {
+            // macOS ships /var/run as root:daemon 775.
+            assert!(
+                ancestor_write_problem(0o40775, 0, 1).is_none(),
+                "root:daemon 775"
+            );
+        } else {
+            assert!(ancestor_write_problem(0o40775, 0, 1).is_some());
+        }
+    }
+
+    #[test]
+    fn other_writable_ancestors_are_refused() {
+        // Another group (staff, admin, a user's own group).
+        assert!(
+            ancestor_write_problem(0o40775, 0, 20).is_some(),
+            "root:staff 775"
         );
-        // Nothing bound for the account: fall back to the base path.
-        let base = Path::new("/nonexistent-faro-dir/agent.sock");
-        assert_eq!(resolve_agent_socket(base, 501), base);
+        assert!(
+            ancestor_write_problem(0o40775, 0, 80).is_some(),
+            "root:admin 775"
+        );
+        // A system group, but not owned by root.
+        assert!(ancestor_write_problem(0o40775, 501, 0).is_some());
+        // World-writable without the sticky bit, whatever the group.
+        assert!(ancestor_write_problem(0o40777, 0, 0).is_some());
+        assert!(ancestor_write_problem(0o40757, 0, 1).is_some());
     }
 }

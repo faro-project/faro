@@ -375,3 +375,44 @@ async fn garbage_from_a_verified_peer_is_a_typed_error() {
         .unwrap();
     assert!(matches!(conn.recv().await, Err(IpcError::BadMagic)));
 }
+
+/// The enroll socket's own message types travel over the same transport,
+/// one request and one answer per connection.
+#[tokio::test]
+async fn enroll_request_and_response_round_trip() {
+    use faro_ipc::{
+        EnrollClientConnection, EnrollRequest, EnrollResponse, EnrollServerConnection, EnrollStatus,
+    };
+    let dir = private_dir();
+    let path = faro_ipc::enroll_socket_path(&dir.path().join("agent.sock"), None);
+    let server = IpcServer::bind(&path, AllowSameUid).unwrap();
+    assert_eq!(mode_of(server.path()), 0o600);
+    let srv = tokio::spawn(async move {
+        let mut conn: EnrollServerConnection<_> = server.accept_typed().await.unwrap();
+        assert_eq!(conn.recv().await.unwrap(), EnrollRequest::Status);
+        conn.send(&EnrollResponse::Status(EnrollStatus {
+            enrolled: false,
+            instance_name: None,
+            instance_url: None,
+            endorsed: false,
+        }))
+        .await
+        .unwrap();
+    });
+    let mut conn: EnrollClientConnection<_> =
+        IpcClient::connect_verified_typed(&path, &AllowSameUid)
+            .await
+            .unwrap();
+    conn.send(&EnrollRequest::Status).await.unwrap();
+    match conn.recv().await.unwrap() {
+        EnrollResponse::Status(s) => assert!(!s.enrolled),
+        other => panic!("unexpected {other:?}"),
+    }
+    srv.await.unwrap();
+
+    // A listener that is not who the agent expects gets nothing.
+    let _server = IpcServer::bind(&path, AllowSameUid).unwrap();
+    let other = AllowUids::new([euid().wrapping_add(1)]);
+    let r = IpcClient::connect_verified_typed::<EnrollRequest, EnrollResponse>(&path, &other).await;
+    assert!(matches!(r, Err(IpcError::PeerRejected(_))));
+}

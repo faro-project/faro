@@ -25,6 +25,7 @@ use faro_platform::synthetic::Scene;
 use faro_platform::PermissionState;
 use faro_proto::body::{EventBody, GoodbyeReason, Rating, TamperSignal};
 use faro_proto::{EventHeader, EventKind, Urgency};
+use faro_service::client::Retired;
 use faro_service::{GoodbyeError, GoodbyeOutcome, Phase};
 use std::time::Duration;
 
@@ -252,7 +253,8 @@ async fn revoked_permission_is_an_urgent_tamper_alert_for_the_ally() {
         body,
         EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
-                permission: "screen_recording".into()
+                permission: "screen_recording".into(),
+                never_granted: false,
             },
             account: None,
         }
@@ -276,6 +278,260 @@ async fn revoked_permission_is_an_urgent_tamper_alert_for_the_ally() {
         assert_content_free(m, &[]);
     }
 
+    // The captures it makes fail are not reported again as
+    // `capture_failing`: one signal, naming the cause.
+    drive_failures(&dev, failure_threshold() + 1).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: false,
+        }]
+    );
+
+    dev.shutdown().await;
+}
+
+/// Consecutive failed captures before the service reports them.
+fn failure_threshold() -> u64 {
+    u64::from(faro_service::config::CaptureConfig::default().capture_failure_threshold)
+}
+
+/// Drive the device until `n` captures have failed in all, one at a time
+/// (after a success the schedule spaces them out more than one
+/// `drive_until` allows for all of them).
+async fn drive_failures(dev: &Device, n: u64) {
+    loop {
+        let failed = dev.status().capture_failures;
+        if failed >= n {
+            return;
+        }
+        dev.drive_until("another failed capture", |s| s.capture_failures > failed)
+            .await;
+    }
+}
+
+/// Every tamper signal of `dev`, as the ally decrypts them, in `seq` order.
+async fn tamper_signals(w: &World, dev: &Device) -> Vec<TamperSignal> {
+    dev.upload_all().await;
+    let mut out = Vec::new();
+    let mut events = w.feed_events(&w.ally.session).await;
+    events.sort_by_key(|e| e.seq);
+    for e in events {
+        if e.device_id != dev.enrollment.device_id || e.kind != EventKind::Tamper {
+            continue;
+        }
+        let item = w.event_item(&w.ally.session, dev, e.seq).await;
+        let body: EventBody = serde_json::from_slice(
+            &open_event(&item, dev, e.seq, &w.ally.id, &w.ally.keys.enc).expect("ally opens it"),
+        )
+        .expect("EventBody");
+        match body {
+            EventBody::Tamper { signal, .. } => out.push(signal),
+            other => panic!("not a tamper body: {other:?}"),
+        }
+    }
+    out
+}
+
+/// 3a. A computer where Faro never had Screen Recording (a new install, or
+///     a reinstall that dropped the grant) is reported as exactly that once
+///     the captures keep failing, not as `capture_failing`, and only once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn screen_recording_never_granted_is_named_once() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    dev.script.with(|s| s.permission = PermissionState::Denied);
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+
+    drive_failures(&dev, failure_threshold() + 3).await;
+    assert_eq!(dev.status().captures, 0);
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: true,
+        }]
+    );
+    dev.shutdown().await;
+}
+
+/// 3a (#191). A `permission_revoked` the source forwards (an agent's word)
+///     doesn't count as the service having told allies: it used to mark
+///     Screen Recording as reported, so the real "never granted" report at
+///     the failure threshold was never sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forwarded_permission_revoked_does_not_silence_the_real_one() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    let forwarded = TamperSignal::PermissionRevoked {
+        permission: "screen_recording".into(),
+        never_granted: false,
+    };
+    dev.script.with(|s| {
+        s.permission = PermissionState::Denied;
+        s.tamper.push(forwarded.clone());
+    });
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+
+    drive_failures(&dev, failure_threshold() + 3).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![
+            forwarded,
+            TamperSignal::PermissionRevoked {
+                permission: "screen_recording".into(),
+                never_granted: true,
+            }
+        ]
+    );
+    dev.shutdown().await;
+}
+
+/// 3a'. Captures failing for any other reason are still `capture_failing`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn other_capture_failures_are_capture_failing() {
+    let w = World::new().await;
+    let mut dev = w.active_device(quiet_classifier()).await;
+    dev.drive_until("a capture", |s| s.captures >= 1).await;
+    dev.script.with(|s| s.fail_capture = true);
+    drive_failures(&dev, failure_threshold() + 1).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::CaptureFailing {
+            consecutive_failures: u32::try_from(failure_threshold()).unwrap(),
+        }]
+    );
+    dev.shutdown().await;
+}
+
+/// A capture that fails with this platform error is one a window kept
+/// out of (Android's `FLAG_SECURE`).
+struct HiddenScreen;
+
+impl faro_platform::ScreenCapture for HiddenScreen {
+    fn capture_all_displays(&mut self) -> faro_platform::Result<Vec<faro_platform::Frame>> {
+        Err(faro_platform::PlatformError::Unavailable(
+            faro_service::source::HIDDEN_FROM_CAPTURE.into(),
+        ))
+    }
+    fn permission_state(&self) -> PermissionState {
+        PermissionState::Granted
+    }
+}
+
+/// 3a''. Captures a secure window refuses (Android) count as failed, but
+///       never as `capture_failing`: the platform reports the window
+///       itself (one cause, one signal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_captures_are_not_capture_failing() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    let mut platform = dev.script.platform();
+    platform.capture = Box::new(HiddenScreen);
+    let source = faro_service::InProcessFrameSource::new(platform, Duration::from_millis(10));
+    dev.start_with(quiet_classifier(), Box::new(source));
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+    drive_failures(&dev, failure_threshold() + 2).await;
+    let s = dev.status();
+    assert_eq!(s.capture.consecutive_failures, 0, "{:?}", s.capture);
+    assert!(tamper_signals(&w, &dev).await.is_empty());
+    dev.shutdown().await;
+}
+
+/// 3a'''. A source whose captures need another permission (Android's
+///        accessibility service) has it named in `permission_revoked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_capture_permission_is_the_sources() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    dev.script.with(|s| s.permission = PermissionState::Denied);
+    let source =
+        faro_service::InProcessFrameSource::new(dev.script.platform(), Duration::from_millis(10))
+            .with_capture_permission("accessibility_service");
+    dev.start_with(quiet_classifier(), Box::new(source));
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    w.endorse(&dev).await;
+    dev.wait("running", |s| s.phase == Phase::Running).await;
+    drive_failures(&dev, failure_threshold() + 2).await;
+    assert_eq!(
+        tamper_signals(&w, &dev).await,
+        vec![TamperSignal::PermissionRevoked {
+            permission: "accessibility_service".into(),
+            never_granted: true,
+        }]
+    );
+    dev.shutdown().await;
+}
+
+/// 3b. An image model that doesn't match its manifest (someone replaced the
+///     weights) is never loaded: the service runs on context signals and
+///     reports it as an urgent `integrity_failure` once it is active. The
+///     component is a fixed string, never text from the manifest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_altered_image_model_is_an_urgent_tamper_alert() {
+    let w = World::new().await;
+    let mut dev = w.enroll_device().await;
+    let models = tempfile::tempdir().unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../faro-detect/models/opennsfw/manifest.json"
+    ))
+    .unwrap();
+    // Weights that aren't the pinned ones, and a manifest name an ally
+    // must never see.
+    std::fs::write(models.path().join("opennsfw-int8.onnx"), b"not the model").unwrap();
+    manifest["name"] = "attacker text".into();
+    let path = models.path().join("manifest.json");
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    dev.model_manifest = Some(path);
+
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    assert_eq!(dev.status().tamper_events, 0, "reported once running");
+    w.endorse(&dev).await;
+    dev.wait("tamper event", |s| s.tamper_events >= 1).await;
+    let seq = dev.upload_all().await;
+
+    let ev = w.feed_event(&w.ally.session, &dev, seq).await;
+    assert_eq!(ev.kind, EventKind::Tamper);
+    assert_eq!(ev.urgency, Urgency::Urgent);
+    let item = w.event_item(&w.ally.session, &dev, seq).await;
+    let body: EventBody = serde_json::from_slice(
+        &open_event(&item, &dev, seq, &w.ally.id, &w.ally.keys.enc).expect("ally opens it"),
+    )
+    .expect("EventBody");
+    assert_eq!(
+        body,
+        EventBody::Tamper {
+            signal: TamperSignal::IntegrityFailure {
+                component: faro_service::model::MODEL_CHANGED.into()
+            },
+            account: None,
+        }
+    );
     dev.shutdown().await;
 }
 
@@ -550,7 +806,8 @@ async fn permission_revoked_while_stopped_is_tamper_at_next_start() {
         body,
         EventBody::Tamper {
             signal: TamperSignal::PermissionRevoked {
-                permission: "screen_recording".into()
+                permission: "screen_recording".into(),
+                never_granted: false,
             },
             account: None,
         }
@@ -736,5 +993,474 @@ async fn goodbye_writes_nothing_when_it_cannot_be_delivered() {
     dev.start(quiet_classifier());
     dev.wait("running again", |s| s.phase == Phase::Running)
         .await;
+    dev.shutdown().await;
+}
+
+/// Records the packages the service asks it to install. With `reject`,
+/// the package signature check rejects every package.
+#[derive(Debug, Default)]
+struct RecordingInstaller {
+    calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    checked: std::sync::Mutex<Vec<String>>,
+    reject: Option<String>,
+}
+
+impl faro_service::update::install::Installer for RecordingInstaller {
+    fn check_package(
+        &self,
+        _package: &std::path::Path,
+        target: &faro_update::TargetInfo,
+        _installed: &faro_update::Version,
+    ) -> Result<(), faro_service::update::signature::PackageCheckError> {
+        self.checked.lock().unwrap().push(target.name.clone());
+        match &self.reject {
+            Some(r) => Err(faro_service::update::signature::PackageCheckError::Rejected(r.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn install(
+        &self,
+        package: &std::path::Path,
+        target: &faro_update::TargetInfo,
+    ) -> Result<(), faro_service::update::install::InstallError> {
+        let bytes = std::fs::read(package).expect("package on disk");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((target.name.clone(), bytes));
+        Ok(())
+    }
+}
+
+const UPDATE_PKG: &str = "client/macos/aarch64/Faro-99.0.0.pkg";
+
+/// An instance whose mirror holds release 99.0.0, and the project root that
+/// signed it.
+async fn world_with_an_update() -> (World, Vec<u8>) {
+    use faro_update::testing::{Artifact, ToyProject, DAY_MS};
+    use faro_update::TargetKind;
+    let now = faro_core::Clock::wall_ms(&faro_core::SystemClock::new());
+    let project_dir = tempfile::tempdir().unwrap();
+    let mut project = ToyProject::new(now + 365 * DAY_MS);
+    let root_file = project_dir.path().join("root.json");
+    std::fs::write(&root_file, project.first_root()).unwrap();
+    let release = project_dir.path().join("release");
+    project
+        .publish(
+            &release,
+            &[Artifact::new(
+                UPDATE_PKG,
+                TargetKind::Client,
+                "macos",
+                "aarch64",
+                "99.0.0",
+                b"new faro",
+            )],
+            now + 7 * DAY_MS,
+        )
+        .unwrap();
+
+    let w = World::with_server_config(move |c| c.updates.root = Some(root_file)).await;
+    w.state()
+        .updates()
+        .expect("mirror configured")
+        .refresh_from(
+            &faro_server::updates::upstream::Upstream::Dir(release),
+            now,
+            &faro_update::Channel::stable(),
+            faro_server::updates::Prefetch::All,
+        )
+        .await
+        .unwrap();
+    (w, project.first_root())
+}
+
+fn update_overrides(
+    root: Vec<u8>,
+    installer: std::sync::Arc<RecordingInstaller>,
+) -> faro_service::UpdateOverrides {
+    faro_service::UpdateOverrides {
+        root: Some(root),
+        installer: Some(installer),
+        spec: Some(faro_service::update::ClientSpec {
+            platform: "macos".into(),
+            arch: "aarch64".into(),
+            os_version: None,
+            installed: faro_update::Version::new(1, 0, 0),
+        }),
+        first_check: Some(Duration::ZERO),
+        ..Default::default()
+    }
+}
+
+/// Wait up to 30 s for `f`.
+async fn within_30s(what: &str, f: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !f() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: not within 30 s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The running service checks its instance's mirror on its own, verifies
+/// the release against the project root it ships with, and hands the
+/// package to the installer. It does this before its member has endorsed
+/// it, too: a computer waiting for activation still gets fixes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_service_installs_an_update_from_its_instance() {
+    let (w, root) = world_with_an_update().await;
+    let mut dev = w.enroll_device().await;
+    let installer = std::sync::Arc::new(RecordingInstaller::default());
+    dev.updates = update_overrides(root, installer.clone());
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    within_30s("an install", || !installer.calls.lock().unwrap().is_empty()).await;
+    assert_eq!(
+        *installer.calls.lock().unwrap(),
+        vec![(UPDATE_PKG.to_owned(), b"new faro".to_vec())]
+    );
+    assert_eq!(*installer.checked.lock().unwrap(), [UPDATE_PKG]);
+    dev.shutdown().await;
+}
+
+/// A project-signed package that fails its own signature check (the
+/// update keys leaked) is not installed, and allies get a tamper-class
+/// integrity failure. It was rejected before activation; the event is
+/// written once the device is active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejected_update_package_is_reported_as_tamper() {
+    let (w, root) = world_with_an_update().await;
+    let mut dev = w.enroll_device().await;
+    let installer = std::sync::Arc::new(RecordingInstaller {
+        reject: Some("signed by team ZZZZZ99999, not ABCDE12345".into()),
+        ..RecordingInstaller::default()
+    });
+    dev.updates = update_overrides(root, installer.clone());
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    within_30s("a package check", || {
+        !installer.checked.lock().unwrap().is_empty()
+    })
+    .await;
+
+    w.endorse(&dev).await;
+    dev.wait("the tamper event", |s| {
+        s.phase == Phase::Running && s.tamper_events >= 1
+    })
+    .await;
+    let last = dev.upload_all().await;
+    let mut found = Vec::new();
+    for seq in 1..=last {
+        let item = w.event_item(&w.member_session, &dev, seq).await;
+        let body: EventBody = serde_json::from_slice(
+            &open_event(&item, &dev, seq, &w.member, &w.member_keys.enc).expect("member opens"),
+        )
+        .expect("EventBody");
+        if let EventBody::Tamper {
+            signal: TamperSignal::IntegrityFailure { component },
+            ..
+        } = body
+        {
+            found.push(component);
+        }
+    }
+    assert_eq!(
+        found,
+        ["update package 99.0.0: signed by team ZZZZZ99999, not ABCDE12345"]
+    );
+    assert!(
+        installer.calls.lock().unwrap().is_empty(),
+        "never installed"
+    );
+    dev.shutdown().await;
+}
+
+/// Stands in for ONNX Runtime: a classifier with the verified manifest
+/// that finds nothing.
+#[derive(Debug, Default)]
+struct StandInRuntime;
+
+struct StandIn(faro_detect::ModelInfo);
+
+impl faro_detect::Classifier for StandIn {
+    fn info(&self) -> &faro_detect::ModelInfo {
+        &self.0
+    }
+    fn classify(
+        &mut self,
+        _frame: &faro_platform::Frame,
+    ) -> Result<faro_detect::ImageScores, faro_detect::DetectError> {
+        Ok(faro_detect::ImageScores::empty())
+    }
+}
+
+impl faro_service::model::ModelRuntime for StandInRuntime {
+    fn open(
+        &self,
+        model: faro_detect::VerifiedModel,
+    ) -> Result<Box<dyn faro_detect::Classifier>, faro_detect::DetectError> {
+        Ok(Box::new(StandIn(model.info().clone())))
+    }
+}
+
+/// A model and a domain list published by the project reach the running
+/// service through the real instance's mirror, and the detector switches
+/// to them without a restart. The notices are written next to the others.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_service_switches_to_a_model_and_domain_list_from_its_instance() {
+    use faro_update::testing::{Artifact, ToyProject, DAY_MS};
+    use faro_update::TargetKind;
+    let now = faro_core::Clock::wall_ms(&faro_core::SystemClock::new());
+    let project_dir = tempfile::tempdir().unwrap();
+    let mut project = ToyProject::new(now + 365 * DAY_MS);
+    let root_file = project_dir.path().join("root.json");
+    std::fs::write(&root_file, project.first_root()).unwrap();
+
+    let weights = b"model weights".to_vec();
+    let info = faro_detect::ModelInfo {
+        name: "channel".into(),
+        version: "2.0.0".into(),
+        file: "channel.onnx".into(),
+        input_size: faro_detect::InputSize {
+            width: 8,
+            height: 8,
+        },
+        resize: Default::default(),
+        labels: vec!["nsfw".into()],
+        mean: [0.0; 3],
+        std: [1.0; 3],
+        channel_order: faro_detect::ChannelOrder::Rgb,
+        layout: faro_detect::TensorLayout::Nchw,
+        input_scale: 1.0,
+        output: faro_detect::OutputActivation::Probabilities,
+        license: "CC0-1.0".into(),
+        license_text: None,
+        attribution: None,
+        blake3: blake3::hash(&weights).to_hex().to_string(),
+    };
+    let model =
+        faro_update::bundle::bundle_bytes(&serde_json::to_vec(&info).unwrap(), &weights).unwrap();
+    let mut b = faro_detect::DomainCategorizerBuilder::new();
+    b.add_domain("adult.test", faro_detect::Category::Adult)
+        .unwrap();
+    let list = b.build().unwrap().to_bytes();
+    let manifest = serde_json::json!({
+        "format": faro_detect::DOMAINS_MANIFEST_FORMAT,
+        "notice": "Test list.",
+        "version": "1.0.0",
+        "bundle": {"file": "domains.bin", "bytes": list.len(),
+                   "blake3": blake3::hash(&list).to_hex().to_string()},
+        "domains": 1,
+        "unapproved_included": false,
+        "sources": [{"name": "test", "category": "adult", "format": "domains",
+                     "license": "CC0-1.0", "approved": true, "origin": "test.txt",
+                     "blake3": "0".repeat(64), "lines": 1, "domains": 1, "skipped": 0}],
+        "license_texts": {},
+    });
+    let list =
+        faro_update::bundle::bundle_bytes(&serde_json::to_vec(&manifest).unwrap(), &list).unwrap();
+    let release = project_dir.path().join("release");
+    project
+        .publish(
+            &release,
+            &[
+                Artifact::new(
+                    "model/any/channel-2.0.0-stable.data",
+                    TargetKind::Model,
+                    "any",
+                    "any",
+                    "2.0.0",
+                    &model,
+                ),
+                Artifact::new(
+                    "blocklist/any/domains-1.0.0-stable.data",
+                    TargetKind::Blocklist,
+                    "any",
+                    "any",
+                    "1.0.0",
+                    &list,
+                ),
+            ],
+            now + 7 * DAY_MS,
+        )
+        .unwrap();
+    let w = World::with_server_config(move |c| c.updates.root = Some(root_file)).await;
+    w.state()
+        .updates()
+        .expect("mirror configured")
+        .refresh_from(
+            &faro_server::updates::upstream::Upstream::Dir(release),
+            now,
+            &faro_update::Channel::stable(),
+            faro_server::updates::Prefetch::Selected,
+        )
+        .await
+        .unwrap();
+
+    let mut dev = w.enroll_device().await;
+    let notices = project_dir.path().join("notices");
+    dev.updates = faro_service::UpdateOverrides {
+        model_runtime: Some(std::sync::Arc::new(StandInRuntime)),
+        notices_dir: Some(notices.clone()),
+        ..update_overrides(
+            project.first_root(),
+            std::sync::Arc::new(RecordingInstaller::default()),
+        )
+    };
+    dev.start(quiet_classifier());
+    dev.wait("awaiting endorsement", |s| {
+        s.phase == Phase::AwaitingEndorsement
+    })
+    .await;
+    assert_eq!(dev.status().model.as_deref(), Some("null 0"));
+    w.endorse(&dev).await;
+    dev.wait("the switch", |s| {
+        s.phase == Phase::Running
+            && s.model.as_deref() == Some("channel 2.0.0")
+            && s.blocklist.as_deref() == Some("domains 1.0.0")
+    })
+    .await;
+    let notice =
+        std::fs::read_to_string(notices.join(faro_service::update::artifacts::MODEL_NOTICE))
+            .unwrap();
+    assert!(notice.contains("Image model channel 2.0.0"), "{notice}");
+    assert!(notices
+        .join(faro_service::update::artifacts::BLOCKLIST_NOTICE)
+        .exists());
+    dev.shutdown().await;
+}
+
+/// 12. A computer the instance already retired has nothing left to tell:
+///     its member removed it (allies got `device_removed`), or the account
+///     it reported to was deleted (allies got `account_deleted`). `goodbye`
+///     writes nothing and reports that allies know, so the uninstaller goes
+///     ahead instead of backing out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goodbye_from_a_retired_device_writes_nothing_and_lets_the_uninstall_go_on() {
+    let w = World::new().await;
+    let mut removed = w.active_device(quiet_classifier()).await;
+    let mut deleted = w.active_device(quiet_classifier()).await;
+    removed.shutdown().await;
+    deleted.shutdown().await;
+    let head = |dev: &Device| {
+        faro_core::Outbox::open(
+            dev.dir.path(),
+            &dev.enrollment.instance_id,
+            &dev.enrollment.device_id,
+        )
+        .expect("outbox")
+        .head()
+        .expect("head")
+        .next_seq
+    };
+
+    // The member removes one computer in the web app.
+    let r =
+        w.t.call(
+            axum::http::Method::DELETE,
+            &format!("/v1/me/devices/{}", removed.enrollment.device_id),
+            None,
+            Some(&w.member_session),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
+    let next = head(&removed);
+    assert_eq!(
+        removed.goodbye(Duration::ZERO).await.expect("goodbye"),
+        GoodbyeOutcome::AlreadyRetired(Retired::DeviceRemoved)
+    );
+    assert_eq!(head(&removed), next, "nothing was written");
+
+    // The member deletes their account; once it is purged, the other
+    // computer is refused too.
+    let r =
+        w.t.call(
+            axum::http::Method::DELETE,
+            "/v1/me",
+            Some(serde_json::json!({ "confirm_email": MEMBER_EMAIL })),
+            Some(&w.member_session),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::ACCEPTED, "{:?}", r.body);
+    // Skip the hold (the server tests cover it and the notice gate).
+    sqlx::query("UPDATE users SET deletion_purge_after = $1 WHERE id = $2")
+        .bind(w.t.clock_ms())
+        .bind(w.member.as_str())
+        .execute(w.state().db().pool())
+        .await
+        .expect("end the hold");
+    assert!(faro_server::deletion::purge(w.state(), &w.member)
+        .await
+        .expect("purge"));
+    let next = head(&deleted);
+    assert_eq!(
+        deleted.goodbye(Duration::ZERO).await.expect("goodbye"),
+        GoodbyeOutcome::AlreadyRetired(Retired::AccountDeleted)
+    );
+    assert_eq!(head(&deleted), next, "nothing was written");
+}
+
+/// 13. A problem report (`faro-service diagnose`) from an active device
+///     names its instance and says what the status says, and holds none of
+///     the device's secrets or the accounts' email addresses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_problem_report_names_the_instance_and_holds_no_secret() {
+    use faro_core::clock::Clock;
+    use faro_service::diagnose::{collect, Sources};
+    let w = World::new().await;
+    let mut dev = w.active_device(quiet_classifier()).await;
+    let config = faro_service::Config {
+        state_dir: dev.state_dir.clone(),
+        ..Default::default()
+    };
+    let sources = Sources {
+        config_file: dev.state_dir.join("service.toml"),
+        service_log: None,
+        agent_logs: Vec::new(),
+        agent_log_notes: String::new(),
+        lines: 100,
+        listings: vec![dev.state_dir.clone()],
+        system: false,
+        agent_uid: None,
+    };
+    let report = collect(&config, &sources, dev.clock.wall_ms());
+    let instance = url::Url::parse(&dev.enrollment.instance_url).expect("instance URL");
+    assert_eq!(report.instance_host.as_deref(), instance.host_str());
+    let status = report.file("status.txt").expect("status.txt").contents();
+    assert!(
+        status.contains(&format!("({})", dev.enrollment.instance_url)),
+        "the instance's address stays:\n{status}"
+    );
+    assert!(
+        status.contains(&dev.enrollment.device_id.to_string()),
+        "{status}"
+    );
+    assert!(status.contains(&dev.fingerprint()), "{status}");
+
+    let all = report.full_text();
+    let key = dev
+        .dir
+        .read_secret(faro_service::state::DEVICE_KEY_FILE)
+        .expect("read the key")
+        .expect("a device key");
+    assert!(
+        !all.contains(&hex::encode(&key[..])),
+        "the device key is in the report"
+    );
+    for email in [MEMBER_EMAIL, ALLY_EMAIL, ADMIN_EMAIL] {
+        assert!(!all.contains(email), "{email} is in the report");
+    }
+    let files = report.file("files.txt").expect("files.txt").contents();
+    assert!(files.contains("outbox.sqlite3"), "{files}");
     dev.shutdown().await;
 }

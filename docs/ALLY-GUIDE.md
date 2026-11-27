@@ -1,0 +1,367 @@
+# A guide for allies
+
+**Who this is for:** someone who has been asked to be an **ally** in Faro: a friend, a mentor, a spouse, a small-group leader. You don't need to know anything about computers beyond using email and a web browser.
+
+Someone you know has chosen to use Faro on their own computer, and they want you to help keep them accountable. Faro looks at their screen *on their computer*, and when something is flagged or Faro is switched off, it lets you know. You read what it found on a web page, and then the two of you talk.
+
+That last part is the point. Faro exists to make honest conversations easier, not to catch anyone out.
+
+## Contents
+
+1. [A few words you'll see](#1-a-few-words-youll-see)
+2. [Accepting the invitation](#2-accepting-the-invitation)
+3. [Your passphrase and recovery code](#3-your-passphrase-and-recovery-code)
+4. [Comparing the safety code](#4-comparing-the-safety-code)
+5. [Reading what Faro shows you](#5-reading-what-faro-shows-you)
+6. [Choosing which emails you get](#6-choosing-which-emails-you-get)
+7. [If you want to stop being an ally](#7-if-you-want-to-stop-being-an-ally)
+8. [What the people running the server can and can't see](#8-what-the-people-running-the-server-can-and-cant-see)
+9. [Having the conversation](#9-having-the-conversation)
+10. [Groups](#10-groups)
+11. [If the member uses an iPhone](#11-if-the-member-uses-an-iphone)
+
+---
+
+## 1. A few words you'll see
+
+- **Member:** the person who uses Faro on their computer and invited you. Faro's pages call them one of the "People you support".
+- **Ally:** you. Someone a member trusts to see their reports and alerts.
+- **Instance:** the Faro server your invitation came from. A church, a college, a small group or one person runs it. Its name is at the top of each page.
+- **Passphrase:** like a password, but longer, for example a few unrelated words strung together. You choose it. It unlocks what the member shares with you.
+- **Recovery code:** a long code Faro makes for you, as a spare key. If you forget your passphrase, the recovery code unlocks things instead. You can get a new one in **Settings**.
+- **Safety code:** a set of numbers you and the member compare, to make sure the member is approving *you* and not an impostor.
+
+## 2. Accepting the invitation
+
+You'll get an email with the subject **"*Name* invited you to be their ally on *instance*"**. Sometimes the member sends you the link themselves instead. Either way, it only works for the email address it was sent to, for 7 days, and only once.
+
+1. **Open the link** in the email. The page says **"You're invited to *instance*"**.
+2. **Sign in.** Click **Sign in with *your email***, then **Email me a sign-in link**. There is no password: Faro emails you a link instead. Open that link within 15 minutes, on the same computer and browser. It brings you back to the invitation. (If it doesn't, open the invitation link from the first email again.)
+3. **Set up your ally key.** Under **"Set up your ally key"**:
+   - Type **Your name** as the member knows you. They see it when they approve you, and the member signs it into the list of people their devices report to, so their iPhone shows it too. If you change your name later, their phone shows the new one after the member next changes their allies.
+   - Choose a **Passphrase** and type it again under **Type it again**. It must be at least 10 characters. Read [section 3](#3-your-passphrase-and-recovery-code) first.
+   - Click **Create my key and accept**. It takes a few seconds.
+4. **Save your recovery code.** The page **"Save your recovery code"** shows it once and never again. Write it down, print it (**Print**) or copy it into a password manager (**Copy**). Then tick **I have saved my recovery code somewhere safe** and click **Show my safety code**.
+5. **Compare the safety code** with the member. The page now says **"Invitation accepted"** and shows a long row of numbers. See [section 4](#4-comparing-the-safety-code).
+
+Until the member approves you, you see nothing about them, and the **Supporting** page lists them under **Waiting for approval**.
+
+**If you are already someone else's ally,** step 3 is different: the page says **"Unlock your ally key"**. Type the passphrase you already have, click **Unlock**, then click **Accept *Name*'s invitation**. You use the same passphrase for everyone you support.
+
+**If something goes wrong:**
+
+- **"You're signed in as … but this invitation is for …"**: you signed in with a different email address. Click **Sign out and switch** and sign in with the address the invitation was sent to.
+- **"This invitation no longer works"**: it expired, was already used, or the link was cut short when copying it. Ask the member to send a new one.
+- **No sign-in email?** Check your spam folder. On the sign-in page, **Send another link** tries again.
+
+## 3. Your passphrase and recovery code
+
+What the member shares with you is locked on their computer before it is sent, and only your passphrase (or your recovery code) can unlock it. It's unlocked inside your own browser. The server never sees your passphrase, so **nobody can reset it for you**, not even the people who run the server.
+
+**Choosing a passphrase:**
+
+- Use at least 10 characters. A few unrelated words, like `kettle orbit marigold canyon`, are easy to remember and hard to guess.
+- Don't use one you use anywhere else, and don't tell anyone, including the member.
+- A password manager is a good place to keep it.
+
+**Keeping the recovery code safe:**
+
+- It's 32 letters and numbers in 8 groups of 4.
+- Keep it somewhere other than the computer you use Faro on: on paper in a drawer, or in a password manager.
+- Anyone with the recovery code, and access to your email, could read what the member shares with you. Treat it like a house key.
+
+**When Faro asks you to unlock:**
+
+You type your passphrase on the **Supporting** pages whenever Faro needs to show you details. It stays unlocked in that browser tab until you click **Lock** (top of the page), sign out, close or reload the tab, or leave it alone for 30 minutes. On a shared computer, click **Lock** and **Sign out** when you're done.
+
+**If you forget your passphrase:** on any unlock screen, click **Forgot it? Use the recovery code** and type the recovery code instead. Faro then offers to set a new passphrase: click **Choose a new passphrase** in the note at the top of the page. Your recovery code keeps working afterwards.
+
+**Changing your passphrase or recovery code:** open **Settings** (your name, top right). Under **Your keys**:
+
+- **Change my passphrase…** sets a new passphrase. Tick **Also make a new recovery code** if you want a new code too.
+- **Get a new recovery code…** replaces your recovery code and keeps your passphrase. Use it if you lost the code, or think someone else has seen it. The old code stops working, and the new one is shown once, so save it.
+
+Faro may ask you to unlock first. Nothing changes for the members you support: your safety code stays the same, they aren't told, and you can still read everything they share.
+
+### If you lose your passphrase and your recovery code
+
+If you lose both, Faro can't get your key back, and nobody can reset it, not even the people who run the server. It can't make you a new ally key either: Faro refuses, because you already have one. You can't read what the members you support share with you, and until you do something about it they don't know that. So:
+
+1. **Tell each member,** so they know you can't read their reports. Their computers keep sending reports locked for your old key, and nobody can read them.
+2. **Delete your account** to start again: open **Settings**, choose **Delete your account** at the bottom (it asks you to have signed in within the last 10 minutes, and to type your email address). Everyone you support, and their other allies, are emailed straight away. For 7 days nothing changes and you can cancel. After that your account and key are deleted, and you stop being anyone's ally.
+3. **Sign up again** with the same address, if the instance allows it, and ask each member to invite you again. You make a new key, compare the safety code again and the member approves you again. You see only what happens after that. What was shared with the old key stays unreadable.
+
+If you only want to stop being someone's ally in the meantime, you can still do that without your key ([section 7](#7-if-you-want-to-stop-being-an-ally)).
+
+## 4. Comparing the safety code
+
+When you accept, the member has to approve you. Before they do, the two of you compare a **safety code**: 12 groups of 5 numbers that both of your screens show. If the numbers match, the member knows the person they are approving is really you, and that nobody (not even someone who broke into the server) has slipped in their own key instead.
+
+1. **Meet in person or call each other.** Don't send the code by email or text message: the point is to hear it from each other.
+2. **Read your code out loud.** You find it on the **"Invitation accepted"** page, on the **Supporting** page under **Waiting for approval** (unlock with your passphrase first if it asks), or later in the **Safety code** tab on the member's page.
+3. **The member checks it** against the code on their screen (on their **Allies** page, under **Compare codes and approve**), ticks that it is the same, and clicks **Approve *your name***.
+4. **On your side, click We compared it and it matches.** The code then shows **✓ Checked**, and this browser remembers it.
+
+After that, if the member's key ever changes, this browser warns you: **"*Name*'s key has changed"**. That's normal if they set up Faro again from scratch. If they didn't, ask them before you trust anything on the page, and compare the new code.
+
+If you ever see **"The server lists a different key for you than the one you unlocked"**, don't let the member approve anything. Tell them and the person who runs the instance.
+
+## 5. Reading what Faro shows you
+
+Click **Supporting** at the top of any page to see **"People you support"**. Click a name, or **Open**, to see that person's page. It has three tabs: **Activity**, **Notifications** and **Safety code**.
+
+### Unlocking the details
+
+At first, the **Activity** tab shows only what the server knows: *what kind* of thing happened and *when*, with **🔒 Details encrypted** underneath. Type your passphrase in the box headed **"Unlock to see the details"** and click **Unlock**. Faro then opens each item in your browser.
+
+You only see things from after the member approved you. Older items say **"Not shared with you"**.
+
+### Finding your way around
+
+- The drop-down list picks how far back to look: **Last day**, **Last 7 days**, **Last 30 days** or **Last 90 days**.
+- **Everything**, **Urgent** and **Reports** filter the list.
+- The list refreshes itself every couple of minutes, or click **Refresh**.
+- Items marked **Server** were noticed by the server itself (for example, a computer that stopped checking in), rather than sent by the member's computer.
+
+### Is it really from their computer?
+
+Each computer signs what it sends, and the member's key vouches for each computer. Your browser checks every item against the key you compared in the safety code ([section 4](#4-comparing-the-safety-code)), so the server can't make up an item, change one, or quietly drop one without it showing:
+
+- **✓ Every event and report below is signed by one of their computers, and their history has no gaps** means everything checked out.
+- **Unconfirmed** next to items, and a note at the top, means you haven't compared safety codes with this person yet. The items may be real, but nothing proves the server didn't make them up. Compare the codes.
+- **Not verified** means the item isn't what the member's computer signed. Its details aren't shown. Ask the member, and tell whoever runs the server.
+- **The history the server provided has gaps** lists events from a computer that are missing, or that the server holds but didn't list. A computer that couldn't send for a long time can lose events too; the server then also shows a **chain gap** alert. Either way, it is worth a conversation.
+
+### Urgent, normal and daily items
+
+- **Urgent** items have an **Urgent** label. They are things you'd probably want to hear about soon: something on screen rated **high** (or **medium**, which is urgent unless the member lowered it), signs that Faro was switched off or interfered with, a computer that stopped checking in, or Faro being uninstalled.
+- **Normal** items have no label. They are worth knowing but not pressing: a change to Faro's settings, monitoring being paused or resumed, an ally being added or removed, or the member keeping their history for less time.
+- **Daily reports** are titled **Daily report**. Once a day the member's computer sums up the day: how many times it checked the screen and how many were flagged. Click **Show the report** to see:
+  - **Activity**: a bar showing when the computer was in use, idle (screen on, no keyboard or mouse use; checks continue, less often), locked, asleep, paused or off, and any time it was **Not monitored**;
+  - **Screen checks**: how many checks were **clean**, **low**, **medium** or **high**;
+  - **Flagged moments**: each flagged moment, with its blurred picture and the reasons;
+  - **Most used apps** and **Most visited sites**, only if the member chose to share them;
+  - **Health**: **✓ No problems**, or a list of anything that went wrong.
+
+Everyday screen checks that found nothing don't show up one by one. They're only counted in the daily report.
+
+### Flagged moments
+
+When an item says **"Something was flagged"**, unlocking it shows how it was rated and why (for example "from what was on screen" or "from the website"), which app it was in, the window's title, the web address if it was in a browser, and which account on the computer was being used. The member may have added a **Note from the member**.
+
+Faro decides what to flag by itself, on the member's computer, and it makes mistakes. A flag is a reason to ask, not a verdict.
+
+### Why the pictures are blurred
+
+The small pictures (**Blurred screenshot**) are blurred on the member's computer, heavily, before anything is saved or sent. They show the general idea, such as "a video with a person in it", without the explicit detail. The clear picture is thrown away straight after, so nobody can ever un-blur it: not you, not the member, not the people who run the server. There is no setting to turn this off.
+
+This protects you as well as the member. You will never be shown explicit images by Faro.
+
+**If something looks like child sexual abuse material** (a sexual picture of someone who might be under 18, or a website name or window title that points to it), don't download it, save it, screenshot it, photograph it or send it to anyone, not even the person who runs the server. Click **Lock**, close the page, and read [what to do if you see apparently illegal material](operators/ILLEGAL-MATERIAL.md): it says how to report it and what Faro keeps.
+
+### Tamper alerts
+
+Anyone who controls their own computer can switch Faro off. Faro can't prevent that, but it makes sure you find out. These are the alerts you may see for a computer. Alerts about an iPhone are different: see [section 11](#11-if-the-member-uses-an-iphone).
+
+| What it says | What it means |
+|---|---|
+| **Possible tampering** | Something interfered with Faro. Unlocked, it says what: a permission Faro needs was turned off, Faro was stopped several times, part of Faro was changed, the computer's clock was changed, or someone used an account on the computer while Faro wasn't running in it. |
+| **Screen Recording is off on *computer*** | What a **Possible tampering** alert becomes once unlocked, when the cause is that Faro doesn't have the Mac's Screen Recording permission, so it can't see the screen. Macs only: Windows has no such permission. It says whether the permission was turned off or Faro never had it on that computer (a new install, or a reinstall, which can drop it). The member is told on the computer too. To fix it, they open System Settings → Privacy & Security → Screen & System Audio Recording and switch on Faro Agent, or, if it's already on, remove it with − and add it again. |
+| **A window was hidden from Faro on *computer*** | What a **Possible tampering** alert becomes once unlocked, when an app on the member's Mac or Windows PC kept one of its windows out of screenshots and screen recordings. Faro's captures then show whatever is behind that window, so Faro couldn't see what it showed. The alert names the app (never the window's title). Some apps do this on purpose: password managers, video players with copy protection, screen-sharing tools. But any app can, so it is also a way around Faro, and a browser or viewer doing it deserves a question. The member is told on the computer too. |
+| **Faro kept restarting** | Faro was stopped and had to restart several times within an hour. |
+| **Faro stopped on a computer** | Faro was uninstalled, moved to another server, or the member deleted their account. |
+| ***Computer* isn't sending what it records** | The computer is online, but something is holding back what Faro records. |
+| **Events from *computer* are missing** | Some records never arrived, or were removed. |
+| ***Computer* sent something that didn't verify** | Something arrived that the member's computer didn't really send, or that was changed on the way. |
+| ***Computer*'s clock is wrong** | The computer's time is very different from the server's. |
+| ***Computer* was removed** | The member removed the computer from Faro, so it no longer reports. |
+
+Some of these have innocent causes: a system update can switch a permission off, for example. During the closed beta, setting up Faro also causes some of them: [BETA.md](BETA.md#4-known-limitations-and-false-alarms) says which to expect. Others are hard to explain away. Either way, the right response is to ask.
+
+### Missed check-ins
+
+Every computer with Faro checks in with the server every few minutes. If one goes quiet for longer than the instance allows (3 hours unless the instance's admin changed it), you get an urgent **"*Computer* stopped checking in"** alert. It says what the computer last reported, for example **going to sleep** or **shutting down**. When it comes back, you see **"*Computer* is back online"**, with how long it was silent.
+
+A missed check-in often just means the laptop was closed, switched off or away from the internet for a while. "Going to sleep" before a long silence usually means exactly that. A computer that was "in use" and then went silent is more worth asking about.
+
+**If the server itself goes down, that's never blamed on the member.** Servers run by churches and small groups sometimes go offline: a power cut, a restart. Faro keeps track of its own downtime. It never counts time when the server was down as the member's computer being silent, and after it starts again it waits a full grace period before judging anyone. Meanwhile the member's computer keeps its records and sends them once the server is back, and if anything is missing, you'll see **"Events … are missing"**.
+
+### Other items you might see
+
+- **"The account was disabled by an admin"**: the person who runs the server stopped the member signing in. Their computers keep reporting to you. Faro always tells the person and their allies when an admin does this, and the same if an admin disables an ally's account.
+- **"The account is being deleted"**: the member asked for their account to be deleted. The item gives the date. Until then nothing changes: their computers keep reporting to you, you can open what they sent, and they can still cancel. After that date, everything about them is removed from the server. **"*Name* is deleting their account"** means the same thing for one of their other allies, who stops being an ally on that date. If someone cancels, you see **"…cancelled deleting their account"**. You're emailed about all of these.
+- **"The details are no longer stored"**: the item is older than the instance (or the member) keeps things for.
+- **"The details couldn't be decrypted"**: the item may have been damaged or tampered with. Worth mentioning to the member.
+
+The member sees exactly what you see, on their own **Activity** page.
+
+## 6. Choosing which emails you get
+
+Open the person's page and click the **Notifications** tab, headed **"Email notifications about *Name*"**. Emails never contain details, only that something happened, for example *"Urgent: new alert for Sam"*. You always sign in to Faro to read what it was.
+
+For each kind of item, choose **Right away**, **Hourly digest** or **Off**:
+
+| Row | What it covers | Starts as |
+|---|---|---|
+| **Urgent** | Tamper, missed check-ins, high flags, medium flags (unless the member lowered them) | Right away |
+| **Normal** | Settings and ally changes, and medium flags if the member lowered them | Hourly digest |
+| **Everything else** | Low-rated items | Off |
+
+The **hourly digest** is one email that gathers up everything waiting, sent an hour after the first item in it.
+
+Tick **Quiet hours (hold emails until they end)** and pick the times if you don't want emails overnight. Emails that arrive during quiet hours, urgent ones included, wait until the end. Click **Save** when you're done.
+
+These settings are for this one person. If you support more than one person, set each one separately. Faro only sends email for now; there are no phone notifications yet. Whatever you choose, everything still appears on the **Activity** tab.
+
+### Why some alerts can't be switched off
+
+If you choose **Off** for **Urgent** or **Normal**, Faro tells you: **"Some alerts can't be switched off: Faro being stopped, removed or interfered with, a computer that stops checking in or isn't sending what it records, missing or unverified records, a computer being removed, an ally being removed or leaving, and an account being disabled by an admin. With Off, they still arrive in the hourly digest."**
+
+That's on purpose. If these alerts could be switched off, Faro could be quietly silenced: by accident, or by someone talking you into it. So the most you can do is move them into the hourly digest. These are the ones, by what they say in the list:
+
+| What it says | Urgent or normal |
+|---|---|
+| **Possible tampering** | Urgent |
+| **Faro stopped on a computer** | Urgent |
+| ***Computer* stopped checking in** | Urgent |
+| ***Computer* isn't sending what it records** | Urgent |
+| **Events from *computer* are missing** | Urgent |
+| ***Computer* sent something that didn't verify** | Urgent |
+| ***Computer* was removed** | Urgent |
+| ***Name* was removed as an ally**, or ***Name* stopped being an ally** | Normal |
+| **The account was disabled by an admin** | Urgent |
+| ***Name*'s account was disabled by an admin** | Urgent |
+| **The account is being deleted** | Urgent |
+| ***Name* is deleting their account** | Normal |
+| **The account deletion was cancelled**, or ***Name* cancelled deleting their account** | Normal |
+
+You'll always hear about those, at least in the hourly digest. Everything else can be switched off, including flagged moments, **Faro kept restarting**, and ***Computer* is back online**. If Faro is stopped again and again, you get **Possible tampering**, which can't be switched off.
+
+## 7. If you want to stop being an ally
+
+It's fine to step back. It's kinder to tell the person first, so it isn't a surprise and they can ask someone else.
+
+1. Open the person's page from **Supporting**.
+2. At the bottom, click **Stop being *Name*'s ally…**.
+3. Read the message and click **Stop being their ally**. (Click **Cancel** if you change your mind.)
+
+What happens:
+
+- You lose access to their reports and alerts straight away, and you stop getting emails about them.
+- Faro tells them by email (**"*your name* is no longer your ally"**) and in their feed (**"*your name* stopped being an ally"**). Their other allies see that in their feeds too.
+- They're asked to confirm their updated list of allies. Until they do, their computer still locks new items for you, but the server won't give you anything.
+
+If they invite you again later, you can accept with your existing passphrase.
+
+**Deleting your Faro account** ends all of this at once: open **Settings** (your name, top right) and use **Delete your account** at the bottom. You need to have signed in within the last 10 minutes (it offers to send you a sign-in link), and you type your email address to confirm. Everyone you support, and their other allies, are emailed straight away. For 7 days nothing else changes, you can still sign in, and every page has a **Cancel deletion** button. After that you stop being anyone's ally and your account, your ally key and your settings are deleted.
+
+If the member removes you as an ally, Faro tells you, and their page says **"You aren't an ally for this person (any more)"**. A member can't remove an ally without the other allies being told either.
+
+## 8. What the people running the server can and can't see
+
+Someone runs the Faro instance your invitation came from: maybe your church's IT volunteer, a college, or the member themselves. Faro is built so that **they can't see what's on anyone's screen**.
+
+**They can see:**
+
+- names, email addresses and who is whose ally;
+- the names of the member's computers and when each last checked in;
+- *when* things happen, what *kind* of thing it was (a flag, a tamper alert, a pause) and whether it was urgent, but not what it was about;
+- when emails were sent.
+
+**They can't see:**
+
+- reports, flagged moments, pictures, web addresses or what triggered an alert. These are locked on the member's computer and only unlocked in your browser and the member's;
+- your passphrase, recovery code or key;
+- a way in: they can't make themselves (or anyone else) someone's ally, and an admin account gives no access to anyone's reports.
+
+**One honest limit:** the web page you use to read reports comes from that server. If the person running it changed that page on purpose, they could in principle capture your passphrase. So it matters that the server is run by someone you trust. A separate desktop app for allies, which wouldn't depend on the server for this, is planned.
+
+Every instance publishes its own notice saying exactly what its operator can see. Click **What this instance can see** at the bottom of any Faro page to read it. The people who run your instance may also publish a longer privacy notice of their own, saying who they are, how long they keep backups and how to contact them (the Faro project gives them [a template](operators/PRIVACY-NOTICE.md)). Ask them for it if you can't find it.
+
+## 9. Having the conversation
+
+Faro's real goal is honest conversation, not policing. The person you support chose this for themselves, and chose *you*. Your job isn't to catch them out or keep score; it's to be someone they can be honest with.
+
+- **Agree how you'll talk before anything comes up.** For example, a short call every week, plus a message from them if they have a hard day. Talk about what you'll each do when an alert arrives.
+- **Ask before you assume.** Flags can be mistakes, and tamper alerts and missed check-ins often have ordinary explanations. Start with a question: "I saw something come up on Tuesday evening. What was going on?"
+- **Stay calm.** If you react with shock or anger, honesty gets harder next time. Thank them for being open, even when the news is bad.
+- **Remember they see the same thing.** Everything you see, they can see on their own page. There are no secrets about what you were shown.
+- **Keep it between you.** Don't share what you see with other people unless they've agreed to it. The one exception is what looks like child sexual abuse material: report it, without copying it ([what to do](operators/ILLEGAL-MATERIAL.md)).
+- **Look after yourself.** You're not responsible for their choices, and you don't have to read every report the day it arrives. If this becomes too much, say so; it's fine to [step back](#7-if-you-want-to-stop-being-an-ally).
+- **Ask whether it is still their choice.** Faro is for someone who chose it. If the member seems to be there because someone made them, or says so, don't push them to stay: Faro has no quiet way out (every exit tells you), but a member can always leave. Removing a computer or deleting their account needs no administrator password. See [If this wasn't your choice](MEMBER-GUIDE.md#if-this-wasnt-your-choice) in the member guide.
+- **Get help when it's beyond you.** If you're ever worried about someone's safety, contact people who can help, such as a pastor, a counsellor or, in an emergency, the emergency services. Faro isn't an emergency service.
+
+### An ally holding the administrator password
+
+Some members and allies agree that the ally keeps the administrator name and password of the member's Mac or Windows PC, so the member can't uninstall Faro alone. The Faro installers suggest it. That is their own arrangement: Faro doesn't set it up or rely on it, and can't tell whether anyone holds it.
+
+Be careful with this, as with a passcode on an iPhone ([section 11](#an-ally-holding-the-screen-time-passcode)). Faro's rule is that a member can always leave. Uninstalling Faro needs that password, so holding it can stop a member from leaving by the front door. The member can still remove the computer (**Computers → Remove…**, which stops it reporting) or delete their account (**Settings → Delete your account**, which takes 7 days) without it, and you are told either way. Before you agree to hold the password, talk through what happens if the member wants out, agree on it in advance, and don't use it to keep someone in Faro who wants to leave.
+
+## 10. Groups
+
+Some people using Faro also belong to a **group**: a recovery group, a small group at church, a team that meets each week. Being in a group shares nothing about anyone's computer. Nobody in a group sees your reports or alerts, and you see no one else's unless you are their ally.
+
+- **Joining.** Someone invites you by email, or you ask to join a listed group (below). Open the invitation from the email, or choose **Look at it** under **Invitations** on the **Groups** page. Read the group's name, its description and who invited you, then choose **Join this group** or **No thanks**. Whoever invited you sees only whether you accepted.
+- **Leaving.** Open the group, choose **Leave group…**, then **Leave group**. The facilitators are told. Your alliances stay as they are.
+- **Being asked, offered or partnered.** Proposals to you from people in a group wait under **Waiting for you** on the group's page. Someone can ask you to be their ally, offer to be yours, or suggest you partner up, which makes you allies of each other. Choose **Accept** or **Not now**, or **Decide later** to leave it. If you say no, the person is never told that. Their proposal shows as pending until it runs out after two weeks.
+- **Comparing safety codes.** Accepting doesn't make the alliance active yet. It waits under **Compare at your next meeting**. Meet in person or on a call, choose **Compare codes**, and follow [section 4](#4-comparing-the-safety-code). Each of you approves only your own side.
+- **Finding a group.** Choose **Find a group** on the **Groups** page. You can search by name, and only groups listed on this instance appear. You see whether a group is full, never who is in it. Choose **Ask to join**. The facilitators say yes or no and don't have to say why. If the answer is no, the page shows the date you can ask again.
+
+---
+
+## 11. If the member uses an iPhone
+
+Some members use an iPhone. Faro on an iPhone works differently from Faro on a computer. It **blocks** adult websites and apps on the phone. It doesn't watch the screen, takes no screenshots and can't see what is on it. So an iPhone sends no screen checks, no pictures and no blurred screenshots. The member may also choose more things to block, such as gambling sites, sites they name, or apps. Faro counts how often a blocked app was opened, but never learns which app it was.
+
+What you see is about the blocking: whether protection stayed on, what was blocked, and any change to it.
+
+### The iPhone's alerts
+
+An iPhone's alerts use the phone's name, such as **iPhone-X**. They are the ones you may see:
+
+| What it says | What it means | What to say |
+|---|---|---|
+| **Screen Time protection is off on *iPhone-X*** | The member turned off Faro's Screen Time access. The blocks and app shields are gone, and Faro can now be deleted from the phone. This one is urgent. | "I saw that Faro's Screen Time access was turned off on your phone. What happened?" |
+| **Faro's web filter is off on *iPhone-X*** | The VPN setting that checks website names has stopped. The alert says why: the VPN was switched off, Connect On Demand was turned off, another VPN took over, or the Faro VPN was deleted. Sometimes the phone doesn't say why. This one is urgent. | "Faro's web filter stopped on your phone. Do you know why?" |
+| **Faro's Screen Time settings were changed on *iPhone-X*** | The settings Faro applies were cleared or changed, although Screen Time access is still on. This one is urgent. | "Some of Faro's Screen Time settings on your phone changed. What happened?" |
+| **Protection on *iPhone-X* is being loosened** | The member asked to unblock something, or turn off a limit. It takes effect later. See [pending loosenings](#pending-loosenings) below. | "You asked to unblock something. Can we talk about it before it takes effect?" |
+| **Faro settings changed** | The member blocked more, or a change took effect. It takes effect at once. | Nothing urgent. You might ask what prompted it. |
+| **A change to *iPhone-X* was cancelled** | The member cancelled an unblocking before it took effect. Nothing changed. | Nothing to act on. |
+| **Something was flagged** | A burst of blocked lookups came in a short time. The details say how many, and whether the phone's screen was on. Adverts and link previews can cause some of these. | "Your phone tried to reach a lot of blocked sites in a short time. What was happening?" |
+| **Faro was removed from *iPhone-X*** | The member chose **Leave Faro** on the phone, so Faro was removed from it. This one is urgent. | "Did you remove Faro from your phone?" |
+| ***iPhone-X* hasn't checked in for 3 hours** | The phone has been silent for longer than the instance allows. The alert says how long, and what the phone last reported. A phone that is switched off or out of signal looks like this. | Ask what happened, as you would for a computer ([missed check-ins](#missed-check-ins)). |
+
+Some things are only context and don't come as alerts. An example is a VPN that is connected while Faro is on, or a phone that looks jailbroken. They appear in the daily report.
+
+Blocked lookups and blocked app counts don't come as separate alerts. They are in the daily report.
+
+### Pending loosenings
+
+A loosening is when the member unblocks something, or turns off a limit. It doesn't take effect at once. It waits for the wait the member chose, which is 24 hours unless they changed it. The member can set it from 0 to 72 hours.
+
+You hear about it twice:
+
+- **When it is asked for**, for example: "Gambling sites will be unblocked on iPhone-X tomorrow at 21:04. That is after the member's 24 hours delay. The member can still cancel it."
+- **When it takes effect, or is cancelled.** A cancelled change says the member cancelled it before it took effect, and that nothing changed.
+
+Until the time has passed, the old blocking stays. Only the member can cancel a pending change. You can't, and Faro doesn't let you stop it. If you see one you didn't expect, talk to the member about it.
+
+### What the iPhone report shows
+
+The daily report for an iPhone has no activity timeline and no screen checks. It shows:
+
+- **Protection:** for each period, whether Screen Time and the web filter were **on**, **off** or **unknown**. It says unknown when the phone couldn't tell.
+- **Changes to protection:** each unblocking that was asked for, took effect, or was cancelled, with its time.
+- **Blocked lookups:** for each day, how many were blocked, by category (**adult** or **gambling**). It lists the names of those sites, with how often each was blocked. Other sites are counted, not listed.
+- **Blocked apps opened:** for each day, how many times a blocked app was opened, and how many times the block screen was closed. Faro never records which app.
+- **Flagged bursts:** moments flagged for a burst of blocked lookups, with their reasons.
+
+At the top of each iPhone report there is this notice: "Faro on iPhone blocks; it doesn't see the screen. It can't block sites reached through some private DNS services or apps."
+
+### An ally holding the Screen Time passcode
+
+Some members and allies agree that the ally holds the Screen Time passcode on the member's phone. This is the member's and the ally's own arrangement. Faro doesn't set it up, doesn't ask for the passcode and doesn't rely on it. Faro can't tell whether anyone holds it.
+
+If a passcode is set, changing Faro's Screen Time settings may need it. Turning off Faro's Screen Time access may need it too, depending on how iOS handles this.
+
+Be careful with this. Faro's rule is that a member can always leave. A passcode held by an ally can stop a member from leaving. Before you agree to hold one, talk through what happens if the member wants out, and agree on it in advance.

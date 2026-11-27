@@ -1,7 +1,8 @@
 //! # faro-core
 //!
-//! The portable client core shared by every desktop platform: everything the
-//! Faro service does that is not OS-specific and not ML.
+//! The portable client core shared by every client platform (the desktop
+//! service and the iOS core, `faro-mobile`): everything a Faro client does
+//! that is not OS-specific, not ML and not network.
 //!
 //! | Module | Role (ARCHITECTURE.md) |
 //! |---|---|
@@ -46,7 +47,8 @@ pub use clock::{Clock, ClockGuard, ClockGuardConfig, ClockObservation, ManualClo
 pub use outbox::{ManifestAnchor, Outbox, OutboxError, PruneOutcome, PrunePolicy, PrunedRange};
 pub use recipients::{ManifestDecision, RecipientError, RecipientSet};
 pub use report::{
-    open_report, seal_report, ReportBuilder, ReportError, ReportOptions, SealedReport,
+    open_report, seal_report, IosReportBuilder, ReportBuilder, ReportError, ReportOptions,
+    SealedReport,
 };
 pub use request::sign_request;
 pub use scheduler::{

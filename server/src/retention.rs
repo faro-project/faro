@@ -6,6 +6,7 @@
 //! | event and report ciphertext (blob files + `blobs` rows), and report rows | `blob_days` (30) |
 //! | alerts (and their notifications), closed liveness episodes, removed ally links, old uptime rows | `alert_days` (90) |
 //! | expired sessions, magic links, setup tokens, enroll codes, invites | at expiry |
+//! | token hashes of a deleted account's computers (`deleted_device_tokens`) | 365 days |
 //! | orphan blob files (no `blobs` row, older than a day) | immediately |
 //!
 //! **Per-member windows.** Members may choose *shorter* retention, never
@@ -22,6 +23,14 @@
 //! normal alerts off would not even hear about the change, so a retroactive
 //! cut would be exactly the quiet early deletion §4.3 forbids.
 //!
+//! **Instance windows.** An admin may not set a window below
+//! [`crate::settings::MIN_INSTANCE_RETENTION_DAYS`] in the console, and
+//! shortening one is just as non-retroactive: the old window is kept in
+//! [`crate::settings::RetentionBefore`] with the time of the change, and
+//! data received before it keeps that longer window ([`ranges`]). Rows with
+//! no single receive time (notifications, uptime, group messages) follow
+//! the longer alert window until it has run out.
+//!
 //! **Order.** Blob rows are deleted in the database first, then the files:
 //! a crash in between leaves orphan files (swept on the next run), never
 //! rows pointing at missing files.
@@ -32,6 +41,7 @@
 use crate::blob::BlobId;
 use crate::config::RetentionConfig;
 use crate::error::AppError;
+use crate::settings::{RetentionBefore, WindowBefore};
 use crate::state::AppState;
 use faro_proto::UserId;
 use serde::{Deserialize, Serialize};
@@ -233,8 +243,26 @@ fn cutoff(now: i64, days: u32) -> i64 {
 /// older than the instance window, plus, for a member's shorter window,
 /// anything older than it **that was received after it took effect**
 /// (`since`). Without an override (or `since`), only the first.
-pub fn ranges(now: i64, instance_days: u32, member: Option<(u32, i64)>) -> Vec<(i64, i64)> {
-    let mut out = vec![(i64::MIN, cutoff(now, instance_days))];
+pub fn ranges(
+    now: i64,
+    instance_days: u32,
+    before: Option<(u32, i64)>,
+    member: Option<(u32, i64)>,
+) -> Vec<(i64, i64)> {
+    // An admin shortened the instance window at `since`: what was received
+    // before keeps the old window `before_days`; only newer data follows
+    // `instance_days`.
+    let mut out = match before.filter(|(d, _)| *d > instance_days) {
+        Some((before_days, since)) => {
+            let mut v = vec![(i64::MIN, cutoff(now, before_days))];
+            let to = cutoff(now, instance_days);
+            if since < to {
+                v.push((since, to));
+            }
+            v
+        }
+        None => vec![(i64::MIN, cutoff(now, instance_days))],
+    };
     if let Some((days, since)) = member {
         let to = cutoff(now, days);
         if days < instance_days && since < to {
@@ -334,6 +362,10 @@ const DELETE_REPORTS: ScopedSql =
     scoped_sql!("DELETE FROM reports WHERE", "received_at", "member_id");
 const DELETE_EVENTS: ScopedSql =
     scoped_sql!("DELETE FROM events WHERE", "received_at", "member_id");
+/// Check-ins follow blob retention (GROUPS.md §18); their replies go with
+/// them (`group_posts.parent_id` cascades).
+const DELETE_GROUP_POSTS: ScopedSql =
+    scoped_sql!("DELETE FROM group_posts WHERE", "created_at", "author_id");
 const DELETE_ALERTS: ScopedSql = scoped_sql!("DELETE FROM alerts WHERE", "created_at", "member_id");
 const DELETE_EPISODES: ScopedSql = scoped_sql!(
     "DELETE FROM liveness_episodes WHERE closed_at IS NOT NULL AND",
@@ -411,8 +443,10 @@ impl Plan {
     fn new(
         now: i64,
         instance: &RetentionConfig,
+        before: &RetentionBefore,
         member: Option<(&RetentionConfig, &WindowsSince)>,
     ) -> Plan {
+        let b = |w: Option<WindowBefore>| w.map(|w| (w.days, w.since));
         let m = |days: fn(&RetentionConfig) -> u32, since: fn(&WindowsSince) -> Option<i64>| {
             member.and_then(|(w, s)| since(s).map(|t| (days(w), t)))
         };
@@ -420,10 +454,21 @@ impl Plan {
             events: ranges(
                 now,
                 instance.event_header_days,
+                b(before.event_header),
                 m(|w| w.event_header_days, |s| s.event_header),
             ),
-            blobs: ranges(now, instance.blob_days, m(|w| w.blob_days, |s| s.blob)),
-            alerts: ranges(now, instance.alert_days, m(|w| w.alert_days, |s| s.alert)),
+            blobs: ranges(
+                now,
+                instance.blob_days,
+                b(before.blob),
+                m(|w| w.blob_days, |s| s.blob),
+            ),
+            alerts: ranges(
+                now,
+                instance.alert_days,
+                b(before.alert),
+                m(|w| w.alert_days, |s| s.alert),
+            ),
         }
     }
 }
@@ -438,6 +483,7 @@ async fn purge_scope(
         purge_blobs(state, *r, &scope, s).await?;
         // Reports whose blob was already gone.
         s.reports += exec_scoped(state, &DELETE_REPORTS, *r, &scope).await?;
+        s.other += exec_scoped(state, &DELETE_GROUP_POSTS, *r, &scope).await?;
     }
     for r in &plan.events {
         s.events += exec_scoped(state, &DELETE_EVENTS, *r, &scope).await?;
@@ -450,15 +496,48 @@ async fn purge_scope(
     Ok(())
 }
 
+impl Plan {
+    /// Everything, whenever it was received (account deletion).
+    fn everything() -> Plan {
+        let all = vec![(i64::MIN, i64::MAX)];
+        Plan {
+            events: all.clone(),
+            blobs: all.clone(),
+            alerts: all,
+        }
+    }
+}
+
+/// Delete all of one member's content through the same statements a
+/// retention pass uses (blob rows, then their files; reports; events;
+/// alerts; closed liveness episodes; removed links), whatever its age. The
+/// first stage of the account-deletion purge ([`crate::deletion`]).
+pub async fn purge_member(state: &AppState, member: &UserId) -> Result<RetentionSummary, AppError> {
+    let mut s = RetentionSummary::default();
+    purge_scope(
+        state,
+        &Plan::everything(),
+        Scope::Member(member.as_str()),
+        &mut s,
+    )
+    .await?;
+    Ok(s)
+}
+
+/// Device tombstones of deleted accounts are kept this long (§12).
+pub const DEVICE_TOMBSTONE_DAYS: u32 = 365;
+
 /// One full retention pass.
 pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
     let now = state.now_ms();
-    let instance = state.settings().retention;
+    let settings = state.settings();
+    let instance = settings.retention;
+    let before = settings.retention_before;
     let mut s = RetentionSummary::default();
 
     purge_scope(
         state,
-        &Plan::new(now, &instance, None),
+        &Plan::new(now, &instance, &before, None),
         Scope::Default,
         &mut s,
     )
@@ -493,14 +572,25 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             ),
         };
         let w = effective(&instance, &o);
-        let plan = Plan::new(now, &instance, Some((&w, &since)));
+        let plan = Plan::new(now, &instance, &before, Some((&w, &since)));
         purge_scope(state, &plan, Scope::Member(&member), &mut s).await?;
     }
 
     let pool = state.db().pool();
-    let alert_cut = cutoff(now, instance.alert_days);
+    // Rows that follow the alert window but carry no single receive time
+    // we can split on (notifications, uptime, group messages) wait for the
+    // longer window while an admin's shortening is still protecting older
+    // alerts.
+    let alert_days = before
+        .alert
+        .filter(|b| b.since > cutoff(now, b.days))
+        .map_or(instance.alert_days, |b| instance.alert_days.max(b.days));
+    let alert_cut = cutoff(now, alert_days);
     // Notifications outlive nothing they refer to (they cascade), but
     // delivered or suppressed rows are pruned on the alert window too.
+    // That includes the emails about admin log entries; the entries
+    // themselves are kept and never pruned (only an account's purge NULLs
+    // the ids in them).
     s.notifications += sqlx::query("DELETE FROM notifications WHERE created_at < $1")
         .bind(alert_cut)
         .execute(pool)
@@ -512,6 +602,11 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             .execute(pool)
             .await?
             .rows_affected();
+    s.other += crate::db::repo::deletion::sweep_device_tombstones(
+        pool,
+        cutoff(now, DEVICE_TOMBSTONE_DAYS),
+    )
+    .await?;
     for sql in [
         "DELETE FROM sessions WHERE expires_at < $1",
         "DELETE FROM magic_links WHERE expires_at < $1",
@@ -524,6 +619,26 @@ pub async fn run_once(state: &AppState) -> Result<RetentionSummary, AppError> {
             .execute(pool)
             .await?
             .rows_affected();
+    }
+
+    // Groups: archived ones are deleted after 30 days, unaccepted
+    // facilitator offers end, old invitations go (GROUPS.md §9, §18).
+    {
+        let mut conn = state.db().pool().acquire().await?;
+        let g = crate::db::repo::groups::sweep(&mut conn, now).await?;
+        s.other += g.groups_deleted + g.requests_deleted;
+        s.expired_secrets += g.invites_deleted;
+        // Alliance proposals: mark the expired ones, forget them 90 days
+        // after they expired.
+        let p = crate::db::repo::proposals::sweep(&mut conn, now).await?;
+        s.other += p.pruned;
+        // Reach outs follow alert retention; messages go with whatever
+        // used them (a proposal, a join request or a reach out), GROUPS.md §18.
+        use crate::db::repo::group_messages;
+        s.other += group_messages::prune(&mut *conn, alert_cut).await?;
+        s.other += group_messages::sweep_unused(&mut *conn, now - 3600 * 1000).await?;
+        // An epoch key goes once no stored item uses it (§18).
+        s.other += crate::db::repo::group_posts::prune_epoch_keys(&mut *conn).await?;
     }
 
     s.orphan_files = sweep_orphans(state, now).await?;
@@ -653,27 +768,48 @@ mod tests {
     fn a_shorter_window_only_applies_from_when_it_was_chosen() {
         let now = 100 * DAY_MS;
         // No override: only the instance window.
-        assert_eq!(ranges(now, 30, None), vec![(i64::MIN, 70 * DAY_MS)]);
+        assert_eq!(ranges(now, 30, None, None), vec![(i64::MIN, 70 * DAY_MS)]);
         // 7 days chosen on day 90: data from day 90 on goes after 7 days;
         // older data keeps the 30-day window.
         assert_eq!(
-            ranges(now, 30, Some((7, 90 * DAY_MS))),
+            ranges(now, 30, None, Some((7, 90 * DAY_MS))),
             vec![(i64::MIN, 70 * DAY_MS), (90 * DAY_MS, 93 * DAY_MS)]
         );
         // Chosen today: nothing extra yet.
         assert_eq!(
-            ranges(now, 30, Some((7, now))),
+            ranges(now, 30, None, Some((7, now))),
             vec![(i64::MIN, 70 * DAY_MS)]
         );
         // Not actually shorter: nothing extra.
         assert_eq!(
-            ranges(now, 30, Some((30, 0))),
+            ranges(now, 30, None, Some((30, 0))),
             vec![(i64::MIN, 70 * DAY_MS)]
         );
         // Long ago: the member window applies to everything still stored.
         assert_eq!(
-            ranges(now, 30, Some((7, 0))),
+            ranges(now, 30, None, Some((7, 0))),
             vec![(i64::MIN, 70 * DAY_MS), (0, 93 * DAY_MS)]
+        );
+    }
+
+    #[test]
+    fn a_shortened_instance_window_keeps_the_old_one_for_older_data() {
+        let now = 100 * DAY_MS;
+        // Cut from 30 to 7 days on day 90: older data keeps 30 days, newer
+        // data goes after 7.
+        assert_eq!(
+            ranges(now, 7, Some((30, 90 * DAY_MS)), None),
+            vec![(i64::MIN, 70 * DAY_MS), (90 * DAY_MS, 93 * DAY_MS)]
+        );
+        // Cut today: nothing new yet.
+        assert_eq!(
+            ranges(now, 7, Some((30, now)), None),
+            vec![(i64::MIN, 70 * DAY_MS)]
+        );
+        // A rule that is no longer longer does nothing.
+        assert_eq!(
+            ranges(now, 30, Some((30, 0)), None),
+            vec![(i64::MIN, 70 * DAY_MS)]
         );
     }
 

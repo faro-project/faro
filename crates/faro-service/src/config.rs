@@ -7,13 +7,25 @@
 //!
 //! **What is deliberately not configurable here.** Anything that would let
 //! whoever can edit this file quietly weaken monitoring without allies being
-//! told: the detector thresholds, the idle threshold that pauses capture, and
-//! the urgency floors. The tamper-detection knobs in `[capture]` exist but
-//! can only be made stricter than their defaults. Member-facing settings (capture interval, urgency
+//! told: the detector thresholds, the idle threshold and idle capture rate, and
+//! the urgency floors. (The one exception is `[dev_thresholds]`, which only a
+//! service built with the `dev` feature acts on, and which can only lower
+//! thresholds: [`crate::thresholds`]. A release build ignores it.) The
+//! tamper-detection knobs in `[capture]` exist but can only be made stricter
+//! than their defaults. Member-facing settings (capture interval, urgency
 //! mapping, report sharing) *are* read from `[member_settings]`, but every
 //! change to them is announced to allies as a `settings_change` event when
 //! the service starts ([`crate::runtime`]).
+//!
+//! **Without `[member_settings]`** the device keeps the settings it last
+//! announced (`settings.json` in the state directory), and only a device that
+//! has never announced any starts from [`MemberSettings::default`]. So a new
+//! default (such as `medium` flags becoming `urgent`) reaches new devices but
+//! never silently changes an existing one
+//! ([`crate::state::settings_in_effect`]). Removing the section therefore
+//! keeps the current settings; to go back to the defaults, write them out.
 
+use crate::thresholds::{DevThresholds, BUILD_ALLOWS_DEV_THRESHOLDS};
 use faro_core::MemberSettings;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -52,12 +64,27 @@ pub struct Config {
     /// Default instance for `faro-service enroll` when `--instance` is not
     /// given. After enrollment the pinned enrollment record is authoritative.
     pub instance_url: Option<String>,
+    /// How much `faro-service` logs, as a `RUST_LOG`-style filter (`info`,
+    /// `debug`, `faro_service=debug,info`, …). Unset means `info`. The
+    /// `RUST_LOG` environment variable and `-v` take precedence. At `info`
+    /// and above the log never holds URLs, window titles, notice texts or
+    /// anything from a frame; `debug` and `trace` may.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
     pub capture: CaptureConfig,
     pub ipc: IpcConfig,
     pub network: NetworkConfig,
     pub report: ReportConfig,
-    /// The member's settings. Changes are announced to allies.
-    pub member_settings: MemberSettings,
+    pub updates: UpdatesConfig,
+    /// The member's settings, if set here. Changes are announced to allies.
+    /// `None` keeps the settings last announced, or the defaults on a device
+    /// that has announced none ([`crate::state::settings_in_effect`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_settings: Option<MemberSettings>,
+    /// Development builds only: lower detection thresholds, for testing
+    /// the flag path ([`crate::thresholds`]). A release build ignores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev_thresholds: Option<DevThresholds>,
 }
 
 impl Default for Config {
@@ -65,11 +92,14 @@ impl Default for Config {
         Config {
             state_dir: default_state_dir(),
             instance_url: None,
+            log_level: None,
             capture: CaptureConfig::default(),
             ipc: IpcConfig::default(),
             network: NetworkConfig::default(),
             report: ReportConfig::default(),
-            member_settings: MemberSettings::default(),
+            updates: UpdatesConfig::default(),
+            member_settings: None,
+            dev_thresholds: None,
         }
     }
 }
@@ -93,8 +123,8 @@ pub struct CaptureConfig {
     pub agent_kill_threshold: u32,
     /// 600..=86400 (default 600): a longer window catches slower kill loops.
     pub agent_kill_window_secs: u64,
-    /// Consecutive failed captures before a `capture_failing` tamper event.
-    /// 1..=5 (default 5).
+    /// Failed captures among the last 10 attempts (in a row or not) before
+    /// a `capture_failing` tamper event. 1..=5 (default 5).
     pub capture_failure_threshold: u32,
 }
 
@@ -208,6 +238,32 @@ pub struct ReportConfig {
     pub utc_offset_minutes: i32,
 }
 
+/// Client updates (§3.8, [`crate::update`]). There is deliberately no
+/// switch to turn them off: an install that stops taking updates would keep
+/// whatever bugs (or weaknesses) the project has since fixed. Updates only
+/// run when the package ships the project's root of trust.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// How often the instance's mirror is checked. 3600..=86400 (default
+    /// 21600, every 6 hours), jittered.
+    pub check_secs: u64,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig {
+            check_secs: 6 * 3600,
+        }
+    }
+}
+
+impl UpdatesConfig {
+    pub fn check_interval(&self) -> Duration {
+        Duration::from_secs(self.check_secs)
+    }
+}
+
 fn invalid(field: &'static str, reason: impl Into<String>) -> ConfigError {
     ConfigError::Invalid {
         field,
@@ -270,6 +326,14 @@ impl Config {
             crate::link::parse_instance_url(u)
                 .map_err(|e| invalid("instance_url", e.to_string()))?;
         }
+        if let Some(l) = &self.log_level {
+            if l.len() > 1024 {
+                return Err(invalid("log_level", "must be at most 1024 bytes"));
+            }
+            tracing_subscriber::EnvFilter::builder()
+                .parse(l)
+                .map_err(|e| invalid("log_level", e.to_string()))?;
+        }
         let c = &self.capture;
         // Tamper-detection knobs may only be tightened (see CaptureConfig).
         if !(5..=DEFAULT_AGENT_PING_SECS).contains(&c.agent_ping_secs) {
@@ -297,6 +361,10 @@ impl Config {
                     "must be a non-empty requirement of at most 4096 bytes",
                 ));
             }
+            // A typo must fail here, not lock out every agent later.
+            #[cfg(windows)]
+            faro_platform_windows::SignerRequirement::parse(r)
+                .map_err(|e| invalid("ipc.agent_requirement", e.to_string()))?;
         }
         if self.ipc.socket_path.as_os_str().is_empty() || self.ipc.socket_path.file_name().is_none()
         {
@@ -322,11 +390,18 @@ impl Config {
         if !(1..=600).contains(&n.request_timeout_secs) {
             return Err(invalid("network.request_timeout_secs", "must be 1..=600"));
         }
+        if !(3600..=86_400).contains(&self.updates.check_secs) {
+            return Err(invalid("updates.check_secs", "must be 3600..=86400"));
+        }
         if !(-14 * 60..=14 * 60).contains(&self.report.utc_offset_minutes) {
             return Err(invalid(
                 "report.utc_offset_minutes",
                 "must be within ±14 hours",
             ));
+        }
+        // A release build ignores the section, so its values can't stop it.
+        if let (Some(t), true) = (&self.dev_thresholds, BUILD_ALLOWS_DEV_THRESHOLDS) {
+            t.validate().map_err(|e| invalid("dev_thresholds", e))?;
         }
         Ok(())
     }
@@ -366,12 +441,33 @@ fn check_config_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), Config
 
 #[cfg(not(unix))]
 fn check_config_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), ConfigError> {
-    // TODO(windows): check the file's DACL (SYSTEM/Administrators only).
     if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
         return Err(ConfigError::UnsafeFile {
             path: path.to_path_buf(),
             reason: "not a regular file of reasonable size".into(),
         });
+    }
+    // The service (SYSTEM) refuses a config that anyone but SYSTEM,
+    // Administrators or TrustedInstaller can change; a development run
+    // by hand reads whatever it is given, as on Unix.
+    #[cfg(windows)]
+    if faro_platform_windows::acl::running_as_system() {
+        match faro_platform_windows::acl::writable_by_others(path) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(ConfigError::UnsafeFile {
+                    path: path.to_path_buf(),
+                    reason: "can be changed by accounts other than SYSTEM and Administrators"
+                        .into(),
+                })
+            }
+            Err(e) => {
+                return Err(ConfigError::UnsafeFile {
+                    path: path.to_path_buf(),
+                    reason: format!("cannot read its permissions: {e}"),
+                })
+            }
+        }
     }
     Ok(())
 }
@@ -403,9 +499,9 @@ pub fn default_socket_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/var/run/faro/agent.sock")
     } else if cfg!(windows) {
-        // Placeholder: the Windows transport is a named pipe (not yet
-        // implemented in faro-ipc).
-        PathBuf::from(r"\\.\pipe\faro-agent")
+        // A named pipe: `faro_ipc::session_socket_path` makes
+        // `\\.\pipe\faro\agent.<SID>` from it.
+        PathBuf::from(r"\\.\pipe\faro\agent")
     } else {
         PathBuf::from("/run/faro/agent.sock")
     }
@@ -431,7 +527,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         assert_eq!(c.state_dir, Path::new("/var/lib/faro"));
         assert_eq!(c.network.heartbeat_secs, 300);
-        assert_eq!(c.member_settings, MemberSettings::default());
+        assert_eq!(
+            c.member_settings, None,
+            "the stored settings, or the defaults"
+        );
     }
 
     #[test]
@@ -446,6 +545,7 @@ mod tests {
         let toml = r#"
             state_dir = '@STATE@'
             instance_url = "https://faro.example.org"
+            log_level = "faro_service=debug,info"
             [capture]
             agent_kill_threshold = 2
             [ipc]
@@ -463,13 +563,16 @@ mod tests {
         .replace("@STATE@", state);
         let c = Config::from_toml_str(&toml).unwrap();
         assert_eq!(c.state_dir, Path::new(state));
+        assert_eq!(c.log_level.as_deref(), Some("faro_service=debug,info"));
         assert_eq!(c.capture.agent_kill_threshold, 2);
         assert_eq!(c.capture.agent_ping_secs, 30, "unset fields keep defaults");
         assert_eq!(c.ipc.allowed_uids, vec![501]);
         assert_eq!(c.network.heartbeat_secs, 120);
         assert_eq!(c.report.utc_offset_minutes, -300);
-        assert_eq!(c.member_settings.capture_mean_secs(), 90);
-        assert!(c.member_settings.share_top_apps());
+        let s = c.member_settings.expect("[member_settings] is set");
+        assert_eq!(s.capture_mean_secs(), 90);
+        assert!(s.share_top_apps());
+        assert_eq!(s.urgency().medium(), faro_proto::Urgency::Urgent);
     }
 
     #[test]
@@ -497,12 +600,31 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
+            Config::from_toml_str("log_level = \"faro_service=loud\""),
+            Err(ConfigError::Invalid {
+                field: "log_level",
+                ..
+            })
+        ));
+        assert!(matches!(
             Config::from_toml_str("state_dir = \"relative/dir\""),
             Err(ConfigError::Invalid {
                 field: "state_dir",
                 ..
             })
         ));
+        assert!(Config::from_toml_str("[updates]\ncheck_secs = 60").is_err());
+        assert!(
+            Config::from_toml_str("[updates]\nenabled = false").is_err(),
+            "no off switch"
+        );
+        assert_eq!(
+            Config::from_toml_str("[updates]\ncheck_secs = 7200")
+                .unwrap()
+                .updates
+                .check_secs,
+            7200
+        );
         assert!(matches!(
             Config::from_toml_str("[network]\nheartbeat_secs = 5"),
             Err(ConfigError::Invalid { .. })

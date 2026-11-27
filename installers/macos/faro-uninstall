@@ -13,10 +13,13 @@
 #      If the instance can't be reached, nothing is written: the service is
 #      started again and nothing is removed, so you can retry when online.
 #      --force removes Faro anyway; allies then see a missed check-in
-#      instead of the goodbye.
+#      instead of the goodbye. If the instance already retired this
+#      computer (its member removed it, or the account was deleted), allies
+#      were told then: goodbye says so and the uninstall goes ahead.
 #   3. Stop the agent in every account's session, then remove the programs,
-#      the launchd jobs, the state directory (device key and outbox) and the
-#      package receipt.
+#      the launchd jobs, the state directory (device key and outbox), the
+#      logs (/Library/Logs/Faro and each account's ~/Library/Logs/Faro) and
+#      the package receipt.
 #
 #   --yes    don't ask for confirmation
 #   --force  remove Faro even if allies can't be told first
@@ -28,6 +31,10 @@ DAEMON_PLIST=/Library/LaunchDaemons/org.faro.service.plist
 AGENT_PLIST=/Library/LaunchAgents/org.faro.agent.plist
 FARO_DIR=/Library/Faro
 STATE_DIR="/Library/Application Support/Faro"
+# The logs (faro_platform_macos::pkg_layout): the service's, and the
+# agent's in each account's home.
+LOG_DIR=/Library/Logs/Faro
+USERS_DIR=/Users
 SERVICE="$FARO_DIR/bin/faro-service"
 PKG_ID=org.faro.pkg
 # `faro-service goodbye` exit status: written but not delivered.
@@ -49,10 +56,11 @@ die() { echo "faro-uninstall: $*" >&2; exit 1; }
 
 [[ "$(id -u)" == 0 ]] || die "run it as root: sudo $0"
 
-# The uids of every account with a GUI login session (also in the package's
+# The uids of every account with a GUI login session, whatever its uid, but
+# not the login window (uid 0) or _mbsetupuser (also in the package's
 # scripts/lib.sh, which is not installed).
 gui_uids() {
-    ps -axo uid=,comm= | awk '$2 ~ /\/loginwindow$/ && $1 >= 501 { print $1 }' | sort -un
+    ps -axo uid=,comm= | awk -v skip="$(id -u _mbsetupuser 2>/dev/null || echo 0)" '$2 ~ /\/loginwindow$/ && $1 != 0 && $1 != skip { print $1 }' | sort -un
 }
 
 start_service() {
@@ -102,6 +110,11 @@ else
 fi
 
 # ---- 3. remove --------------------------------------------------------------
+# An update install job left from an earlier update (its plist is in the
+# state directory, removed below).
+if launchctl print "system/org.faro.update" >/dev/null 2>&1; then
+    launchctl bootout "system/org.faro.update" 2>/dev/null || true
+fi
 for uid in $(gui_uids); do
     if launchctl print "gui/$uid/$AGENT_LABEL" >/dev/null 2>&1; then
         launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
@@ -110,6 +123,14 @@ done
 # The plists go first, so nothing starts a Faro program again.
 rm -f "$DAEMON_PLIST" "$AGENT_PLIST"
 rm -rf "$STATE_DIR"
+rm -rf "$LOG_DIR"
+# Each account owns its home, so never follow a symbolic link in it: that
+# would let an account point root's rm somewhere else.
+for home in "$USERS_DIR"/*; do
+    logs="$home/Library/Logs/Faro"
+    [[ -L "$home/Library" || -L "$home/Library/Logs" || -L "$logs" ]] && continue
+    [[ -d "$logs" ]] && rm -rf "$logs"
+done
 # Bash has read this script from an open file, so it can remove itself.
 rm -rf "$FARO_DIR"
 pkgutil --forget "$PKG_ID" >/dev/null 2>&1 || true

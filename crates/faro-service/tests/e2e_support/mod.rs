@@ -258,8 +258,14 @@ pub struct World {
 
 impl World {
     pub async fn new() -> World {
+        Self::with_server_config(|_| {}).await
+    }
+
+    /// As [`World::new`], with the instance's config adjusted first (for
+    /// example to run its update mirror).
+    pub async fn with_server_config(tweak: impl FnOnce(&mut faro_server::config::Config)) -> World {
         init_logging();
-        let t = TestApp::new().await;
+        let t = TestApp::with_config(tweak).await;
         let started_ms = t.clock_ms();
         let backend = Backend::serve(t.state.clone()).await;
         let gate = Gate::start(backend.addr).await;
@@ -387,9 +393,32 @@ impl World {
             clock,
             script: Script::new(),
             utc_offset_minutes: 0,
+            updates: faro_service::UpdateOverrides::default(),
+            model_manifest: None,
             handle: None,
             _tmp: tmp,
         })
+    }
+
+    /// A device enrolled some other way (the agent's enroll socket,
+    /// `tests/enroll_gui.rs`) into `state_dir`, which lives in `tmp`.
+    // Only tests/enroll_gui.rs uses it; tests/e2e.rs compiles this module too.
+    #[allow(dead_code)]
+    pub fn adopt_device(&self, tmp: tempfile::TempDir, state_dir: PathBuf) -> Device {
+        let dir = StateDir::open(&state_dir).expect("state dir");
+        let enrollment = dir.enrollment().expect("enrolled");
+        Device {
+            state_dir,
+            dir,
+            enrollment,
+            clock: DeviceClock::new(self.t.clock_ms(), 10_000_000),
+            script: Script::new(),
+            utc_offset_minutes: 0,
+            updates: faro_service::UpdateOverrides::default(),
+            model_manifest: None,
+            handle: None,
+            _tmp: tmp,
+        }
     }
 
     /// The member's browser endorses the pending device: it lists the
@@ -595,6 +624,13 @@ pub struct Device {
     pub script: Script,
     /// `report.utc_offset_minutes` for the next [`Device::start`].
     pub utc_offset_minutes: i32,
+    /// Update task overrides for the next [`Device::start`]. By default no
+    /// root of trust is injected, so the service doesn't check for updates
+    /// (no packaged root exists in tests).
+    pub updates: faro_service::UpdateOverrides,
+    /// Load the image model from this manifest at the next
+    /// [`Device::start`], instead of using the classifier passed to it.
+    pub model_manifest: Option<PathBuf>,
     handle: Option<ServiceHandle>,
     _tmp: tempfile::TempDir,
 }
@@ -630,12 +666,20 @@ impl Device {
         cfg.network.endorsement_poll_secs = 1;
         cfg.network.upload_interval_secs = 1;
         cfg.report.utc_offset_minutes = self.utc_offset_minutes;
-        let service = Service::builder(cfg)
+        // Never the domain list of a Faro package installed on this machine
+        // (a CI runner may have one): as on platforms without a package.
+        let builder =
+            Service::builder(cfg).domains_manifest(self.state_dir.join("no-packaged-domains"));
+        let builder = match &self.model_manifest {
+            Some(m) => builder.model_manifest(m),
+            None => builder.classifier(classifier),
+        };
+        let service = builder
             .clock(Arc::new(self.clock.clone()))
             .boxed_frame_source(source)
-            .classifier(classifier)
             .tick_interval(Duration::from_millis(10))
             .scheduler_seed(7)
+            .updates(self.updates.clone())
             .build()
             .expect("service builds");
         self.handle = Some(service.spawn());

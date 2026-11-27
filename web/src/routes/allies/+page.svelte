@@ -12,22 +12,36 @@
 	// * Removing an approved ally signs the next list without them; the
 	//   server tells them and the other allies. When an ally leaves on their
 	//   own, the list still names them until the member signs a new one.
+	// * Every list is built on the latest one, checked against the highest
+	//   list this browser has signed or seen (`ensureManifest`: no rollback
+	//   or fork), and shown with names and key ids before it is signed
+	//   (`RecipientList`). Each ally keeps the name the last list signed,
+	//   unless the member ticks the new name the server shows, so phones can
+	//   name allies without trusting the server (PROTOCOL.md §5.1).
 
 	import { resolve } from '$app/paths';
 	import { api, ApiError, describeError, seg } from '#lib/api.ts';
-	import { unb64 } from '#lib/crypto/bytes.ts';
-	import { safetyCode } from '#lib/crypto/keys.ts';
-	import { allyEndorsementSigningBytes, nextManifest, signWith } from '#lib/crypto/proto.ts';
+	import type { RecipientManifest, Signed } from '#lib/crypto/proto.ts';
 	import { ago, date, dateTime } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
+	import {
+		approvalManifest,
+		approveAlly,
+		approveErrorMessage,
+		codeForAlly
+	} from '#lib/keys/approve.ts';
 	import { keyring, type MemberKeys } from '#lib/keys/keyring.svelte.ts';
-	import { ensureManifest, ManifestTrustError, signManifest } from '#lib/keys/member.ts';
+	import { nameChanges, namesToSign, planNext, type NameChange } from '#lib/keys/manifest-trust.ts';
+	import { ensureManifest, signAndSend } from '#lib/keys/member.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import type { AllyLink, ApproveAlly, InviteCreated, MyAllies } from '#lib/types.ts';
+	import type { AllyLink, InviteCreated, MyAllies } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
+	import RecipientList from '#lib/ui/RecipientList.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
 
 	let mine = $state<MyAllies | null>(null);
+	/** Names of the groups links came from, for the "From Tuesday group" label. */
+	let groupNames = $state<Record<string, string>>({});
 	let loadError = $state('');
 	let loadedFor = '';
 
@@ -46,10 +60,23 @@
 	let removing = $state<AllyLink | null>(null);
 	let removeError = $state('');
 
+	/** The latest list, checked; every list signed here is built on it. */
+	let base = $state<Signed<RecipientManifest> | null>(null);
+	let baseLoading = $state(false);
+	let baseError = $state('');
+	/** Allies whose new name the member ticked to sign. */
+	let accepted = $state(new Set<string>());
+
 	async function load() {
 		loadError = '';
 		try {
 			mine = await api.get<MyAllies>('/v1/me/allies');
+			if (mine.allies.some((a) => a.origin_group_id)) {
+				api
+					.get<{ id: string; name: string }[]>('/v1/groups')
+					.then((gs) => (groupNames = Object.fromEntries(gs.map((g) => [g.id, g.name]))))
+					.catch(() => {});
+			}
 		} catch (e) {
 			loadError = describeError(e);
 		}
@@ -70,22 +97,7 @@
 		)
 	);
 
-	function message(e: unknown): string {
-		if (e instanceof ManifestTrustError) return e.message;
-		if (e instanceof ApiError) {
-			switch (e.code) {
-				case 'ally_not_active':
-				case 'ally_already_in_manifest':
-					return 'Your recipient list still names an ally who left. Confirm the updated list (above) first.';
-				case 'manifest_version_mismatch':
-					return 'Your recipient list changed in another tab. Reload this page and try again.';
-				case 'not_pending':
-				case 'already_active':
-					return 'This ally was already approved or removed elsewhere.';
-			}
-		}
-		return describeError(e);
-	}
+	const message = approveErrorMessage;
 
 	async function invite(e: SubmitEvent) {
 		e.preventDefault();
@@ -116,6 +128,9 @@
 		}
 	}
 
+	// While the account is being deleted, nothing new joins it (§12).
+	let deleting = $derived(!!session.deletion);
+
 	let copied = $state('');
 	async function copy(text: string) {
 		try {
@@ -131,45 +146,76 @@
 		return keyring.memberFor(session.user?.id);
 	}
 
-	async function activeAllyEntries() {
-		return active
-			.filter((a) => a.ally_enc_pubkey)
-			.map((a) => ({ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey! }));
+	async function loadBase() {
+		const keys = keysOrNull();
+		const inst = instance.info;
+		if (!keys || !inst) return;
+		baseLoading = true;
+		baseError = '';
+		try {
+			base = await ensureManifest(keys, inst.instance_id);
+		} catch (e) {
+			base = null;
+			baseError = message(e);
+		} finally {
+			baseLoading = false;
+		}
+	}
+
+	// Once the keys are unlocked, fetch and check the list to build on.
+	$effect(() => {
+		if (keyring.memberFor(session.user?.id) && mine && !base && !baseLoading && !baseError) {
+			void loadBase();
+		}
+	});
+
+	/** After signing, or when the list changed elsewhere: start again. */
+	function resetBase(e?: unknown) {
+		if (
+			e === undefined ||
+			(e instanceof ApiError &&
+				['manifest_version_mismatch', 'manifest_prev_mismatch'].includes(e.code))
+		) {
+			base = null;
+			accepted = new Set();
+		}
+	}
+
+	/**
+	 * Each ally's display name as this page shows it. A name that differs
+	 * from the one the last list signed is offered as a change (`changes`)
+	 * and signed only once ticked (`names`); phones show the signed names
+	 * (docs/PROTOCOL.md §5.1), and `nextManifest` sanitizes them.
+	 */
+	let current = $derived(new Map((mine?.allies ?? []).map((l) => [l.ally_id, l.display_name])));
+	let names = $derived(base ? namesToSign(base, current, accepted) : new Map<string, string>());
+
+	/** The name changes that matter for `list`: allies who stay in it. */
+	function changesFor(list: RecipientManifest): NameChange[] {
+		if (!base) return [];
+		const kept = new Set(list.allies.map((a) => a.ally_id));
+		return nameChanges(base, current).filter((c) => kept.has(c.ally_id));
+	}
+
+	function removalList(ids: Iterable<string>): RecipientManifest | null {
+		return base ? planNext(base, { kind: 'remove', ids: new Set(ids) }, names) : null;
 	}
 
 	async function approve(a: AllyLink) {
 		const keys = keysOrNull();
 		const inst = instance.info;
-		if (!keys || !inst || !a.ally_enc_pubkey) return;
+		if (!keys || !inst || !a.ally_enc_pubkey || !base) return;
 		busy = true;
 		actionError = '';
 		try {
-			const latest = await ensureManifest(keys, inst.instance_id, activeAllyEntries);
-			const endorsement = signWith(
-				keys.signSeed,
-				{
-					instance_id: inst.instance_id,
-					member_id: keys.userId,
-					ally_id: a.ally_id,
-					ally_enc_pubkey: a.ally_enc_pubkey,
-					endorsed_at_ms: Date.now()
-				},
-				allyEndorsementSigningBytes
-			);
-			const manifest = signManifest(
-				keys,
-				nextManifest(latest, [
-					...latest.allies,
-					{ ally_id: a.ally_id, enc_pubkey: a.ally_enc_pubkey }
-				])
-			);
-			const body: ApproveAlly = { endorsement, manifest };
-			await api.post(`/v1/me/allies/${seg(a.ally_id)}/approve`, body);
+			await approveAlly(keys, inst.instance_id, a, base, names);
 			done = `${a.display_name} is now your ally. Your computers start encrypting to them within a few minutes.`;
 			reviewing = null;
+			resetBase();
 			await load();
 		} catch (e) {
 			actionError = message(e);
+			resetBase(e);
 		} finally {
 			busy = false;
 		}
@@ -190,16 +236,12 @@
 			if (a.state === 'active') {
 				const keys = keysOrNull();
 				const inst = instance.info;
-				if (!keys || !inst) return;
-				const latest = await ensureManifest(keys, inst.instance_id, activeAllyEntries);
-				const manifest = signManifest(
-					keys,
-					nextManifest(
-						latest,
-						latest.allies.filter((x) => x.ally_id !== a.ally_id)
-					)
+				const next = removalList([a.ally_id]);
+				if (!keys || !inst || !next) return;
+				await signAndSend(keys, inst.instance_id, next, (manifest) =>
+					api.delete(`/v1/me/allies/${seg(a.ally_id)}`, { manifest })
 				);
-				await api.delete(`/v1/me/allies/${seg(a.ally_id)}`, { manifest });
+				resetBase();
 				done = `${a.display_name} is no longer your ally. They and your other allies are being told.`;
 			} else {
 				await api.delete(`/v1/me/allies/${seg(a.ally_id)}`);
@@ -210,6 +252,7 @@
 			await load();
 		} catch (e) {
 			removeError = message(e);
+			resetBase(e);
 		} finally {
 			busy = false;
 		}
@@ -218,35 +261,36 @@
 	async function refreshList() {
 		const keys = keysOrNull();
 		const inst = instance.info;
-		if (!keys || !inst || !mine?.manifest) return;
+		const next = refreshed;
+		if (!keys || !inst || !next) return;
 		busy = true;
 		actionError = '';
 		try {
-			const latest = await ensureManifest(keys, inst.instance_id, activeAllyEntries);
-			const departed = new Set(mine.manifest.departed);
-			const m = signManifest(
-				keys,
-				nextManifest(
-					latest,
-					latest.allies.filter((x) => !departed.has(x.ally_id))
-				)
+			await signAndSend(keys, inst.instance_id, next, (m) =>
+				api.put('/v1/me/recipient-manifest', m)
 			);
-			await api.put('/v1/me/recipient-manifest', m);
 			done =
 				'Your recipient list is up to date. Your computers stop encrypting to anyone who left.';
+			resetBase();
 			await load();
 		} catch (e) {
 			actionError = message(e);
+			resetBase(e);
 		} finally {
 			busy = false;
 		}
 	}
 
+	/** The list "Sign the updated list" signs: without the allies who left. */
+	let refreshed = $derived(mine?.manifest ? removalList(mine.manifest.departed) : null);
+	/** The list the remove dialog signs. */
+	let afterRemoval = $derived(
+		removing?.state === 'active' ? removalList([removing.ally_id]) : null
+	);
+
 	/** The safety code from the unlocked member key and the ally's key. */
 	function codeFor(a: AllyLink): string | null {
-		const keys = keyring.member;
-		if (!keys || !a.ally_enc_pubkey) return null;
-		return safetyCode(keys.signPk, unb64(a.ally_enc_pubkey));
+		return codeForAlly(keyring.member, a);
 	}
 </script>
 
@@ -269,7 +313,14 @@
 				<p>{actionError}</p>
 			</div>{/if}
 
-		{#if !session.hasMemberKeys}
+		{#if deleting}
+			<div class="notice warn">
+				<p>
+					Your account is being deleted, so you can't invite or approve allies. Your allies keep
+					getting your alerts until the deletion.
+				</p>
+			</div>
+		{:else if !session.hasMemberKeys}
 			<div class="notice info">
 				<p>
 					You can invite allies now; to approve them, first <a href={resolve('/keys')}>
@@ -290,7 +341,20 @@
 					list.
 				</p>
 				{#if keyring.memberFor(user.id)}
-					<button class="primary" type="button" onclick={refreshList} disabled={busy}>
+					{#if refreshed && base}
+						<RecipientList
+							title="The updated list"
+							list={refreshed}
+							{base}
+							changes={changesFor(refreshed)}
+							bind:accepted
+						/>
+					{:else if baseError}
+						{@render listError()}
+					{:else}
+						<p class="muted" role="status">Checking your recipient list…</p>
+					{/if}
+					<button class="primary" type="button" onclick={refreshList} disabled={busy || !refreshed}>
 						{busy ? 'Signing…' : 'Sign the updated list'}
 					</button>
 				{:else}
@@ -311,7 +375,15 @@
 								<div>
 									<div class="row-title">
 										<strong>{a.display_name}</strong>
-										<span class="chip pending">Accepted your invitation</span>
+										<span class="chip pending">
+											{a.origin_group_id ? 'Accepted your proposal' : 'Accepted your invitation'}
+										</span>
+										{#if a.origin_group_id && groupNames[a.origin_group_id]}
+											<span class="chip normal">From {groupNames[a.origin_group_id]}</span>
+										{/if}
+										{#if a.deletion_purge_after_ms}
+											<span class="chip off">Account being deleted</span>
+										{/if}
 									</div>
 									<div class="row-meta">
 										{a.email} ·
@@ -319,7 +391,7 @@
 									</div>
 								</div>
 								<div class="row-actions">
-									{#if reviewing !== a.ally_id}
+									{#if reviewing !== a.ally_id && !deleting && !a.deletion_purge_after_ms}
 										<button
 											class="primary small"
 											type="button"
@@ -338,7 +410,7 @@
 									</button>
 								</div>
 							</div>
-							{#if reviewing === a.ally_id}
+							{#if reviewing === a.ally_id && !deleting}
 								<div class="review">
 									{#if !keyring.memberFor(user.id)}
 										<UnlockKeys kind="member" {user}>
@@ -370,6 +442,20 @@
 											Matching codes prove that the key you approve is really theirs, and not one
 											the server swapped in.
 										</p>
+										{#if base && code}
+											{@const list = approvalManifest(base, a, names)}
+											<RecipientList
+												title="Your recipient list with {a.display_name}"
+												{list}
+												{base}
+												changes={changesFor(list)}
+												bind:accepted
+											/>
+										{:else if baseError}
+											{@render listError()}
+										{:else if code}
+											<p class="muted" role="status">Checking your recipient list…</p>
+										{/if}
 										<label class="check">
 											<input type="checkbox" bind:checked={codesMatch} />
 											{a.display_name}'s code is the same
@@ -381,7 +467,7 @@
 											<button
 												class="primary"
 												type="button"
-												disabled={!codesMatch || busy || !code}
+												disabled={!codesMatch || busy || !code || !base}
 												onclick={() => approve(a)}
 											>
 												{busy ? 'Approving…' : `Approve ${a.display_name}`}
@@ -416,10 +502,23 @@
 								<div>
 									<div class="row-title">
 										<strong>{a.display_name}</strong><span class="chip good">Ally</span>
+										{#if a.origin_group_id && groupNames[a.origin_group_id]}
+											<span class="chip normal">From {groupNames[a.origin_group_id]}</span>
+										{/if}
+										{#if a.deletion_purge_after_ms}
+											<span class="chip normal">Leaving {date(a.deletion_purge_after_ms)}</span>
+										{/if}
 									</div>
 									<div class="row-meta">
 										{a.email} · since {date(a.activated_at_ms ?? a.created_at_ms)}
 									</div>
+									{#if a.deletion_purge_after_ms}
+										<div class="row-meta">
+											{a.display_name}'s account is being deleted. They stay your ally until {date(
+												a.deletion_purge_after_ms
+											)}; then confirm your updated ally list here.
+										</div>
+									{/if}
 								</div>
 								<button class="secondary small" type="button" onclick={() => confirmRemove(a)}>
 									Remove…
@@ -431,49 +530,51 @@
 			{/if}
 		</section>
 
-		<form class="card section" onsubmit={invite} novalidate>
-			<h2>Invite an ally</h2>
-			<p class="muted">
-				They get an email invitation, valid for 7 days, and accept it by signing in with that
-				address. You approve them after comparing a safety code.
-			</p>
-			<div class="invite-row">
-				<label class="visually-hidden" for="ally-email">Ally's email address</label>
-				<input
-					id="ally-email"
-					type="email"
-					placeholder="name@example.org"
-					bind:value={inviteEmail}
-					autocomplete="off"
-					aria-invalid={inviteError ? 'true' : undefined}
-					aria-describedby={inviteError ? 'ally-email-error' : undefined}
-				/>
-				<button class="primary" type="submit" disabled={inviteBusy}>
-					{inviteBusy ? 'Sending…' : 'Send invitation'}
-				</button>
-			</div>
-			{#if inviteError}<span class="field-error" id="ally-email-error">{inviteError}</span>{/if}
-			{#if invited.length}
-				<ul class="sent" aria-live="polite">
-					{#each invited as i (i.email)}
-						<li>
-							<span>
-								✓ Invitation sent to <strong>{i.email}</strong>, valid until {date(
-									i.expires_at_ms
-								)}.
-							</span>
-							<button class="link small" type="button" onclick={() => copy(i.invite_url)}>
-								{copied === i.invite_url ? 'Copied' : 'Copy the link'}
-							</button>
-						</li>
-					{/each}
-				</ul>
-				<p class="muted small">
-					Only {invited.length === 1 ? 'that address' : 'those addresses'} can accept, so sharing the
-					link another way is safe.
+		{#if !deleting}
+			<form class="card section" onsubmit={invite} novalidate>
+				<h2>Invite an ally</h2>
+				<p class="muted">
+					They get an email invitation, valid for 7 days, and accept it by signing in with that
+					address. You approve them after comparing a safety code.
 				</p>
-			{/if}
-		</form>
+				<div class="invite-row">
+					<label class="visually-hidden" for="ally-email">Ally's email address</label>
+					<input
+						id="ally-email"
+						type="email"
+						placeholder="name@example.org"
+						bind:value={inviteEmail}
+						autocomplete="off"
+						aria-invalid={inviteError ? 'true' : undefined}
+						aria-describedby={inviteError ? 'ally-email-error' : undefined}
+					/>
+					<button class="primary" type="submit" disabled={inviteBusy}>
+						{inviteBusy ? 'Sending…' : 'Send invitation'}
+					</button>
+				</div>
+				{#if inviteError}<span class="field-error" id="ally-email-error">{inviteError}</span>{/if}
+				{#if invited.length}
+					<ul class="sent" aria-live="polite">
+						{#each invited as i (i.email)}
+							<li>
+								<span>
+									✓ Invitation sent to <strong>{i.email}</strong>, valid until {date(
+										i.expires_at_ms
+									)}.
+								</span>
+								<button class="link small" type="button" onclick={() => copy(i.invite_url)}>
+									{copied === i.invite_url ? 'Copied' : 'Copy the link'}
+								</button>
+							</li>
+						{/each}
+					</ul>
+					<p class="muted small">
+						Only {invited.length === 1 ? 'that address' : 'those addresses'} can accept, so sharing the
+						link another way is safe.
+					</p>
+				{/if}
+			</form>
+		{/if}
 	{/snippet}
 </Gate>
 
@@ -482,14 +583,26 @@
 		{#if removing.state === 'active'}
 			<h2 id="remove-title">Remove {removing.display_name} as your ally?</h2>
 			<p>
-				They lose access to your reports and alerts now. Faro tells them and your other allies. You
-				sign a new recipient list without them, so your computers stop encrypting to them.
+				They lose access to your reports and alerts at once, older ones included: the server stops
+				giving them anything. Faro tells them and your other allies. You sign a new recipient list
+				without them, so your computers stop encrypting to them.
 			</p>
-			<p class="muted">They can still read what was shared with them before.</p>
 			{#if session.user && !keyring.memberFor(session.user.id)}
 				<UnlockKeys kind="member" user={session.user}>
 					{#snippet intro()}<h3>Unlock your keys to sign the new list</h3>{/snippet}
 				</UnlockKeys>
+			{:else if afterRemoval && base}
+				<RecipientList
+					title="Your new recipient list"
+					list={afterRemoval}
+					{base}
+					changes={changesFor(afterRemoval)}
+					bind:accepted
+				/>
+			{:else if baseError}
+				{@render listError()}
+			{:else}
+				<p class="muted" role="status">Checking your recipient list…</p>
 			{/if}
 		{:else}
 			<h2 id="remove-title">Decline {removing.display_name}?</h2>
@@ -503,7 +616,8 @@
 				class="danger"
 				type="button"
 				onclick={remove}
-				disabled={busy || (removing.state === 'active' && !keyring.memberFor(session.user?.id))}
+				disabled={busy ||
+					(removing.state === 'active' && (!keyring.memberFor(session.user?.id) || !afterRemoval))}
 			>
 				{busy ? 'Removing…' : removing.state === 'active' ? 'Remove ally' : 'Decline'}
 			</button>
@@ -511,6 +625,22 @@
 		</div>
 	{/if}
 </dialog>
+
+{#snippet listError()}
+	<div class="notice error" role="alert">
+		<p>{baseError}</p>
+		<button
+			class="secondary small"
+			type="button"
+			onclick={() => {
+				baseError = '';
+				base = null;
+			}}
+		>
+			Try again
+		</button>
+	</div>
+{/snippet}
 
 <style>
 	.attention {

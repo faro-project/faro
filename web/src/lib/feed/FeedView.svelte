@@ -3,18 +3,35 @@
 	// reports, newest first. The list is metadata from the server; with the
 	// viewer's key unlocked, each item's details are fetched and decrypted
 	// here. A member sees exactly what their allies see (§6, §12).
+	//
+	// Nothing the server says is taken on trust: each item is checked
+	// against the member's key (the member's own, or the one an ally
+	// compared by safety code) and its device's signature and hash chain
+	// (`verify.ts`). Items that fail are marked and their details not shown;
+	// gaps in a computer's history are listed above the feed.
 	import { onDestroy, untrack } from 'svelte';
 	import { describeError } from '../api.ts';
+	import type { DeviceEndorsement, Signed } from '../crypto/proto.ts';
 	import { dateTime } from '../format.ts';
 	import { instance } from '../instance.svelte.ts';
 	import { keyring } from '../keys/keyring.svelte.ts';
-	import type { FeedEntry, User } from '../types.ts';
+	import { verifiedKey } from '../keys/verified.ts';
+	import type { ChainLink, FeedEntry, Platform, User } from '../types.ts';
 	import UnlockKeys from '../ui/UnlockKeys.svelte';
-	import { describeBody, describeEntry, reportSummary, type NameOf } from './describe.ts';
+	import {
+		bodyTitle,
+		describeBody,
+		describeEntry,
+		isIosBody,
+		platformOf,
+		reportSummary,
+		type NameOf
+	} from './describe.ts';
 	import {
 		entryKey,
 		FAILURE_TEXT,
 		hasContent,
+		loadChain,
 		loadFeed,
 		openEntry,
 		thumbnailUrl,
@@ -22,19 +39,40 @@
 		type Opened
 	} from './feed.ts';
 	import ReportView from './ReportView.svelte';
+	import {
+		allyMemberKey,
+		chainRange,
+		checkChain,
+		checkEntry,
+		deviceKeys,
+		passed,
+		type ChainCheck,
+		type Gap,
+		type ItemCheck,
+		type MemberKey
+	} from './verify.ts';
 
 	let {
 		memberId,
 		viewer,
 		keyKind,
+		memberSignPk = null,
 		nameOf = () => undefined,
-		deviceNames = {}
+		deviceNames = {},
+		devicePlatforms = {}
 	}: {
 		memberId: string;
 		viewer: User;
 		keyKind: 'member' | 'ally';
+		/**
+		 * For an ally: the member's signing key as the server reports it.
+		 * Trusted only once the ally compared it by safety code.
+		 */
+		memberSignPk?: string | null;
 		nameOf?: NameOf;
 		deviceNames?: Record<string, string>;
+		/** What each device is, where the page knows (the member's own device list). */
+		devicePlatforms?: Record<string, Platform>;
 	} = $props();
 
 	const WINDOWS = [
@@ -53,15 +91,29 @@
 	let opened = $state<Record<string, Opened | OpenFailure | 'loading'>>({});
 	let expanded = $state<Record<string, boolean>>({});
 	let learnedNames = $state<Record<string, string>>({});
+	let serverPlatforms = $state<Record<string, Platform>>({});
+	let learnedIos = $state<Record<string, true>>({});
+	let endorsements = $state<Record<string, Signed<DeviceEndorsement>>>({});
+	let loadedSince = $state(0);
+	type Chain =
+		| { range: string; status: 'loading' | 'error' }
+		| { range: string; status: 'ok'; links: ChainLink[]; complete: boolean };
+	let chains = $state<Record<string, Chain>>({});
 	let loadedKey = '';
 
 	async function load() {
 		loading = true;
 		error = '';
 		try {
-			const r = await loadFeed(memberId, Date.now() - days * 86400_000);
+			const since = Date.now() - days * 86400_000;
+			const r = await loadFeed(memberId, since);
 			items = r.items;
 			truncated = r.truncated;
+			serverPlatforms = r.platforms;
+			endorsements = r.endorsements;
+			loadedSince = since;
+			// A history that failed to load is fetched again.
+			for (const [d, c] of Object.entries(chains)) if (c.status === 'error') delete chains[d];
 		} catch (e) {
 			error = describeError(e);
 		} finally {
@@ -73,6 +125,7 @@
 		const k = `${memberId}:${days}`;
 		if (k !== loadedKey) {
 			loadedKey = k;
+			chains = {};
 			void load();
 		}
 	});
@@ -116,9 +169,14 @@
 				try {
 					const o = await openEntry(e, inst.instance_id, viewer.id, s);
 					opened[k] = o;
+					// Only what a computer signed names it.
+					if (!passed(untrack(() => checks[k]))) continue;
 					if (o.kind === 'report' && e.type === 'report') {
 						learnedNames[e.device_id] = o.report.device_name;
+						if (o.report.ios) learnedIos[e.device_id] = true;
 					}
+					if (o.kind === 'event' && e.device_id && isIosBody(o.body))
+						learnedIos[e.device_id] = true;
 				} catch (err) {
 					opened[k] = typeof err === 'string' ? (err as OpenFailure) : 'broken';
 				}
@@ -127,9 +185,147 @@
 		void Promise.all([worker(), worker(), worker(), worker()]);
 	});
 
+	/**
+	 * What a device is, if the page knows: from the member's device list, from
+	 * the feed (which tells an ally too), or from what an iPhone sent.
+	 */
+	function platform(id: string | null): Platform | undefined {
+		return (
+			platformOf(id, devicePlatforms, serverPlatforms) ??
+			(id && learnedIos[id] ? ('ios' as const) : undefined)
+		);
+	}
+
 	function device(id: string | null): string {
 		if (!id) return 'A computer';
 		return deviceNames[id] ?? learnedNames[id] ?? 'A computer';
+	}
+
+	// ---- Checking (verify.ts) ----------------------------------------------
+
+	/** The member key to check against, and where it came from. */
+	let memberKey = $derived.by((): MemberKey | null => {
+		if (keyKind === 'member') {
+			const k = keyring.member;
+			return k && k.userId === viewer.id ? { pk: k.signPk, trust: 'own' } : null;
+		}
+		return allyMemberKey(memberSignPk, verifiedKey(viewer.id, memberId));
+	});
+
+	let keys = $derived(
+		memberKey && instance.info
+			? deviceKeys(memberKey, instance.info.instance_id, memberId, endorsements)
+			: new Map<string, Uint8Array | string>()
+	);
+
+	let checks = $derived.by(() => {
+		const out: Record<string, ItemCheck> = {};
+		const inst = instance.info?.instance_id;
+		for (const e of items ?? []) {
+			out[entryKey(e)] = inst
+				? checkEntry(e, memberKey, keys, inst, memberId)
+				: { status: 'unchecked' as const };
+		}
+		return out;
+	});
+
+	const ok = (e: FeedEntry) => passed(checks[entryKey(e)]);
+
+	// Fetch each checked device's chain over the range the feed covers.
+	$effect(() => {
+		const list = items;
+		const ks = keys;
+		void checks;
+		if (!list || !memberKey) return;
+		untrack(() => {
+			for (const [dev, pk] of ks) {
+				if (typeof pk === 'string') continue;
+				const r = chainRange(list, dev, ok);
+				if (!r) continue;
+				const range = `${r.lo}-${r.hi}`;
+				if (chains[dev]?.range === range) continue;
+				chains[dev] = { range, status: 'loading' };
+				loadChain(memberId, dev, r.lo, r.hi)
+					.then((c) => {
+						if (chains[dev]?.range === range) chains[dev] = { range, status: 'ok', ...c };
+					})
+					.catch(() => {
+						if (chains[dev]?.range === range) chains[dev] = { range, status: 'error' };
+					});
+			}
+		});
+	});
+
+	/** Every stored event above urgency `none` received after this must be listed. */
+	let listedAfter = $derived(
+		truncated && items?.length ? items[items.length - 1].received_at_ms : loadedSince
+	);
+
+	let chainChecks = $derived.by(() => {
+		const out: Record<string, ChainCheck> = {};
+		const inst = instance.info?.instance_id;
+		if (!items || !inst) return out;
+		for (const [dev, c] of Object.entries(chains)) {
+			const pk = keys.get(dev);
+			const r = chainRange(items, dev, ok);
+			if (c.status !== 'ok' || !(pk instanceof Uint8Array) || !r || c.range !== `${r.lo}-${r.hi}`)
+				continue;
+			out[dev] = checkChain({
+				instanceId: inst,
+				deviceId: dev,
+				devicePk: pk,
+				range: r,
+				links: c.links,
+				complete: c.complete,
+				entries: items,
+				listedAfterMs: listedAfter,
+				ok
+			});
+		}
+		return out;
+	});
+
+	let chainsPending = $derived(Object.values(chains).some((c) => c.status === 'loading'));
+	let chainErrors = $derived(
+		Object.entries(chains)
+			.filter(([, c]) => c.status === 'error')
+			.map(([d]) => d)
+	);
+	let chainCapped = $derived(
+		Object.entries(chains)
+			.filter(([, c]) => c.status === 'ok' && !c.complete)
+			.map(([d]) => d)
+	);
+
+	/** An item's check, with what the chain and its content add. */
+	function verdict(e: FeedEntry): ItemCheck {
+		const k = entryKey(e);
+		const c = checks[k] ?? { status: 'unchecked' };
+		if (!passed(c)) return c;
+		if (e.type === 'event' && chainChecks[e.device_id]?.notInChain.has(e.seq)) {
+			return { status: 'failed', reason: 'it isn’t part of this computer’s history' };
+		}
+		if (opened[k] === 'tampered') return { status: 'failed', reason: 'its details were replaced' };
+		return c;
+	}
+
+	let failedCount = $derived((items ?? []).filter((e) => verdict(e).status === 'failed').length);
+	let gaps = $derived(Object.values(chainChecks).flatMap((c) => c.gaps));
+	let broken = $derived(
+		Object.entries(chainChecks)
+			.filter(([, c]) => c.broken)
+			.map(([d, c]) => ({ device: d, reason: c.broken! }))
+	);
+
+	function gapText(g: Gap): string {
+		const name = device(g.deviceId);
+		if (g.kind === 'withheld') {
+			const what = (g.eventKind ?? 'event').replaceAll('_', ' ');
+			return `The server holds a “${what}” event from ${name} (number ${g.from}) that it left out of this list.`;
+		}
+		const n = g.to - g.from + 1;
+		const which = n === 1 ? `number ${g.from}` : `numbers ${g.from} to ${g.to}`;
+		return `${n === 1 ? 'An event' : `${n} events`} from ${name} ${n === 1 ? 'is' : 'are'} missing (${which})${g.inReport ? ', which its daily report counts' : ''}.`;
 	}
 
 	let shown = $derived.by(() => {
@@ -222,6 +418,84 @@
 	</button>
 </div>
 
+{#if items && !error}
+	{#if keyKind === 'ally' && !memberKey}
+		<div class="notice warn">
+			<p>
+				Nothing here can be checked yet: this person hasn't set up their keys, so their computers'
+				signatures can't be confirmed.
+			</p>
+		</div>
+	{:else if memberKey?.trust === 'unchecked'}
+		<div class="notice warn">
+			<p>
+				<strong>Not confirmed yet.</strong> These items are signed by computers approved with the
+				key the server reports for this person, but you haven't compared safety codes, so the server
+				could have made them up. Compare safety codes (the <em>Safety code</em> tab) to confirm them.
+			</p>
+		</div>
+	{:else if memberKey?.trust === 'changed'}
+		<div class="notice error" role="alert">
+			<p>
+				<strong>This person's key has changed</strong> since you compared safety codes. Items are checked
+				against the key you compared, so anything signed with the new one shows as not verified until
+				you compare the new code.
+			</p>
+		</div>
+	{/if}
+	{#if failedCount || gaps.length || broken.length || chainErrors.length}
+		<div class="notice error" role="alert">
+			{#if failedCount}
+				<p>
+					<strong>
+						{failedCount === 1 ? 'One item' : `${failedCount} items`} failed {failedCount === 1
+							? 'its'
+							: 'their'} checks.
+					</strong>
+					{failedCount === 1 ? "It isn't" : "They aren't"} what this person's computers signed, so the
+					server may have made {failedCount === 1 ? 'it' : 'them'} up or changed {failedCount === 1
+						? 'it'
+						: 'them'}. {failedCount === 1 ? 'It is' : 'They are'} marked below, without details.
+				</p>
+			{/if}
+			{#if gaps.length || broken.length}
+				<p><strong>The history the server provided has gaps:</strong></p>
+				<ul class="gaps">
+					{#each broken as b (b.device)}<li>
+							{device(b.device)}'s history doesn't add up: {b.reason}.
+						</li>{/each}
+					{#each gaps as g (`${g.deviceId}:${g.kind}:${g.from}`)}<li>{gapText(g)}</li>{/each}
+				</ul>
+				<p class="small">
+					A computer can lose events it couldn't send (the server then also raises a “chain gap”
+					alert), or the server may be holding something back. Talk with {keyKind === 'member'
+						? 'your allies'
+						: 'this person'} about it.
+				</p>
+			{/if}
+			{#if chainErrors.length}
+				<p class="small">
+					The history of {chainErrors.map((d) => device(d)).join(', ')} couldn't be loaded, so gaps there
+					aren't checked. Refresh to try again.
+				</p>
+			{/if}
+		</div>
+	{:else if chainsPending}
+		<p class="muted small" role="status">Checking each computer's history…</p>
+	{:else if memberKey && (memberKey.trust === 'own' || memberKey.trust === 'checked') && items.length}
+		<p class="muted small checked">
+			✓ Every event and report below is signed by one of {keyKind === 'member' ? 'your' : 'their'} computers,
+			and their history has no gaps.
+		</p>
+	{/if}
+	{#if chainCapped.length}
+		<p class="muted small">
+			Only part of the history of {chainCapped.map((d) => device(d)).join(', ')} was checked. Choose a
+			shorter range to check all of it.
+		</p>
+	{/if}
+{/if}
+
 {#if error}
 	<div class="notice error" role="alert"><p>{error}</p></div>
 {:else if !items}
@@ -251,14 +525,21 @@
 		<ul class="rows feed">
 			{#each g.entries as e (entryKey(e))}
 				{@const k = entryKey(e)}
-				{@const d = describeEntry(e, nameOf, device(e.device_id))}
+				{@const d = describeEntry(e, nameOf, device(e.device_id), platform(e.device_id))}
 				{@const o = opened[k]}
+				{@const v = verdict(e)}
+				{@const title =
+					(typeof o === 'object' &&
+						v.status !== 'failed' &&
+						o.kind === 'event' &&
+						bodyTitle(o.body, device(e.device_id), platform(e.device_id))) ||
+					d.title}
 				<li class="tone-{d.tone}">
 					<div class="entry">
 						<span class="dot" aria-hidden="true"></span>
 						<div class="body">
 							<div class="row-title">
-								<strong>{d.title}</strong>
+								<strong>{title}</strong>
 								{#if e.type !== 'report' && e.urgency === 'urgent'}<span class="chip urgent">
 										Urgent
 									</span>{/if}
@@ -268,6 +549,13 @@
 									>
 										Server
 									</span>{/if}
+								{#if v.status === 'failed'}<span class="chip off">Not verified</span>
+								{:else if v.status === 'unconfirmed'}<span
+										class="chip pending"
+										title="Signed by a computer approved with a key you haven't compared by safety code"
+									>
+										Unconfirmed
+									</span>{/if}
 							</div>
 							<div class="row-meta">
 								<span title={dateTime(e.received_at_ms)}>{time(e.received_at_ms)}</span>
@@ -276,11 +564,20 @@
 								{#if d.text && e.type === 'alert'}
 									· {d.text}{/if}
 							</div>
+							{#if v.status === 'failed'}
+								<p class="small unverified">
+									⚠ Not verified: {v.reason}. It may not have come from {device(e.device_id)} at all.
+								</p>
+							{/if}
 
 							<!-- Content comes from a device: if it doesn't render, only this item fails. -->
 							<svelte:boundary>
 								{#if hasContent(e)}
-									{#if !secret}
+									{#if v.status === 'failed'}
+										<p class="muted small">
+											Details not shown, because this item failed its checks.
+										</p>
+									{:else if !secret}
 										<p class="locked small">🔒 Details encrypted</p>
 									{:else if o === 'loading' || o === undefined}
 										<p class="muted small">Decrypting…</p>
@@ -288,7 +585,9 @@
 										<p class="muted small">{FAILURE_TEXT[o]}</p>
 									{:else if o.kind === 'event'}
 										<ul class="details small">
-											{#each describeBody(o.body) as line, i (i)}<li>{line}</li>{/each}
+											{#each describeBody(o.body, device(e.device_id), Date.now(), platform(e.device_id)) as line, i (i)}<li>
+													{line}
+												</li>{/each}
 										</ul>
 										{#if o.body.type === 'flag' && o.body.thumbnail}
 											{@const url = thumbnailUrl(o.body.thumbnail)}
@@ -426,6 +725,20 @@
 	.locked {
 		color: var(--muted);
 		margin: 0.35rem 0 0;
+	}
+
+	.unverified {
+		color: var(--danger);
+		margin: 0.35rem 0 0;
+	}
+
+	.gaps {
+		margin: 0.3rem 0 0.5rem;
+		padding-left: 1.1rem;
+	}
+
+	.checked {
+		margin: 0 0 1rem;
 	}
 
 	.body > p.small {

@@ -1,0 +1,172 @@
+{
+  "events": [
+    {
+      "bucket_secs": 600,
+      "bucket_start": 1800000600000,
+      "by_category": {
+        "adult": 5,
+        "gambling": 2
+      },
+      "hosts": [
+        {
+          "category": "adult",
+          "count": 4,
+          "host": "a.example"
+        },
+        {
+          "category": "adult",
+          "count": 1,
+          "host": "b.example"
+        },
+        {
+          "category": "gambling",
+          "count": 2,
+          "host": "casino.example"
+        }
+      ],
+      "other_hosts": 3,
+      "type": "blocked_summary"
+    },
+    {
+      "bucket_secs": 600,
+      "bucket_start": 1800000300000,
+      "closed": 2,
+      "shown": 3,
+      "type": "shield_summary"
+    },
+    {
+      "burst": true,
+      "rating": "medium",
+      "reasons": [
+        {
+          "label": "dns:adult ×6, 4 hosts, 3 min, screen on",
+          "source": "dns"
+        }
+      ],
+      "type": "flag"
+    },
+    {
+      "changes": [
+        {
+          "key": "blocking.gambling",
+          "new": "off",
+          "old": "on"
+        }
+      ],
+      "delay_secs": 86400,
+      "requested_at": 1800000000000,
+      "takes_effect_at": 1800086400000,
+      "type": "settings_change"
+    }
+  ],
+  "report": {
+    "counts": {
+      "clean": 0,
+      "high": 0,
+      "low": 0,
+      "medium": 0
+    },
+    "device_id": "dev_test",
+    "device_name": "Laptop-X",
+    "first_seq": 7,
+    "flagged": [
+      {
+        "rating": "medium",
+        "reasons": [
+          {
+            "label": "dns:adult ×6, 4 hosts, 3 min, screen on",
+            "source": "dns"
+          }
+        ],
+        "seq": 7,
+        "ts_ms": 1800000720000
+      }
+    ],
+    "health": {
+      "agent_restarts": 0,
+      "capture_failures": 0,
+      "context": [
+        {
+          "seq": null,
+          "signal": {
+            "signal": "doh_dropped"
+          },
+          "ts_ms": 1800002400000
+        }
+      ],
+      "tamper": [
+        {
+          "seq": 9,
+          "signal": {
+            "cause": "vpn_disconnected",
+            "signal": "filter_off"
+          },
+          "ts_ms": 1800001200000
+        }
+      ],
+      "unmonitored_secs": 0
+    },
+    "ios": {
+      "blocked": [
+        {
+          "by_category": {
+            "adult": 6,
+            "encrypted_dns": 1,
+            "gambling": 2
+          },
+          "day_start_ms": 1800000000000,
+          "hosts": [
+            {
+              "category": "adult",
+              "count": 5,
+              "host": "a.example"
+            },
+            {
+              "category": "adult",
+              "count": 1,
+              "host": "b.example"
+            },
+            {
+              "category": "gambling",
+              "count": 2,
+              "host": "casino.example"
+            }
+          ],
+          "other_hosts": 3
+        }
+      ],
+      "loosenings": [
+        {
+          "text": "Asked for (after a delay of 24 hours): blocking.gambling: on → off",
+          "ts_ms": 1800001800000
+        }
+      ],
+      "protection": [
+        {
+          "end_ms": 1800001200000,
+          "filter": true,
+          "screen_time": true,
+          "start_ms": 1800000000000
+        },
+        {
+          "end_ms": 1800086400000,
+          "filter": false,
+          "screen_time": null,
+          "start_ms": 1800001200000
+        }
+      ],
+      "shields": [
+        {
+          "closed": 2,
+          "day_start_ms": 1800000000000,
+          "shown": 3
+        }
+      ]
+    },
+    "last_seq": 11,
+    "period_end_ms": 1800086400000,
+    "period_start_ms": 1800000000000,
+    "timeline": [],
+    "v": 1
+  }
+}

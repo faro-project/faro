@@ -16,16 +16,30 @@
 //! and wrapped secrets are randomized, so blessing changes them; everything
 //! else is deterministic.
 
+use faro_crypto::roster::{apply_entry, open_epoch_key, verify_snapshot, SignedRosterEntry};
 use faro_crypto::{
-    open_item, seal_item, seal_to, unwrap_secret, verify, verify_signed, wrap_secret,
-    EncryptionKeypair, KdfParams, Recipient, SigningKey, WrappedSecret,
+    open_group_message, open_group_message_with_epoch, open_item, seal_group_message,
+    seal_group_message_to_epoch, seal_item, seal_to, unwrap_secret, verify, verify_group_message,
+    verify_signed, wrap_secret, EncryptionKeypair, KdfParams, Recipient, SigningKey, WrappedSecret,
 };
 use faro_proto::encoding::{b64_decode, b64_encode};
-use faro_proto::keys::{
-    key_id, safety_code, AllyEndorsement, DeviceEndorsement, KeyRewrap, ManifestAlly, ManifestRef,
-    MemberEncKeyBinding, RecipientManifest, Signed,
+use faro_proto::group::{
+    body_aad as message_body_aad, epoch_wrap_aad, GroupMessage, GroupMessageKind, MessageRecipient,
+    SealedGroupMessage,
 };
-use faro_proto::{event, DeviceId, EncryptedItem, InstanceId, Signature, UserId};
+use faro_proto::keys::{
+    key_id, safety_code, sanitize_ally_name, AllyEndorsement, AllyKeyRewrap, DeviceEndorsement,
+    KeyRewrap, ManifestAlly, ManifestRef, MemberEncKeyBinding, ProvenAllyKeyRewrap,
+    RecipientManifest, Signed, MANIFEST_FORMAT_V1, MANIFEST_FORMAT_V2, MANIFEST_FORMAT_V3,
+};
+use faro_proto::report::ReportHeader;
+use faro_proto::roster::{
+    epoch_key_check, genesis_prev_hash, group_safety_code, EpochRotation, GroupRole, RosterChange,
+    RosterEntry, RosterSnapshot, RosterState,
+};
+use faro_proto::{
+    event, DeviceId, EncryptedItem, EventKind, Hash32, InstanceId, Signature, Urgency, UserId,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -66,23 +80,76 @@ fn device_sign() -> SigningKey {
 
 fn manifest() -> RecipientManifest {
     RecipientManifest {
+        format: MANIFEST_FORMAT_V1,
         instance_id: InstanceId::new(INSTANCE),
         member_id: UserId::new(MEMBER),
         version: 3,
+        prev_hash: None,
         issued_at_ms: 1_790_000_000_123,
         member_enc_pubkey: member_enc().public(),
         allies: vec![
             ManifestAlly {
                 ally_id: UserId::new(ALLY_A),
                 enc_pubkey: ally_a().public(),
+                name: None,
             },
             ManifestAlly {
                 ally_id: UserId::new(ALLY_B),
                 enc_pubkey: ally_b().public(),
+                name: None,
             },
         ],
     }
 }
+
+/// `manifest()` in format 2, with names that need no sanitizing (the
+/// sanitizer has its own vectors, `ALLY_NAMES`).
+fn manifest_v2() -> RecipientManifest {
+    let mut m = manifest();
+    m.format = MANIFEST_FORMAT_V2;
+    m.version = 4;
+    m.allies[0].name = Some("Zoë Ångström 🙏".into());
+    m.allies[1].name = Some(String::new());
+    m
+}
+
+/// `manifest_v2()`'s successor in format 3, linked to it by `prev_hash`.
+fn manifest_v3() -> RecipientManifest {
+    let prev = manifest_v2();
+    let mut m = prev.clone();
+    m.format = MANIFEST_FORMAT_V3;
+    m.version = prev.version + 1;
+    m.prev_hash = Some(prev.hash());
+    m.issued_at_ms = prev.issued_at_ms + 1;
+    m
+}
+
+/// Inputs for `sanitize_ally_name`: the web app's `sanitizeAllyName` must
+/// produce exactly what Rust does for each.
+const ALLY_NAMES: &[&str] = &[
+    "Sam",
+    "  Sam   Smith  ",
+    "Sam\tSmith\r\nJr",
+    "a\u{2028}b\u{2029}c\u{85}d\u{b}e\u{c}f",
+    "e\u{301}",
+    "Zoe\u{308} A\u{30a}ngstro\u{308}m",
+    "\u{212b}\u{2126}",
+    "\u{1100}\u{1161}\u{11a8}",
+    "Sam\u{202e}evil\u{202c}",
+    "\u{202a}\u{202b}\u{202d}x\u{2066}\u{2067}\u{2068}\u{2069}\u{200e}\u{200f}\u{61c}",
+    "\u{0}\u{1}\u{8}\u{e}\u{1f}\u{1b}[31mred\u{7f}\u{80}\u{84}\u{86}\u{9b}\u{9f}",
+    "zero\u{feff}width\u{fff9}\u{fffa}\u{fffb}",
+    "\u{1f469}\u{200d}\u{1f467} \u{645}\u{200c}\u{646}",
+    "e\u{0}\u{301}",
+    "ﬁ ① Ｓａｍ",
+    "",
+    " \u{202e} ",
+    "\u{a0}Sam\u{a0}",
+    "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b",
+    "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+    "e\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}x",
+];
 
 fn device_endorsement() -> DeviceEndorsement {
     DeviceEndorsement {
@@ -92,6 +159,59 @@ fn device_endorsement() -> DeviceEndorsement {
         device_sign_pubkey: device_sign().public(),
         endorsed_at_ms: 1_790_000_100_000,
         min_manifest: manifest().reference(),
+    }
+}
+
+/// Three linked events from `device_sign()`: a boot, an urgent flag with a
+/// body, and a tamper signed `none` (the instance raises it to its floor).
+/// Body hashes are fixed values, so the headers are deterministic.
+fn event_chain() -> Vec<(event::EventHeader, Signature)> {
+    let (inst, dev) = (InstanceId::new(INSTANCE), DeviceId::new(DEVICE));
+    let mut prev = event::genesis_hash(&inst, &dev);
+    let specs = [
+        (EventKind::Boot, Urgency::None, None),
+        (
+            EventKind::Flag,
+            Urgency::Urgent,
+            Some(("event body 1", 120)),
+        ),
+        (EventKind::Tamper, Urgency::None, Some(("event body 2", 64))),
+    ];
+    let mut out = Vec::new();
+    for (seq, (kind, urgency, body)) in (0u64..).zip(specs) {
+        let header = event::EventHeader {
+            v: event::EVENT_HEADER_VERSION,
+            instance_id: inst.clone(),
+            device_id: dev.clone(),
+            seq,
+            prev_hash: prev,
+            ts_ms: 1_790_000_000_000 + 60_000 * i64::try_from(seq).unwrap(),
+            mono_ms: 5_000 + 60_000 * seq,
+            boot_id: "boot-7f3a".into(),
+            kind,
+            urgency,
+            body_hash: body.map_or(Hash32::ZERO, |(b, _)| Hash32::of(b.as_bytes())),
+            body_len: body.map_or(0, |(_, n)| n),
+        };
+        prev = header.chain_hash();
+        let sig = device_sign().sign(&header);
+        out.push((header, sig));
+    }
+    out
+}
+
+fn report_header() -> ReportHeader {
+    ReportHeader {
+        v: 1,
+        instance_id: InstanceId::new(INSTANCE),
+        member_id: UserId::new(MEMBER),
+        device_id: DeviceId::new(DEVICE),
+        period_start_ms: 1_790_000_000_000,
+        period_end_ms: 1_790_086_400_000,
+        first_seq: Some(0),
+        last_seq: Some(2),
+        body_hash: Hash32::of(b"report body"),
+        body_len: 300,
     }
 }
 
@@ -126,6 +246,165 @@ fn key_rewrap() -> KeyRewrap {
     }
 }
 
+fn ally_key_rewrap() -> AllyKeyRewrap {
+    AllyKeyRewrap {
+        instance_id: InstanceId::new(INSTANCE),
+        ally_id: UserId::new(ALLY_A),
+        enc_pubkey: ally_a().public(),
+        issued_at_ms: 1_790_000_400_000,
+        wrapped_privkey: r#"{"v":1,"note":"pässwörd ✓","recovery":{}}"#.into(),
+    }
+}
+
+const MESSAGE_GROUP: &str = "fedcba9876543210fedcba9876543210";
+const ITEM: &str = "0123456789abcdef0123456789abcdef";
+const MESSAGE_PLAINTEXT: &str = r#"{"text":"Rough night. Can someone call me? ✓"}"#;
+
+/// A reach out from the member to both allies, in a group. Content-free
+/// (zero `body_hash`) so its signature is deterministic.
+fn group_message() -> GroupMessage {
+    GroupMessage {
+        instance_id: InstanceId::new(INSTANCE),
+        group_id: Some(MESSAGE_GROUP.into()),
+        item_id: ITEM.into(),
+        kind: GroupMessageKind::ReachOut,
+        author_id: UserId::new(MEMBER),
+        issued_at_ms: 1_790_000_500_000,
+        recipients: vec![
+            MessageRecipient {
+                user_id: UserId::new(ALLY_A),
+                enc_pubkey: ally_a().public(),
+            },
+            MessageRecipient {
+                user_id: UserId::new(ALLY_B),
+                enc_pubkey: ally_b().public(),
+            },
+        ],
+        body_hash: Hash32::ZERO,
+        epoch: None,
+        parent_id: None,
+    }
+}
+
+const CHECK_IN_PLAINTEXT: &str =
+    r#"{"scale":4,"went_well":"Three good days ✓","ask":"A call on Sunday"}"#;
+const EPOCH: u64 = 3;
+const PARENT: &str = "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb";
+
+/// A check-in to the whole group, sealed with epoch 3's key: no recipients.
+fn whole_group_message() -> GroupMessage {
+    GroupMessage {
+        kind: GroupMessageKind::CheckIn,
+        recipients: vec![],
+        epoch: Some(EPOCH),
+        ..group_message()
+    }
+}
+
+/// A private reply to a check-in: one recipient, and the check-in it answers.
+fn reply_message() -> GroupMessage {
+    let mut m = group_message();
+    m.kind = GroupMessageKind::CheckInReply;
+    m.item_id = "11111111111111112222222222222222".into();
+    m.recipients.truncate(1);
+    m.parent_id = Some(PARENT.into());
+    m
+}
+
+/// The challenge the ally key re-wrap vector is proven with.
+const REWRAP_CHALLENGE: [u8; 32] = [0x55; 32];
+
+const GROUP: &str = "0123456789abcdef0123456789abcdef";
+
+/// The epoch key of roster epoch `n` in the vectors (deterministic, so the
+/// entries that commit to them are too).
+fn epoch_key(n: u64) -> [u8; 32] {
+    [0x80 + n as u8; 32]
+}
+
+fn rotation(n: u64) -> Option<EpochRotation> {
+    Some(EpochRotation {
+        epoch: n,
+        key_check: epoch_key_check(&InstanceId::new(INSTANCE), GROUP, n, &epoch_key(n)),
+    })
+}
+
+/// A three-entry roster log signed by the member (the group's creator):
+/// the member and ally A join; ally A becomes a facilitator and ally B
+/// joins; ally B is removed. Every entry rotates the epoch.
+fn roster_log() -> Vec<SignedRosterEntry> {
+    let ms = member_sign();
+    let inst = InstanceId::new(INSTANCE);
+    let mut state = RosterState::new(inst.clone(), GROUP.into());
+    let mut out = Vec::new();
+    let steps: Vec<(Vec<RosterChange>, Option<EpochRotation>)> = vec![
+        (
+            vec![
+                RosterChange::Join {
+                    user_id: UserId::new(ALLY_A),
+                    role: GroupRole::Participant,
+                    enc_pubkey: ally_a().public(),
+                    sign_pubkey: None,
+                },
+                RosterChange::Join {
+                    user_id: UserId::new(MEMBER),
+                    role: GroupRole::Facilitator,
+                    enc_pubkey: member_enc().public(),
+                    sign_pubkey: Some(ms.public()),
+                },
+            ],
+            rotation(1),
+        ),
+        (
+            vec![
+                RosterChange::Role {
+                    user_id: UserId::new(ALLY_A),
+                    role: GroupRole::Facilitator,
+                },
+                RosterChange::Join {
+                    user_id: UserId::new(ALLY_B),
+                    role: GroupRole::Participant,
+                    enc_pubkey: ally_b().public(),
+                    sign_pubkey: None,
+                },
+            ],
+            rotation(2),
+        ),
+        (
+            vec![RosterChange::Remove {
+                user_id: UserId::new(ALLY_B),
+            }],
+            rotation(3),
+        ),
+    ];
+    for (i, (changes, epoch)) in steps.into_iter().enumerate() {
+        let e = RosterEntry {
+            instance_id: inst.clone(),
+            group_id: GROUP.into(),
+            seq: state.next_seq,
+            prev_hash: state.head,
+            at_ms: 1_790_000_500_000 + i as i64,
+            signer: UserId::new(MEMBER),
+            changes,
+            epoch,
+        };
+        let signed = ms.endorse(e);
+        apply_entry(&mut state, &signed).unwrap();
+        out.push(signed);
+    }
+    out
+}
+
+fn roster_snapshot(log: &[SignedRosterEntry]) -> RosterSnapshot {
+    let mut state = RosterState::new(InstanceId::new(INSTANCE), GROUP.into());
+    for e in log {
+        apply_entry(&mut state, e).unwrap();
+    }
+    state
+        .snapshot(1_790_000_600_000, UserId::new(MEMBER))
+        .unwrap()
+}
+
 const EVENT_PLAINTEXT: &str = r#"{"type":"flag","rating":"high","reasons":[{"source":"image","label":"explicit","score":0.93}],"app":{"id":"com.apple.Safari","name":"Safari"},"burst":false,"account":"sam"}"#;
 const REPORT_PLAINTEXT: &str = r#"{"v":1,"device_id":"dev_laptop01","device_name":"Sam's MacBook","period_start_ms":1790000000000,"period_end_ms":1790086400000,"first_seq":10,"last_seq":42,"timeline":[{"start_ms":1790000000000,"end_ms":1790003600000,"state":"active"}],"counts":{"clean":30,"low":1,"medium":1,"high":0},"flagged":[],"health":{"tamper":[],"context":[],"agent_restarts":0,"capture_failures":0,"unmonitored_secs":0}}"#;
 
@@ -137,10 +416,13 @@ fn signed_json<T: serde::Serialize>(body: T, sig: Signature) -> Value {
 fn generate() -> Value {
     let ms = member_sign();
     let m = manifest();
+    let m2 = manifest_v2();
+    let m3 = manifest_v3();
     let de = device_endorsement();
     let ae = ally_endorsement();
     let mb = member_binding();
     let kr = key_rewrap();
+    let akr = ally_key_rewrap();
     let recips = |pairs: &[(&str, &EncryptionKeypair)]| -> Vec<Recipient> {
         pairs
             .iter()
@@ -173,6 +455,26 @@ fn generate() -> Value {
     let wrapped_unicode = wrap_secret(&[0x99; 32], "pässwörd ✓".as_bytes(), cheap()).unwrap();
     let a = ally_a().public();
     let msg = b"faro test message";
+    let gm = group_message();
+    let gm_sealed = seal_group_message(
+        &ms,
+        &member_enc().public(),
+        gm.clone(),
+        Some(MESSAGE_PLAINTEXT.as_bytes()),
+    )
+    .unwrap();
+    let wg = whole_group_message();
+    let wg_sealed = seal_group_message_to_epoch(
+        &ms,
+        &epoch_key(EPOCH),
+        wg.clone(),
+        Some(CHECK_IN_PLAINTEXT.as_bytes()),
+    )
+    .unwrap();
+    let rp = reply_message();
+    let log = roster_log();
+    let snap = roster_snapshot(&log);
+    let inst = InstanceId::new(INSTANCE);
     json!({
         "comment": "Generated by crates/faro-crypto/tests/web_vectors.rs; checked by that test and by web/src/lib/crypto/vectors.test.ts. Do not edit by hand.",
         "ids": { "instance": INSTANCE, "member": MEMBER, "ally_a": ALLY_A, "ally_b": ALLY_B, "device": DEVICE },
@@ -223,6 +525,11 @@ fn generate() -> Value {
             "item": report_item,
             "plaintext": REPORT_PLAINTEXT,
         },
+        "roster_sealed_epoch_key": {
+            "epoch": 3,
+            "recipient": ALLY_A,
+            "sealed": b64_encode(&faro_crypto::roster::seal_epoch_key(&epoch_key(3), &a).unwrap()),
+        },
         "wrapped": [
             { "passphrase": "correct horse battery", "plaintext_hex": hex::encode(ck), "wrapped": wrapped_cheap },
             { "passphrase": "pässwörd ✓", "plaintext_hex": hex::encode([0x99u8; 32]), "wrapped": wrapped_unicode },
@@ -232,9 +539,37 @@ fn generate() -> Value {
             "signing_bytes_hex": hex::encode(m.signing_bytes()),
             "hash": m.hash(),
         },
+        "manifest_v2": {
+            "signed": signed_json(m2.clone(), ms.sign(&m2)),
+            "signing_bytes_hex": hex::encode(m2.signing_bytes()),
+            "hash": m2.hash(),
+        },
+        "manifest_v3": {
+            "signed": signed_json(m3.clone(), ms.sign(&m3)),
+            "signing_bytes_hex": hex::encode(m3.signing_bytes()),
+            "hash": m3.hash(),
+        },
+        "ally_names": ALLY_NAMES
+            .iter()
+            .map(|n| json!({ "input_hex": hex::encode(n), "output": sanitize_ally_name(n) }))
+            .collect::<Vec<_>>(),
         "device_endorsement": {
             "signed": signed_json(de.clone(), ms.sign(&de)),
             "signing_bytes_hex": hex::encode(de.signing_bytes()),
+        },
+        "event_chain": {
+            "genesis_hash": event::genesis_hash(&inst, &DeviceId::new(DEVICE)),
+            "links": event_chain().iter().map(|(h, sig)| json!({
+                "header": h,
+                "sig": sig,
+                "signing_bytes_hex": hex::encode(h.signing_bytes()),
+                "chain_hash": h.chain_hash(),
+            })).collect::<Vec<_>>(),
+        },
+        "report_header": {
+            "header": report_header(),
+            "sig": device_sign().sign(&report_header()),
+            "signing_bytes_hex": hex::encode(report_header().signing_bytes()),
         },
         "ally_endorsement": {
             "signed": signed_json(ae.clone(), ms.sign(&ae)),
@@ -247,6 +582,55 @@ fn generate() -> Value {
         "key_rewrap": {
             "signed": signed_json(kr.clone(), ms.sign(&kr)),
             "signing_bytes_hex": hex::encode(kr.signing_bytes()),
+        },
+        "ally_key_rewrap": {
+            "challenge_hex": hex::encode(REWRAP_CHALLENGE),
+            "proven": ProvenAllyKeyRewrap { proof: akr.proof(&REWRAP_CHALLENGE), body: akr.clone() },
+            "proof_bytes_hex": hex::encode(akr.proof_bytes()),
+        },
+        "group_message": {
+            "content_free": {
+                "signed": signed_json(gm.clone(), ms.sign(&gm)),
+                "signing_bytes_hex": hex::encode(gm.signing_bytes()),
+            },
+            "body_aad_hex": hex::encode(message_body_aad(&InstanceId::new(INSTANCE), ITEM)),
+        },
+        "group_message_sealed": {
+            "sealed": gm_sealed,
+            "plaintext": MESSAGE_PLAINTEXT,
+        },
+        "group_message_epoch": {
+            "content_free": {
+                "signed": signed_json(wg.clone(), ms.sign(&wg)),
+                "signing_bytes_hex": hex::encode(wg.signing_bytes()),
+            },
+            "wrap_aad_hex": hex::encode(epoch_wrap_aad(&InstanceId::new(INSTANCE), MESSAGE_GROUP, ITEM, EPOCH)),
+            "epoch_key_hex": hex::encode(epoch_key(EPOCH)),
+            "sealed": wg_sealed,
+            "plaintext": CHECK_IN_PLAINTEXT,
+        },
+        "group_message_reply": {
+            "signed": signed_json(rp.clone(), ms.sign(&rp)),
+            "signing_bytes_hex": hex::encode(rp.signing_bytes()),
+        },
+        "roster": {
+            "group_id": GROUP,
+            "genesis_prev_hash": genesis_prev_hash(&inst, GROUP),
+            "entries": log.iter().map(|e| json!({
+                "signed": e,
+                "signing_bytes_hex": hex::encode(e.body.signing_bytes()),
+                "hash": e.body.hash(),
+            })).collect::<Vec<_>>(),
+            "epoch_keys": (1..=3u64).map(|n| json!({
+                "epoch": n,
+                "key_hex": hex::encode(epoch_key(n)),
+                "key_check": epoch_key_check(&inst, GROUP, n, &epoch_key(n)),
+            })).collect::<Vec<_>>(),
+            "snapshot": {
+                "signed": Signed { sig: ms.sign(&snap), body: snap.clone() },
+                "signing_bytes_hex": hex::encode(snap.signing_bytes()),
+            },
+            "safety_code": group_safety_code(&inst, GROUP, &snap.head()),
         },
     })
 }
@@ -303,10 +687,23 @@ fn web_vectors() {
         "/safety_code",
         "/ed25519",
         "/manifest",
+        "/manifest_v2",
+        "/manifest_v3",
+        "/ally_names",
         "/device_endorsement",
+        "/event_chain",
+        "/report_header",
         "/ally_endorsement",
         "/member_binding",
         "/key_rewrap",
+        "/ally_key_rewrap",
+        "/group_message",
+        "/group_message_epoch/content_free",
+        "/group_message_epoch/wrap_aad_hex",
+        "/group_message_epoch/epoch_key_hex",
+        "/group_message_epoch/plaintext",
+        "/group_message_reply",
+        "/roster",
     ] {
         assert_eq!(v.pointer(ptr), fresh.pointer(ptr), "{ptr} is stale");
     }
@@ -323,6 +720,28 @@ fn web_vectors() {
         let pt = open_item(&item, &aad, &UserId::new(id), &k).unwrap();
         assert_eq!(&**pt, s(&v, "/event_item/plaintext").as_bytes());
     }
+    // The event chain the web app walks verifies here from genesis, with
+    // no gaps (bodies stripped, as the chain endpoint serves them).
+    let events: Vec<faro_proto::SignedEvent> = v["event_chain"]["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| faro_proto::SignedEvent {
+            header: serde_json::from_value(l["header"].clone()).unwrap(),
+            sig: serde_json::from_value(l["sig"].clone()).unwrap(),
+            body: None,
+        })
+        .collect();
+    let (_, gaps) = faro_crypto::verify_chain(
+        &InstanceId::new(INSTANCE),
+        &DeviceId::new(DEVICE),
+        &device_sign().public(),
+        &events,
+        false,
+    )
+    .unwrap();
+    assert!(gaps.is_empty());
+
     let item: EncryptedItem = serde_json::from_value(v["report_item"]["item"].clone()).unwrap();
     let aad = h(&v, "/canonical/report_body_aad_hex");
     let pt = open_item(&item, &aad, &UserId::new(ALLY_B), &ally_b()).unwrap();
@@ -332,6 +751,52 @@ fn web_vectors() {
         let pt = unwrap_secret(&ws, s(w, "/passphrase").as_bytes()).unwrap();
         assert_eq!(&**pt, h(w, "/plaintext_hex").as_slice());
     }
+    let gm: SealedGroupMessage =
+        serde_json::from_value(v["group_message_sealed"]["sealed"].clone()).unwrap();
+    verify_group_message(&member_sign().public(), &gm).unwrap();
+    for (id, k) in [
+        (MEMBER, member_enc()),
+        (ALLY_A, ally_a()),
+        (ALLY_B, ally_b()),
+    ] {
+        let pt = open_group_message(&gm, &UserId::new(id), &k)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&**pt, s(&v, "/group_message_sealed/plaintext").as_bytes());
+    }
+
+    // A whole-group check-in sealed with epoch 3's key opens for anyone
+    // holding that key, and for nobody else.
+    let wg: SealedGroupMessage =
+        serde_json::from_value(v["group_message_epoch"]["sealed"].clone()).unwrap();
+    verify_group_message(&member_sign().public(), &wg).unwrap();
+    let pt = open_group_message_with_epoch(&wg, &epoch_key(EPOCH))
+        .unwrap()
+        .unwrap();
+    assert_eq!(&**pt, s(&v, "/group_message_epoch/plaintext").as_bytes());
+    assert!(open_group_message_with_epoch(&wg, &epoch_key(2)).is_err());
+
+    // The roster log verifies, and the sealed epoch key opens against the
+    // commitment in the last entry.
+    let inst = InstanceId::new(INSTANCE);
+    let mut state = RosterState::new(inst.clone(), GROUP.into());
+    for e in v["roster"]["entries"].as_array().unwrap() {
+        let signed: SignedRosterEntry = serde_json::from_value(e["signed"].clone()).unwrap();
+        apply_entry(&mut state, &signed).unwrap();
+    }
+    let snap: Signed<RosterSnapshot> =
+        serde_json::from_value(v["roster"]["snapshot"]["signed"].clone()).unwrap();
+    assert_eq!(verify_snapshot(&snap).unwrap(), state);
+    let k = open_epoch_key(
+        &ally_a(),
+        &b(&v, "/roster_sealed_epoch_key/sealed"),
+        &inst,
+        GROUP,
+        3,
+        &state.epoch_key_check,
+    )
+    .unwrap();
+    assert_eq!(*k, epoch_key(3));
 
     // What the web app produced opens and verifies here.
     let Some(web) = v.get("from_web").filter(|w| !w.is_null()) else {
@@ -351,6 +816,47 @@ fn web_vectors() {
         serde_json::from_value(web["manifest"].clone()).expect("web manifest parses");
     m.body.validate().unwrap();
     verify_signed(&pk, &m).unwrap();
+    // A format 2 manifest the web app signed, with names its sanitizer
+    // made: Rust verifies it and would show exactly those names.
+    let m2: Signed<RecipientManifest> =
+        serde_json::from_value(web["manifest_v2"].clone()).expect("web v2 manifest parses");
+    assert_eq!(m2.body.format, MANIFEST_FORMAT_V2);
+    m2.body.validate().unwrap();
+    verify_signed(&pk, &m2).unwrap();
+    for a in &m2.body.allies {
+        let name = a.name.as_deref().unwrap();
+        assert_eq!(sanitize_ally_name(name), name, "{name:?}");
+    }
+    // The display names the web app was given, as UTF-8 hex (they hold
+    // bidi controls, which have no place in a file people review).
+    let signed: Vec<String> = web["manifest_v2_raw_names_hex"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            let raw = String::from_utf8(hex::decode(v.as_str().unwrap()).unwrap()).unwrap();
+            sanitize_ally_name(&raw)
+        })
+        .collect();
+    let got: Vec<String> = m2
+        .body
+        .allies
+        .iter()
+        .map(|a| a.name.clone().unwrap())
+        .collect();
+    assert_eq!(
+        got, signed,
+        "the web app signed what Rust's sanitizer makes"
+    );
+    // The web app's next version after that one, in format 3: linked to
+    // it, and verified here.
+    let m3: Signed<RecipientManifest> =
+        serde_json::from_value(web["manifest_v3"].clone()).expect("web v3 manifest parses");
+    assert_eq!(m3.body.format, MANIFEST_FORMAT_V3);
+    m3.body.validate().unwrap();
+    verify_signed(&pk, &m3).unwrap();
+    assert_eq!(m3.body.version, m2.body.version + 1);
+    assert_eq!(m3.body.prev_hash, Some(m2.body.hash()));
     let de: Signed<DeviceEndorsement> =
         serde_json::from_value(web["device_endorsement"].clone()).unwrap();
     verify_signed(&pk, &de).unwrap();
@@ -369,4 +875,70 @@ fn web_vectors() {
     verify_signed(&pk, &mb).unwrap();
     let kr: Signed<KeyRewrap> = serde_json::from_value(web["key_rewrap"].clone()).unwrap();
     verify_signed(&pk, &kr).unwrap();
+    let akr: ProvenAllyKeyRewrap =
+        serde_json::from_value(web["ally_key_rewrap"]["proven"].clone()).unwrap();
+    let challenge: [u8; 32] = h(web, "/ally_key_rewrap/challenge_hex").try_into().unwrap();
+    assert_eq!(akr.proof, akr.body.proof(&challenge));
+
+    // A reach out the web app sealed and signed: it verifies with the web
+    // key only, and opens for each recipient.
+    let gm: SealedGroupMessage =
+        serde_json::from_value(web["group_message"]["sealed"].clone()).expect("web message parses");
+    verify_group_message(&pk, &gm).unwrap();
+    assert!(verify_group_message(&member_sign().public(), &gm).is_err());
+    for (id, k) in [(ALLY_A, ally_a()), (ALLY_B, ally_b())] {
+        let pt = open_group_message(&gm, &UserId::new(id), &k)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&**pt, s(web, "/group_message/plaintext").as_bytes());
+    }
+    let mut forged = gm.clone();
+    forged.message.body.recipients.pop();
+    assert!(verify_group_message(&pk, &forged).is_err());
+
+    // A check-in the web app sealed with an epoch key, and a reply it signed.
+    let wg: SealedGroupMessage =
+        serde_json::from_value(web["group_message_epoch"]["sealed"].clone()).unwrap();
+    verify_group_message(&pk, &wg).unwrap();
+    let epoch_key_bytes: [u8; 32] = h(web, "/group_message_epoch/epoch_key_hex")
+        .try_into()
+        .unwrap();
+    let pt = open_group_message_with_epoch(&wg, &epoch_key_bytes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(&**pt, s(web, "/group_message_epoch/plaintext").as_bytes());
+    let rp: SealedGroupMessage =
+        serde_json::from_value(web["group_message_reply"]["sealed"].clone()).unwrap();
+    verify_group_message(&pk, &rp).unwrap();
+    let pt = open_group_message(&rp, &UserId::new(ALLY_A), &ally_a())
+        .unwrap()
+        .unwrap();
+    assert_eq!(&**pt, s(web, "/group_message_reply/plaintext").as_bytes());
+    assert_eq!(rp.message.body.parent_id.as_deref(), Some(PARENT));
+
+    // The web app's roster log: entries it signed, its snapshot, and an
+    // epoch key it sealed to ally A.
+    let web_group = s(web, "/roster/group_id");
+    let mut state = RosterState::new(inst.clone(), web_group.into());
+    for e in web["roster"]["entries"].as_array().unwrap() {
+        let signed: SignedRosterEntry = serde_json::from_value(e.clone()).unwrap();
+        apply_entry(&mut state, &signed).unwrap();
+    }
+    let snap: Signed<RosterSnapshot> =
+        serde_json::from_value(web["roster"]["snapshot"].clone()).unwrap();
+    assert_eq!(verify_snapshot(&snap).unwrap(), state);
+    let k = open_epoch_key(
+        &ally_a(),
+        &b(web, "/roster/sealed_epoch_key"),
+        &inst,
+        web_group,
+        state.epoch,
+        &state.epoch_key_check,
+    )
+    .unwrap();
+    assert_eq!(hex::encode(*k), s(web, "/roster/epoch_key_hex"));
+    assert_eq!(
+        group_safety_code(&inst, web_group, &state.checkpoint().unwrap()),
+        s(web, "/roster/safety_code")
+    );
 }

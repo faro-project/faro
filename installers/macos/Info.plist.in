@@ -4,13 +4,31 @@
      "Faro Agent" for the Screen Recording permission and in Login Items, and
      so its code-signing identifier is org.faro.agent (the service's
      ipc.agent_requirement). LSUIElement: no Dock icon or app menu; its only
-     UI is the menu-bar icon and the monitoring notice. -->
+     UI is the menu-bar icon and the monitoring notice. CFBundleURLTypes:
+     faro://enroll links open the agent's enrollment window (issue #62).
+     CFBundleIconFile: Contents/Resources/Faro.icns, copied by build-pkg.sh
+     from assets/brand/faro-icon.icns. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.faro.enroll-link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>faro</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>faro-agent</string>
+	<key>CFBundleIconFile</key>
+	<string>Faro</string>
 	<key>CFBundleIdentifier</key>
 	<string>org.faro.agent</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -22,9 +40,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>@VERSION@</string>
+	<string>@BUNDLE_VERSION@</string>
 	<key>CFBundleVersion</key>
-	<string>@VERSION@</string>
+	<string>@BUNDLE_VERSION@</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>

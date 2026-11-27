@@ -1,36 +1,51 @@
 //! Drives the agent's real loop against an in-test service: a `faro-ipc`
-//! server on a Unix socket in a private tempdir, with the synthetic platform
-//! standing in for the screen.
-#![cfg(unix)]
+//! server on a Unix socket in a private tempdir (a uniquely named pipe on
+//! Windows), with the synthetic platform standing in for the screen.
+#![cfg(any(unix, windows))]
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use faro_agent::{Agent, AgentConfig, AgentError, Backoff, ExitReason, ServiceTrust};
 use faro_ipc::{
-    accept_agent, AgentMsg, AllowSameUid, CaptureReason, IpcError, IpcServer, ServiceConnection,
+    accept_agent, AgentMsg, AllowSameUser, CaptureReason, IpcError, IpcServer, ServiceConnection,
     ServiceMsg, ShutdownReason, WirePermissionState, WirePixelFormat, WireSessionChange,
     HELLO_TIMEOUT,
 };
 use faro_platform::synthetic::{Scene, Script};
-use faro_platform::{AppInfo, PermissionState, SessionChange, TamperSignal};
-use tokio::net::UnixStream;
+use faro_platform::{AppInfo, BrowserContext, PermissionState, SessionChange, TamperSignal};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(5);
 
-type Conn = ServiceConnection<UnixStream>;
+type Conn = ServiceConnection<faro_ipc::ServerStream>;
 
 /// A private (0700) tempdir with a short path: macOS caps socket paths at
 /// 104 bytes and `faro-ipc` refuses group/world-writable directories.
 fn private_dir() -> tempfile::TempDir {
     let d = tempfile::tempdir().expect("tempdir");
-    fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
     d
+}
+
+/// The agent endpoint for a test: `agent.sock` in the tempdir, or on
+/// Windows a pipe named after it (unique per test).
+fn agent_endpoint(dir: &tempfile::TempDir) -> PathBuf {
+    #[cfg(unix)]
+    {
+        dir.path().join("agent.sock")
+    }
+    #[cfg(windows)]
+    {
+        let unique = dir.path().file_name().unwrap().to_string_lossy();
+        PathBuf::from(format!(r"\\.\pipe\faro-agent-test-{unique}\agent"))
+    }
 }
 
 fn config(path: &Path) -> AgentConfig {
@@ -63,8 +78,8 @@ impl Harness {
     /// start the agent with `trust`.
     async fn start_with(script: Script, trust: ServiceTrust) -> (Harness, IpcServer) {
         let dir = private_dir();
-        let path = dir.path().join("agent.sock");
-        let server = IpcServer::bind(&path, AllowSameUid).expect("bind");
+        let path = agent_endpoint(&dir);
+        let server = IpcServer::bind(&path, AllowSameUser).expect("bind");
         let mut cfg = config(&path);
         cfg.service_trust = trust;
         let notices: Notices = Arc::default();
@@ -306,6 +321,55 @@ async fn permission_revocation_reports_and_keeps_running() {
     recv_until(&mut conn, is_frames).await;
 }
 
+/// The person at the screen is told Screen Recording is off once, not on
+/// every poll or capture, and again when it goes off after a capture
+/// worked in between.
+#[tokio::test]
+async fn screen_recording_off_is_shown_once_per_change() {
+    let screen_off = || {
+        (
+            faro_agent::SCREEN_RECORDING_OFF.title.to_owned(),
+            faro_agent::SCREEN_RECORDING_OFF.body.to_owned(),
+        )
+    };
+    let script = Script::new();
+    script.with(|s| s.permission = PermissionState::Denied);
+    let (h, server) = Harness::start(script).await;
+    let (mut conn, _) = accept(&server).await;
+    for _ in 0..2 {
+        conn.send(&ServiceMsg::CaptureNow {
+            reason: CaptureReason::Scheduled,
+        })
+        .await
+        .unwrap();
+        recv_until(&mut conn, |m| matches!(m, AgentMsg::CaptureFailed { .. })).await;
+    }
+    // Several polls later (a Pong proves everything before it was handled).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    conn.send(&ServiceMsg::Ping { nonce: 1 }).await.unwrap();
+    recv_until(&mut conn, |m| *m == AgentMsg::Pong { nonce: 1 }).await;
+    assert_eq!(*h.notices.lock().unwrap(), vec![screen_off()]);
+
+    h.script.with(|s| s.permission = PermissionState::Granted);
+    conn.send(&ServiceMsg::CaptureNow {
+        reason: CaptureReason::Scheduled,
+    })
+    .await
+    .unwrap();
+    recv_until(&mut conn, is_frames).await;
+    h.script.with(|s| s.permission = PermissionState::Denied);
+    recv_until(&mut conn, |m| {
+        *m == AgentMsg::Permission {
+            screen: WirePermissionState::Denied,
+            accessibility: None,
+        }
+    })
+    .await;
+    conn.send(&ServiceMsg::Ping { nonce: 2 }).await.unwrap();
+    recv_until(&mut conn, |m| *m == AgentMsg::Pong { nonce: 2 }).await;
+    assert_eq!(*h.notices.lock().unwrap(), vec![screen_off(), screen_off()]);
+}
+
 #[tokio::test]
 async fn os_capture_failure_is_reported() {
     let (h, server) = Harness::start(Script::new()).await;
@@ -391,6 +455,70 @@ async fn state_changes_and_tamper_are_forwarded() {
         )
     })
     .await;
+}
+
+#[tokio::test]
+async fn browser_tab_follows_the_foreground() {
+    let (h, server) = Harness::start(Script::new()).await;
+    let (mut conn, _) = accept(&server).await;
+    // No browser: the first report clears whatever the service held, and
+    // comes after the foreground.
+    let (_, fg) = recv_until(&mut conn, |m| {
+        matches!(m, AgentMsg::Foreground { .. } | AgentMsg::Browser(_))
+    })
+    .await;
+    assert!(matches!(fg, AgentMsg::Foreground { .. }));
+    recv_until(&mut conn, |m| {
+        *m == AgentMsg::Browser(BrowserContext::default())
+    })
+    .await;
+
+    let tab = BrowserContext {
+        url: Some("https://example.test/".into()),
+        title: None,
+        incognito: false,
+    };
+    h.script.with(|s| {
+        s.app = Some(AppInfo {
+            id: "com.apple.Safari".into(),
+            name: None,
+        });
+        s.browser = Some(tab.clone());
+    });
+    let (_, fg) = recv_until(&mut conn, |m| {
+        matches!(m, AgentMsg::Foreground { app: Some(a), .. } if a.id == "com.apple.Safari")
+            || matches!(m, AgentMsg::Browser(b) if b.url.is_some())
+    })
+    .await;
+    assert!(
+        matches!(fg, AgentMsg::Foreground { .. }),
+        "the app comes before its tab"
+    );
+    recv_until(&mut conn, |m| *m == AgentMsg::Browser(tab.clone())).await;
+
+    // Leaving the browser clears the tab.
+    h.script.with(|s| s.browser = None);
+    recv_until(&mut conn, |m| {
+        *m == AgentMsg::Browser(BrowserContext::default())
+    })
+    .await;
+}
+
+/// A window hidden from capture goes to the service and the person at the
+/// screen is told which app it is.
+#[tokio::test]
+async fn hidden_window_is_forwarded_and_shown() {
+    let (h, server) = Harness::start(Script::new()).await;
+    let (mut conn, _) = accept(&server).await;
+    let signal = TamperSignal::WindowHiddenFromCapture {
+        app: "Viewer".into(),
+    };
+    h.script.with(|s| s.tamper.push(signal.clone()));
+    recv_until(&mut conn, |m| *m == AgentMsg::Tamper(signal.clone())).await;
+    let notices = h.notices.lock().unwrap().clone();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0], faro_agent::window_hidden_notice("Viewer"));
+    assert!(notices[0].1.contains("\u{201c}Viewer\u{201d}"));
 }
 
 #[tokio::test]
@@ -481,6 +609,7 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
     recv_until(&mut conn, |m| matches!(m, AgentMsg::Foreground { .. })).await;
 
     // The service goes away (socket removed, connection closed).
+    #[cfg(unix)]
     let path = server.path().to_path_buf();
     drop(conn);
     drop(server);
@@ -491,13 +620,15 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
         s.changes.push(SessionChange::DisplaySleep);
         s.tamper.push(TamperSignal::PermissionRevoked {
             permission: "screen_recording".into(),
+            never_granted: false,
         });
     });
     // Let a few failed reconnects (and polls) go by.
     tokio::time::sleep(Duration::from_millis(300)).await;
+    #[cfg(unix)]
     assert!(!path.exists());
 
-    let server = IpcServer::bind(&h.path, AllowSameUid).expect("rebind");
+    let server = IpcServer::bind(&h.path, AllowSameUser).expect("rebind");
     let (mut conn, hello) = accept(&server).await;
     assert_eq!(hello.pid, std::process::id());
     recv_until(&mut conn, |m| {
@@ -507,6 +638,7 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
     recv_until(&mut conn, |m| {
         *m == AgentMsg::Tamper(TamperSignal::PermissionRevoked {
             permission: "screen_recording".into(),
+            never_granted: false,
         })
     })
     .await;
@@ -523,12 +655,12 @@ async fn reconnects_after_service_restart_and_delivers_queued_signals() {
 #[tokio::test]
 async fn agent_started_before_service_connects_when_it_appears() {
     let dir = private_dir();
-    let path = dir.path().join("agent.sock");
+    let path = agent_endpoint(&dir);
     let script = Script::new();
     let agent = Agent::new(config(&path), script.platform());
     let task = tokio::spawn(agent.run(std::future::pending::<()>()));
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let server = IpcServer::bind(&path, AllowSameUid).unwrap();
+    let server = IpcServer::bind(&path, AllowSameUser).unwrap();
     let (mut conn, _) = accept(&server).await;
     faro_ipc::ping(&mut conn, WAIT, |_| {}).await.unwrap();
     task.abort();
@@ -538,7 +670,9 @@ async fn agent_started_before_service_connects_when_it_appears() {
 /// the socket path must not even receive `Hello`, let alone frames.
 #[tokio::test]
 async fn refuses_a_non_root_service_in_production_mode() {
+    // On Windows the test server is never LocalSystem.
     // SAFETY: no preconditions.
+    #[cfg(unix)]
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("skipped: running as root, so the test server *is* root");
         return;
@@ -555,4 +689,122 @@ async fn refuses_a_non_root_service_in_production_mode() {
             "impostor service received {r:?}"
         );
     }
+}
+
+type Statuses = Arc<Mutex<Vec<faro_agent::status_menu::Seen>>>;
+
+/// Records what the status menu would show.
+struct StatusSink(Statuses);
+
+impl faro_agent::NoticeSink for StatusSink {
+    fn show(&mut self, _title: &str, _body: &str) {}
+
+    fn status(&mut self, seen: &faro_agent::status_menu::Seen) {
+        self.0.lock().unwrap().push(seen.clone());
+    }
+}
+
+/// Wait until the latest status matches.
+async fn status_until(statuses: &Statuses, want: impl Fn(&faro_agent::status_menu::Seen) -> bool) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if statuses.lock().unwrap().last().is_some_and(&want) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "statuses: {:?}",
+            statuses.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A stand-in for the service's enroll socket that answers every `Status`
+/// with "enrolled, waiting for approval".
+fn fake_enroll_socket(agent_socket: &Path) -> JoinHandle<()> {
+    use faro_ipc::{EnrollRequest, EnrollResponse, EnrollStatus};
+    let path = faro_ipc::enroll_socket_path(agent_socket, None);
+    let server = IpcServer::bind(&path, AllowSameUser).expect("bind enroll");
+    tokio::spawn(async move {
+        loop {
+            let Ok(mut conn) = server.accept_typed::<EnrollResponse, EnrollRequest>().await else {
+                continue;
+            };
+            if let Ok(EnrollRequest::Status) = conn.recv().await {
+                let _ = conn
+                    .send(&EnrollResponse::Status(EnrollStatus {
+                        enrolled: true,
+                        instance_name: Some("Sam's Faro".into()),
+                        instance_url: Some("https://faro.example.org/".into()),
+                        endorsed: false,
+                    }))
+                    .await;
+            }
+        }
+    })
+}
+
+/// The status menu hears the enroll socket while the service's agent
+/// socket isn't there, then the service's own `Status` once connected, and
+/// each change only once. Nothing the agent sends back depends on it.
+#[tokio::test]
+async fn the_status_menu_follows_the_service() {
+    use faro_agent::status_menu::{Enrollment, Seen};
+    use faro_ipc::status::CaptureState;
+    let dir = private_dir();
+    let path = agent_endpoint(&dir);
+    let enroll = fake_enroll_socket(&path);
+    let statuses: Statuses = Arc::default();
+    let script = Script::new();
+    let agent =
+        Agent::new(config(&path), script.platform()).with_notice_sink(StatusSink(statuses.clone()));
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let agent = tokio::spawn(agent.run(async move {
+        let _ = stop_rx.await;
+    }));
+
+    // No agent socket yet: the computer waits for its member's approval.
+    status_until(&statuses, |s| {
+        matches!(s, Seen::NotConnected(Enrollment::AwaitingApproval { name, .. }) if name == "Sam's Faro")
+    })
+    .await;
+    // Asked again on every retry, but told only once.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(statuses.lock().unwrap().len(), 1, "{statuses:?}");
+
+    // The service starts and sends its view.
+    let server = IpcServer::bind(&path, AllowSameUser).expect("bind");
+    let (mut conn, _) = accept(&server).await;
+    let status = faro_ipc::MemberStatus {
+        instance_name: "Sam's Faro".into(),
+        capture: Some(CaptureState::Active),
+        ..faro_ipc::MemberStatus::default()
+    };
+    for _ in 0..2 {
+        conn.send(&ServiceMsg::Status(status.clone()))
+            .await
+            .unwrap();
+    }
+    conn.send(&ServiceMsg::Ping { nonce: 9 }).await.unwrap();
+    let (before, _) = recv_until(&mut conn, |m| *m == AgentMsg::Pong { nonce: 9 }).await;
+    // The agent answers nothing to a status.
+    assert!(
+        before
+            .iter()
+            .all(|m| !matches!(m, AgentMsg::Pong { .. } | AgentMsg::Goodbye)),
+        "{before:?}"
+    );
+    status_until(&statuses, |s| *s == Seen::Connected(status.clone())).await;
+    assert_eq!(statuses.lock().unwrap().len(), 2, "{statuses:?}");
+
+    // The service goes away: back to what the enroll socket says.
+    drop(conn);
+    drop(server);
+    status_until(&statuses, |s| matches!(s, Seen::NotConnected(_))).await;
+
+    let _ = stop_tx.send(());
+    let exit = tokio::time::timeout(WAIT, agent).await.unwrap().unwrap();
+    assert!(matches!(exit, Ok(ExitReason::Stopped)), "{exit:?}");
+    enroll.abort();
 }

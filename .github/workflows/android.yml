@@ -1,0 +1,134 @@
+name: Android
+
+# The Android app (apps/android) and the Rust core behind it (crates/faro-android).
+#
+# Both jobs run on GitHub's hosted runners, never on a machine of the
+# project's own: this workflow runs a pull request's code, and a
+# self-hosted runner must not (docs/DEVELOPMENT.md, "CI runners"). The
+# Android NDK has Linux x86_64 hosts, so the app builds on ubuntu-24.04.
+# Only the image model needs macOS (its pinned Python wheels are macOS
+# only), so `model` builds it on macos-15 and `android` takes it from an
+# artifact.
+#
+# It runs on pushes to main, on pull requests that touch the app, the
+# crates faro-android depends on (its path dependencies, transitively,
+# including faro-server for its tests) or the workspace manifests, and on
+# manual dispatch. The two path lists below are the same: keep them in
+# step with `cargo tree -p faro-android`.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "apps/android/**"
+      - "crates/faro-android/**"
+      - "crates/faro-client/**"
+      - "crates/faro-core/**"
+      - "crates/faro-crypto/**"
+      - "crates/faro-detect/**"
+      - "crates/faro-ipc/**"
+      - "crates/faro-platform/**"
+      - "crates/faro-platform-macos/**"
+      - "crates/faro-platform-windows/**"
+      - "crates/faro-proto/**"
+      - "crates/faro-service/**"
+      - "crates/faro-update/**"
+      - "server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "apps/android/**"
+      - "crates/faro-android/**"
+      - "crates/faro-client/**"
+      - "crates/faro-core/**"
+      - "crates/faro-crypto/**"
+      - "crates/faro-detect/**"
+      - "crates/faro-ipc/**"
+      - "crates/faro-platform/**"
+      - "crates/faro-platform-macos/**"
+      - "crates/faro-platform-windows/**"
+      - "crates/faro-proto/**"
+      - "crates/faro-service/**"
+      - "crates/faro-update/**"
+      - "server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The image model (crates/faro-detect/models/opennsfw/build.sh), built on
+  # macOS with the pinned wheels and packaged into the APK by `android`.
+  model:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the image model
+        run: crates/faro-detect/models/opennsfw/build.sh "$RUNNER_TEMP/models"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: faro-android-model
+          path: ${{ runner.temp }}/models
+          if-no-files-found: error
+          retention-days: 1
+
+  android:
+    needs: model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      # The SDK and NDK versions the app is built against
+      # (apps/android/README.md). The action accepts the licences.
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;30.0.16248370"
+      - name: Point the build at the NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # The app's Gradle build runs crates/faro-android/build-android.sh itself
+      # (task buildFaroCore), so the Rust core is built for both ABIs there. Check
+      # that the crate builds for the host first, so a Rust error fails fast.
+      - run: cargo test --locked -p faro-android
+      # ONNX Runtime for Android is fetched by the Gradle build
+      # (crates/faro-android/fetch-onnxruntime.sh).
+      - uses: actions/download-artifact@v4
+        with:
+          name: faro-android-model
+          path: ${{ runner.temp }}/models
+      # The committed wrapper pins Gradle 8.10.2 by checksum; setup-gradle
+      # also validates the wrapper jar and caches Gradle's downloads.
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests and a debug APK
+        working-directory: apps/android
+        run: ./gradlew --no-daemon -Pfaro.modelDir="$RUNNER_TEMP/models" :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: faro-android-debug-${{ github.sha }}
+          path: apps/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

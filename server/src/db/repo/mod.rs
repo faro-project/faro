@@ -3,19 +3,30 @@
 //! Handlers never build SQL themselves; they call these functions inside a
 //! transaction (`&mut *tx`) or directly on the pool.
 
+pub mod admin_log;
 pub mod alerts;
 pub mod allies;
 pub mod auth_tokens;
+pub mod branding;
+pub mod deletion;
 pub mod devices;
 pub mod enroll_codes;
 pub mod events;
 pub mod feed;
+pub mod group_listing;
+pub mod group_messages;
+pub mod group_notices;
+pub mod group_posts;
+pub mod group_roster;
+pub mod group_sharing;
+pub mod groups;
 pub mod instance;
 pub mod invites;
 pub mod liveness;
 pub mod manifests;
 pub mod member_keys;
 pub mod notifications;
+pub mod proposals;
 pub mod reports;
 pub mod sessions;
 pub mod stats;

@@ -8,7 +8,7 @@
 
 use crate::config::{Config, SmtpTls};
 use crate::db::repo::instance;
-use crate::db::Db;
+use crate::db::{Db, POSTGRES_UNSUPPORTED};
 use crate::identity::IDENTITY_FILE;
 use crate::mailer::SmtpMailer;
 use std::path::Path;
@@ -207,6 +207,7 @@ pub async fn run(cfg: &Config, check_smtp: bool) -> Report {
     }
 
     // Database.
+    check_postgres(cfg, &mut r);
     check_database(cfg, &key, &mut r).await;
 
     // SMTP.
@@ -358,6 +359,14 @@ pub fn check_updates(cfg: &Config, now_ms: i64, r: &mut Report) {
     }
 }
 
+/// Postgres is experimental and unsupported in the beta: a `WARN` line when
+/// the database is Postgres, nothing for SQLite.
+pub fn check_postgres(cfg: &Config, r: &mut Report) {
+    if cfg.uses_postgres() {
+        r.push("postgres", Level::Warn, POSTGRES_UNSUPPORTED);
+    }
+}
+
 async fn check_database(cfg: &Config, key_path: &Path, r: &mut Report) {
     if cfg.database_url.is_none() && !cfg.data_dir.join("faro.db").is_file() {
         r.push(
@@ -466,5 +475,40 @@ async fn check_database(cfg: &Config, key_path: &Path, r: &mut Report) {
             format!("cannot read settings: {e}"),
         ),
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    match crate::db::repo::users::deletion_counts(db.pool(), now_ms).await {
+        Ok(c) => check_deletions(c, r),
+        Err(e) => r.push(
+            "deletions",
+            Level::Fail,
+            format!("cannot read pending deletions: {e}"),
+        ),
+    }
     db.close().await;
+}
+
+/// Account deletions (§12): a purge waits until every deletion notice has
+/// been delivered, so one held up long past its hold means mail is failing.
+pub fn check_deletions(c: crate::db::repo::users::DeletionCounts, r: &mut Report) {
+    if c.overdue > 0 {
+        r.push(
+            "deletions",
+            Level::Warn,
+            format!(
+                "{} account deletion(s) have waited more than 7 days past their hold because \
+                 their notices can't be delivered; once email works again they go ahead",
+                c.overdue
+            ),
+        );
+    } else if c.pending > 0 {
+        r.push(
+            "deletions",
+            Level::Ok,
+            format!("{} account deletion(s) pending", c.pending),
+        );
+    } else {
+        r.push("deletions", Level::Ok, "no account deletions pending");
+    }
 }

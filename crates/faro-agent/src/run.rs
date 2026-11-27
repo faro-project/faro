@@ -27,12 +27,12 @@ use std::future::Future;
 use std::pin::{pin, Pin};
 use std::time::Duration;
 
+use faro_ipc::ClientStream as UnixStream;
 use faro_ipc::{
     hello, AgentConnection, AgentHello, AgentMsg, IpcClient, IpcError, PeerVerifier, ServiceMsg,
     ShutdownReason, WirePermissionState,
 };
-use faro_platform::{AgentPlatform, AppInfo, PermissionState};
-use tokio::net::UnixStream;
+use faro_platform::{AgentPlatform, AppInfo, BrowserContext, PermissionState, TamperSignal};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
@@ -42,6 +42,7 @@ use crate::pending::{Pending, Signal};
 use crate::platform::{
     AccessibilityProbe, Capture, CaptureOutcome, Observation, PlatformWorker, WorkerGone,
 };
+use crate::status_menu::{Enrollment, Seen};
 
 /// The version this agent reports in `Hello`.
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -52,6 +53,10 @@ const MAX_REASON_LEN: usize = 256;
 
 /// How long a best-effort `Goodbye` may take before the agent exits anyway.
 const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long the enroll socket may take to say whether the computer is
+/// enrolled, for the status menu (`Status` reads two files).
+const ENROLL_STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Why [`Agent::run`] returned normally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +133,8 @@ impl Agent {
             pending: Pending::default(),
             observing: None,
             poll,
+            screen_off_noticed: false,
+            seen: Seen::Starting,
         };
         rt.run(pin!(stop)).await
     }
@@ -173,6 +180,7 @@ struct Reported {
     permission: Option<(WirePermissionState, Option<bool>)>,
     session: Option<SessionKey>,
     foreground: Option<(Option<AppInfo>, Option<String>)>,
+    browser: Option<Option<BrowserContext>>,
     last_full: Option<Instant>,
 }
 
@@ -186,6 +194,13 @@ struct Runtime {
     /// already drained the edges and tamper signals in it.
     observing: Option<oneshot::Receiver<Observation>>,
     poll: Interval,
+    /// The user was told Screen Recording is off, and no capture has
+    /// worked since. (A capture, not the permission check: if the check
+    /// says granted while captures are still refused, the notice must not
+    /// come back with every capture.)
+    screen_off_noticed: bool,
+    /// What the notice sink was last told of the service (status menu).
+    seen: Seen,
 }
 
 /// Await an optional one-shot; pending forever when there is none, so it can
@@ -269,6 +284,14 @@ impl Runtime {
                 }
                 Err(Fail::Fatal(e)) => return Err(e),
             }
+            // Not connected: the status menu says why, from the enroll
+            // socket (enrolled? approved?).
+            let enrollment = tokio::select! {
+                biased;
+                () = &mut stop => return Ok(ExitReason::Stopped),
+                e = self.enrollment() => e,
+            };
+            self.tell(Seen::NotConnected(enrollment));
             if self.wait(delay, stop.as_mut()).await? {
                 return Ok(ExitReason::Stopped);
             }
@@ -324,11 +347,39 @@ impl Runtime {
                 obs = recv_opt(&mut self.observing) => {
                     self.observing = None;
                     let mut obs = obs.map_err(|_| WorkerGone)?;
+                    self.note_screen_permission(obs.permission);
                     self.queue_signals(&mut obs);
                 }
                 _ = self.poll.tick() => self.start_observe()?,
             }
         }
+    }
+
+    /// Tell the notice sink what is known of the service, if it changed.
+    fn tell(&mut self, seen: Seen) {
+        if seen != self.seen {
+            self.notices.status(&seen);
+            self.seen = seen;
+        }
+    }
+
+    /// Ask the enroll socket whether the computer is enrolled and approved
+    /// (`Status`, which changes nothing).
+    async fn enrollment(&mut self) -> Enrollment {
+        let socket = match faro_ipc::current_account() {
+            Ok(account) => faro_ipc::resolve_enroll_socket(&self.config.socket_path, account),
+            Err(_) => self.config.socket_path.clone(),
+        };
+        let answer = crate::enroll::enrollment_status(
+            &socket,
+            self.config.service_trust,
+            ENROLL_STATUS_TIMEOUT,
+        )
+        .await;
+        if let Err(e) = &answer {
+            tracing::debug!(error = %e, "no enrollment status from the service");
+        }
+        Enrollment::from_status(answer.as_ref().map_err(String::as_str))
     }
 
     fn start_observe(&mut self) -> Result<(), WorkerGone> {
@@ -338,6 +389,18 @@ impl Runtime {
         Ok(())
     }
 
+    /// Tell the user when Screen Recording is off: once, and again only
+    /// after a capture worked in between. Their allies hear about it from
+    /// the service (§3.7); this is how the person at the screen does.
+    fn note_screen_permission(&mut self, screen: PermissionState) {
+        if screen == PermissionState::Denied
+            && !std::mem::replace(&mut self.screen_off_noticed, true)
+        {
+            tracing::warn!("Screen Recording is off for Faro; telling the user");
+            self.notices.screen_recording_off();
+        }
+    }
+
     fn queue_signals(&mut self, obs: &mut Observation) {
         for c in obs.changes.drain(..) {
             tracing::debug!(change = ?c, "session change");
@@ -345,6 +408,11 @@ impl Runtime {
         }
         for t in obs.tamper.drain(..) {
             tracing::info!(signal = ?t, "tamper signal observed");
+            if let TamperSignal::WindowHiddenFromCapture { app } = &t {
+                // The person at the screen hears it too (§3.7, §12).
+                let (title, body) = crate::notice::window_hidden_notice(app);
+                self.notices.show(&title, &body);
+            }
             self.pending.push(Signal::Tamper(t));
         }
     }
@@ -402,6 +470,9 @@ impl Runtime {
                     ServiceMsg::Welcome { .. } => {
                         tracing::warn!("ignoring an unexpected Welcome from the service");
                     }
+                    // Shown, never acted on: nothing in it changes what the
+                    // agent does.
+                    ServiceMsg::Status(s) => self.tell(Seen::Connected(s)),
                 },
                 out = recv_opt(&mut capture) => {
                     capture = None;
@@ -433,6 +504,7 @@ impl Runtime {
                 captured_at_mono_ms,
                 frames,
             }) => {
+                self.screen_off_noticed = false;
                 let displays = frames.len();
                 // Each batch is dropped (zeroized) right after it is written;
                 // on a failed send the rest drop with the iterator.
@@ -449,6 +521,7 @@ impl Runtime {
                         PermissionState::Granted => PermissionState::Denied,
                         other => other,
                     };
+                    self.note_screen_permission(screen);
                     let perm = (WirePermissionState::from(screen), out.accessibility);
                     send(
                         conn,
@@ -476,6 +549,7 @@ impl Runtime {
         reported: &mut Reported,
     ) -> Result<(), Fail> {
         let timeout = self.config.send_timeout;
+        self.note_screen_permission(obs.permission);
         self.queue_signals(&mut obs);
         self.flush_pending(conn).await?;
 
@@ -536,6 +610,15 @@ impl Runtime {
             reported.foreground = Some(foreground);
         }
 
+        // After `Foreground`: the service drops the browser context when the
+        // app changes, and this brings the new one. `None` goes out as an
+        // empty context, which clears it. URLs are never logged.
+        if full || reported.browser.as_ref() != Some(&obs.browser) {
+            let msg = AgentMsg::Browser(obs.browser.clone().unwrap_or_default());
+            send(conn, timeout, &msg).await?;
+            reported.browser = Some(obs.browser);
+        }
+
         if full {
             reported.last_full = Some(now);
         }
@@ -553,9 +636,10 @@ async fn goodbye(conn: &mut AgentConnection<UnixStream>) {
 /// The socket to connect to: this account's own socket next to the
 /// configured path if the service bound one, else the configured path.
 fn resolve_socket(base: &std::path::Path) -> std::path::PathBuf {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    faro_ipc::resolve_agent_socket(base, uid)
+    match faro_ipc::current_account() {
+        Ok(account) => faro_ipc::resolve_agent_socket(base, account),
+        Err(_) => base.to_path_buf(),
+    }
 }
 
 #[cfg(test)]

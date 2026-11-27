@@ -4,19 +4,26 @@
 // serialized EncryptedItem) that `GET /v1/blobs/{id}` serves only to the
 // member and to allies it was sealed to; it is opened here with the
 // viewer's X25519 key, with the AAD that binds it to its event or report,
-// so the server can't move a body to another item unnoticed.
+// so the server can't move a body to another item unnoticed, and checked
+// against the `body_hash` its device signed, so the server can't replace
+// it either (`open.ts`). The signatures and each device's hash chain are
+// checked in `verify.ts`.
 
 import { api, seg } from '../api.ts';
-import { base64Std, fromUtf8, unb64 } from '../crypto/bytes.ts';
-import { eventBodyAad, reportBodyAad } from '../crypto/proto.ts';
-import { DecryptError, openItem, type EncryptedItem } from '../crypto/seal.ts';
+import { base64Std, unb64 } from '../crypto/bytes.ts';
+import type { DeviceEndorsement, Signed } from '../crypto/proto.ts';
+import type { EncryptedItem } from '../crypto/seal.ts';
+import { openFetched, type OpenFailure, type Opened } from './open.ts';
 import type {
 	BlurredThumbnail,
-	DailyReport,
-	EventBody,
+	ChainLink,
+	ChainResponse,
 	FeedEntry,
-	FeedResponse
+	FeedResponse,
+	Platform
 } from '../types.ts';
+
+export type { OpenFailure, Opened };
 
 export const PAGE = 500;
 /** Pages fetched for one view at most (5,000 items). */
@@ -27,11 +34,17 @@ export interface Loaded {
 	items: FeedEntry[];
 	/** True if the window holds more than MAX_PAGES pages. */
 	truncated: boolean;
+	/** What the instance says each device in `items` is (older instances: none). */
+	platforms: Record<string, Platform>;
+	/** The member-signed endorsement of each device in `items`. */
+	endorsements: Record<string, Signed<DeviceEndorsement>>;
 }
 
 /** Everything received since `sinceMs`, newest first. */
 export async function loadFeed(memberId: string, sinceMs: number): Promise<Loaded> {
 	const items: FeedEntry[] = [];
+	const platforms: Record<string, Platform> = {};
+	const endorsements: Record<string, Signed<DeviceEndorsement>> = {};
 	let cursor: string | null = null;
 	for (let page = 0; page < MAX_PAGES; page++) {
 		const q = new URLSearchParams({ member_id: memberId, limit: String(PAGE) });
@@ -39,15 +52,46 @@ export async function loadFeed(memberId: string, sinceMs: number): Promise<Loade
 		else q.set('since_ms', String(sinceMs));
 		const r: FeedResponse = await api.get<FeedResponse>(`/v1/ally/feed?${q}`);
 		items.push(...r.items);
-		if (!r.has_more || !r.next_cursor) return { items: items.reverse(), truncated: false };
+		Object.assign(platforms, r.device_platforms);
+		Object.assign(endorsements, r.device_endorsements);
+		if (!r.has_more || !r.next_cursor)
+			return { items: items.reverse(), truncated: false, platforms, endorsements };
 		cursor = r.next_cursor;
 	}
-	return { items: items.reverse(), truncated: true };
+	return { items: items.reverse(), truncated: true, platforms, endorsements };
 }
 
-export type Opened = { kind: 'event'; body: EventBody } | { kind: 'report'; report: DailyReport };
+export const CHAIN_PAGE = 1000;
+/** Headers fetched per device at most (20,000). */
+export const MAX_CHAIN_PAGES = 20;
 
-export type OpenFailure = 'not_shared' | 'gone' | 'broken';
+/**
+ * One device's stored headers from `lo` through `hi` (those the server
+ * has). `complete` is false if fetching stopped at the cap first.
+ */
+export async function loadChain(
+	memberId: string,
+	deviceId: string,
+	lo: number,
+	hi: number
+): Promise<{ links: ChainLink[]; complete: boolean }> {
+	const links: ChainLink[] = [];
+	let from = lo;
+	for (let page = 0; page < MAX_CHAIN_PAGES; page++) {
+		const q = new URLSearchParams({
+			member_id: memberId,
+			device_id: deviceId,
+			from_seq: String(from),
+			limit: String(CHAIN_PAGE)
+		});
+		const r = await api.get<ChainResponse>(`/v1/ally/chain?${q}`);
+		links.push(...r.links);
+		const last = r.links.at(-1)?.header?.seq;
+		if (!r.has_more || typeof last !== 'number' || last >= hi) return { links, complete: true };
+		from = last + 1;
+	}
+	return { links, complete: false };
+}
 
 const cache = new Map<string, Opened>();
 
@@ -64,7 +108,8 @@ export function hasContent(e: FeedEntry): boolean {
 
 /**
  * Fetch and decrypt an entry's content as `viewerId` with `secret`.
- * Throws an OpenFailure string when it can't be opened.
+ * Throws an OpenFailure string when it can't be opened, or when it isn't
+ * the content the entry's signed header commits to (`tampered`).
  */
 export async function openEntry(
 	e: FeedEntry,
@@ -85,30 +130,7 @@ export async function openEntry(
 		if ((err as { status?: number }).status === 404) throw 'gone' satisfies OpenFailure;
 		throw err;
 	}
-	const aad =
-		e.type === 'event'
-			? eventBodyAad(instanceId, e.device_id, e.seq)
-			: e.type === 'report'
-				? reportBodyAad(instanceId, e.device_id, e.period_start_ms, e.period_end_ms)
-				: new Uint8Array();
-	let text: string;
-	try {
-		text = fromUtf8(openItem(item, aad, viewerId, secret));
-	} catch (err) {
-		if (err instanceof DecryptError && err.reason === 'no_envelope') {
-			throw 'not_shared' satisfies OpenFailure;
-		}
-		throw 'broken' satisfies OpenFailure;
-	}
-	let opened: Opened;
-	try {
-		opened =
-			e.type === 'report'
-				? { kind: 'report', report: JSON.parse(text) as DailyReport }
-				: { kind: 'event', body: JSON.parse(text) as EventBody };
-	} catch {
-		throw 'broken' satisfies OpenFailure;
-	}
+	const opened = openFetched(e, item, instanceId, viewerId, secret);
 	cache.set(key, opened);
 	return opened;
 }
@@ -137,5 +159,7 @@ export const FAILURE_TEXT: Record<OpenFailure | 'unreadable', string> = {
 	unreadable: "The details were decrypted but aren't in a form this page can show.",
 	not_shared: 'Not shared with you: it was sealed before you were an ally, or to other keys.',
 	gone: 'The details are no longer stored (they expire under the retention settings).',
-	broken: "The details couldn't be decrypted. They may have been damaged or tampered with."
+	broken: "The details couldn't be decrypted. They may have been damaged or tampered with.",
+	tampered:
+		"These details aren't what the computer signed, so the server must have replaced them. They aren't shown."
 };

@@ -44,7 +44,12 @@
 //!   only its frames, foreground, idle/lock and permission state reach the
 //!   core. Other agents' latest state is kept and replayed when their
 //!   session becomes active (fast user switching). Tamper signals are
-//!   forwarded from every agent, labelled with the account.
+//!   forwarded from every agent, labelled with the account, but only those
+//!   an agent may originate, bounded and rate-limited per connection
+//!   ([`super::agent_tamper`]).
+//! * **Bounded text.** Window titles, app ids and names, and browser URLs
+//!   and titles are cut to [`faro_ipc::limits`] on arrival, so no agent
+//!   string can make an event too large for the instance.
 //! * **Frames only on request.** The service owns the schedule (§3.4):
 //!   `Frames` that do not answer an outstanding `CaptureNow` are dropped
 //!   (and zeroized) unread, so a misbehaving agent cannot make the
@@ -53,20 +58,38 @@
 //!   *late* answer (to a request whose answer window closed, or that was
 //!   withdrawn when the screen changed hands) is dropped too, but not held
 //!   against the agent: a slow agent is not a misbehaving one.
-//! * **Liveness.** Every agent is pinged every `ping_every`; a missed pong
-//!   drops the connection (a hung agent counts as a disconnect, §3.7).
+//! * **Captures on time.** The schedule is only as unpredictable as the
+//!   agent is prompt (§3.4), so an answer must arrive within
+//!   [`CAPTURE_ANSWER_WINDOW`] and its capture must have started within
+//!   [`CAPTURE_START_MAX_MS`] of the request, on the monotonic clock both
+//!   sides read. A capture stamped before the request answers an earlier
+//!   one and is dropped as late; one that started too late is a failed
+//!   capture (`CaptureFailed`, which counts towards `capture_failing`).
+//!   One capture carries at most [`MAX_FRAMES_PER_CAPTURE`] frames.
+//! * **Liveness.** Every agent is pinged every `ping_every`; a pong missing
+//!   after `ping_timeout` drops the connection (a hung agent counts as a
+//!   disconnect, §3.7). Deadlines are checked every second, not only when
+//!   the next ping is due.
 //!   The session list, with whether each session has an agent, is reported
 //!   to the core as [`SourceEvent::Sessions`], so it can raise tamper for a
 //!   session nobody monitors.
+//! * **Status menu.** Each agent gets `ServiceMsg::Status` right after
+//!   `Welcome` and whenever its view changes: [`MemberStatus::for_session`]
+//!   of the service's latest report (`SourceIo::status`), so one account's
+//!   agent never hears another's name, session or permissions. Only the
+//!   service sends it; nothing an agent sends changes it.
 
+use super::agent_tamper::TamperGate;
 use super::codesign;
 use super::sessions::{self, SessionEntry, SessionLister};
 use super::{
     BoxFuture, CaptureTarget, FrameSource, SessionStatus, SourceCommand, SourceEvent, SourceIo,
 };
+use faro_core::clock::{Clock, SystemClock};
 use faro_ipc::{
-    read_agent_hello, welcome_agent, AgentHello, AgentMsg, BindOptions, IpcError, IpcServer,
-    PeerInfo, ServiceConnection, ServiceMsg, ShutdownReason, HELLO_TIMEOUT,
+    limits, read_agent_hello, welcome_agent, AccountId, AgentHello, AgentMsg, BindOptions,
+    IpcError, IpcServer, MemberStatus, PeerInfo, ServerStream, ServiceConnection, ServiceMsg,
+    ShutdownReason, StatusReport, HELLO_TIMEOUT,
 };
 use faro_proto::body::account_label;
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,13 +97,36 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-/// How long a `CaptureNow` stays answerable.
-const CAPTURE_ANSWER_WINDOW: Duration = Duration::from_secs(30);
+/// How long a `CaptureNow` stays answerable: a capture that starts within
+/// [`CAPTURE_START_MAX_MS`] and then waits out ScreenCaptureKit's 5 s
+/// deadline for the display list and for a display
+/// (`faro_platform_macos::bridge::DEFAULT_TIMEOUT`). A normal capture
+/// answers within a second; Windows' desktop duplication and GDI are
+/// faster still.
+const CAPTURE_ANSWER_WINDOW: Duration = Duration::from_secs(15);
+/// Latest an answering capture may *start* after its request, on the
+/// monotonic clock agents stamp captures with (the agent reads its clock
+/// before it captures, so the stamp does not include the capture itself).
+/// Between the two the request crosses the socket and waits for the
+/// agent's platform worker, which may be busy with one state poll: on
+/// macOS at most a few Accessibility reads of 0.25 s each and a 0.5 s
+/// browser read. Normally a few milliseconds. A later start is a capture
+/// moved away from the moment the schedule picked (§3.4: a held or stopped
+/// agent), and fails.
+pub const CAPTURE_START_MAX_MS: u64 = 5_000;
+/// Most displays one capture may carry. More batches or frames sharing a
+/// capture time are unsolicited.
+const MAX_FRAMES_PER_CAPTURE: usize = 16;
+/// Most `Frames` messages one capture may take.
+const MAX_BATCHES_PER_CAPTURE: usize =
+    MAX_FRAMES_PER_CAPTURE.div_ceil(faro_ipc::MAX_FRAMES_PER_MESSAGE);
+/// Longest wait between deadline checks (pong and capture-answer
+/// deadlines); shorter when those deadlines are.
+const DEADLINE_CHECK: Duration = Duration::from_secs(1);
 /// Unsolicited `Frames` tolerated per connection before disconnecting.
 const MAX_UNSOLICITED: u32 = 3;
 /// Late answers an agent can be owed at once (see [`Agent::late`]).
@@ -108,7 +154,7 @@ pub enum PeerPolicy {
 #[derive(Clone)]
 pub struct IpcFrameSource {
     socket_path: PathBuf,
-    allowed_uids: BTreeSet<u32>,
+    allowed_uids: BTreeSet<AccountId>,
     ping_every: Duration,
     ping_timeout: Duration,
     code_requirement: Option<String>,
@@ -117,6 +163,13 @@ pub struct IpcFrameSource {
     capture_window: Duration,
     session_end_grace: Duration,
     recheck: Duration,
+    /// Windows: require the connection to come from the Windows session its
+    /// hello names. On unless [`IpcFrameSource::with_sessions`] replaced the
+    /// lister with a model.
+    check_windows_session: bool,
+    /// The clock agents stamp captures with (`faro_agent::identity::mono_ms`
+    /// reads the same OS clock as [`SystemClock`]); tests share theirs.
+    clock: Arc<dyn Clock>,
 }
 
 impl fmt::Debug for IpcFrameSource {
@@ -134,7 +187,7 @@ impl fmt::Debug for IpcFrameSource {
 impl IpcFrameSource {
     pub fn new(
         socket_path: impl Into<PathBuf>,
-        allowed_uids: impl IntoIterator<Item = u32>,
+        allowed_uids: impl IntoIterator<Item = AccountId>,
     ) -> Self {
         IpcFrameSource {
             socket_path: socket_path.into(),
@@ -143,11 +196,20 @@ impl IpcFrameSource {
             ping_timeout: faro_ipc::DEFAULT_PING_TIMEOUT,
             code_requirement: None,
             sessions: sessions::default_lister(),
-            per_account_sockets: euid() == 0,
+            per_account_sockets: sessions::is_privileged(),
             capture_window: CAPTURE_ANSWER_WINDOW,
             session_end_grace: SESSION_END_GRACE,
             recheck: SESSION_RECHECK,
+            check_windows_session: true,
+            clock: Arc::new(SystemClock::new()),
         }
+    }
+
+    /// Read capture request times from `clock` instead of the OS clock
+    /// (tests whose agents stamp captures with the same clock).
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn with_ping(mut self, every: Duration, timeout: Duration) -> Self {
@@ -164,9 +226,13 @@ impl IpcFrameSource {
     }
 
     /// Replace the session list (default: [`sessions::default_lister`]).
-    /// Tests use this to model logins, logouts and user switches.
+    /// Tests use this to model logins, logouts and user switches. The
+    /// modelled session ids are not real Windows sessions, so this also
+    /// turns off the check (Windows) that a connection comes from the
+    /// session it names; production never calls it.
     pub fn with_sessions(mut self, lister: SessionLister) -> Self {
         self.sessions = lister;
+        self.check_windows_session = false;
         self
     }
 
@@ -184,37 +250,65 @@ impl IpcFrameSource {
         self
     }
 
-    /// How peers will be verified, or why no agent can be accepted.
-    ///
-    /// A root service must verify the agent's code signature: otherwise any
-    /// program the member runs could stand in for the agent and report a
-    /// sleeping or locked screen forever. Only a `dev` build may skip it.
+    /// How peers will be verified, or why no agent can be accepted. See
+    /// [`peer_policy`].
     pub fn peer_policy(&self) -> Result<PeerPolicy, String> {
-        if let Some(r) = &self.code_requirement {
-            codesign::check_requirement(r).map_err(|e| format!("ipc.agent_requirement: {e}"))?;
-            return Ok(PeerPolicy::CodeRequirement(r.clone()));
-        }
-        if euid() != 0 || cfg!(feature = "dev") {
-            return Ok(PeerPolicy::UidOnly);
-        }
-        Err(
-            "a root service needs `ipc.agent_requirement` (the agent's code-signing \
-             requirement) to tell the real agent from any program the user runs; \
-             only builds with the `dev` feature accept agents by uid alone"
-                .into(),
-        )
+        peer_policy(self.code_requirement.as_deref())
     }
 }
 
-fn euid() -> u32 {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
+/// How the agent is verified beyond its uid, or why it can't be. The agent
+/// sockets and the enroll socket (`crate::enroll_server`) use the same rule.
+///
+/// A root service must verify the agent's code signature: otherwise any
+/// program the member runs could stand in for the agent and report a
+/// sleeping or locked screen forever. Only a `dev` build may skip it.
+pub fn peer_policy(code_requirement: Option<&str>) -> Result<PeerPolicy, String> {
+    if let Some(r) = code_requirement {
+        codesign::check_requirement(r).map_err(|e| format!("ipc.agent_requirement: {e}"))?;
+        return Ok(PeerPolicy::CodeRequirement(r.to_owned()));
+    }
+    if !sessions::is_privileged() || cfg!(feature = "dev") {
+        return Ok(PeerPolicy::UidOnly);
+    }
+    Err(
+        "a root service needs `ipc.agent_requirement` (the agent's code-signing \
+         requirement) to tell the real agent from any program the user runs; \
+         only builds with the `dev` feature accept agents by uid alone"
+            .into(),
+    )
+}
+
+/// Check `peer` against `policy` (after its uid was checked).
+pub(crate) fn check_policy(
+    peer: &PeerInfo,
+    policy: &Result<PeerPolicy, String>,
+) -> faro_ipc::Result<()> {
+    match policy {
+        Ok(PeerPolicy::UidOnly) => Ok(()),
+        Ok(PeerPolicy::CodeRequirement(r)) => codesign::verify_peer(peer, r)
+            .map_err(|e| IpcError::peer_rejected(format!("pid {:?}: {e}", peer.pid))),
+        Err(why) => Err(IpcError::peer_rejected(why.clone())),
+    }
+}
+
+/// The account a connecting peer runs as: its uid on Unix, the SID of the
+/// token it opened the pipe with on Windows.
+pub(crate) fn peer_account(peer: &PeerInfo) -> Option<AccountId> {
+    #[cfg(unix)]
+    {
+        Some(peer.uid)
+    }
+    #[cfg(windows)]
+    {
+        peer.windows_sid
+    }
 }
 
 /// The last good session list, shared with the peer verifiers.
 type SessionSnapshot = Arc<Mutex<Vec<SessionEntry>>>;
 
-fn snapshot_uids(s: &SessionSnapshot) -> BTreeSet<u32> {
+fn snapshot_uids(s: &SessionSnapshot) -> BTreeSet<AccountId> {
     s.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .iter()
@@ -226,38 +320,63 @@ fn snapshot_uids(s: &SessionSnapshot) -> BTreeSet<u32> {
 #[derive(Clone)]
 enum Admit {
     /// A per-account socket: only that account (or an allowed uid).
-    Account(u32),
+    Account(AccountId),
     /// The development socket: any uid that owns a listed session.
     AnySession(SessionSnapshot),
 }
 
 fn verifier(
     admit: Admit,
-    allowed: BTreeSet<u32>,
+    allowed: BTreeSet<AccountId>,
     policy: Result<PeerPolicy, String>,
 ) -> impl Fn(&PeerInfo) -> faro_ipc::Result<()> + Send + Sync {
     move |peer: &PeerInfo| {
-        let ok = allowed.contains(&peer.uid)
-            || match &admit {
-                Admit::Account(uid) => peer.uid == *uid,
-                Admit::AnySession(s) => snapshot_uids(s).contains(&peer.uid),
-            };
+        let account = peer_account(peer);
+        let ok = account.is_some_and(|a| {
+            allowed.contains(&a)
+                || match &admit {
+                    Admit::Account(uid) => a == *uid,
+                    Admit::AnySession(s) => snapshot_uids(s).contains(&a),
+                }
+        });
         if !ok {
             return Err(IpcError::peer_rejected(format!(
-                "uid {} has no session this socket serves",
-                peer.uid
+                "account {} has no session this socket serves",
+                account.map_or_else(|| "?".to_owned(), |a| a.to_string())
             )));
         }
-        match &policy {
-            Ok(PeerPolicy::UidOnly) => Ok(()),
-            Ok(PeerPolicy::CodeRequirement(r)) => codesign::verify_peer(peer, r)
-                .map_err(|e| IpcError::peer_rejected(format!("pid {:?}: {e}", peer.pid))),
-            Err(why) => Err(IpcError::peer_rejected(why.clone())),
-        }
+        check_policy(peer, &policy)
     }
 }
 
-fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
+/// How a listener is bound: an owner-only socket (mode 0600, owned by the
+/// account) on Unix; a pipe whose DACL names the account on Windows.
+/// `None`: the account this process runs as (a development service).
+pub(crate) fn bind_options(owner: Option<AccountId>) -> BindOptions {
+    #[cfg(unix)]
+    {
+        BindOptions {
+            mode: 0o600,
+            group: None,
+            owner,
+        }
+    }
+    #[cfg(windows)]
+    {
+        owner.map_or_else(BindOptions::default, BindOptions::for_account)
+    }
+}
+
+/// Create the socket's directory (0755) if it is missing. A pipe name has
+/// no directory.
+#[cfg(windows)]
+pub(crate) fn ensure_socket_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Create the socket's directory (0755) if it is missing.
+#[cfg(unix)]
+pub(crate) fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         if !dir.exists() {
             let mut b = std::fs::DirBuilder::new();
@@ -271,7 +390,7 @@ fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
 
 /// A connection whose `Hello` was read but not yet answered.
 struct Arrival {
-    conn: ServiceConnection<UnixStream>,
+    conn: ServiceConnection<ServerStream>,
     hello: AgentHello,
 }
 
@@ -289,6 +408,37 @@ impl Drop for Listener {
 /// slow or silent client cannot hold up the source.
 async fn listen(server: IpcServer, arrivals: mpsc::Sender<Arrival>) {
     loop {
+        // Windows verifies an agent's Authenticode signature, which can wait
+        // on the network: do it on a task of its own, not in this loop.
+        #[cfg(windows)]
+        {
+            match server.accept_pending().await {
+                Ok(pending) => {
+                    let tx = arrivals.clone();
+                    tokio::spawn(async move {
+                        let mut conn = match pending.verify().await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "agent connection refused");
+                                return;
+                            }
+                        };
+                        match read_agent_hello(&mut conn, HELLO_TIMEOUT).await {
+                            Ok(hello) => {
+                                let _ = tx.send(Arrival { conn, hello }).await;
+                            }
+                            Err(e) => tracing::warn!(error = %e, "agent handshake failed"),
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "agent connection refused");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            continue;
+        }
+        #[cfg(not(windows))]
         match server.accept().await {
             Ok(mut conn) => {
                 let tx = arrivals.clone();
@@ -320,7 +470,7 @@ struct Inbound {
 /// Own one agent's connection: forward what it sends, send what the source
 /// queues. Ends when either side closes; a `Shutdown` is the last message.
 async fn serve_agent(
-    mut conn: ServiceConnection<UnixStream>,
+    mut conn: ServiceConnection<ServerStream>,
     conn_id: u64,
     mut outbox: mpsc::Receiver<ServiceMsg>,
     inbox: mpsc::Sender<Inbound>,
@@ -413,9 +563,8 @@ struct Agent {
     tx: mpsc::Sender<ServiceMsg>,
     session: String,
     account: String,
-    /// Outstanding `CaptureNow`: when sent, and the capture time of the
-    /// first answering batch (later batches of the same capture share it).
-    capture: Option<(Instant, Option<u64>)>,
+    /// The outstanding `CaptureNow`.
+    capture: Option<Request>,
     unsolicited: u32,
     /// Requests that closed before any frames came (window passed, or
     /// withdrawn): the agent may still answer each once, late. Capped, so
@@ -427,6 +576,68 @@ struct Agent {
     ping: Option<(u64, Instant)>,
     goodbye: bool,
     cached: Cached,
+    /// The status view last queued to this agent.
+    status_sent: Option<MemberStatus>,
+    /// Which of its tamper signals are taken, and how many.
+    tamper: TamperGate,
+}
+
+/// An outstanding `CaptureNow`.
+#[derive(Debug, Clone, Copy)]
+struct Request {
+    /// When it was sent; the answer window runs from here.
+    sent: Instant,
+    /// The same moment on the clock agents stamp captures with.
+    sent_mono_ms: u64,
+    /// The capture time of the first answering batch (later batches of the
+    /// same capture share it).
+    first: Option<u64>,
+    /// `Frames` messages and frames taken for it so far.
+    batches: usize,
+    frames: usize,
+}
+
+impl Request {
+    fn new(sent_mono_ms: u64) -> Self {
+        Request {
+            sent: Instant::now(),
+            sent_mono_ms,
+            first: None,
+            batches: 0,
+            frames: 0,
+        }
+    }
+
+    fn unanswered(&self) -> bool {
+        self.first.is_none()
+    }
+}
+
+/// Windows: the connection must come from the session it names, and, where
+/// the service launches the agents, from the very process it launched there.
+/// The account check alone admits any process the user runs (their own
+/// `faro-agent.exe` copy that passes Authenticode is not enough: only the
+/// service-spawned process has the protected descriptor).
+#[cfg(windows)]
+fn windows_peer_ok(
+    peer: Option<&PeerInfo>,
+    session: &str,
+    check_session: bool,
+) -> Result<(), &'static str> {
+    let peer = peer.ok_or("no peer credentials")?;
+    let claimed = faro_platform_windows::service::parse_session_id(&faro_platform::SessionId(
+        session.to_owned(),
+    ));
+    if check_session {
+        let claimed = claimed.ok_or("not a Windows session id")?;
+        if peer.windows_session_id != Some(claimed) {
+            return Err("the connection is from a different Windows session than it names");
+        }
+    }
+    if !claimed.is_none_or(|c| crate::win::agent_pid_allowed(c, peer.pid)) {
+        return Err("the connecting process is not the agent the service launched in this session");
+    }
+    Ok(())
 }
 
 /// An agent that closed its connection; whether that was expected is
@@ -453,7 +664,10 @@ struct Run {
     inbox_tx: mpsc::Sender<Inbound>,
     sessions: Vec<SessionEntry>,
     snapshot: SessionSnapshot,
-    listeners: BTreeMap<Option<u32>, Listener>,
+    listeners: BTreeMap<Option<AccountId>, Listener>,
+    /// Consecutive `AddrInUse` failures binding each account pipe: someone
+    /// else holds the name.
+    bind_squatted: BTreeMap<Option<AccountId>, u32>,
     agents: BTreeMap<String, Agent>,
     departed: BTreeMap<String, Departure>,
     /// The last `Sessions` sent to the core.
@@ -462,6 +676,10 @@ struct Run {
     target: Option<CaptureTarget>,
     next_conn: u64,
     nonce: u64,
+    /// The service's status reports, made into each agent's view.
+    status: watch::Receiver<Option<Arc<StatusReport>>>,
+    /// The feed's sender is still there (a closed feed is not polled).
+    status_open: bool,
 }
 
 /// The core is gone: stop.
@@ -491,13 +709,14 @@ impl Run {
         self.sessions.iter().find(|s| s.id == session)
     }
 
-    fn bind(&self, path: &Path, owner: Option<u32>, admit: Admit) -> faro_ipc::Result<IpcServer> {
+    fn bind(
+        &self,
+        path: &Path,
+        owner: Option<AccountId>,
+        admit: Admit,
+    ) -> faro_ipc::Result<IpcServer> {
         ensure_socket_dir(path)?;
-        let options = BindOptions {
-            mode: 0o600,
-            group: None,
-            owner,
-        };
+        let options = bind_options(owner);
         IpcServer::bind_with(
             path,
             options,
@@ -508,7 +727,7 @@ impl Run {
     /// Bind sockets for accounts that gained a session, close those whose
     /// sessions all ended.
     fn sync_listeners(&mut self) {
-        let wanted: BTreeSet<Option<u32>> = if self.cfg.per_account_sockets {
+        let wanted: BTreeSet<Option<AccountId>> = if self.cfg.per_account_sockets {
             self.sessions
                 .iter()
                 .map(|s| s.uid)
@@ -536,14 +755,45 @@ impl Run {
             };
             match bound {
                 Ok(server) => {
+                    self.bind_squatted.remove(&key);
                     tracing::info!(path = %server.path().display(), uid = ?key, "listening for session agents");
                     let task = tokio::spawn(listen(server, self.arrivals_tx.clone()));
                     self.listeners.insert(key, Listener(task));
                 }
+                Err(IpcError::AddrInUse(path)) => self.pipe_squatted(key, &path),
                 Err(e) => {
                     tracing::warn!(error = %e, uid = ?key, "cannot bind agent socket; will retry")
                 }
             }
+        }
+    }
+
+    /// Binding an account pipe keeps failing because the name is taken
+    /// (`ERROR_ACCESS_DENIED` / `ERROR_PIPE_BUSY` on creation). Nothing
+    /// legitimate holds the name, so after a few tries this is someone
+    /// squatting it to keep the real agent out: log it and raise the
+    /// no-agent tamper path now instead of after the usual silent period.
+    fn pipe_squatted(&mut self, key: Option<AccountId>, path: &Path) {
+        const SQUAT_AFTER: u32 = 3;
+        let n = self.bind_squatted.entry(key).or_insert(0);
+        *n += 1;
+        let n = *n;
+        if n < SQUAT_AFTER {
+            tracing::warn!(path = %path.display(), uid = ?key, attempt = n, "agent pipe name is in use; will retry");
+            return;
+        }
+        let account = self
+            .sessions
+            .iter()
+            .find(|s| Some(s.uid) == key)
+            .map(|s| s.account.clone());
+        if n == SQUAT_AFTER {
+            tracing::error!(path = %path.display(), uid = ?key, account = ?account, attempts = n, "the agent pipe name is held by another process: possible squatting to keep the agent out; raising tamper");
+            let user = account.clone().unwrap_or_else(|| "unknown".to_owned());
+            let _ = self.events.try_send(SourceEvent::Tamper {
+                signal: faro_proto::body::TamperSignal::UnmonitoredUserSession { user },
+                account,
+            });
         }
     }
 
@@ -560,6 +810,13 @@ impl Run {
     }
 
     async fn report_sessions(&mut self) -> Step {
+        #[cfg(windows)]
+        crate::win::set_connected_agents(
+            self.agents
+                .keys()
+                .filter_map(|id| id.strip_prefix("wts:")?.parse().ok())
+                .collect(),
+        );
         let now = self.statuses();
         if self.reported.as_ref() == Some(&now) {
             return Ok(());
@@ -596,7 +853,7 @@ impl Run {
         // An answer to a capture sent to the old target no longer counts
         // (and arrives late, which is not the agent's fault).
         for a in self.agents.values_mut() {
-            if let Some((_, None)) = a.capture.take() {
+            if a.capture.take().is_some_and(|r| r.unanswered()) {
                 a.late = (a.late + 1).min(MAX_LATE);
             }
         }
@@ -645,6 +902,13 @@ impl Run {
             };
             if let Some((expected, reason)) = self.decide(&id, d, force) {
                 let d = self.departed.remove(&id).expect("present");
+                // The core stops capturing from a session whose agent is
+                // reported gone. Forget the target here too, so that an
+                // agent reconnecting in the same session (a restart) is
+                // announced as the target again. Otherwise the target
+                // looks unchanged, nothing is announced, and captures stop
+                // without a word.
+                let was_target = self.target.as_ref().is_some_and(|t| t.session == id);
                 self.emit(SourceEvent::AgentDisconnected {
                     session: id,
                     account: d.account,
@@ -652,6 +916,10 @@ impl Run {
                     expected,
                 })
                 .await?;
+                if was_target {
+                    self.target = None;
+                    self.emit(SourceEvent::CaptureTarget(None)).await?;
+                }
             }
         }
         Ok(())
@@ -698,6 +966,35 @@ impl Run {
         self.sync_target().await
     }
 
+    /// Queue `session`'s status view to its agent if it changed since the
+    /// last one (`ServiceMsg::Status`, for the status menu). The view is
+    /// [`MemberStatus::for_session`]: that session's own state and the
+    /// computer's, nothing about other accounts. Best effort: a full queue
+    /// skips it (the next change brings it up to date) rather than counting
+    /// against the agent, since the service, not the agent, chose to send.
+    fn offer_status(&mut self, session: &str) {
+        let Some(report) = self.status.borrow().clone() else {
+            return;
+        };
+        let Some(a) = self.agents.get_mut(session) else {
+            return;
+        };
+        let view = MemberStatus::for_session(&report, session);
+        if a.status_sent.as_ref() == Some(&view) {
+            return;
+        }
+        if a.tx.try_send(ServiceMsg::Status(view.clone())).is_ok() {
+            a.status_sent = Some(view);
+        }
+    }
+
+    fn offer_status_to_all(&mut self) {
+        let sessions: Vec<String> = self.agents.keys().cloned().collect();
+        for s in sessions {
+            self.offer_status(&s);
+        }
+    }
+
     /// Queue a message to an agent; a full or closed queue means the agent
     /// is gone or stuck.
     async fn send_to(&mut self, session: &str, msg: ServiceMsg) -> Step {
@@ -722,7 +1019,7 @@ impl Run {
     }
 
     async fn on_arrival(&mut self, mut arrival: Arrival) -> Step {
-        let peer_uid = arrival.conn.peer().map(|p| p.uid);
+        let peer_uid = arrival.conn.peer().and_then(peer_account);
         let hello = arrival.hello;
         if self.listed(&hello.session).is_none() {
             // Perhaps a login the last recheck has not seen yet.
@@ -733,7 +1030,16 @@ impl Run {
             _ => false,
         };
         if !owner_ok {
-            tracing::warn!(session = %hello.session, uid = ?peer_uid, "refusing an agent for a session that is not listed or not its own");
+            tracing::warn!(session = %hello.session, uid = ?peer_uid.map(|a| a.to_string()), "refusing an agent for a session that is not listed or not its own");
+            return Ok(());
+        }
+        #[cfg(windows)]
+        if let Err(why) = windows_peer_ok(
+            arrival.conn.peer(),
+            &hello.session,
+            self.cfg.check_windows_session,
+        ) {
+            tracing::warn!(session = %hello.session, why, "refusing an agent connection");
             return Ok(());
         }
         if self.agents.contains_key(&hello.session) {
@@ -741,7 +1047,7 @@ impl Run {
             // dropped by the ping check). A second connection is either an
             // impostor or a relaunched agent racing the old one's close;
             // closing before `Welcome` makes a real agent retry shortly.
-            tracing::warn!(session = %hello.session, uid = ?peer_uid, "refusing a second agent connection for a session whose agent is connected");
+            tracing::warn!(session = %hello.session, uid = ?peer_uid.map(|a| a.to_string()), "refusing a second agent connection for a session whose agent is connected");
             return Ok(());
         }
         if let Err(e) = welcome_agent(&mut arrival.conn).await {
@@ -766,7 +1072,7 @@ impl Run {
             rx,
             self.inbox_tx.clone(),
         ));
-        tracing::info!(pid = hello.pid, uid = ?peer_uid, account = %account, version = %hello.agent_version, "agent connected");
+        tracing::info!(pid = hello.pid, uid = ?peer_uid.map(|a| a.to_string()), account = %account, version = %hello.agent_version, "agent connected");
         self.agents.insert(
             hello.session.clone(),
             Agent {
@@ -781,8 +1087,11 @@ impl Run {
                 ping: None,
                 goodbye: false,
                 cached: Cached::default(),
+                status_sent: None,
+                tamper: TamperGate::new(Instant::now()),
             },
         );
+        self.offer_status(&hello.session);
         self.emit(SourceEvent::AgentConnected {
             session: hello.session,
             account,
@@ -846,8 +1155,9 @@ impl Run {
                         })
                         .await;
                 };
+                let sent_mono_ms = self.cfg.clock.mono_ms();
                 if let Some(a) = self.agents.get_mut(&session) {
-                    a.capture = Some((Instant::now(), None));
+                    a.capture = Some(Request::new(sent_mono_ms));
                 }
                 self.send_to(&session, ServiceMsg::CaptureNow { reason })
                     .await
@@ -876,7 +1186,10 @@ impl Run {
         }
     }
 
-    async fn on_ping(&mut self) -> Step {
+    /// Enforce the pong and capture-answer deadlines. Runs every
+    /// [`DEADLINE_CHECK`] (or sooner), not only when the next ping is due,
+    /// so an agent has the ping timeout to answer, not the ping interval.
+    async fn on_deadlines(&mut self) -> Step {
         let sessions: Vec<String> = self.agents.keys().cloned().collect();
         for session in sessions {
             let timeout = self.cfg.ping_timeout;
@@ -894,34 +1207,42 @@ impl Run {
                 continue;
             }
             let mut unanswered = false;
-            if let Some((sent, first)) = a.capture {
-                if sent.elapsed() > window {
+            if let Some(r) = a.capture {
+                if r.sent.elapsed() > window {
                     // The answer window closed. Only a request that got no
                     // frames at all is a failure; an answered one just
                     // stops accepting continuation batches.
                     a.capture = None;
-                    unanswered = first.is_none();
+                    unanswered = r.unanswered();
                     if unanswered {
                         a.late = (a.late + 1).min(MAX_LATE);
                     }
                 }
             }
-            let ping = if a.ping.is_none() {
-                self.nonce = self.nonce.wrapping_add(1);
-                a.ping = Some((self.nonce, Instant::now()));
-                Some(self.nonce)
-            } else {
-                None
-            };
             if unanswered && self.is_target(&session) {
                 self.emit(SourceEvent::CaptureFailed {
                     reason: "agent did not answer the capture request".into(),
                 })
                 .await?;
             }
-            if let Some(nonce) = ping {
-                self.send_to(&session, ServiceMsg::Ping { nonce }).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_ping(&mut self) -> Step {
+        self.on_deadlines().await?;
+        let sessions: Vec<String> = self.agents.keys().cloned().collect();
+        for session in sessions {
+            let Some(a) = self.agents.get_mut(&session) else {
+                continue;
+            };
+            if a.ping.is_some() {
+                continue;
             }
+            self.nonce = self.nonce.wrapping_add(1);
+            let nonce = self.nonce;
+            a.ping = Some((nonce, Instant::now()));
+            self.send_to(&session, ServiceMsg::Ping { nonce }).await?;
         }
         Ok(())
     }
@@ -973,7 +1294,30 @@ impl Run {
             let _ = tokio::time::timeout(left, tx.closed()).await;
         }
         self.listeners.clear();
+        #[cfg(windows)]
+        crate::win::set_connected_agents(Default::default());
     }
+}
+
+/// Session changes the SCM reported (Windows), so the list is re-read at
+/// once rather than at the next recheck. Never ready elsewhere.
+#[cfg(windows)]
+fn session_change_feed() -> Option<watch::Receiver<u64>> {
+    Some(crate::win::session_changes())
+}
+
+#[cfg(not(windows))]
+fn session_change_feed() -> Option<watch::Receiver<u64>> {
+    None
+}
+
+async fn session_changed(feed: &mut Option<watch::Receiver<u64>>) {
+    if let Some(rx) = feed {
+        if rx.changed().await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }
 
 impl IpcFrameSource {
@@ -981,6 +1325,7 @@ impl IpcFrameSource {
         let SourceIo {
             mut commands,
             events,
+            status,
         } = io;
         let policy = self.peer_policy();
         if let Err(why) = &policy {
@@ -992,8 +1337,16 @@ impl IpcFrameSource {
         let (inbox_tx, mut inbox) = mpsc::channel(32);
         let mut ping_tick = tokio::time::interval(self.ping_every);
         ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut session_feed = session_change_feed();
         let mut recheck = tokio::time::interval(self.recheck);
         recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut deadlines = tokio::time::interval(
+            DEADLINE_CHECK
+                .min(self.ping_timeout / 4)
+                .min(self.capture_window / 4)
+                .max(Duration::from_millis(10)),
+        );
+        deadlines.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut run = Run {
             cfg: self,
             policy,
@@ -1003,12 +1356,15 @@ impl IpcFrameSource {
             sessions: Vec::new(),
             snapshot: Arc::default(),
             listeners: BTreeMap::new(),
+            bind_squatted: BTreeMap::new(),
             agents: BTreeMap::new(),
             departed: BTreeMap::new(),
             reported: None,
             target: None,
             next_conn: 0,
             nonce: 0,
+            status,
+            status_open: true,
         };
         run.refresh_sessions();
         run.sync_listeners();
@@ -1025,7 +1381,16 @@ impl IpcFrameSource {
                 Some(a) = arrivals.recv() => run.on_arrival(a).await,
                 Some(m) = inbox.recv() => run.on_inbound(m).await,
                 _ = ping_tick.tick() => run.on_ping().await,
+                _ = deadlines.tick() => run.on_deadlines().await,
                 _ = recheck.tick() => run.on_recheck().await,
+                _ = session_changed(&mut session_feed) => run.on_recheck().await,
+                r = run.status.changed(), if run.status_open => {
+                    match r {
+                        Ok(()) => run.offer_status_to_all(),
+                        Err(_) => run.status_open = false,
+                    }
+                    Ok(())
+                }
             };
             if step.is_err() {
                 break;
@@ -1043,17 +1408,22 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
             frames,
         } => {
             let answers = match a.capture {
-                Some((sent, first)) if sent.elapsed() <= window => {
-                    first.is_none_or(|t| t == captured_at_mono_ms)
-                }
+                Some(r) if r.sent.elapsed() <= window => match r.first {
+                    // A capture taken before the request answers an earlier
+                    // one (the agent coalesces requests that arrive while
+                    // it captures), never this one.
+                    None => captured_at_mono_ms >= r.sent_mono_ms,
+                    Some(t) => t == captured_at_mono_ms,
+                },
                 _ => false,
             };
             if !answers {
                 // A late answer: to a request still open but past its window
-                // (the ping tick has not closed it yet), to one that closed
-                // unanswered, or more batches of such an answer.
-                let open_but_late =
-                    matches!(a.capture, Some((sent, None)) if sent.elapsed() > window);
+                // (the deadline check has not closed it yet), to one that
+                // closed unanswered, a capture taken before the request, or
+                // more batches of such an answer.
+                let open_but_late = matches!(a.capture,
+                    Some(r) if r.unanswered() && r.sent.elapsed() > window);
                 let excused = if open_but_late || a.late_ts == Some(captured_at_mono_ms) {
                     true
                 } else if a.late > 0 {
@@ -1083,8 +1453,45 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
                 a.capture = None;
                 return Handled::Nothing;
             }
-            if let Some(c) = a.capture.as_mut() {
-                c.1 = Some(captured_at_mono_ms);
+            let Some(r) = a.capture.as_mut() else {
+                // `answers` needs an outstanding request.
+                return Handled::Nothing;
+            };
+            if r.unanswered() {
+                let lag_ms = captured_at_mono_ms - r.sent_mono_ms;
+                if lag_ms > CAPTURE_START_MAX_MS {
+                    // Taken well after the moment the schedule picked: a
+                    // failed capture. Its other batches are dropped quietly.
+                    drop(frames);
+                    a.capture = None;
+                    a.late_ts = Some(captured_at_mono_ms);
+                    tracing::warn!(lag_ms, "capture taken long after the request; refused");
+                    return Handled::Forward(SourceEvent::CaptureFailed {
+                        reason: format!(
+                            "capture taken {} s after the request",
+                            lag_ms.div_ceil(1000)
+                        ),
+                    });
+                }
+                r.first = Some(captured_at_mono_ms);
+            }
+            r.batches += 1;
+            r.frames = r.frames.saturating_add(frames.len());
+            if r.batches > MAX_BATCHES_PER_CAPTURE || r.frames > MAX_FRAMES_PER_CAPTURE {
+                // More displays than a capture has: unsolicited frames under
+                // an answered capture's time.
+                drop(frames);
+                a.capture = None;
+                a.unsolicited += 1;
+                tracing::warn!(
+                    count = a.unsolicited,
+                    "agent sent more frames than a capture has"
+                );
+                return if a.unsolicited > MAX_UNSOLICITED {
+                    Handled::Violation("repeated unsolicited frames".into())
+                } else {
+                    Handled::Nothing
+                };
             }
             let mut out = Vec::with_capacity(frames.len());
             for wf in frames {
@@ -1105,12 +1512,26 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
             }
             Handled::Forward(SourceEvent::Frames(out))
         }
-        AgentMsg::Foreground { app, title } => state(
-            target,
-            &mut a.cached.foreground,
-            SourceEvent::Foreground { app, title },
-        ),
-        AgentMsg::Browser(b) => state(target, &mut a.cached.browser, SourceEvent::Browser(b)),
+        AgentMsg::Foreground { mut app, mut title } => {
+            // Any app picks its own title: bound it before it can reach a
+            // `flag` body (faro_ipc::limits).
+            let cut = app.as_mut().is_some_and(limits::clamp_app)
+                | limits::clamp_opt(&mut title, limits::MAX_TITLE_BYTES);
+            if cut {
+                tracing::debug!("agent foreground text cut to the IPC limits");
+            }
+            state(
+                target,
+                &mut a.cached.foreground,
+                SourceEvent::Foreground { app, title },
+            )
+        }
+        AgentMsg::Browser(mut b) => {
+            if limits::clamp_browser(&mut b) {
+                tracing::debug!("agent browser context cut to the IPC limits");
+            }
+            state(target, &mut a.cached.browser, SourceEvent::Browser(b))
+        }
         AgentMsg::Session {
             idle_secs,
             locked,
@@ -1142,10 +1563,13 @@ fn handle_msg(a: &mut Agent, msg: AgentMsg, window: Duration, target: bool) -> H
                 accessibility,
             },
         ),
-        AgentMsg::Tamper(t) => Handled::Forward(SourceEvent::Tamper {
-            signal: t,
-            account: Some(a.account.clone()).filter(|s| !s.is_empty()),
-        }),
+        AgentMsg::Tamper(t) => match a.tamper.admit(t, Instant::now()) {
+            Some(signal) => Handled::Forward(SourceEvent::Tamper {
+                signal,
+                account: Some(a.account.clone()).filter(|s| !s.is_empty()),
+            }),
+            None => Handled::Nothing,
+        },
         AgentMsg::CaptureFailed { reason } => {
             a.capture = None;
             if !target {
@@ -1196,7 +1620,30 @@ impl FrameSource for IpcFrameSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_peer_must_come_from_the_session_it_names() {
+        let peer = |session: Option<u32>| PeerInfo {
+            uid: PeerInfo::NO_ID,
+            gid: PeerInfo::NO_ID,
+            pid: Some(4242),
+            macos_audit_token: None,
+            windows_sid: None,
+            windows_session_id: session,
+        };
+        assert!(windows_peer_ok(Some(&peer(Some(3))), "wts:3", true).is_ok());
+        assert!(windows_peer_ok(Some(&peer(Some(4))), "wts:3", true).is_err());
+        assert!(windows_peer_ok(Some(&peer(None)), "wts:3", true).is_err());
+        assert!(windows_peer_ok(Some(&peer(Some(3))), "uid:501", true).is_err());
+        assert!(windows_peer_ok(None, "wts:3", true).is_err());
+    }
+
     use faro_ipc::{hello, AgentConnection, IpcClient, WireFrame, WirePixelFormat};
+
+    fn own_account() -> AccountId {
+        faro_ipc::current_account().unwrap()
+    }
 
     fn wire_frame() -> WireFrame {
         WireFrame::new(4, 4, WirePixelFormat::Rgba8, 0, vec![7u8; 64]).unwrap()
@@ -1219,7 +1666,7 @@ mod tests {
         fn log_in(&self, id: &str, active: bool) {
             self.0.lock().unwrap().push(SessionEntry {
                 id: id.into(),
-                uid: euid(),
+                uid: own_account(),
                 account: format!("acct-{id}"),
                 active,
             });
@@ -1244,20 +1691,44 @@ mod tests {
         cmd: mpsc::Sender<SourceCommand>,
         ev: mpsc::Receiver<SourceEvent>,
         task: JoinHandle<()>,
+        status: watch::Sender<Option<Arc<StatusReport>>>,
+        /// The clock the source reads request times from, which the test
+        /// agents stamp their captures with (it starts at 0).
+        clock: Arc<faro_core::ManualClock>,
         _dir: tempfile::TempDir,
     }
 
     impl Harness {
         async fn start(logins: &Logins, capture_window: Duration) -> Harness {
+            Self::start_with(logins, capture_window, |s| s).await
+        }
+
+        /// As [`start`](Self::start), with `configure` applied to the source.
+        async fn start_with(
+            logins: &Logins,
+            capture_window: Duration,
+            configure: impl FnOnce(IpcFrameSource) -> IpcFrameSource,
+        ) -> Harness {
             // Private, whatever the umask: the socket checks refuse a group-writable
             // directory, and tempfile leaves the mode to the umask (002 on many Linux
             // accounts).
+            #[cfg(unix)]
             let dir = tempfile::Builder::new()
                 .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
                 .tempdir()
                 .unwrap();
+            #[cfg(windows)]
+            let dir = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
             let sock = dir.path().join("run").join("agent.sock");
-            let mut src = IpcFrameSource::new(&sock, [])
+            // A pipe name is unique per harness; the temp directory only
+            // supplies the unique part.
+            #[cfg(windows)]
+            let sock = PathBuf::from(format!(
+                r"\\.\pipe\faro-test-{}\agent",
+                dir.path().file_name().unwrap().to_string_lossy()
+            ));
+            let src = IpcFrameSource::new(&sock, [])
                 .with_ping(Duration::from_millis(50), Duration::from_secs(60))
                 .with_sessions(logins.lister())
                 .with_timings(
@@ -1265,15 +1736,23 @@ mod tests {
                     Duration::from_millis(1000),
                     Duration::from_millis(20),
                 );
+            let clock = Arc::new(faro_core::ManualClock::new(0, 0));
+            let mut src = configure(src.with_clock(clock.clone()));
             // Even when the tests run as root: one socket for everyone.
             src.per_account_sockets = false;
+            // The made-up session ids are not Windows sessions.
+            src.check_windows_session = false;
             let (cmd, cmd_rx) = mpsc::channel(4);
             let (ev_tx, mut ev) = mpsc::channel(64);
+            let (status, status_rx) = watch::channel(None);
             let task = tokio::spawn(Box::new(src).run(SourceIo {
                 commands: cmd_rx,
                 events: ev_tx,
+                status: status_rx,
             }));
             assert!(matches!(ev.recv().await, Some(SourceEvent::Sessions(_))));
+            // The listeners are bound before the first `Sessions` report.
+            #[cfg(unix)]
             for _ in 0..400 {
                 if sock.exists() {
                     break;
@@ -1285,21 +1764,37 @@ mod tests {
                 cmd,
                 ev,
                 task,
+                status,
+                clock,
                 _dir: dir,
             }
         }
 
         /// Connect an agent for `session`; returns once the source reports
         /// it connected.
-        async fn connect(&mut self, session: &str) -> AgentConnection<UnixStream> {
-            let mut agent = IpcClient::connect(&self.sock).await.unwrap();
-            hello(
-                &mut agent,
-                AgentHello::new("test-agent", session, "me"),
-                Duration::from_secs(5),
-            )
-            .await
-            .unwrap();
+        async fn connect(&mut self, session: &str) -> AgentConnection<faro_ipc::ClientStream> {
+            // A pipe notices an agent's departure a moment after a socket
+            // would, so a reconnect can be refused (before `Welcome`, as a
+            // real agent expects) while the old connection is still being
+            // cleared. Retry like a real agent.
+            let mut tries = 0;
+            let agent = loop {
+                let mut agent = IpcClient::connect(&self.sock).await.unwrap();
+                let said = hello(
+                    &mut agent,
+                    AgentHello::new("test-agent", session, "me"),
+                    Duration::from_secs(5),
+                )
+                .await;
+                match said {
+                    Ok(_) => break agent,
+                    Err(_) if tries < 50 => {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(e) => panic!("agent handshake: {e}"),
+                }
+            };
             self.until(
                 |e| matches!(e, SourceEvent::AgentConnected { session: s, .. } if s == session),
             )
@@ -1336,7 +1831,7 @@ mod tests {
 
     /// Answer pings until `want` arrives.
     async fn serve_until(
-        agent: &mut AgentConnection<UnixStream>,
+        agent: &mut AgentConnection<faro_ipc::ClientStream>,
         mut want: impl FnMut(&ServiceMsg) -> bool,
     ) -> ServiceMsg {
         loop {
@@ -1352,7 +1847,7 @@ mod tests {
     }
 
     /// Answer pings for `d` of real time.
-    async fn serve_for(agent: &mut AgentConnection<UnixStream>, d: Duration) {
+    async fn serve_for(agent: &mut AgentConnection<faro_ipc::ClientStream>, d: Duration) {
         let _ = tokio::time::timeout(d, serve_until(agent, |_| false)).await;
     }
 
@@ -1399,6 +1894,97 @@ mod tests {
             SourceEvent::Frames(f) => assert_eq!(f[0].width(), 4),
             other => panic!("unexpected {other:?}"),
         }
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// An agent can't forge the service's own tamper signals, flood them, or
+    /// send a title too large for a `flag` body (#190, #191).
+    #[tokio::test]
+    async fn agent_input_is_bounded_and_service_signals_are_refused() {
+        use faro_proto::body::{AppInfo, TamperSignal};
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+
+        let forged = [
+            TamperSignal::AgentKilledRepeatedly {
+                count: 99,
+                window_secs: 1,
+            },
+            TamperSignal::IntegrityFailure {
+                component: "faro-service".into(),
+            },
+            TamperSignal::ClockManipulation {
+                wall_delta_ms: 1,
+                mono_delta_ms: 0,
+            },
+            TamperSignal::CaptureFailing {
+                consecutive_failures: 5,
+            },
+            TamperSignal::UnmonitoredUserSession {
+                user: "someone-else".into(),
+            },
+        ];
+        for t in forged {
+            agent.send(&AgentMsg::Tamper(t)).await.unwrap();
+        }
+        // Many more than the burst of one allowed signal.
+        for i in 0..(super::super::agent_tamper::BURST * 3) {
+            agent
+                .send(&AgentMsg::Tamper(TamperSignal::WindowHiddenFromCapture {
+                    app: format!("App {i}"),
+                }))
+                .await
+                .unwrap();
+        }
+        agent
+            .send(&AgentMsg::Foreground {
+                app: Some(AppInfo {
+                    id: "x".repeat(1 << 20),
+                    name: Some("Viewer".into()),
+                }),
+                title: Some("t".repeat(5 << 20)),
+            })
+            .await
+            .unwrap();
+        let mut tampers = Vec::new();
+        loop {
+            match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+                SourceEvent::Tamper { signal, .. } => tampers.push(signal),
+                SourceEvent::Foreground { app, title } => {
+                    assert_eq!(title.map(|t| t.len()), Some(limits::MAX_TITLE_BYTES));
+                    assert_eq!(app.map(|a| a.id.len()), Some(limits::MAX_APP_ID_BYTES));
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        // The Windows agent's per-display check sends `capture_failing`.
+        let capture_failing = TamperSignal::CaptureFailing {
+            consecutive_failures: 5,
+        };
+        assert_eq!(
+            tampers[..2],
+            [
+                TamperSignal::IntegrityFailure {
+                    component: super::super::agent_tamper::REFUSED_COMPONENT.into()
+                },
+                capture_failing,
+            ],
+            "one report for the refused signals"
+        );
+        let hidden = tampers[2..]
+            .iter()
+            .filter(|s| matches!(s, TamperSignal::WindowHiddenFromCapture { .. }))
+            .count();
+        assert_eq!(tampers.len(), 2 + hidden);
+        assert_eq!(
+            hidden + 1,
+            super::super::agent_tamper::BURST as usize,
+            "rate-limited per connection (capture_failing used one)"
+        );
         drop(agent);
         h.stop().await;
     }
@@ -1506,13 +2092,16 @@ mod tests {
 
         // Frames for requests that were never made: a flood ends it.
         for i in 0..=(MAX_UNSOLICITED + MAX_LATE) {
-            agent
+            let sent = agent
                 .send(&AgentMsg::Frames {
                     captured_at_mono_ms: 1_000 + u64::from(i),
                     frames: vec![wire_frame()],
                 })
-                .await
-                .unwrap();
+                .await;
+            // The service may close the connection before the last one.
+            if sent.is_err() {
+                break;
+            }
         }
         match h
             .until(|e| matches!(e, SourceEvent::AgentDisconnected { .. }))
@@ -1522,6 +2111,118 @@ mod tests {
                 reason, expected, ..
             } => {
                 assert!(!expected && reason.contains("unsolicited"), "{reason}")
+            }
+            _ => unreachable!(),
+        }
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// Ask the source for a capture and wait for the agent to receive it.
+    async fn request(h: &Harness, agent: &mut AgentConnection<faro_ipc::ClientStream>) {
+        h.cmd
+            .send(SourceCommand::CaptureNow(
+                faro_ipc::CaptureReason::Scheduled,
+            ))
+            .await
+            .unwrap();
+        serve_until(agent, |m| matches!(m, ServiceMsg::CaptureNow { .. })).await;
+    }
+
+    /// #192: an answer is judged by when its capture was taken. Taken
+    /// before the request, it answers an earlier one and is dropped; taken
+    /// more than a few seconds after, it is a failed capture, whenever it
+    /// arrives. One capture carries a bounded number of frames.
+    #[tokio::test]
+    async fn captures_must_be_taken_promptly_after_the_request() {
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+        h.clock.advance(10_000);
+
+        request(&h, &mut agent).await;
+        // Stamped before the request: not an answer.
+        agent
+            .send(&AgentMsg::Frames {
+                captured_at_mono_ms: 9_000,
+                frames: vec![wire_frame()],
+            })
+            .await
+            .unwrap();
+        // The agent was held for 6 s before capturing.
+        let late = 10_000 + CAPTURE_START_MAX_MS + 1_000;
+        for _ in 0..2 {
+            agent
+                .send(&AgentMsg::Frames {
+                    captured_at_mono_ms: late,
+                    frames: vec![wire_frame()],
+                })
+                .await
+                .unwrap();
+        }
+        match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+            SourceEvent::CaptureFailed { reason } => {
+                assert_eq!(reason, "capture taken 6 s after the request")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A prompt answer is forwarded, up to MAX_FRAMES_PER_CAPTURE frames.
+        request(&h, &mut agent).await;
+        let batches = MAX_BATCHES_PER_CAPTURE + 2;
+        for _ in 0..batches {
+            agent
+                .send(&AgentMsg::Frames {
+                    captured_at_mono_ms: 10_050,
+                    frames: (0..faro_ipc::MAX_FRAMES_PER_MESSAGE)
+                        .map(|_| wire_frame())
+                        .collect(),
+                })
+                .await
+                .unwrap();
+        }
+        let mut frames = 0;
+        while frames < MAX_FRAMES_PER_CAPTURE {
+            match h.until(|e| !matches!(e, SourceEvent::Sessions(_))).await {
+                SourceEvent::Frames(f) => frames += f.len(),
+                other => panic!("{other:?}"),
+            }
+        }
+        serve_for(&mut agent, Duration::from_millis(300)).await;
+        while let Ok(ev) = h.ev.try_recv() {
+            assert!(
+                matches!(ev, SourceEvent::Sessions(_)),
+                "nothing past the bound, nothing else: {ev:?}"
+            );
+        }
+        assert_eq!(frames, MAX_FRAMES_PER_CAPTURE);
+        drop(agent);
+        h.stop().await;
+    }
+
+    /// A pong is due within the ping timeout, not by the next ping.
+    #[tokio::test]
+    async fn a_missed_pong_is_noticed_before_the_next_ping() {
+        let logins = Logins::with(&[("s1", true)]);
+        // Pings every 30 s, answered within 200 ms.
+        let mut h = Harness::start_with(&logins, Duration::from_secs(30), |src| {
+            src.with_ping(Duration::from_secs(30), Duration::from_millis(200))
+        })
+        .await;
+        let mut agent = h.connect("s1").await;
+        // The first ping goes out at once; never answer it.
+        let m = agent.recv().await.unwrap();
+        assert!(matches!(m, ServiceMsg::Ping { .. }), "{m:?}");
+        let gone = tokio::time::timeout(
+            Duration::from_secs(5),
+            h.until(|e| matches!(e, SourceEvent::AgentDisconnected { .. })),
+        )
+        .await
+        .expect("dropped well before the next ping");
+        match gone {
+            SourceEvent::AgentDisconnected { reason, .. } => {
+                assert!(reason.contains("pings"), "{reason}")
             }
             _ => unreachable!(),
         }
@@ -1635,6 +2336,33 @@ mod tests {
         h.stop().await;
     }
 
+    /// An agent that restarts within the grace period (it said goodbye, or
+    /// crashed, and the same session's agent connects again) is the capture
+    /// target again. Before, the source kept the old target through the
+    /// departure, saw nothing change on reconnect and never told the core,
+    /// which had dropped its target: captures stopped silently.
+    #[tokio::test]
+    async fn a_restarted_agent_is_the_capture_target_again() {
+        let logins = Logins::with(&[("s1", true)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        let mut agent = h.connect("s1").await;
+        h.until(|e| target_is(e, Some("s1"))).await;
+
+        for crash in [false, true] {
+            if !crash {
+                agent.send(&AgentMsg::Goodbye).await.unwrap();
+            }
+            drop(agent);
+            // Reconnect at once, well within the grace period.
+            agent = h.connect("s1").await;
+            // The departure was reported (the core drops its target then)...
+            // and the restarted agent is announced as the target again.
+            h.until(|e| target_is(e, Some("s1"))).await;
+        }
+        drop(agent);
+        h.stop().await;
+    }
+
     /// Two accounts logged in at once (fast user switching): both agents
     /// stay connected, captures follow the session at the screen, the
     /// background agent's state is replayed when its session comes to the
@@ -1725,7 +2453,7 @@ mod tests {
     #[test]
     fn uid_only_policy_is_for_non_root_or_dev() {
         let src = IpcFrameSource::new("/tmp/x.sock", []);
-        if euid() != 0 || cfg!(feature = "dev") {
+        if !sessions::is_privileged() || cfg!(feature = "dev") {
             assert_eq!(src.peer_policy(), Ok(PeerPolicy::UidOnly));
         } else {
             assert!(src.peer_policy().is_err());
@@ -1748,5 +2476,77 @@ mod tests {
             let req = src.with_code_requirement(Some("anything".into()));
             assert!(req.peer_policy().is_err(), "no silent fallback to uid-only");
         }
+    }
+
+    fn status_report(target: &str, failures: u32) -> StatusReport {
+        use faro_ipc::status::{CaptureState, SessionReport};
+        let mut r = StatusReport {
+            instance_name: Some("Sam's Faro".into()),
+            instance_url: Some("https://faro.example.org/".into()),
+            ..StatusReport::default()
+        };
+        for s in ["s1", "s2"] {
+            r.sessions.push(SessionReport {
+                session: s.into(),
+                account: format!("acct-{s}"),
+                at_screen: s == target,
+                agent_connected: true,
+                capture_target: s == target,
+                ..SessionReport::default()
+            });
+        }
+        r.capture.state = CaptureState::Active;
+        r.capture.target_account = Some(format!("acct-{target}"));
+        r.capture.consecutive_failures = failures;
+        r.permissions.account = Some(format!("acct-{target}"));
+        r.permissions.accessibility = Some(true);
+        r
+    }
+
+    /// Answer pings until a `Status` arrives.
+    async fn next_status(agent: &mut AgentConnection<faro_ipc::ClientStream>) -> MemberStatus {
+        match serve_until(agent, |m| matches!(m, ServiceMsg::Status(_))).await {
+            ServiceMsg::Status(s) => s,
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn each_agent_gets_its_own_status_view() {
+        use faro_ipc::status::CaptureState;
+        let logins = Logins::with(&[("s1", true), ("s2", false)]);
+        let mut h = Harness::start(&logins, Duration::from_secs(30)).await;
+        h.status
+            .send(Some(Arc::new(status_report("s1", 0))))
+            .unwrap();
+
+        // On connecting, each agent is sent its view at once.
+        let mut a1 = h.connect("s1").await;
+        let s1 = next_status(&mut a1).await;
+        assert_eq!(s1.capture, Some(CaptureState::Active));
+        assert_eq!(s1.accessibility, Some(true));
+        assert_eq!(s1.instance_name, "Sam's Faro");
+        let mut a2 = h.connect("s2").await;
+        let s2 = next_status(&mut a2).await;
+        assert_eq!((s2.capture, s2.accessibility), (None, None));
+        assert_eq!(s2.instance_url, "https://faro.example.org/");
+
+        // A change only one view sees goes to that agent only.
+        h.status
+            .send(Some(Arc::new(status_report("s1", 4))))
+            .unwrap();
+        assert_eq!(next_status(&mut a1).await.consecutive_failures, 4);
+        serve_for(&mut a2, Duration::from_millis(300)).await;
+
+        // The screen changes hands: both views change.
+        h.status
+            .send(Some(Arc::new(status_report("s2", 0))))
+            .unwrap();
+        assert_eq!(next_status(&mut a1).await.capture, None);
+        assert_eq!(
+            next_status(&mut a2).await.capture,
+            Some(CaptureState::Active)
+        );
+        h.stop().await;
     }
 }

@@ -5,7 +5,7 @@
 //! | `device.key` | 32-byte Ed25519 seed of the device key | 0600 |
 //! | `enrollment.json` | [`Enrollment`]: pinned instance and member keys, device token | 0600 |
 //! | `endorsement.json` | the member-signed `DeviceEndorsement`, once verified | 0600 |
-//! | `settings.json` | the member settings last announced to allies | 0600 |
+//! | `settings.json` | the member settings last announced to allies; in effect when `service.toml` sets none ([`settings_in_effect`]) | 0600 |
 //! | `outbox.sqlite3` | `faro_core::Outbox` (ciphertext only) | 0600 |
 //! | `service.lock` | empty; [`StateDir::try_lock`] holds an exclusive lock on it | 0600 |
 //!
@@ -22,9 +22,8 @@
 
 use faro_crypto::SigningKey;
 use faro_proto::keys::{DeviceEndorsement, Signed};
-use faro_proto::{DeviceId, InstanceId, SignPublicKey, UserId};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::fmt;
+use faro_proto::DeviceId;
+use serde::{de::DeserializeOwned, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,6 +38,9 @@ pub const LOCK_FILE: &str = "service.lock";
 /// Permissions the service has seen granted, so a revocation made while the
 /// service was stopped is still reported (runtime/core.rs).
 pub const PERMISSIONS_FILE: &str = "permissions.json";
+/// The current report period's activity timeline, so a crash or power cut
+/// does not lose it (runtime/journal.rs `SavedTimeline`).
+pub const TIMELINE_FILE: &str = "timeline.json";
 
 /// Largest state file read back (they are all tiny).
 const MAX_STATE_FILE: u64 = 1024 * 1024;
@@ -71,46 +73,7 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StateError + '_ {
 }
 
 /// What enrollment established, persisted in `enrollment.json`.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Enrollment {
-    /// Normalized instance base URL (ends in `/`).
-    pub instance_url: String,
-    pub instance_id: InstanceId,
-    /// The instance name the member confirmed.
-    pub instance_name: String,
-    /// Pinned from `/.well-known/faro`; re-checked by the runtime.
-    pub instance_identity_pubkey: SignPublicKey,
-    pub device_id: DeviceId,
-    /// Bearer token. Secret; redacted from `Debug`.
-    pub device_token: String,
-    pub member_id: UserId,
-    /// Pinned at enrollment: the root of trust for the endorsement and every
-    /// recipient manifest.
-    pub member_sign_pubkey: SignPublicKey,
-    pub device_name: String,
-    pub enrolled_at_ms: i64,
-}
-
-impl fmt::Debug for Enrollment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Enrollment")
-            .field("instance_url", &self.instance_url)
-            .field("instance_id", &self.instance_id)
-            .field("instance_name", &self.instance_name)
-            .field("device_id", &self.device_id)
-            .field("device_token", &"<redacted>")
-            .field("member_id", &self.member_id)
-            .field("member_sign_pubkey", &self.member_sign_pubkey)
-            .field("device_name", &self.device_name)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for Enrollment {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.device_token);
-    }
-}
+pub use faro_client::Enrollment;
 
 /// Handle to the (validated) state directory.
 #[derive(Debug, Clone)]
@@ -209,6 +172,16 @@ impl StateDir {
         self.file(name).exists()
     }
 
+    /// Remove `name`; a missing file is not an error.
+    pub fn remove(&self, name: &str) -> Result<(), StateError> {
+        let path = self.file(name);
+        match fs::remove_file(&path) {
+            Ok(()) => sync_dir(&self.path).map_err(io_err(&path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(&path)(e)),
+        }
+    }
+
     pub fn write_json<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StateError> {
         let bytes =
             Zeroizing::new(
@@ -286,6 +259,30 @@ pub fn store_device_key(dir: &StateDir) -> Result<SigningKey, StateError> {
     Ok(key)
 }
 
+/// The member settings the service runs with.
+///
+/// Settings set in `service.toml` win. Without them the device keeps the
+/// settings it last announced to allies, so a default that changes in a new
+/// release (`medium` flags became `urgent`) applies to new devices only and
+/// never moves an existing device's mapping behind the member's back. A
+/// device that has announced nothing yet, or whose `settings.json` can't be
+/// read, starts from the defaults; startup then announces any difference.
+pub fn settings_in_effect(
+    dir: &StateDir,
+    configured: Option<&faro_core::MemberSettings>,
+) -> faro_core::MemberSettings {
+    if let Some(s) = configured {
+        return s.clone();
+    }
+    match dir.read_json(SETTINGS_FILE) {
+        Ok(stored) => stored.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(error = %e, "stored settings unreadable; using the defaults");
+            faro_core::MemberSettings::default()
+        }
+    }
+}
+
 /// Load the device key.
 pub fn load_device_key(dir: &StateDir) -> Result<SigningKey, StateError> {
     let bytes = dir
@@ -334,9 +331,46 @@ fn secure_dir(path: &Path) -> Result<(), StateError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Windows: the state directory gets a protected SYSTEM + Administrators
+/// DACL (§3.3 Windows) whenever a privileged process opens it, the
+/// service or an administrator's `enroll`, `status` or `goodbye`. That
+/// covers a directory an elevated command created before the service
+/// ever ran, which would otherwise inherit `C:\ProgramData`'s default
+/// ACL (readable, and creatable-in, by every user). `protect_state_dir`
+/// refuses a reparse point anywhere in the tree and resets every child to
+/// inherit, so it also repairs a key file someone loosened. It is applied
+/// on every open rather than only when something looks wrong, because a
+/// read grant is as bad as a write grant for the device key.
+///
+/// Unprivileged development runs (`--state-dir` in a temp folder, the
+/// tests) keep their ACL: a SYSTEM/Administrators-only DACL would lock
+/// the user who runs them out of their own state.
+#[cfg(windows)]
 fn secure_dir(path: &Path) -> Result<(), StateError> {
-    // TODO(windows): apply a SYSTEM/Administrators-only DACL (§3.3 Windows).
+    use faro_platform_windows::acl;
+    let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
+    let unsafe_dir = |reason: String| StateError::Unsafe {
+        path: path.to_path_buf(),
+        reason,
+    };
+    if meta.file_type().is_symlink() {
+        return Err(unsafe_dir("is a symlink".into()));
+    }
+    if !meta.is_dir() {
+        return Err(unsafe_dir("is not a directory".into()));
+    }
+    if acl::running_as_system() || acl::running_elevated() {
+        acl::protect_state_dir(path).map_err(|e| {
+            unsafe_dir(format!(
+                "cannot restrict it to SYSTEM and Administrators: {e}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn secure_dir(path: &Path) -> Result<(), StateError> {
     let meta = fs::symlink_metadata(path).map_err(io_err(path))?;
     if !meta.is_dir() {
         return Err(StateError::Unsafe {
@@ -375,11 +409,43 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faro_proto::{InstanceId, SignPublicKey, UserId};
 
     #[cfg(unix)]
     fn mode(p: &Path) -> u32 {
         use std::os::unix::fs::MetadataExt;
         fs::metadata(p).unwrap().mode() & 0o7777
+    }
+
+    #[test]
+    fn stored_settings_outlive_a_new_default() {
+        use faro_core::{MemberSettings, UrgencyPolicy};
+        use faro_proto::Urgency;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = StateDir::open(tmp.path().join("state")).unwrap();
+        // A new device starts from the defaults: medium flags are urgent.
+        let fresh = settings_in_effect(&dir, None);
+        assert_eq!(fresh, MemberSettings::default());
+        assert_eq!(fresh.urgency().medium(), Urgency::Urgent);
+        // A device that announced the old default (medium = normal) keeps it.
+        dir.write_secret(
+            SETTINGS_FILE,
+            br#"{"capture_mean_secs":60,"urgency":{"low":"none","medium":"normal","high":"urgent"}}"#,
+        )
+        .unwrap();
+        let kept = settings_in_effect(&dir, None);
+        assert_eq!(kept.urgency().medium(), Urgency::Normal);
+        // `service.toml` still wins when it sets the member settings.
+        let configured =
+            MemberSettings::new(90, UrgencyPolicy::default(), false, false, None).unwrap();
+        assert_eq!(settings_in_effect(&dir, Some(&configured)), configured);
+        // Unreadable (here: below the floor) falls back to the defaults.
+        dir.write_secret(
+            SETTINGS_FILE,
+            br#"{"capture_mean_secs":60,"urgency":{"low":"none","medium":"none","high":"urgent"}}"#,
+        )
+        .unwrap();
+        assert_eq!(settings_in_effect(&dir, None), MemberSettings::default());
     }
 
     #[test]

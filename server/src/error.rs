@@ -40,6 +40,8 @@ pub enum AppError {
     Conflict { code: &'static str, message: String },
     #[error("payload too large")]
     PayloadTooLarge,
+    #[error("device storage quota exceeded")]
+    QuotaExceeded,
     #[error("rate limited")]
     TooManyRequests { retry_after_secs: u64 },
     #[error("service unavailable: {0}")]
@@ -79,7 +81,7 @@ impl AppError {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             AppError::Conflict { .. } => StatusCode::CONFLICT,
-            AppError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::PayloadTooLarge | AppError::QuotaExceeded => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             AppError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Db(_) | AppError::Blob(_) | AppError::Internal(_) => {
@@ -102,6 +104,10 @@ impl AppError {
             ),
             AppError::Conflict { code, message } => (code, message.clone()),
             AppError::PayloadTooLarge => ("payload_too_large", "request body too large".into()),
+            AppError::QuotaExceeded => (
+                "storage_quota_exceeded",
+                "this device is over its storage quota".into(),
+            ),
             AppError::TooManyRequests { .. } => {
                 ("rate_limited", "too many requests; slow down".into())
             }

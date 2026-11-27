@@ -21,6 +21,7 @@ use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};
 
 use crate::codec::MAX_FRAMES_PER_MESSAGE;
 use crate::error::{IpcError, Result};
+use crate::status::{MemberStatus, MAX_MEMBER_TEXT};
 use crate::wire_frame::WireFrame;
 
 /// Messages the agent sends to the service.
@@ -103,6 +104,11 @@ pub enum ServiceMsg {
     ShowNotice { title: String, body: String },
     /// The agent should exit.
     Shutdown { reason: ShutdownReason },
+    /// What the service is doing, as far as it concerns this session and
+    /// this computer, for the agent's status menu. Sent after `Welcome` and
+    /// whenever it changes. The agent only shows it: no message changes
+    /// any of it. See [`MemberStatus`] for what it may hold.
+    Status(MemberStatus),
 }
 
 /// Why the service asked for a capture (§3.4). Carried so the agent can make
@@ -259,6 +265,7 @@ impl ServiceMsg {
             ServiceMsg::Ping { .. } => "Ping",
             ServiceMsg::ShowNotice { .. } => "ShowNotice",
             ServiceMsg::Shutdown { .. } => "Shutdown",
+            ServiceMsg::Status(_) => "Status",
         }
     }
 }
@@ -344,10 +351,14 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for super::AgentMsg {}
     impl Sealed for super::ServiceMsg {}
+    impl Sealed for crate::enroll::EnrollRequest {}
+    impl Sealed for crate::enroll::EnrollResponse {}
 }
 
 /// A message type the codec can carry. Sealed: only [`AgentMsg`] and
-/// [`ServiceMsg`] go on this wire.
+/// [`ServiceMsg`] go on the agent's session wire, and
+/// [`EnrollRequest`](crate::EnrollRequest) and
+/// [`EnrollResponse`](crate::EnrollResponse) on the enroll socket.
 pub trait WireMessage:
     Serialize + for<'de> Deserialize<'de> + std::fmt::Debug + sealed::Sealed
 {
@@ -383,6 +394,21 @@ impl WireMessage for AgentMsg {
 
 impl WireMessage for ServiceMsg {
     fn validate(&self) -> Result<()> {
+        if let ServiceMsg::Status(s) = self {
+            for (field, text) in [
+                ("service_version", &s.service_version),
+                ("instance_name", &s.instance_name),
+                ("instance_url", &s.instance_url),
+            ] {
+                if text.len() > MAX_MEMBER_TEXT {
+                    return Err(IpcError::FieldTooLong {
+                        field,
+                        len: text.len(),
+                        max: MAX_MEMBER_TEXT,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -479,6 +505,9 @@ mod compat {
     /// of the wire format: append only.
     #[derive(Serialize, Deserialize)]
     enum WireTamperSignal {
+        /// Without `never_granted`: only the service knows whether it saw
+        /// the permission granted on this enrollment, so it decides that
+        /// itself, and an agent's signal always arrives as `false`.
         PermissionRevoked {
             permission: String,
         },
@@ -506,14 +535,20 @@ mod compat {
         UnmonitoredUserSession {
             user: String,
         },
+        WindowHiddenFromCapture {
+            app: String,
+        },
     }
 
-    impl From<&TamperSignal> for WireTamperSignal {
-        fn from(t: &TamperSignal) -> Self {
+    /// The iPhone-only signals have no wire form: an agent never sends them.
+    impl TryFrom<&TamperSignal> for WireTamperSignal {
+        type Error = &'static str;
+
+        fn try_from(t: &TamperSignal) -> std::result::Result<Self, Self::Error> {
             use TamperSignal as T;
             use WireTamperSignal as W;
-            match t.clone() {
-                T::PermissionRevoked { permission } => W::PermissionRevoked { permission },
+            Ok(match t.clone() {
+                T::PermissionRevoked { permission, .. } => W::PermissionRevoked { permission },
                 T::AgentKilledRepeatedly { count, window_secs } => {
                     W::AgentKilledRepeatedly { count, window_secs }
                 }
@@ -536,7 +571,17 @@ mod compat {
                 T::VirtualMachine => W::VirtualMachine,
                 T::RemoteDesktop => W::RemoteDesktop,
                 T::UnmonitoredUserSession { user } => W::UnmonitoredUserSession { user },
-            }
+                T::WindowHiddenFromCapture { app } => W::WindowHiddenFromCapture { app },
+                T::ScreenTimeRevoked
+                | T::FilterOff { .. }
+                | T::SettingsCleared
+                | T::DohDropped
+                | T::OtherVpn
+                | T::JailbreakSuspected => return Err("iPhone-only tamper signal"),
+                T::BatteryOptimizationOn | T::UsbDebuggingOn => {
+                    return Err("Android-only tamper signal")
+                }
+            })
         }
     }
 
@@ -545,7 +590,10 @@ mod compat {
             use TamperSignal as T;
             use WireTamperSignal as W;
             match w {
-                W::PermissionRevoked { permission } => T::PermissionRevoked { permission },
+                W::PermissionRevoked { permission } => T::PermissionRevoked {
+                    permission,
+                    never_granted: false,
+                },
                 W::AgentKilledRepeatedly { count, window_secs } => {
                     T::AgentKilledRepeatedly { count, window_secs }
                 }
@@ -568,6 +616,7 @@ mod compat {
                 W::VirtualMachine => T::VirtualMachine,
                 W::RemoteDesktop => T::RemoteDesktop,
                 W::UnmonitoredUserSession { user } => T::UnmonitoredUserSession { user },
+                W::WindowHiddenFromCapture { app } => T::WindowHiddenFromCapture { app },
             }
         }
     }
@@ -579,7 +628,9 @@ mod compat {
             v: &TamperSignal,
             s: S,
         ) -> std::result::Result<S::Ok, S::Error> {
-            WireTamperSignal::from(v).serialize(s)
+            WireTamperSignal::try_from(v)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(s)
         }
 
         pub fn deserialize<'de, D: serde::Deserializer<'de>>(
@@ -655,6 +706,24 @@ mod tests {
         ] {
             assert_eq!(SessionChange::from(WireSessionChange::from(c)), c);
         }
+    }
+
+    /// An agent can't claim a permission was never granted: the service
+    /// decides that from its own record, and the field isn't on the wire
+    /// (so the wire format is unchanged).
+    #[test]
+    fn never_granted_is_not_carried() {
+        let sent = AgentMsg::Tamper(TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: true,
+        });
+        let old = AgentMsg::Tamper(TamperSignal::PermissionRevoked {
+            permission: "screen_recording".into(),
+            never_granted: false,
+        });
+        let bytes = postcard::to_allocvec(&sent).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&old).unwrap());
+        assert_eq!(postcard::from_bytes::<AgentMsg>(&bytes).unwrap(), old);
     }
 
     /// Documents why the compat mirrors exist: the proto types' JSON-oriented

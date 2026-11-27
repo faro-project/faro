@@ -62,6 +62,9 @@ tar = "0.4.46"
 # service: rustls with ring and the OS trust store (the container image
 # ships ca-certificates), no native-tls/OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+# Instance logos: decoded and re-encoded to PNG before they are stored
+# (docs/SELF-HOSTING.md "Branding your instance"). Pure-Rust decoders only.
+image = { workspace = true, features = ["jpeg", "webp"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }

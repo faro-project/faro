@@ -25,7 +25,9 @@
 	const SECTIONS = [
 		{ path: '/admin', label: 'Overview' },
 		{ path: '/admin/people', label: 'People' },
+		{ path: '/admin/groups', label: 'Groups' },
 		{ path: '/admin/settings', label: 'Settings' },
+		{ path: '/admin/branding', label: 'Branding' },
 		{ path: '/admin/email', label: 'Email' }
 	] as const;
 

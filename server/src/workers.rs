@@ -1,6 +1,6 @@
 //! In-process background workers (§4.2 "Jobs"): uptime bookkeeping, the
-//! notifier and digests, the liveness monitor, retention and the update
-//! mirror.
+//! notifier and digests, the liveness monitor, retention, the
+//! account-deletion purge and the update mirror.
 //!
 //! Every worker is a periodic loop around a `run_once`-style function that
 //! reads time only through [`AppState::now_ms`] (an injectable
@@ -16,7 +16,7 @@ use crate::db::repo::uptime;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::tokens::new_hex_id;
-use crate::{liveness, notify, retention};
+use crate::{deletion, liveness, meetings, notify, retention};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -235,6 +235,19 @@ pub fn spawn_all(
         ));
     }
     {
+        let state = state.clone();
+        handles.push(spawn_periodic(
+            "meeting-reminders",
+            Duration::from_secs(10),
+            Duration::from_secs(meetings::REMINDER_INTERVAL_SECS),
+            cancel.clone(),
+            move || {
+                let state = state.clone();
+                async move { meetings::run_once(&state).await.map(|_| ()) }
+            },
+        ));
+    }
+    {
         let (state, run) = (state.clone(), run);
         handles.push(spawn_periodic(
             "liveness",
@@ -259,6 +272,19 @@ pub fn spawn_all(
             move || {
                 let state = state.clone();
                 async move { retention::run_once(&state).await.map(|_| ()) }
+            },
+        ));
+    }
+    {
+        let state = state.clone();
+        handles.push(spawn_periodic(
+            "deletion",
+            Duration::from_secs(deletion::PURGE_INTERVAL_SECS),
+            Duration::from_secs(deletion::PURGE_INTERVAL_SECS),
+            cancel.clone(),
+            move || {
+                let state = state.clone();
+                async move { deletion::run_once(&state).await.map(|_| ()) }
             },
         ));
     }

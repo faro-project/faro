@@ -1,0 +1,864 @@
+# Builds, signs and publishes a Faro release (docs/DEVELOPMENT.md
+# "Releasing"; PROTOCOL.md §8).
+#
+#   git tag v0.1.0-beta.1 && git push origin v0.1.0-beta.1   # a real release
+#   gh workflow run release.yml -f dry_run=true             # a dry run of main
+#
+# Jobs, in order:
+#   prepare        the version, channels and checks: the tag matches the
+#                  workspace version and is on main
+#   macos-pkg      the universal .pkg: signed and notarized for a release,
+#                  an unsigned development package for a dry run; and the
+#                  image model it ships, for the update channel
+#   windows-msi    the x64 .msi, built on a Windows runner: signed through
+#                  installers/windows/sign.ps1 (SignPath or Azure Trusted
+#                  Signing) for a release, an unsigned development MSI for a
+#                  dry run; nothing, with a loud warning, when no signing
+#                  provider is configured
+#   blocklist      the domain list (domains-compile) for the update channel,
+#                  the same list the package ships
+#   server         the container image and the faro-server binary, natively
+#                  on each architecture (images are pushed by digest only)
+#   layout         targets.json with every artifact (the model and the
+#                  domain list as data bundles, PROTOCOL.md §8.1), signed with the targets
+#                  key, and a timestamp signed with the timestamp key, then
+#                  `faro-release verify` of the whole set. A dry run signs
+#                  with throwaway keys made in the job. It first checks that
+#                  the package's domain list is the one `blocklist` built
+#   publish-layout the layout to https://updates.faro-project.org/
+#                  (release/publish-layout.sh), then checks what is served
+#   publish        the image tags, then the GitHub Release (notes and
+#                  downloads for people). A dry run makes a draft release of
+#                  the unsigned artifacts instead, and publishes nothing else
+#
+# Nothing is published until `layout` has verified the set.
+#
+# Security (docs/DEVELOPMENT.md "Releasing", docs/KEY-CEREMONY.md §4.2):
+# - This never runs on pull_request, and a real release only from a v* tag
+#   on main.
+# - FARO_TARGETS_KEY and FARO_TIMESTAMP_KEY are read only by `layout` in a
+#   real release, which runs on a GitHub-hosted runner unless
+#   FARO_SIGNING_RUNNER says otherwise. A dry run never maps a real secret
+#   and signs with throwaway keys on ubuntu-24.04.
+# - Once the plan allows environments, set FARO_RELEASE_ENVIRONMENT
+#   (`release`, limited to v* tags and main) and move the secrets into it; jobs that
+#   read secrets then run in it.
+# - Root keys never touch CI.
+
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: >-
+          Dry run: throwaway keys, an unsigned package and a draft release;
+          publishes nothing. Untick only to re-run a release from its tag.
+        type: boolean
+        default: true
+
+# A real release and the re-signing jobs (update-timestamp.yml) never
+# run at once, so neither publishes a timestamp older than the other's.
+# Dry runs have their own group.
+concurrency:
+  group: ${{ (github.event_name == 'push' || !inputs.dry_run) && 'updates-publish' || format('release-dry-run-{0}', github.ref) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/faro-project/faro-server
+  FARO_UPDATES_URL: ${{ vars.FARO_UPDATES_URL || 'https://updates.faro-project.org/' }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      environment: ${{ steps.v.outputs.environment }}
+      signing_runner: ${{ steps.v.outputs.signing_runner }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_INPUT: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_ENVIRONMENT: ${{ vars.FARO_RELEASE_ENVIRONMENT }}
+          SIGNING_RUNNER: ${{ vars.FARO_SIGNING_RUNNER || '"ubuntu-24.04"' }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          dry_run=false
+          if [[ "$EVENT" == workflow_dispatch && "$DRY_INPUT" == true ]]; then
+            dry_run=true
+          fi
+          if [[ "$dry_run" == false ]]; then
+            if [[ "$REF_TYPE" != tag ]]; then
+              echo "::error::A real release runs from a v* tag only. Run a dry run, or push the tag."
+              exit 1
+            fi
+            if [[ "$REF_NAME" != "v$version" ]]; then
+              echo "::error::Tag $REF_NAME doesn't match the workspace version $version (Cargo.toml). Tag v$version instead."
+              exit 1
+            fi
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "::error::Tag $REF_NAME is not on main. Releases are cut from main only."
+              exit 1
+            fi
+          fi
+          prerelease=false
+          [[ "${version%%+*}" == *-* ]] && prerelease=true
+          # Secrets and an environment only for a real release. Its keys are
+          # read on GitHub's runners (or FARO_SIGNING_RUNNER); a dry run's
+          # throwaway keys always on GitHub's.
+          environment=""
+          signing_runner='"ubuntu-24.04"'
+          if [[ "$dry_run" == false ]]; then
+            environment="$RELEASE_ENVIRONMENT"
+            signing_runner="$SIGNING_RUNNER"
+          fi
+          {
+            echo "version=$version"
+            echo "dry_run=$dry_run"
+            echo "prerelease=$prerelease"
+            echo "environment=$environment"
+            echo "signing_runner=$signing_runner"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$dry_run" == true ]]; then
+            echo "::warning title=Dry run::Dry run of $version at $REF: throwaway keys, an unsigned development package, a draft release. Nothing is published."
+          else
+            channels="stable and beta"
+            [[ "$prerelease" == true ]] && channels="beta only"
+            echo "::notice title=Release::Releasing $version to $channels."
+          fi
+
+  macos-pkg:
+    needs: prepare
+    runs-on: macos-15
+    environment: ${{ needs.prepare.outputs.environment }}
+    timeout-minutes: 120
+    env:
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    outputs:
+      # The SHA-256 of the domain list manifest the package ships: `layout`
+      # checks it is the one `blocklist` built for the update channel.
+      domains_manifest_sha256: ${{ steps.domains.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      # No build cache: a release builds from clean sources.
+      # For the package's third-party notices (release/notices/third-party.sh).
+      - name: cargo-about
+        run: release/notices/third-party.sh --install-cargo-about
+      - name: Signing configuration
+        id: sign
+        env:
+          FARO_SIGN_IDENTITY: ${{ vars.FARO_SIGN_IDENTITY }}
+          FARO_INSTALLER_IDENTITY: ${{ vars.FARO_INSTALLER_IDENTITY }}
+          FARO_TEAM_ID: ${{ vars.FARO_TEAM_ID }}
+          FARO_NOTARY_PROFILE: ${{ vars.FARO_NOTARY_PROFILE }}
+        run: |
+          if [[ "$DRY_RUN" == true ]]; then
+            echo "::warning title=UNSIGNED PACKAGE::Dry run: building an unsigned development package (--dev). Its service accepts any program as the agent. Never install it on anyone's computer."
+            echo "mode=dev" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=()
+          for v in FARO_SIGN_IDENTITY FARO_INSTALLER_IDENTITY FARO_TEAM_ID FARO_NOTARY_PROFILE; do
+            [[ -n "${!v}" ]] || missing+=("$v")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error title=No signing identity::A release needs the Actions variables ${missing[*]} (docs/DEVELOPMENT.md \"Releasing\"). An unsigned package is never published."
+            exit 1
+          fi
+          if [[ ! -f release/update-root.json ]]; then
+            echo "::error title=No root of trust::release/update-root.json is missing. It comes from the key ceremony (docs/KEY-CEREMONY.md, \"Shipping root 1\")."
+            exit 1
+          fi
+          echo "mode=release" >> "$GITHUB_OUTPUT"
+          echo "root=release/update-root.json" >> "$GITHUB_OUTPUT"
+      # Optional: the Developer ID certificates in their own keychain, kept
+      # locked except during this job (docs/DEVELOPMENT.md "Releasing").
+      - name: Unlock the signing keychain
+        if: steps.sign.outputs.mode == 'release' && vars.FARO_MACOS_KEYCHAIN != ''
+        env:
+          KEYCHAIN: ${{ vars.FARO_MACOS_KEYCHAIN }}
+          KEYCHAIN_PASSWORD: ${{ secrets.FARO_MACOS_KEYCHAIN_PASSWORD }}
+        run: security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+      - name: Build the package
+        env:
+          MODE: ${{ steps.sign.outputs.mode }}
+          FARO_UPDATE_ROOT: ${{ steps.sign.outputs.root }}
+          FARO_SIGN_IDENTITY: ${{ steps.sign.outputs.mode == 'release' && vars.FARO_SIGN_IDENTITY || '' }}
+          FARO_INSTALLER_IDENTITY: ${{ steps.sign.outputs.mode == 'release' && vars.FARO_INSTALLER_IDENTITY || '' }}
+          FARO_TEAM_ID: ${{ steps.sign.outputs.mode == 'release' && vars.FARO_TEAM_ID || '' }}
+          FARO_NOTARY_PROFILE: ${{ steps.sign.outputs.mode == 'release' && vars.FARO_NOTARY_PROFILE || '' }}
+        run: |
+          rm -rf target/pkg
+          if [[ "$MODE" == dev ]]; then
+            installers/macos/build-pkg.sh --dev
+          else
+            installers/macos/build-pkg.sh
+          fi
+          pkg="$(ls target/pkg/Faro-*.pkg)"
+          installers/macos/check-pkg.sh "$pkg"
+          if [[ "$MODE" == release ]]; then
+            pkgutil --check-signature "$pkg"
+            xcrun stapler validate "$pkg"
+            spctl --assess --type install --verbose=2 "$pkg"
+          fi
+          mkdir -p dist
+          mv "$pkg" dist/
+      # The domain list in the package, the fallback for the one on the
+      # update channel: the same pinned sources must give the same bytes.
+      - name: The domain list the package ships
+        id: domains
+        run: |
+          x="$RUNNER_TEMP/pkg-expanded"
+          rm -rf "$x"
+          pkgutil --expand-full dist/Faro-*.pkg "$x"
+          m="$x/faro-component.pkg/Payload/Library/Faro/domains/domains.manifest.json"
+          echo "sha256=$(shasum -a 256 "$m" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          rm -rf "$x"
+      - name: Lock the signing keychain
+        if: always() && steps.sign.outputs.mode == 'release' && vars.FARO_MACOS_KEYCHAIN != ''
+        env:
+          KEYCHAIN: ${{ vars.FARO_MACOS_KEYCHAIN }}
+        run: security lock-keychain "$KEYCHAIN"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-pkg
+          path: dist/Faro-*.pkg
+          if-no-files-found: error
+          retention-days: 7
+      # The model the package ships, for the update channel: the same pinned
+      # bytes (build.sh refuses others), from its cache. `layout` lists it
+      # under its own version, so a release that doesn't change it lists
+      # nothing new.
+      - name: The image model for the update channel
+        run: |
+          rm -rf data "$RUNNER_TEMP/models" && mkdir -p data/model
+          crates/faro-detect/models/opennsfw/build.sh "$RUNNER_TEMP/models"
+          cp "$RUNNER_TEMP/models/manifest.json" "$RUNNER_TEMP/models/opennsfw-int8.onnx" "$RUNNER_TEMP/models/NOTICE.txt" data/model/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-model
+          path: data
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        run: rm -rf dist data target/pkg "$RUNNER_TEMP/models"
+
+  # The Windows MSI, built on a Windows runner. Signing is behind
+  # installers/windows/sign.ps1: the SignPath Foundation or Azure Trusted
+  # Signing, chosen by the Actions variable FARO_WINDOWS_SIGNING (signpath or
+  # trusted-signing; sign.ps1 lists the other variables each needs). A real
+  # release also needs FARO_WINDOWS_SIGNER (the signer the service checks
+  # updates against) and release/update-root.json. With no provider chosen, a
+  # real release builds nothing here and warns loudly (UNSIGNED BUILD): an
+  # unsigned MSI is never shipped. A dry run builds the unsigned development
+  # MSI. The image model is the one the macOS job built.
+  windows-msi:
+    needs: [prepare, macos-pkg]
+    runs-on: windows-2025
+    environment: ${{ needs.prepare.outputs.environment }}
+    timeout-minutes: 120
+    env:
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    outputs:
+      # Whether an MSI was built, and the SHA-256 of the domain list manifest
+      # it ships (`layout` checks it is the one `blocklist` built).
+      built: ${{ steps.mode.outputs.mode != 'skip' }}
+      domains_manifest_sha256: ${{ steps.domains.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+      - shell: powershell
+        run: Add-Content $env:GITHUB_PATH 'C:\Program Files\Git\bin'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Signing configuration
+        id: mode
+        shell: bash
+        env:
+          FARO_WINDOWS_SIGNING: ${{ vars.FARO_WINDOWS_SIGNING }}
+          FARO_WINDOWS_SIGNER: ${{ vars.FARO_WINDOWS_SIGNER }}
+        run: |
+          if [[ "$DRY_RUN" == true ]]; then
+            echo "::warning title=UNSIGNED WINDOWS PACKAGE::Dry run: building an unsigned development MSI (-Dev). Its service accepts any program as the agent. Never install it on anyone's computer."
+            echo "mode=dev" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$FARO_WINDOWS_SIGNING" ]]; then
+            echo "::warning title=UNSIGNED BUILD::FARO_WINDOWS_SIGNING is not set (signpath or trusted-signing): this release has NO Windows package. Choose a signing provider (installers/windows/README.md) and re-run."
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$FARO_WINDOWS_SIGNER" ]]; then
+            echo "::error title=No Windows signer::A release needs the Actions variable FARO_WINDOWS_SIGNER (subject=\"...\", installers/windows/README.md)."
+            exit 1
+          fi
+          if [[ ! -f release/update-root.json ]]; then
+            echo "::error title=No root of trust::release/update-root.json is missing (docs/KEY-CEREMONY.md, \"Shipping root 1\")."
+            exit 1
+          fi
+          echo "mode=release" >> "$GITHUB_OUTPUT"
+      - if: steps.mode.outputs.mode != 'skip'
+        uses: actions/download-artifact@v4
+        with:
+          name: data-model
+          path: ${{ runner.temp }}/model
+      - name: cargo-about and WiX
+        if: steps.mode.outputs.mode != 'skip'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $about = (& 'C:\Program Files\Git\bin\bash.exe' -o igncr release/notices/third-party.sh --cargo-about-version).Trim()
+          cargo install --locked cargo-about --features cli --version $about
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-about' }
+          $want = (Select-String -Path installers/windows/build-msi.ps1 -Pattern "^.WixVersion = '(.*)'").Matches[0].Groups[1].Value
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          $have = if (Get-Command wix -ErrorAction SilentlyContinue) { (& wix --version) -replace '\+.*$', '' } else { '' }
+          if ($have -ne $want) {
+            dotnet tool update --global wix --version $want
+            if ($LASTEXITCODE -ne 0) { dotnet tool install --global wix --version $want }
+            if ($LASTEXITCODE -ne 0) { throw 'wix' }
+          }
+      - name: Build the MSI
+        if: steps.mode.outputs.mode != 'skip'
+        shell: powershell
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          FARO_UPDATE_ROOT: ${{ steps.mode.outputs.mode == 'release' && 'release/update-root.json' || '' }}
+          FARO_WINDOWS_SIGNING: ${{ steps.mode.outputs.mode == 'release' && vars.FARO_WINDOWS_SIGNING || '' }}
+          FARO_WINDOWS_SIGNER: ${{ steps.mode.outputs.mode == 'release' && vars.FARO_WINDOWS_SIGNER || '' }}
+          SIGNPATH_API_TOKEN: ${{ steps.mode.outputs.mode == 'release' && secrets.SIGNPATH_API_TOKEN || '' }}
+          FARO_SIGNPATH_ORGANIZATION_ID: ${{ vars.FARO_SIGNPATH_ORGANIZATION_ID }}
+          FARO_SIGNPATH_PROJECT: ${{ vars.FARO_SIGNPATH_PROJECT }}
+          FARO_SIGNPATH_POLICY: ${{ vars.FARO_SIGNPATH_POLICY }}
+          FARO_SIGNPATH_CONFIG_EXE: ${{ vars.FARO_SIGNPATH_CONFIG_EXE }}
+          FARO_SIGNPATH_CONFIG_MSI: ${{ vars.FARO_SIGNPATH_CONFIG_MSI }}
+          FARO_TRUSTED_SIGNING_ENDPOINT: ${{ vars.FARO_TRUSTED_SIGNING_ENDPOINT }}
+          FARO_TRUSTED_SIGNING_ACCOUNT: ${{ vars.FARO_TRUSTED_SIGNING_ACCOUNT }}
+          FARO_TRUSTED_SIGNING_PROFILE: ${{ vars.FARO_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TENANT_ID: ${{ steps.mode.outputs.mode == 'release' && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ steps.mode.outputs.mode == 'release' && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ steps.mode.outputs.mode == 'release' && secrets.AZURE_CLIENT_SECRET || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          Remove-Item -Recurse -Force target\msi -ErrorAction SilentlyContinue
+          $model = Join-Path $env:RUNNER_TEMP 'model\model'
+          if ($env:MODE -eq 'dev') {
+            installers\windows\build-msi.ps1 -Dev -ModelDir $model
+          } else {
+            installers\windows\build-msi.ps1 -ModelDir $model
+          }
+          $msi = (Get-Item target\msi\Faro-*.msi).FullName
+          installers\windows\check-msi.ps1 $msi
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Move-Item $msi dist\
+      - name: The domain list the package ships
+        id: domains
+        if: steps.mode.outputs.mode != 'skip'
+        shell: powershell
+        run: |
+          $m = 'target\msi\work\payload\domains\domains.manifest.json'
+          $h = (Get-FileHash -Algorithm SHA256 $m).Hash.ToLowerInvariant()
+          "sha256=$h" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+      - if: steps.mode.outputs.mode != 'skip'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-msi
+          path: dist/Faro-*.msi
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        shell: powershell
+        run: Remove-Item -Recurse -Force dist, target\msi, "$env:RUNNER_TEMP\model" -ErrorAction SilentlyContinue
+
+  # The domain list for the update channel, from the approved, pinned
+  # sources in crates/faro-detect/domains/sources.toml. The same sources
+  # always give the same bytes; `bundle_version` there names them. The
+  # package ships the same list (build-pkg.sh), and `layout` checks the two
+  # are identical.
+  blocklist:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the domain list
+        run: |
+          rm -rf data target/domains
+          c=crates/faro-detect/domains/sources.toml
+          cargo run --locked -p faro-detect --example domains-compile -- fetch --config "$c"
+          cargo run --locked -p faro-detect --example domains-compile -- build --config "$c" \
+            --out data/blocklist/domains.bin
+          ls -l data/blocklist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-blocklist
+          path: data
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        run: rm -rf data target/domains
+
+  server:
+    name: server (${{ matrix.arch }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both natively on GitHub's runners; FARO_LINUX_X64_RUNNER moves
+          # amd64, as in container.yml.
+          - platform: linux/amd64
+            arch: x86_64
+            runner: ${{ vars.FARO_LINUX_X64_RUNNER || '"ubuntu-24.04"' }}
+          - platform: linux/arm64
+            arch: aarch64
+            runner: '"ubuntu-24.04-arm"'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    # A dry run goes on without amd64 while GitHub's runners can't start
+    # (the layout job warns). A release needs both.
+    continue-on-error: ${{ needs.prepare.outputs.dry_run == 'true' && matrix.arch == 'x86_64' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: env.DRY_RUN == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+      # A release pushes the image by digest only; `publish` tags it after
+      # the layout is verified. A dry run loads it into the local daemon.
+      - id: output
+        run: |
+          if [[ "$DRY_RUN" == false ]]; then
+            echo "spec=type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "spec=type=docker,name=faro-server:release-$ARCH" >> "$GITHUB_OUTPUT"
+          fi
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: ${{ steps.output.outputs.spec }}
+          no-cache: true
+      - name: Smoke test and extract faro-server
+        env:
+          REF: ${{ env.DRY_RUN == 'false' && format('{0}@{1}', env.IMAGE, steps.build.outputs.digest) || format('faro-server:release-{0}', matrix.arch) }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          out="$(docker run --rm --platform "$PLATFORM" "$REF" version)"
+          echo "$out"
+          [[ "$out" == *"$VERSION"* ]] || { echo "::error::faro-server version printed \"$out\" (want $VERSION)"; exit 1; }
+          [[ "$(docker run --rm --platform "$PLATFORM" --entrypoint uname "$REF" -m)" == "$ARCH" ]]
+          mkdir -p dist
+          cid="$(docker create --platform "$PLATFORM" "$REF")"
+          docker cp "$cid:/usr/local/bin/faro-server" "dist/faro-server-$VERSION-linux-$ARCH"
+          # Its crates' licences travel with the binary download. (The web
+          # app's are in the binary, at /licenses.)
+          docker cp "$cid:/usr/share/faro/notices/third-party.txt" "dist/faro-server-$VERSION-linux-$ARCH-third-party.txt"
+          docker rm "$cid"
+      - name: Export digest
+        if: env.DRY_RUN == 'false'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: env.DRY_RUN == 'false'
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-server-${{ matrix.arch }}
+          path: dist/faro-server-*
+          if-no-files-found: error
+          retention-days: 7
+      - if: always()
+        env:
+          IMG: faro-server:release-${{ matrix.arch }}
+        run: |
+          rm -rf dist "$RUNNER_TEMP/digests"
+          if [[ "$DRY_RUN" == true ]]; then docker image rm -f "$IMG" || true; fi
+
+  layout:
+    needs: [prepare, macos-pkg, windows-msi, blocklist, server]
+    # always(): run when only a dry run's amd64 build failed (that job is
+    # continue-on-error, so `server` still succeeds); never otherwise.
+    if: >-
+      always()
+      && needs.prepare.result == 'success'
+      && needs.macos-pkg.result == 'success'
+      && needs.windows-msi.result == 'success'
+      && needs.blocklist.result == 'success'
+      && needs.server.result == 'success'
+    runs-on: ${{ fromJSON(needs.prepare.outputs.signing_runner) }}
+    environment: ${{ needs.prepare.outputs.environment }}
+    timeout-minutes: 60
+    env:
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # A fresh CARGO_HOME, so the signing tool is built from sources
+      # downloaded and checked against Cargo.lock now, not from a registry
+      # cache that another job on this runner could have changed.
+      - name: Build faro-release
+        run: |
+          export CARGO_HOME="$RUNNER_TEMP/cargo-home"
+          rm -rf "$CARGO_HOME" && mkdir -p "$CARGO_HOME"
+          cargo build --release --locked -p faro-update --example faro-release
+          rm -rf "$CARGO_HOME"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+      # Not release-*: they go into the update channel, not the GitHub
+      # Release's downloads.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: data-*
+          path: ${{ runner.temp }}/data
+          merge-multiple: true
+      - name: Artifacts
+        id: artifacts
+        env:
+          PKG_DOMAINS_SHA256: ${{ needs.macos-pkg.outputs.domains_manifest_sha256 }}
+          MSI_BUILT: ${{ needs.windows-msi.outputs.built }}
+          MSI_DOMAINS_SHA256: ${{ needs.windows-msi.outputs.domains_manifest_sha256 }}
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          data="$RUNNER_TEMP/data"
+          ls -l "$dist" "$data"/*
+          min_os="$(sed -n 's/.*<os-version min="\([0-9.]*\)".*/\1/p' installers/macos/Distribution.xml.in)"
+          args=()
+          pkg="$(ls "$dist"/Faro-*.pkg)"
+          args+=(--artifact "client:macos:any:$min_os=$pkg")
+          # The Windows MSI (absent when the release has no signing provider).
+          # The minimum is Windows 10 22H2, which the MSI's launch condition
+          # also enforces (installers/windows/Faro.wxs).
+          if [[ "$MSI_BUILT" == true ]]; then
+            msi="$(ls "$dist"/Faro-*.msi)"
+            args+=(--artifact "client:windows:x86_64:10.0.19045=$msi")
+          else
+            echo "::warning title=No Windows package::This release has no Windows MSI (FARO_WINDOWS_SIGNING is not set, so it was not built)."
+          fi
+          for arch in aarch64 x86_64; do
+            f="$dist/faro-server-$VERSION-linux-$arch"
+            if [[ -f "$f" ]]; then
+              args+=(--artifact "server:linux:$arch=$f")
+            elif [[ "$DRY_RUN" == true ]]; then
+              echo "::warning title=Missing server binary::No faro-server for linux/$arch (its build failed). A release needs it."
+            else
+              echo "::error::No faro-server for linux/$arch."
+              exit 1
+            fi
+          done
+          # Models and blocklists, under their own versions. To hold one
+          # back from older clients, give it a minimum client version:
+          # --data model:<version>=... (release/build-layout.sh).
+          args+=(--data "model=$data/model/manifest.json")
+          args+=(--data "blocklist=$data/blocklist/domains.manifest.json")
+          # The package's domain list is the fallback for this one: they
+          # must be the same list (the manifest pins the bundle's BLAKE3).
+          if command -v sha256sum >/dev/null; then
+            got="$(sha256sum "$data/blocklist/domains.manifest.json" | awk '{print $1}')"
+          else
+            got="$(shasum -a 256 "$data/blocklist/domains.manifest.json" | awk '{print $1}')"
+          fi
+          if [[ "$MSI_BUILT" == true && "$got" != "$MSI_DOMAINS_SHA256" ]]; then
+            echo "::error title=Domain lists differ::The Windows MSI's domain list manifest (sha256 ${MSI_DOMAINS_SHA256:-none}) is not the one built for the update channel (sha256 $got)."
+            exit 1
+          fi
+          if [[ -z "$PKG_DOMAINS_SHA256" || "$got" != "$PKG_DOMAINS_SHA256" ]]; then
+            echo "::error title=Domain lists differ::The package's domain list manifest (sha256 ${PKG_DOMAINS_SHA256:-none}) is not the one built for the update channel ($got). The same pinned sources must give the same bytes (docs/DEVELOPMENT.md \"The domain category bundle\")."
+            exit 1
+          fi
+          printf '%s\n' "${args[@]}" > "$RUNNER_TEMP/artifact-args"
+      - name: Keys
+        env:
+          # Mapped only for a real release: a dry run never sees them.
+          FARO_TARGETS_KEY: ${{ needs.prepare.outputs.dry_run == 'false' && secrets.FARO_TARGETS_KEY || '' }}
+          FARO_TIMESTAMP_KEY: ${{ needs.prepare.outputs.dry_run == 'false' && secrets.FARO_TIMESTAMP_KEY || '' }}
+        run: |
+          keys="$RUNNER_TEMP/keys"
+          rm -rf "$keys" && (umask 077 && mkdir -p "$keys")
+          if [[ "$DRY_RUN" == true ]]; then
+            # Throwaway keys and a root nobody trusts. Never real keys: a
+            # dry run's metadata lists an unsigned package.
+            release/throwaway-keys.sh "$keys"
+            echo "ROOTS=$keys" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [[ -z "$FARO_TARGETS_KEY" || -z "$FARO_TIMESTAMP_KEY" ]]; then
+            echo "::error title=No signing keys::The Actions secrets FARO_TARGETS_KEY and FARO_TIMESTAMP_KEY are missing (docs/KEY-CEREMONY.md §4.3)."
+            exit 1
+          fi
+          (umask 077
+           printf '%s' "$FARO_TARGETS_KEY" > "$keys/targets.key.json"
+           printf '%s' "$FARO_TIMESTAMP_KEY" > "$keys/timestamp.key.json")
+          echo "ROOTS=release" >> "$GITHUB_ENV"
+      - name: Published metadata
+        run: |
+          mkdir -p "$RUNNER_TEMP/published"
+          # A dry run's throwaway root can't verify the real metadata, so it
+          # builds the layout as a first release.
+          if [[ "$DRY_RUN" == false ]]; then
+            release/publish-layout.sh pull "$RUNNER_TEMP/published"
+          fi
+      - name: Sign and verify the layout
+        run: |
+          artifacts=()
+          while IFS= read -r a; do artifacts+=("$a"); done < "$RUNNER_TEMP/artifact-args"
+          rm -rf "$RUNNER_TEMP/layout"
+          release/build-layout.sh --version "$VERSION" "${artifacts[@]}" \
+            --roots "$ROOTS" --published "$RUNNER_TEMP/published" \
+            --targets-key "$RUNNER_TEMP/keys/targets.key.json" \
+            --timestamp-key "$RUNNER_TEMP/keys/timestamp.key.json" \
+            --out "$RUNNER_TEMP/layout"
+          if [[ "$DRY_RUN" == true ]]; then
+            # So the dry-run layout can be checked by hand against its root.
+            cp "$ROOTS/update-root.json" "$RUNNER_TEMP/layout/dry-run-root.json"
+          fi
+      - name: Delete the keys
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: update-layout
+          path: ${{ runner.temp }}/layout
+          if-no-files-found: error
+          retention-days: 30
+      # For publish-layout, on the same kind of runner.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: faro-release-tool
+          path: target/release/examples/faro-release
+          if-no-files-found: error
+          retention-days: 1
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/dist" "$RUNNER_TEMP/data" "$RUNNER_TEMP/layout" "$RUNNER_TEMP/published"
+
+  publish-layout:
+    needs: [prepare, layout]
+    if: needs.prepare.outputs.dry_run == 'false'
+    # The runner kind that built faro-release in `layout`.
+    runs-on: ${{ fromJSON(needs.prepare.outputs.signing_runner) }}
+    environment: ${{ needs.prepare.outputs.environment }}
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: update-layout
+          path: ${{ runner.temp }}/layout
+      - uses: actions/download-artifact@v4
+        with:
+          name: faro-release-tool
+          path: ${{ runner.temp }}/tool
+      - run: |
+          chmod +x "$RUNNER_TEMP/tool/faro-release"
+          echo "FARO_RELEASE=$RUNNER_TEMP/tool/faro-release" >> "$GITHUB_ENV"
+      # The layout was built on what was published then. Check again on
+      # what is published now, so this never replaces a newer timestamp.
+      - name: Check against what is published now
+        run: |
+          now="$RUNNER_TEMP/published-now"
+          rm -rf "$now"
+          release/publish-layout.sh pull "$now"
+          repo="$PWD"
+          . release/lib.sh
+          root_args release
+          published_args "$now"
+          "$FARO_RELEASE" verify "${ROOT_ARGS[@]}" "${PUBLISHED_ARGS[@]+"${PUBLISHED_ARGS[@]}"}" \
+            --timestamp "$RUNNER_TEMP/layout/timestamp.json" --targets "$RUNNER_TEMP/layout/targets.json"
+      - name: Publish
+        env:
+          FARO_UPDATES_DEPLOY_KEY: ${{ secrets.FARO_UPDATES_DEPLOY_KEY }}
+        run: |
+          if [[ -z "$FARO_UPDATES_DEPLOY_KEY" ]]; then
+            echo "::error title=No deploy key::The Actions secret FARO_UPDATES_DEPLOY_KEY is missing (docs/DEVELOPMENT.md \"Releasing\")."
+            exit 1
+          fi
+          release/publish-layout.sh push "$RUNNER_TEMP/layout" "Faro $VERSION"
+      - name: Check what is served
+        run: release/check-served.sh "$RUNNER_TEMP/layout" release
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/layout" "$RUNNER_TEMP/published-now" "$RUNNER_TEMP/tool"
+
+  publish:
+    needs: [prepare, server, layout, publish-layout]
+    # A release after its layout is live; a dry run after its layout is
+    # verified.
+    if: >-
+      always()
+      && needs.layout.result == 'success'
+      && (needs.publish-layout.result == 'success'
+          || (needs.prepare.outputs.dry_run == 'true' && needs.publish-layout.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.prepare.outputs.environment }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    env:
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: update-layout
+          path: ${{ runner.temp }}/layout
+
+      # The container image: join the two digests and tag them, as
+      # container.yml did for tags before. Both platforms or nothing.
+      - uses: actions/download-artifact@v4
+        if: env.DRY_RUN == 'false'
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+      - uses: docker/setup-buildx-action@v3
+        if: env.DRY_RUN == 'false'
+      - uses: docker/login-action@v3
+        if: env.DRY_RUN == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        if: env.DRY_RUN == 'false'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Tag the image
+        if: env.DRY_RUN == 'false'
+        run: |
+          shopt -s nullglob
+          refs=()
+          for arch in x86_64 aarch64; do
+            files=("$RUNNER_TEMP/digests/digests-$arch"/*)
+            (( ${#files[@]} == 1 )) || { echo "::error::No $arch image digest"; exit 1; }
+            refs+=("$IMAGE@sha256:$(basename "${files[0]}")")
+          done
+          mapfile -t tags < <(jq -r '.tags[] | "-t", .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create "${tags[@]}" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+
+      - name: Release notes and checksums
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          (cd "$dist" && sha256sum -- * > SHA256SUMS)
+          # A dry run may lack a server binary whose build couldn't run
+          # (`layout` warned); its notes say so. A release has both.
+          missing=()
+          for arch in aarch64 x86_64; do
+            [[ -f "$dist/faro-server-$VERSION-linux-$arch" ]] || missing+=("linux/$arch")
+          done
+          {
+            if [[ "$DRY_RUN" == true ]]; then
+              echo "> [!CAUTION]"
+              echo "> **Dry run. Do not publish this release.** The package is an unsigned development build whose service accepts any program as the agent: never install it on anyone's computer. The update layout is signed with throwaway keys (\`update-layout.tar.gz\`, root in \`dry-run-root.json\`). No container image was pushed."
+              if (( ${#missing[@]} )); then
+                echo ">"
+                echo "> No \`faro-server\` for ${missing[*]}: its build couldn't run in this dry run. A release needs it."
+              fi
+              echo
+            fi
+            echo "## Faro $VERSION"
+            echo
+            if [[ "$PRERELEASE" == true ]]; then
+              echo "A pre-release, on the \`beta\` update channel only."
+            else
+              echo "On the \`stable\` and \`beta\` update channels."
+            fi
+            echo
+            echo "- **macOS** (13 or later, Apple Silicon and Intel): \`$(cd "$dist" && ls Faro-*.pkg)\`. Computers enrolled in an instance update themselves through it."
+            if ls "$dist"/Faro-*.msi > /dev/null 2>&1; then
+              echo "- **Windows** (10 22H2 or later, 64-bit): \`$(cd "$dist" && ls Faro-*.msi)\`. Computers enrolled in an instance update themselves through it."
+            fi
+            echo "- **Instances:** the container image \`$IMAGE:$VERSION\`, or the \`faro-server\` binaries for Linux (glibc 2.41 or newer, as in Debian 13), each with its third-party licences (\`-third-party.txt\`). See SELF-HOSTING.md."
+            echo
+            echo "Every file is also listed, with its length and BLAKE3, in the signed update metadata at ${FARO_UPDATES_URL}targets.json. SHA-256 checksums:"
+            echo
+            echo '```'
+            cat "$dist/SHA256SUMS"
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          if [[ "$DRY_RUN" == true ]]; then
+            tar -C "$RUNNER_TEMP/layout" -czf "$dist/update-layout.tar.gz" .
+          fi
+      - name: GitHub Release
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          if [[ "$DRY_RUN" == true ]]; then
+            # Only one dry-run draft at a time. The tag name doesn't match
+            # v*, so publishing a draft by mistake can't start a release.
+            gh release list --json tagName,isDraft --jq '.[] | select(.isDraft and (.tagName | startswith("dry-run-"))) | .tagName' |
+              while read -r old; do gh release delete "$old" --yes; done
+            gh release create "dry-run-$VERSION-${GITHUB_RUN_ID}" --draft --target "$GITHUB_SHA" \
+              --title "DRY RUN: Faro $VERSION (do not publish)" --notes-file "$RUNNER_TEMP/notes.md" \
+              "$dist"/*
+          else
+            pre=()
+            [[ "$PRERELEASE" == true ]] && pre=(--prerelease)
+            gh release create "v$VERSION" --verify-tag --title "Faro $VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${pre[@]}" \
+              "$dist"/*
+          fi
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/dist" "$RUNNER_TEMP/layout" "$RUNNER_TEMP/digests" "$RUNNER_TEMP/notes.md"

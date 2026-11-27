@@ -8,6 +8,11 @@
 |---|---|
 | `faro-wordmark.svg` | Full logo. Headers, the README, the web app's sign-in page, installers |
 | `faro-icon.svg` | The lighthouse mark alone. App and tray icons, favicons, small spaces |
+| `faro-icon.icns` | The macOS app icon (16–1024 px). `installers/macos/build-pkg.sh` puts it in `Faro Agent.app` |
+| `tray/faro-menubar.png`, `tray/faro-menubar@2x.png` | The macOS menu-bar icon (18 and 36 px), black on transparent. Use it as a template image: macOS draws it in the menu bar's own colour |
+| `tray/faro-tray.ico` | The Windows notification area icon, in colour (16, 20, 24, 32, 40 and 48 px, for display scales 100% to 300%) |
+
+`swift assets/brand/make-tray-icons.swift` rebuilds the `tray/` files from `faro-icon.svg` (macOS 14 or later).
 
 Both are vector files exported from the original artwork, with the path data unchanged. The web app imports them from here (`$brand/…` in `web/`) rather than keeping copies, so there is one set of logo files. The lighthouse is cut out of the circle rather than drawn in white, so it takes the colour of whatever is behind it. That works on both light and dark backgrounds.
 

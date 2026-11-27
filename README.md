@@ -21,14 +21,23 @@ There is no central Faro service. A church, a college, a small group or one pers
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md): the full design, threat model and roadmap.
+- [Status](docs/STATUS.md): what is built, partly built and only planned, dated. Read it alongside the architecture.
 - [Wire protocol](docs/PROTOCOL.md): byte-level signing, hashing and encryption formats.
 - [Development](docs/DEVELOPMENT.md): building, testing, crate map and the invariants every change must keep.
+- [iOS client](docs/IOS.md): the design of the iPhone client, which blocks rather than watches, and what it can and can't do.
+- [Closed beta](docs/BETA.md): for the pilot instances and the people they enroll: what the beta is (the Mac, Windows and iPhone clients), setting up, the alerts to expect, reporting problems and leaving.
+- [Self-hosting](docs/SELF-HOSTING.md): running a Faro instance, for operators.
+- [Ally guide](docs/ALLY-GUIDE.md): a plain-language guide for allies, from accepting an invitation to having the conversation.
+- [Adding your Mac, Windows PC or iPhone](docs/MEMBER-GUIDE.md): a plain-language guide for members, from the enrollment link to approving the computer or phone.
+- [Key ceremony](docs/KEY-CEREMONY.md): the maintainer's runbook for creating and rotating the update signing keys.
+- [Security policy](SECURITY.md): how to report a vulnerability, and what's in scope.
 
 ## Repository layout
 
 ```
-crates/   Rust client crates (proto, crypto, core, detect, ipc, platform, update, service, agent)
+crates/   Rust client crates (proto, crypto, core, client, detect, dnsfilter, mobile, ipc, platform, update, service, agent)
 server/   faro-server, the self-hosted instance
+apps/     the iOS app and its extensions (apps/ios)
 docs/     architecture, protocol and development docs
 assets/   brand assets (logo, colours)
 ```
@@ -42,3 +51,11 @@ Faro is free software under the [GNU Affero General Public License, version 3 or
 Contributions are accepted under the [Contributor License Agreement](CLA.md). Contributors keep their copyright and grant the maintainer a licence that also allows distributing Faro under other terms (for example an app-store build or a commercial edition). In return, the CLA promises that every contribution stays publicly available under the AGPL or another open-source licence. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The "Faro" name and logo are not covered by the licence and are reserved for official, project-signed builds (see ARCHITECTURE.md §11 and [assets/brand](assets/brand/README.md)). Forks are welcome under their own name.
+
+Faro is built on open-source software by others. The licences and copyright notices of everything it ships with are generated at build time and travel with it ([how](docs/DEVELOPMENT.md#third-party-notices)):
+
+- **On a Mac:** `/Library/Faro/notices/`, `third-party.txt` for the Rust crates, next to the image model's, the domain list's (`domains.txt`) and ONNX Runtime's notices.
+- **On Windows:** the MSI installs them in `C:\Program Files\Faro\notices`.
+- **The server image:** `/usr/share/faro/notices/`, `third-party.txt` for the Rust crates in `faro-server` and `third-party-web.txt` for the web app's npm packages.
+- **The server binaries:** `faro-server-<version>-linux-<arch>-third-party.txt`, next to each binary in the release.
+- **The web app:** the **Licences** page (`/licenses`, linked from every page's footer) of any instance.

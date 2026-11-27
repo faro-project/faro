@@ -6,6 +6,7 @@
 //! | Accessibility revoked | `AXIsProcessTrusted` | `PermissionRevoked { "accessibility" }` (urgent) |
 //! | Running in a VM | `sysctl kern.hv_vmm_present` | `VirtualMachine` (context) |
 //! | VPN tunnel up | `getifaddrs` | `VpnActive` (context) |
+//! | A large window hidden from capture | `CGWindowListCopyWindowInfo` | `WindowHiddenFromCapture { app }` (urgent), see [`crate::hidden_windows`] |
 //!
 //! Every signal is **edge-triggered**: it is reported once when the
 //! condition starts, not on every poll, and re-arms when the condition ends.
@@ -42,6 +43,7 @@ use faro_platform::{PermissionState, TamperSignal, TamperSignals};
 
 use crate::capture::screen_capture_permission;
 use crate::foreground::accessibility_trusted;
+use crate::hidden_windows::{self, HiddenWindowTracker};
 
 /// Permission names used in `PermissionRevoked`.
 pub const PERMISSION_SCREEN_RECORDING: &str = "screen_recording";
@@ -63,11 +65,13 @@ pub fn edges(prev: &TamperObservation, next: &TamperObservation) -> Vec<TamperSi
     if prev.screen_recording && !next.screen_recording {
         out.push(TamperSignal::PermissionRevoked {
             permission: PERMISSION_SCREEN_RECORDING.into(),
+            never_granted: false,
         });
     }
     if prev.accessibility && !next.accessibility {
         out.push(TamperSignal::PermissionRevoked {
             permission: PERMISSION_ACCESSIBILITY.into(),
+            never_granted: false,
         });
     }
     if !prev.virtual_machine && next.virtual_machine {
@@ -212,6 +216,7 @@ pub fn observe() -> TamperObservation {
 #[derive(Debug)]
 pub struct MacTamper {
     last: TamperObservation,
+    hidden: HiddenWindowTracker,
 }
 
 impl Default for MacTamper {
@@ -230,6 +235,7 @@ impl MacTamper {
                 vpn: false,
                 ..now
             },
+            hidden: HiddenWindowTracker::new(),
         }
     }
 
@@ -243,7 +249,14 @@ impl MacTamper {
 
 impl TamperSignals for MacTamper {
     fn poll(&mut self) -> Vec<TamperSignal> {
-        self.observe(observe())
+        let now = observe();
+        let mut out = self.observe(now);
+        // Without Screen Recording every other window reads "not shared"
+        // (see `hidden_windows`), so only read with it.
+        if now.screen_recording {
+            out.extend(self.hidden.observe(&hidden_windows::read_now()));
+        }
+        out
     }
 }
 
@@ -263,6 +276,7 @@ mod tests {
     fn revoked(p: &str) -> TamperSignal {
         TamperSignal::PermissionRevoked {
             permission: p.into(),
+            never_granted: false,
         }
     }
 
@@ -270,6 +284,7 @@ mod tests {
     fn permission_revocation_fires_once_and_rearms() {
         let mut t = MacTamper {
             last: obs(true, true, false, false),
+            hidden: HiddenWindowTracker::new(),
         };
         assert_eq!(
             t.observe(obs(false, true, false, false)),
@@ -296,6 +311,7 @@ mod tests {
     fn never_granted_is_not_a_revocation() {
         let mut t = MacTamper {
             last: obs(false, false, false, false),
+            hidden: HiddenWindowTracker::new(),
         };
         assert!(t.observe(obs(false, false, false, false)).is_empty());
     }
@@ -304,6 +320,7 @@ mod tests {
     fn context_signals_rise_only() {
         let mut t = MacTamper {
             last: obs(true, false, false, false),
+            hidden: HiddenWindowTracker::new(),
         };
         assert_eq!(
             t.observe(obs(true, false, true, true)),

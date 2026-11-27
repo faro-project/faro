@@ -1,11 +1,12 @@
 //! HTTP API request/response types (ARCHITECTURE.md §4.5).
 
 use crate::encoding::{Canonical, EncPublicKey, Hash32, SignPublicKey, Signature};
-use crate::event::{EventKind, SignedEvent, Urgency};
+use crate::event::{EventHeader, EventKind, SignedEvent, Urgency};
 use crate::ids::{DeviceId, InstanceId, UserId};
 use crate::keys::{
     AllyEndorsement, DeviceEndorsement, MemberEncKeyBinding, RecipientManifest, Signed,
 };
+use crate::report::ReportHeader;
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version advertised in `/.well-known/faro`.
@@ -51,6 +52,14 @@ pub enum Platform {
     Macos,
     Windows,
     Linux,
+    /// An iPhone. It blocks rather than watches (docs/IOS.md): no captures,
+    /// and it takes data bundles with platform `any`, never packages.
+    Ios,
+    /// An Android phone or tablet (docs/ANDROID.md). It watches like a
+    /// computer: captures, the on-device classifier and blurred thumbnails.
+    /// Instances older than the release that added it reject its enroll
+    /// request, so the Android client checks `WellKnown::server_version`.
+    Android,
 }
 
 impl Platform {
@@ -59,6 +68,8 @@ impl Platform {
             Platform::Macos => "macos",
             Platform::Windows => "windows",
             Platform::Linux => "linux",
+            Platform::Ios => "ios",
+            Platform::Android => "android",
         }
     }
 
@@ -67,6 +78,8 @@ impl Platform {
             "macos" => Some(Self::Macos),
             "windows" => Some(Self::Windows),
             "linux" => Some(Self::Linux),
+            "ios" => Some(Self::Ios),
+            "android" => Some(Self::Android),
             _ => None,
         }
     }
@@ -290,6 +303,27 @@ pub enum ServerAlertKind {
     AllyDisabled,
     /// An admin re-enabled the account of one of the member's allies.
     AllyEnabled,
+    /// The person asked for their account to be deleted. Nothing is removed
+    /// during a 7-day hold (they can cancel, and their computers keep
+    /// reporting); after it, everything about them is purged. Raised on
+    /// that person and told to them and their allies. Tamper-class.
+    AccountDeleted,
+    /// One of the member's allies asked for their account to be deleted:
+    /// when the hold ends they stop being an ally. Raised on the member;
+    /// the alert names the ally. Tamper-class.
+    AllyDeleted,
+    /// A requested deletion was cancelled during the hold. Raised and told
+    /// exactly like the deletion notice it follows (on the person, and on
+    /// each member they are an ally for, naming them). Tamper-class.
+    AccountDeletionCancelled,
+    /// A device or member exceeded the instance's alert rate limit, so
+    /// further alerts in the interval were folded into this one; its detail
+    /// says how many (`coalesced;folded=N`). Tamper-class: never silent.
+    AlertsCoalesced,
+    /// A device is over its storage quota: events keep their signed headers
+    /// but their encrypted bodies were not stored (and reports are refused).
+    /// Tamper-class: it is never silent.
+    StorageQuota,
 }
 
 impl ServerAlertKind {
@@ -308,10 +342,15 @@ impl ServerAlertKind {
             ServerAlertKind::AccountEnabled => "account_enabled",
             ServerAlertKind::AllyDisabled => "ally_disabled",
             ServerAlertKind::AllyEnabled => "ally_enabled",
+            ServerAlertKind::AccountDeleted => "account_deleted",
+            ServerAlertKind::AllyDeleted => "ally_deleted",
+            ServerAlertKind::AccountDeletionCancelled => "account_deletion_cancelled",
+            ServerAlertKind::AlertsCoalesced => "alerts_coalesced",
+            ServerAlertKind::StorageQuota => "storage_quota",
         }
     }
 
-    pub const ALL: [ServerAlertKind; 13] = [
+    pub const ALL: [ServerAlertKind; 18] = [
         ServerAlertKind::MissedCheckin,
         ServerAlertKind::ChainGap,
         ServerAlertKind::InvalidSignature,
@@ -325,6 +364,11 @@ impl ServerAlertKind {
         ServerAlertKind::AccountEnabled,
         ServerAlertKind::AllyDisabled,
         ServerAlertKind::AllyEnabled,
+        ServerAlertKind::AccountDeleted,
+        ServerAlertKind::AllyDeleted,
+        ServerAlertKind::AccountDeletionCancelled,
+        ServerAlertKind::AlertsCoalesced,
+        ServerAlertKind::StorageQuota,
     ];
 
     /// Inverse of [`Self::as_str`].
@@ -341,18 +385,30 @@ impl ServerAlertKind {
             | ServerAlertKind::DeviceRemoved
             | ServerAlertKind::UploadStalled
             | ServerAlertKind::AccountDisabled
-            | ServerAlertKind::AllyDisabled => Urgency::Urgent,
+            | ServerAlertKind::AllyDisabled
+            | ServerAlertKind::AlertsCoalesced
+            | ServerAlertKind::StorageQuota
+            | ServerAlertKind::AccountDeleted => Urgency::Urgent,
             ServerAlertKind::AllyRemoved
             | ServerAlertKind::AllyAdded
             | ServerAlertKind::MemberSettingsChanged
             | ServerAlertKind::AccountEnabled
-            | ServerAlertKind::AllyEnabled => Urgency::Normal,
+            | ServerAlertKind::AllyEnabled
+            | ServerAlertKind::AllyDeleted
+            | ServerAlertKind::AccountDeletionCancelled => Urgency::Normal,
         }
     }
 }
 
 /// One row in `GET /v1/ally/feed`: metadata only; content is fetched as a blob
 /// and decrypted in the browser.
+///
+/// Events and reports carry the device-signed header and its signature, so
+/// a reader can check them against the member-signed device endorsement
+/// (the feed response carries those) instead of trusting the instance's
+/// copy of the metadata (PROTOCOL.md §3.5). The plain fields repeat what
+/// the header says, for readers that don't check. `header` and `sig` are
+/// absent from older instances.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FeedItem {
@@ -362,8 +418,13 @@ pub enum FeedItem {
         seq: u64,
         ts_ms: i64,
         kind: EventKind,
+        /// The effective urgency: the signed one raised to the kind's floor.
         urgency: Urgency,
         blob_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<Box<EventHeader>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<Signature>,
     },
     Report {
         member_id: UserId,
@@ -372,6 +433,10 @@ pub enum FeedItem {
         period_start_ms: i64,
         period_end_ms: i64,
         blob_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<Box<ReportHeader>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<Signature>,
     },
     Alert {
         member_id: UserId,
@@ -382,6 +447,15 @@ pub enum FeedItem {
         ts_ms: i64,
         detail: Option<String>,
     },
+}
+
+/// One stored event header in `GET /v1/ally/chain`: the device-signed
+/// header, its signature, and when the instance received it. No body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainLink {
+    pub received_at_ms: i64,
+    pub header: EventHeader,
+    pub sig: Signature,
 }
 
 /// Uniform JSON error body.
@@ -403,6 +477,26 @@ pub struct AllyKeyUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_names_round_trip_including_mobile() {
+        for p in [
+            Platform::Macos,
+            Platform::Windows,
+            Platform::Linux,
+            Platform::Ios,
+            Platform::Android,
+        ] {
+            assert_eq!(Platform::parse(p.as_str()), Some(p));
+            assert_eq!(
+                serde_json::to_value(p).unwrap(),
+                serde_json::json!(p.as_str())
+            );
+        }
+        assert_eq!(Platform::Ios.as_str(), "ios");
+        assert_eq!(Platform::Android.as_str(), "android");
+        assert_eq!(Platform::parse("chromeos"), None);
+    }
 
     #[test]
     fn request_bytes_bind_everything() {
@@ -442,5 +536,21 @@ mod tests {
     fn server_alert_urgency() {
         assert_eq!(ServerAlertKind::ChainGap.urgency(), Urgency::Urgent);
         assert_eq!(ServerAlertKind::MissedCheckin.urgency(), Urgency::Urgent);
+    }
+
+    #[test]
+    fn opaque_json_survives_being_stored_as_text() {
+        // Found by the `api` fuzz target. The server stores
+        // `wrapped_privkey.to_string()` and later matches the row by the
+        // text of the value it parsed back; without correctly rounded
+        // float parsing this number came back one ulp off, so the text
+        // changed and the match could never succeed.
+        let json = r#"{"enc_pubkey":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "wrapped_privkey":{"x":9555555555555555555555555555555555555555555555555555556.0472870}}"#;
+        let up: AllyKeyUpload = serde_json::from_str(json).unwrap();
+        let stored = up.wrapped_privkey.to_string();
+        let back: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back, up.wrapped_privkey);
+        assert_eq!(back.to_string(), stored);
     }
 }

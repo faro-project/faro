@@ -6,13 +6,16 @@
 //! ([`PolicyConfig`](crate::PolicyConfig)), not here, so swapping models only
 //! needs a new manifest plus, if label names differ, a policy update.
 //!
-//! Models are distributed through the signed update channel (§3.8) as an
-//! ONNX file plus a JSON manifest ([`ModelInfo`]). [`load_model`] checks the
-//! manifest's licence against [`ALLOWED_MODEL_LICENSES`] (§11) and the
-//! file's BLAKE3 against the manifest, and hands back the verified bytes so
-//! the runtime loads *exactly* what was checked (no re-read from disk, no
+//! A model is an ONNX file plus a JSON manifest ([`ModelInfo`]). The beta's
+//! model ships in the macOS package; later ones come through the signed
+//! update channel (§3.8). [`load_model`] checks the manifest's licence
+//! against [`ALLOWED_MODEL_LICENSES`] (§11), that the manifest carries the
+//! attribution and licence text that licence asks for, and the file's
+//! BLAKE3 against the manifest. It hands back the verified bytes so the
+//! runtime loads *exactly* what was checked (no re-read from disk, no
 //! time-of-check/time-of-use gap).
 
+use crate::attribution::{check_attribution, Attribution};
 use crate::error::DetectError;
 use crate::resample::resample_rgb;
 use crate::scratch::Scratch;
@@ -24,6 +27,8 @@ use zeroize::Zeroizing;
 
 #[cfg(feature = "onnx")]
 pub mod onnx;
+#[cfg(all(test, feature = "onnx"))]
+pub(crate) mod test_onnx;
 
 /// SPDX identifiers of licences accepted for model weights (§11). These are
 /// permissive, so a model can ship in every edition of Faro, including builds
@@ -157,10 +162,77 @@ fn default_input_scale() -> f32 {
     1.0 / 255.0
 }
 
+/// How the frame is fitted to `input_size` before normalisation.
+///
+/// Both resample by area averaging and ignore the aspect ratio. A manifest
+/// without `resize` means [`Resize::Direct`], what every manifest before
+/// this field meant, and a [`Resize::Direct`] manifest serializes without
+/// it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Resize {
+    /// The whole frame to `input_size` (`"resize": "direct"`). Keeps the
+    /// edges of a screenshot.
+    #[default]
+    Direct,
+    /// The whole frame to `side × side`, then the centre `input_size` of
+    /// that (`"resize": {"resize_crop": {"side": 256}}`). Yahoo's
+    /// reference pipeline for OpenNSFW: 256, then the centre 224×224, which
+    /// drops a border of 16 pixels in 256 (6 %) on every side.
+    ResizeCrop { side: u32 },
+}
+
+impl Resize {
+    pub fn is_direct(&self) -> bool {
+        *self == Resize::Direct
+    }
+
+    /// The size the frame is resampled to, and the offset of the
+    /// `input_size` crop within it.
+    fn geometry(&self, input: InputSize) -> ((usize, usize), (usize, usize)) {
+        let (w, h) = (input.width.max(1) as usize, input.height.max(1) as usize);
+        match *self {
+            Resize::Direct => ((w, h), (0, 0)),
+            Resize::ResizeCrop { side } => {
+                let side = (side as usize).max(w).max(h);
+                // Integer division, as Yahoo's script crops.
+                ((side, side), ((side - w) / 2, (side - h) / 2))
+            }
+        }
+    }
+}
+
+/// `direct` or `resize_crop:SIDE`, as `model-bench --resize` takes it.
+impl std::fmt::Display for Resize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Resize::Direct => f.write_str("direct"),
+            Resize::ResizeCrop { side } => write!(f, "resize_crop:{side}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Resize {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("{s:?}: expected direct or resize_crop:SIDE (e.g. resize_crop:256)");
+        match s.split_once(':') {
+            None if s == "direct" => Ok(Resize::Direct),
+            Some(("resize_crop", side)) => side
+                .parse()
+                .map(|side| Resize::ResizeCrop { side })
+                .map_err(|_| bad()),
+            _ => Err(bad()),
+        }
+    }
+}
+
 /// A model manifest, shipped next to the model file and signed with it.
 ///
 /// Preprocessing: the frame is resized (area average, aspect *not* kept,
-/// as is standard for classifiers) to `input_size`, each 8-bit channel value
+/// as is standard for classifiers) to `input_size`, or to a larger square
+/// and centre-cropped to it (see [`Resize`]), each 8-bit channel value
 /// `v` becomes `(v * input_scale - mean[c]) / std[c]` where `c` indexes the
 /// tensor's channel order (after any RGB→BGR swap), and the result is laid
 /// out per `layout`.
@@ -173,6 +245,11 @@ pub struct ModelInfo {
     /// absolute or contain `..`.
     pub file: String,
     pub input_size: InputSize,
+    /// How the frame becomes `input_size`. Absent means
+    /// [`Resize::Direct`], so older manifests load unchanged, and a direct
+    /// manifest serializes without it.
+    #[serde(default, skip_serializing_if = "Resize::is_direct")]
+    pub resize: Resize,
     /// One label per model output, in output order.
     pub labels: Vec<String>,
     pub mean: [f32; 3],
@@ -186,6 +263,16 @@ pub struct ModelInfo {
     pub output: OutputActivation,
     /// SPDX licence identifier of the weights; see [`ALLOWED_MODEL_LICENSES`].
     pub license: String,
+    /// The full text of `license`, verbatim. Required for licences in
+    /// [`TEXT_REQUIRED_LICENSES`](crate::attribution::TEXT_REQUIRED_LICENSES),
+    /// whose text must travel with every copy of the weights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_text: Option<String>,
+    /// Who made the weights and what Faro changed. Required unless the
+    /// licence is in
+    /// [`NO_ATTRIBUTION_LICENSES`](crate::attribution::NO_ATTRIBUTION_LICENSES).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<Attribution>,
     /// Lowercase hex BLAKE3 of the model file.
     pub blake3: String,
 }
@@ -201,6 +288,7 @@ impl ModelInfo {
                 width: 1,
                 height: 1,
             },
+            resize: Resize::Direct,
             labels,
             mean: [0.0; 3],
             std: [1.0; 3],
@@ -209,11 +297,14 @@ impl ModelInfo {
             input_scale: default_input_scale(),
             output: OutputActivation::Probabilities,
             license: "Apache-2.0".to_owned(),
+            license_text: None,
+            attribution: None,
             blake3: String::new(),
         }
     }
 
-    /// Check internal consistency and the licence allowlist.
+    /// Check internal consistency, the licence allowlist, and that the
+    /// attribution and licence text the licence asks for are there.
     pub fn validate(&self) -> Result<(), DetectError> {
         let bad = |m: String| Err(DetectError::Manifest(m));
         if self.name.trim().is_empty() || self.version.trim().is_empty() {
@@ -222,6 +313,15 @@ impl ModelInfo {
         let InputSize { width, height } = self.input_size;
         if !(1..=MAX_INPUT_SIDE).contains(&width) || !(1..=MAX_INPUT_SIDE).contains(&height) {
             return bad(format!("input_size {width}x{height} out of range"));
+        }
+        if let Resize::ResizeCrop { side } = self.resize {
+            let least = width.max(height);
+            if !(least..=MAX_INPUT_SIDE).contains(&side) {
+                return bad(format!(
+                    "resize_crop side {side} out of range (need {least}..={MAX_INPUT_SIDE}, \
+                     at least input_size {width}x{height})"
+                ));
+            }
         }
         if self.labels.is_empty() || self.labels.len() > MAX_LABELS {
             return bad(format!(
@@ -249,7 +349,13 @@ impl ModelInfo {
         if !ALLOWED_MODEL_LICENSES.contains(&self.license.as_str()) {
             return Err(DetectError::License(self.license.clone()));
         }
-        Ok(())
+        let has_text = |_: &str| {
+            self.license_text
+                .as_deref()
+                .is_some_and(|t| !t.trim().is_empty())
+        };
+        check_attribution([self.license.as_str()], self.attribution.as_ref(), has_text)
+            .map_err(|e| DetectError::Manifest(format!("licence {}: {e}", self.license)))
     }
 }
 
@@ -399,7 +505,7 @@ impl VerifiedModel {
     }
 }
 
-fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, DetectError> {
+pub(crate) fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, DetectError> {
     let io = |source| DetectError::Io {
         path: path.to_owned(),
         source,
@@ -427,11 +533,7 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, DetectError> {
 /// `TamperSignal::IntegrityFailure`.
 pub fn load_model(manifest_path: impl AsRef<Path>) -> Result<VerifiedModel, DetectError> {
     let manifest_path = manifest_path.as_ref();
-    let raw = read_capped(manifest_path, MAX_MANIFEST_BYTES)?;
-    let info: ModelInfo =
-        serde_json::from_slice(&raw).map_err(|e| DetectError::Manifest(e.to_string()))?;
-    info.validate()?;
-
+    let info = read_manifest(manifest_path)?;
     let rel = Path::new(&info.file);
     if info.file.is_empty() || !rel.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(DetectError::Manifest(format!(
@@ -444,6 +546,26 @@ pub fn load_model(manifest_path: impl AsRef<Path>) -> Result<VerifiedModel, Dete
     VerifiedModel::verify(info, bytes)
 }
 
+/// Like [`load_model`], but read the model from `model_path` instead of the
+/// manifest's `file`, for benchmarking a candidate file that sits elsewhere.
+/// The licence and BLAKE3 checks are the same.
+pub fn load_model_at(
+    manifest_path: impl AsRef<Path>,
+    model_path: impl AsRef<Path>,
+) -> Result<VerifiedModel, DetectError> {
+    let info = read_manifest(manifest_path.as_ref())?;
+    let bytes = read_capped(model_path.as_ref(), MAX_MODEL_BYTES)?;
+    VerifiedModel::verify(info, bytes)
+}
+
+fn read_manifest(path: &Path) -> Result<ModelInfo, DetectError> {
+    let raw = read_capped(path, MAX_MANIFEST_BYTES)?;
+    let info: ModelInfo =
+        serde_json::from_slice(&raw).map_err(|e| DetectError::Manifest(e.to_string()))?;
+    info.validate()?;
+    Ok(info)
+}
+
 /// Turn a frame into the model's input tensor (see [`ModelInfo`] for the
 /// exact transform). The returned buffer is zeroized on drop.
 pub fn preprocess(frame: &Frame, info: &ModelInfo) -> Zeroizing<Vec<f32>> {
@@ -451,8 +573,10 @@ pub fn preprocess(frame: &Frame, info: &ModelInfo) -> Zeroizing<Vec<f32>> {
         info.input_size.width.max(1) as usize,
         info.input_size.height.max(1) as usize,
     );
-    let img = resample_rgb(frame, w, h);
-    let n = img.plane_len();
+    let ((rw, rh), (ox, oy)) = info.resize.geometry(info.input_size);
+    let img = resample_rgb(frame, rw, rh);
+    let plane = img.plane_len();
+    let n = w * h;
     let mut out: Scratch<f32> = Scratch::zeroed(n * 3);
     for tc in 0..3 {
         // Tensor channel `tc` reads source plane `sc`.
@@ -460,17 +584,23 @@ pub fn preprocess(frame: &Frame, info: &ModelInfo) -> Zeroizing<Vec<f32>> {
             ChannelOrder::Rgb => tc,
             ChannelOrder::Bgr => 2 - tc,
         };
-        let src = &img.data[sc * n..(sc + 1) * n];
+        let src = &img.data[sc * plane..(sc + 1) * plane];
         let (m, s, k) = (info.mean[tc], info.std[tc], info.input_scale);
-        match info.layout {
-            TensorLayout::Nchw => {
-                for (o, &v) in out[tc * n..(tc + 1) * n].iter_mut().zip(src) {
-                    *o = (v * k - m) / s;
+        // Row `y` of the crop: the whole image when direct.
+        for y in 0..h {
+            let start = (y + oy) * rw + ox;
+            let row = &src[start..start + w];
+            match info.layout {
+                TensorLayout::Nchw => {
+                    let o = tc * n + y * w;
+                    for (o, &v) in out[o..o + w].iter_mut().zip(row) {
+                        *o = (v * k - m) / s;
+                    }
                 }
-            }
-            TensorLayout::Nhwc => {
-                for (i, &v) in src.iter().enumerate() {
-                    out[i * 3 + tc] = (v * k - m) / s;
+                TensorLayout::Nhwc => {
+                    for (x, &v) in row.iter().enumerate() {
+                        out[(y * w + x) * 3 + tc] = (v * k - m) / s;
+                    }
                 }
             }
         }
@@ -506,6 +636,24 @@ pub fn postprocess(raw: &[f32], info: &ModelInfo) -> Result<ImageScores, DetectE
     ImageScores::new(info.labels.iter().cloned().zip(probs))
 }
 
+/// Licence fields for test manifests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::attribution::Attribution;
+
+    pub(crate) const MIT_TEXT: &str = "Permission is hereby granted, free of charge, ...";
+
+    pub(crate) fn attribution() -> Attribution {
+        Attribution {
+            author: "Faro tests".into(),
+            copyright: vec!["Copyright (c) 2026 Faro tests".into()],
+            source_url: "https://example.org/model".into(),
+            license_url: "https://example.org/model/LICENSE".into(),
+            changes: "None: a graph the tests encode by hand.".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +669,7 @@ mod tests {
                 width: 4,
                 height: 2,
             },
+            resize: Resize::Direct,
             labels: vec!["neutral".into(), "suggestive".into(), "explicit".into()],
             mean: [0.5, 0.25, 0.0],
             std: [0.5, 0.25, 1.0],
@@ -528,7 +677,9 @@ mod tests {
             layout: TensorLayout::Nchw,
             input_scale: 1.0 / 255.0,
             output: OutputActivation::Softmax,
-            license: "Apache-2.0".into(),
+            license: "MIT".into(),
+            license_text: Some(test_support::MIT_TEXT.into()),
+            attribution: Some(test_support::attribution()),
             blake3: blake3::hash(b"weights").to_hex().to_string(),
         }
     }
@@ -603,6 +754,133 @@ mod tests {
         }
     }
 
+    /// A frame whose red channel is the column and green the row.
+    fn coordinates(w: u32, h: u32) -> Frame {
+        let mut px = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                px.extend_from_slice(&[x as u8, y as u8, 0, 255]);
+            }
+        }
+        Frame::new(w, h, PixelFormat::Rgba8, 0, px).unwrap()
+    }
+
+    #[test]
+    fn preprocess_resize_crop_takes_the_centre() {
+        let mut i = info();
+        i.input_size = InputSize {
+            width: 4,
+            height: 2,
+        };
+        i.mean = [0.0; 3];
+        i.std = [1.0; 3];
+        i.input_scale = 1.0;
+        // 8×8 → 8×8 is the identity, so the crop's values are coordinates:
+        // columns 2..6 and rows 3..5.
+        i.resize = Resize::ResizeCrop { side: 8 };
+        let f = coordinates(8, 8);
+        for layout in [TensorLayout::Nchw, TensorLayout::Nhwc] {
+            i.layout = layout;
+            let t = preprocess(&f, &i);
+            assert_eq!(t.len(), 3 * 4 * 2);
+            for y in 0..2 {
+                for x in 0..4 {
+                    let (r, g) = match layout {
+                        TensorLayout::Nchw => (t[y * 4 + x], t[8 + y * 4 + x]),
+                        TensorLayout::Nhwc => (t[(y * 4 + x) * 3], t[(y * 4 + x) * 3 + 1]),
+                    };
+                    assert_eq!((r, g), ((x + 2) as f32, (y + 3) as f32), "{layout:?}");
+                }
+            }
+        }
+
+        // A white border a quarter of the frame wide: resized to 8 and
+        // cropped to the centre 4×4, none of it is left; directly resized,
+        // the corners are white.
+        let mut px = Vec::new();
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let border = !(4..12).contains(&x) || !(4..12).contains(&y);
+                px.extend_from_slice(&if border { [255; 4] } else { [0, 0, 0, 255] });
+            }
+        }
+        let f = Frame::new(16, 16, PixelFormat::Rgba8, 0, px).unwrap();
+        i.layout = TensorLayout::Nchw;
+        i.input_size = InputSize {
+            width: 4,
+            height: 4,
+        };
+        let crop = preprocess(&f, &i);
+        assert!(crop.iter().all(|&v| v.abs() < 1e-3), "{:?}", &crop[..]);
+        i.resize = Resize::Direct;
+        let direct = preprocess(&f, &i);
+        assert!((direct[0] - 255.0).abs() < 1e-3);
+        assert!(direct[5].abs() < 1e-3);
+    }
+
+    #[test]
+    fn resize_is_optional_in_the_manifest() {
+        // The shipped manifests have no `resize`: they mean direct, as they
+        // did before the field, and keep their bytes.
+        for raw in [
+            include_str!("../models/opennsfw/manifest.json"),
+            include_str!("../models/opennsfw/manifest-fp32.json"),
+        ] {
+            assert!(!raw.contains("resize"));
+            let i: ModelInfo = serde_json::from_str(raw).unwrap();
+            assert_eq!(i.resize, Resize::Direct);
+        }
+        // Direct is never written, so a manifest written by this version
+        // reads in one that has no `resize`.
+        let v = serde_json::to_value(info()).unwrap();
+        assert!(v.get("resize").is_none(), "{v}");
+        let parse = |resize: serde_json::Value| {
+            let mut v = serde_json::to_value(info()).unwrap();
+            v["resize"] = resize;
+            serde_json::from_value::<ModelInfo>(v).map(|i| i.resize)
+        };
+        assert_eq!(parse("direct".into()).unwrap(), Resize::Direct);
+        let crop = parse(serde_json::json!({"resize_crop": {"side": 256}})).unwrap();
+        assert_eq!(crop, Resize::ResizeCrop { side: 256 });
+        let mut i = info();
+        i.resize = crop;
+        let v = serde_json::to_value(&i).unwrap();
+        assert_eq!(
+            v["resize"],
+            serde_json::json!({"resize_crop": {"side": 256}})
+        );
+        assert_eq!(serde_json::from_value::<ModelInfo>(v).unwrap(), i);
+        // Anything else is refused, as any unknown field is.
+        for bad in [
+            serde_json::json!("crop"),
+            serde_json::json!("resize_crop"),
+            serde_json::json!({"resize_crop": {}}),
+            serde_json::json!({"resize_crop": {"side": 256, "x": 0}}),
+            serde_json::json!({"resize_crop": {"side": -1}}),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "{bad}");
+        }
+
+        // The command-line spelling.
+        for r in [Resize::Direct, Resize::ResizeCrop { side: 256 }] {
+            assert_eq!(r.to_string().parse::<Resize>(), Ok(r));
+        }
+        assert_eq!(
+            "resize_crop:256".parse(),
+            Ok(Resize::ResizeCrop { side: 256 })
+        );
+        for bad in [
+            "",
+            "crop",
+            "resize_crop",
+            "resize_crop:",
+            "resize_crop:x",
+            "direct:1",
+        ] {
+            assert!(bad.parse::<Resize>().is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn manifest_validation() {
         assert!(info().validate().is_ok());
@@ -624,6 +902,74 @@ mod tests {
         let mut i = info();
         i.input_size.width = 0;
         assert!(i.validate().is_err());
+        // The crop must fit in the resized square.
+        let mut i = info();
+        for (side, ok) in [
+            (3, false),
+            (4, true),
+            (256, true),
+            (2048, true),
+            (2049, false),
+        ] {
+            i.resize = Resize::ResizeCrop { side };
+            assert_eq!(i.validate().is_ok(), ok, "{side}");
+        }
+    }
+
+    /// The manifests of the model the macOS package ships, and of its fp32
+    /// original (crates/faro-detect/models/opennsfw).
+    #[test]
+    fn opennsfw_manifests_are_valid() {
+        for raw in [
+            include_str!("../models/opennsfw/manifest.json"),
+            include_str!("../models/opennsfw/manifest-fp32.json"),
+        ] {
+            let i: ModelInfo = serde_json::from_str(raw).unwrap();
+            i.validate().unwrap();
+            assert_eq!(i.license, "BSD-2-Clause");
+            let a = i.attribution.as_ref().unwrap();
+            assert_eq!(a.copyright, ["Copyright 2016, Yahoo Inc."]);
+            let text = i.license_text.as_deref().unwrap();
+            assert!(text.starts_with("Copyright 2016, Yahoo Inc.\n"));
+            assert!(text.contains("Redistributions in binary form must reproduce"));
+            assert_eq!(i.labels, ["sfw", "nsfw"]);
+            // The default policy reads `nsfw` as explicit.
+            let scores = ImageScores::new([("sfw", 0.05), ("nsfw", 0.95)]).unwrap();
+            let r = crate::PolicyEngine::default().fuse(&scores, &[]);
+            assert_eq!(r.rating, faro_proto::body::Rating::High, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn manifest_needs_what_the_licence_asks_for() {
+        let manifest_err = |i: ModelInfo| match i.validate() {
+            Err(DetectError::Manifest(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        let mut i = info();
+        i.attribution = None;
+        assert!(manifest_err(i).contains("requires attribution"));
+        let mut i = info();
+        i.license_text = Some("  ".into());
+        assert!(manifest_err(i).contains("MIT requires its text"));
+        let mut i = info();
+        i.attribution.as_mut().unwrap().copyright.clear();
+        assert!(manifest_err(i).contains("copyright"));
+        let mut i = info();
+        i.attribution.as_mut().unwrap().changes.clear();
+        assert!(manifest_err(i).contains("attribution.changes"));
+        // A public-domain dedication needs neither.
+        let mut i = info();
+        i.license = "CC0-1.0".into();
+        i.license_text = None;
+        i.attribution = None;
+        assert!(i.validate().is_ok());
+        // load_model refuses such a manifest before reading the weights.
+        let dir = tempfile::tempdir().unwrap();
+        let mut i = info();
+        i.license_text = None;
+        let p = write_model(dir.path(), &i, b"weights");
+        assert!(matches!(load_model(&p), Err(DetectError::Manifest(_))));
     }
 
     fn write_model(dir: &Path, info: &ModelInfo, weights: &[u8]) -> std::path::PathBuf {
@@ -647,6 +993,16 @@ mod tests {
         // Tampered weights → Integrity.
         let p = write_model(dir.path(), &info(), b"weightz");
         assert!(matches!(load_model(&p), Err(DetectError::Integrity { .. })));
+
+        // A candidate file elsewhere gets the same check.
+        let other = dir.path().join("candidate.onnx");
+        std::fs::write(&other, b"weights").unwrap();
+        assert_eq!(load_model_at(&p, &other).unwrap().bytes(), b"weights");
+        std::fs::write(&other, b"weightz").unwrap();
+        assert!(matches!(
+            load_model_at(&p, &other),
+            Err(DetectError::Integrity { .. })
+        ));
     }
 
     #[test]

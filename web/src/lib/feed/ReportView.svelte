@@ -2,16 +2,24 @@
 	// A decrypted daily report (ARCHITECTURE.md §6): activity timeline,
 	// counts by rating, flagged moments with their blurred thumbnails, and a
 	// health summary. Built on the device; the server never saw any of it.
-	import { dateTime } from '../format.ts';
 	import type { ActivityState, DailyReport } from '../types.ts';
-	import { describeReason, describeTamper, RATING_LABEL } from './describe.ts';
+	import { dateTime, date } from '../format.ts';
+	import {
+		categoryCounts,
+		categoryName,
+		describeReason,
+		describeTamper,
+		hostsByCategory,
+		IOS_LIMITS_NOTICE,
+		RATING_LABEL
+	} from './describe.ts';
 	import { thumbnailUrl } from './feed.ts';
 
 	let { report }: { report: DailyReport } = $props();
 
 	const STATE: Record<ActivityState, string> = {
 		active: 'In use',
-		idle: 'Idle',
+		idle: 'Idle (screen on, no input)',
 		locked: 'Locked',
 		asleep: 'Asleep',
 		paused: 'Paused',
@@ -43,6 +51,10 @@
 			: '';
 	}
 
+	function protectionWord(on: boolean | null): string {
+		return on === null ? 'unknown' : on ? 'on' : 'off';
+	}
+
 	function minutes(secs: number) {
 		const m = Math.round(secs / 60);
 		return m < 60 ? `${m} min` : `${Math.round((m / 60) * 10) / 10} h`;
@@ -54,45 +66,110 @@
 		{report.device_name} · {dateTime(report.period_start_ms)} to {dateTime(report.period_end_ms)}
 	</p>
 
-	<h4>Activity</h4>
-	{#if report.timeline.length === 0}
-		<p class="muted small">No activity recorded.</p>
+	{#if report.ios}
+		<!-- An iPhone blocks; it has no activity timeline of its own. -->
 	{:else}
-		<div class="timeline" role="img" aria-label="Activity through the day; listed below">
-			{#each report.timeline as t, i (i)}
-				<span
-					class="span st-{t.state}"
-					style:left="{((t.start_ms - report.period_start_ms) / span) * 100}%"
-					style:width="{Math.max(0.3, ((t.end_ms - t.start_ms) / span) * 100)}%"
-					title="{STATE[t.state]}: {time(t.start_ms)}–{time(t.end_ms)}{t.account
-						? ` (${t.account})`
-						: ''}"
-				></span>
+		<h4>Activity</h4>
+		{#if report.timeline.length === 0}
+			<p class="muted small">No activity recorded.</p>
+		{:else}
+			<div class="timeline" role="img" aria-label="Activity through the day; listed below">
+				{#each report.timeline as t, i (i)}
+					<span
+						class="span st-{t.state}"
+						style:left="{((t.start_ms - report.period_start_ms) / span) * 100}%"
+						style:width="{Math.max(0.3, ((t.end_ms - t.start_ms) / span) * 100)}%"
+						title="{STATE[t.state]}: {time(t.start_ms)}–{time(t.end_ms)}{t.account
+							? ` (${t.account})`
+							: ''}"
+					></span>
+				{/each}
+			</div>
+			<div class="axis small muted" aria-hidden="true">
+				<span>{time(report.period_start_ms)}</span><span>{time(report.period_end_ms)}</span>
+			</div>
+			<ul class="legend small">
+				{#each shownStates as s (s)}
+					<li><span class="swatch st-{s}" aria-hidden="true"></span>{STATE[s]}</li>
+				{/each}
+			</ul>
+		{/if}
+	{/if}
+
+	{#if report.ios}
+		{@const ios = report.ios}
+		<div class="notice info"><p>{IOS_LIMITS_NOTICE}</p></div>
+
+		<h4>Protection</h4>
+		{#if ios.protection.length === 0}
+			<p class="muted small">No protection changes recorded.</p>
+		{:else}
+			<ul class="small plain">
+				{#each ios.protection as p, i (i)}
+					<li>
+						{time(p.start_ms)} to {time(p.end_ms)}: Screen Time {protectionWord(p.screen_time)}, web
+						filter {protectionWord(p.filter)}
+					</li>
+				{/each}
+			</ul>
+		{/if}
+		{#if ios.loosenings?.length}
+			<ul class="small plain">
+				{#each ios.loosenings as l, i (i)}<li>{time(l.ts_ms)}: {l.text}</li>{/each}
+			</ul>
+		{/if}
+
+		<h4>Blocked lookups</h4>
+		{#if ios.blocked.length === 0}
+			<p class="muted small">Nothing was blocked, or this report doesn't include it yet.</p>
+		{:else}
+			{#each ios.blocked as day, i (i)}
+				<p class="small">
+					<strong>{date(day.day_start_ms)}</strong>: {categoryCounts(day.by_category) ||
+						'nothing blocked'}
+				</p>
+				{#each hostsByCategory(day.hosts) as g (g.category)}
+					<p class="small hosts">
+						{categoryName(g.category)}:
+						{g.hosts.map((h) => `${h.host} (${h.count})`).join(', ')}
+					</p>
+				{/each}
+				{#if day.other_hosts}
+					<p class="small hosts muted">
+						{day.other_hosts} more lookups of other sites, not listed.
+					</p>
+				{/if}
 			{/each}
-		</div>
-		<div class="axis small muted" aria-hidden="true">
-			<span>{time(report.period_start_ms)}</span><span>{time(report.period_end_ms)}</span>
-		</div>
-		<ul class="legend small">
-			{#each shownStates as s (s)}
-				<li><span class="swatch st-{s}" aria-hidden="true"></span>{STATE[s]}</li>
-			{/each}
+		{/if}
+
+		<h4>Blocked apps opened</h4>
+		{#if ios.shields.length === 0}
+			<p class="muted small">None, or this report doesn't include it yet.</p>
+		{:else}
+			<ul class="small plain">
+				{#each ios.shields as s, i (i)}
+					<li>
+						{date(s.day_start_ms)}: {s.shown} time{s.shown === 1 ? '' : 's'}, closed {s.closed}.
+					</li>
+				{/each}
+			</ul>
+			<p class="muted small">Faro counts these but never records which apps.</p>
+		{/if}
+	{:else}
+		<h4>Screen checks</h4>
+		<ul class="counts">
+			<li><span class="n">{total}</span> total</li>
+			<li><span class="n">{report.counts.clean}</span> clean</li>
+			<li><span class="n">{report.counts.low}</span> low</li>
+			<li class:flag={report.counts.medium > 0}>
+				<span class="n">{report.counts.medium}</span> medium
+			</li>
+			<li class:flag={report.counts.high > 0}><span class="n">{report.counts.high}</span> high</li>
 		</ul>
 	{/if}
 
-	<h4>Screen checks</h4>
-	<ul class="counts">
-		<li><span class="n">{total}</span> total</li>
-		<li><span class="n">{report.counts.clean}</span> clean</li>
-		<li><span class="n">{report.counts.low}</span> low</li>
-		<li class:flag={report.counts.medium > 0}>
-			<span class="n">{report.counts.medium}</span> medium
-		</li>
-		<li class:flag={report.counts.high > 0}><span class="n">{report.counts.high}</span> high</li>
-	</ul>
-
 	{#if report.flagged.length}
-		<h4>Flagged moments</h4>
+		<h4>{report.ios ? 'Flagged bursts' : 'Flagged moments'}</h4>
 		<ul class="flagged">
 			{#each report.flagged as f, i (i)}
 				{@const url = f.thumbnail ? thumbnailUrl(f.thumbnail) : null}
@@ -180,6 +257,16 @@
 	.report h4 {
 		font-size: 0.92rem;
 		margin: 1.1rem 0 0.4rem;
+	}
+
+	.plain {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.hosts {
+		margin: 0.1rem 0 0.1rem 1rem;
 	}
 
 	.timeline {

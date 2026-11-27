@@ -6,13 +6,15 @@
 //! | Trait | Implementation | Runs in |
 //! |---|---|---|
 //! | `ScreenCapture` | [`MacScreenCapture`]: ScreenCaptureKit `SCScreenshotManager` (14+), `CGDisplayCreateImage` (13) | agent |
-//! | `ForegroundInfo` | [`MacForeground`]: window list + fresh `NSRunningApplication`; titles via Accessibility | agent |
+//! | `ForegroundInfo` | [`MacForeground`]: window list + fresh `NSRunningApplication`; titles and browser tab URLs ([`browser`]) via Accessibility | agent |
 //! | `SessionState` | [`MacSession`]: CGEventSource idle, CGSession lock, display/system sleep | agent |
-//! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN (edge-triggered) | agent |
+//! | `TamperSignals` | [`MacTamper`]: permission revocation, VM, VPN, windows hidden from capture ([`hidden_windows`]) (edge-triggered) | agent |
 //! | `ServiceHost` | [`MacServiceHost`]: launchd plists, `SMAppService`, console sessions | service |
 //!
-//! [`ui`] is the agent's menu-bar icon and monitoring notice (§12); it has no
-//! `faro-platform` trait because only the macOS agent binary drives it.
+//! [`ui`] is the agent's menu-bar icon, monitoring notice (§12) and
+//! enrollment screens; it has no `faro-platform` trait because only the
+//! macOS agent binary drives it. [`authorization`] is how an administrator
+//! approves enrolling the computer (Authorization Services).
 //!
 //! On every other OS this crate compiles to an empty library, so the
 //! workspace builds everywhere and only macOS binaries depend on it for real.
@@ -38,7 +40,11 @@
 #![cfg_attr(not(target_os = "macos"), allow(unused))]
 
 #[cfg(target_os = "macos")]
+pub mod authorization;
+#[cfg(target_os = "macos")]
 mod bridge;
+#[cfg(target_os = "macos")]
+pub mod browser;
 #[cfg(target_os = "macos")]
 pub mod capture;
 #[cfg(target_os = "macos")]
@@ -48,6 +54,8 @@ pub mod convert;
 #[cfg(target_os = "macos")]
 pub mod foreground;
 #[cfg(target_os = "macos")]
+pub mod hidden_windows;
+#[cfg(target_os = "macos")]
 pub mod service;
 #[cfg(target_os = "macos")]
 pub mod session;
@@ -55,13 +63,16 @@ pub mod session;
 pub mod tamper;
 #[cfg(target_os = "macos")]
 pub mod ui;
+#[cfg(target_os = "macos")]
+pub mod update_job;
 
 #[cfg(target_os = "macos")]
 pub use bridge::{BridgeError, DEFAULT_TIMEOUT as CAPTURE_TIMEOUT};
 #[cfg(target_os = "macos")]
 pub use capture::{
-    active_displays, request_screen_capture_access, screen_capture_permission, CaptureBackend,
-    CaptureError, DisplayCapture, DisplayFailure, MacScreenCapture,
+    active_displays, request_screen_capture_access, request_screen_capture_access_once,
+    screen_capture_permission, CaptureBackend, CaptureError, DisplayCapture, DisplayFailure,
+    MacScreenCapture,
 };
 #[cfg(target_os = "macos")]
 pub use foreground::{accessibility_trusted, MacForeground};

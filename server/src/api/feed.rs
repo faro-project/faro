@@ -23,11 +23,20 @@
 //! The feed carries metadata only ([`FeedItem`]); content is fetched as a
 //! blob (the serialized [`faro_proto::EncryptedItem`]) and decrypted in the
 //! browser.
+//!
+//! **Readers check, rather than trust, events and reports.** Each carries its
+//! device-signed header and signature, and the response carries the
+//! member-signed endorsement of every device in it, so the browser checks
+//! them against the member's key rather than taking the instance's word
+//! (PROTOCOL.md §3.5). `GET /v1/ally/chain` serves a device's stored
+//! headers in `seq` order, those the feed leaves out (urgency `none`)
+//! included, so the browser can walk the hash chain between the items it
+//! shows and see a gap where something was dropped.
 
 use crate::auth::session::SessionUser;
 use crate::blob::{BlobError, BlobId};
-use crate::db::repo::allies;
 use crate::db::repo::feed::{self, Cursor, FeedRowKind};
+use crate::db::repo::{allies, devices, events as ev_repo};
 use crate::db::to_u64;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -35,12 +44,17 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use faro_proto::api::{FeedItem, ServerAlertKind};
-use faro_proto::UserId;
+use faro_proto::api::{ChainLink, FeedItem, Platform, ServerAlertKind};
+use faro_proto::keys::{DeviceEndorsement, Signed};
+use faro_proto::report::ReportHeader;
+use faro_proto::{DeviceId, EventHeader, Signature, UserId};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const DEFAULT_FEED_LIMIT: i64 = 100;
 pub const MAX_FEED_LIMIT: i64 = 500;
+pub const DEFAULT_CHAIN_LIMIT: i64 = 500;
+pub const MAX_CHAIN_LIMIT: i64 = 1000;
 
 #[derive(Debug, Deserialize)]
 pub struct FeedQuery {
@@ -68,6 +82,19 @@ pub struct FeedResponse {
     pub next_cursor: Option<String>,
     /// More items may be available right now.
     pub has_more: bool,
+    /// What each device in `items` is (`device_id` to platform), so a reader
+    /// with no device list of their own, an ally, words an iPhone's alerts
+    /// as an iPhone's. The instance already stores this (sent at enrollment)
+    /// and it goes only to callers who can read the feed. Absent from older
+    /// instances.
+    #[serde(default)]
+    pub device_platforms: BTreeMap<String, Platform>,
+    /// The member-signed endorsement of each device in `items`
+    /// (`device_id` to `Signed<DeviceEndorsement>`), as the member uploaded
+    /// it: what the reader checks device signatures against. A device with
+    /// none (never endorsed) is left out. Absent from older instances.
+    #[serde(default)]
+    pub device_endorsements: BTreeMap<String, Signed<DeviceEndorsement>>,
 }
 
 /// Whether `caller` may read `member`'s feed and blobs.
@@ -109,6 +136,8 @@ pub async fn get_feed(
                 kind,
                 urgency,
                 blob_id,
+                header_json,
+                sig,
             } => FeedItem::Event {
                 member_id: member.clone(),
                 device_id,
@@ -117,6 +146,8 @@ pub async fn get_feed(
                 kind,
                 urgency,
                 blob_id,
+                header: parse_stored::<EventHeader>(&header_json).map(Box::new),
+                sig: Signature::from_b64(&sig),
             },
             FeedRowKind::Report {
                 id,
@@ -124,6 +155,8 @@ pub async fn get_feed(
                 period_start_ms,
                 period_end_ms,
                 blob_id,
+                header_json,
+                sig,
             } => FeedItem::Report {
                 member_id: member.clone(),
                 device_id,
@@ -131,6 +164,8 @@ pub async fn get_feed(
                 period_start_ms,
                 period_end_ms,
                 blob_id,
+                header: parse_stored::<ReportHeader>(&header_json).map(Box::new),
+                sig: Signature::from_b64(&sig),
             },
             FeedRowKind::Alert {
                 id,
@@ -159,10 +194,119 @@ pub async fn get_feed(
             item,
         });
     }
+    let mut device_platforms = BTreeMap::new();
+    let mut device_endorsements = BTreeMap::new();
+    let wanted: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|e| match &e.item {
+            FeedItem::Event { device_id, .. } | FeedItem::Report { device_id, .. } => {
+                Some(device_id.as_str())
+            }
+            FeedItem::Alert { device_id, .. } => device_id.as_ref().map(|d| d.as_str()),
+        })
+        .collect();
+    if !wanted.is_empty() {
+        for (id, platform) in devices::platforms_for_owner(&mut *conn, &member).await? {
+            if wanted.contains(id.as_str()) {
+                device_platforms.insert(id.as_str().to_owned(), platform);
+            }
+        }
+        for (id, json) in devices::endorsements_for_owner(&mut *conn, &member).await? {
+            if wanted.contains(id.as_str()) {
+                if let Some(e) = parse_stored::<Signed<DeviceEndorsement>>(&json) {
+                    device_endorsements.insert(id.as_str().to_owned(), e);
+                }
+            }
+        }
+    }
     Ok(Json(FeedResponse {
         member_id: member,
+        device_platforms,
+        device_endorsements,
         items,
         next_cursor,
+        has_more,
+    }))
+}
+
+/// JSON the instance stored itself. A row that no longer parses is served
+/// without it, and the reader treats the item as unsigned.
+fn parse_stored<T: serde::de::DeserializeOwned>(json: &str) -> Option<T> {
+    match serde_json::from_str(json) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(error = %e, "stored signed JSON does not parse");
+            None
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChainQuery {
+    pub member_id: String,
+    pub device_id: String,
+    /// The first `seq` wanted (inclusive). Default 0.
+    pub from_seq: Option<u64>,
+    pub limit: Option<i64>,
+}
+
+/// `GET /v1/ally/chain`: one device's stored event headers, by `seq`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainResponse {
+    pub member_id: UserId,
+    pub device_id: DeviceId,
+    /// Ascending `seq`, from `from_seq`. A `seq` that is missing here was
+    /// never stored (a gap the instance recorded) or has expired.
+    pub links: Vec<ChainLink>,
+    /// More headers may follow the last one: ask again from its `seq + 1`.
+    pub has_more: bool,
+}
+
+/// `GET /v1/ally/chain?member_id=&device_id=&from_seq=&limit=`
+///
+/// Headers only, the ones the feed leaves out included: readable by whoever
+/// may read the member's feed. Headers are metadata the instance holds
+/// anyway (kinds, times, urgency), and they are what lets a reader verify
+/// the hash chain between the feed's items (PROTOCOL.md §3.5).
+pub async fn get_chain(
+    State(state): State<AppState>,
+    s: SessionUser,
+    Query(q): Query<ChainQuery>,
+) -> AppResult<Json<ChainResponse>> {
+    let member = UserId::new(q.member_id);
+    let device = DeviceId::new(q.device_id);
+    if !member.is_well_formed()
+        || !device.is_well_formed()
+        || !can_read(&state, &s.user.id, &member).await?
+    {
+        return Err(AppError::NotFound);
+    }
+    let from = q.from_seq.unwrap_or(0);
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_CHAIN_LIMIT)
+        .clamp(1, MAX_CHAIN_LIMIT);
+    let rows = ev_repo::headers_from(state.db().pool(), &member, &device, from, limit).await?;
+    let has_more = rows.len() as i64 == limit;
+    let mut links = Vec::with_capacity(rows.len());
+    for r in rows {
+        let (Some(header), Some(sig)) = (
+            parse_stored::<EventHeader>(&r.header_json),
+            Signature::from_b64(&r.sig),
+        ) else {
+            // Left out: the reader sees a gap at this seq.
+            continue;
+        };
+        links.push(ChainLink {
+            received_at_ms: r.received_at_ms,
+            header,
+            sig,
+        });
+    }
+    Ok(Json(ChainResponse {
+        member_id: member,
+        device_id: device,
+        links,
         has_more,
     }))
 }

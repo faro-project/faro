@@ -21,6 +21,9 @@
 	--accent-soft: #fbeedd;
 	--brand: #f19e4b;
 	--beam: #ed7043;
+	/* Behind an instance's own logo: none here, white in the dark theme so a
+	 * logo made for a light background stays readable. */
+	--logo-plate: transparent;
 	--ok: #2c7146;
 	--ok-bg: #e7f3ea;
 	--warn: #8a5300;
@@ -56,6 +59,7 @@
 		--accent-hover: #f6b779;
 		--accent-text: #1a1006;
 		--accent-soft: #2b2014;
+		--logo-plate: #ffffff;
 		--ok: #7cd19b;
 		--ok-bg: #132a1b;
 		--warn: #f0c060;
@@ -85,6 +89,7 @@
 	--accent-hover: #f6b779;
 	--accent-text: #1a1006;
 	--accent-soft: #2b2014;
+	--logo-plate: #ffffff;
 	--ok: #7cd19b;
 	--ok-bg: #132a1b;
 	--warn: #f0c060;

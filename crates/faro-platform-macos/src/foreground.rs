@@ -31,7 +31,13 @@
 //! Read through the Accessibility API (`AXFocusedWindow` → `AXTitle`) only
 //! when the member has granted Accessibility (`AXIsProcessTrusted`), which is
 //! optional (§3.3). Each AX call is bounded by a short messaging timeout so a
-//! hung app cannot stall the agent.
+//! hung app cannot stall the agent. Any app picks its own title, so it is
+//! cut to [`MAX_TITLE_CHARS`] (the Windows agent's limit).
+//!
+//! # Browser tabs
+//!
+//! With the same permission, the active tab's URL in Safari, Chrome, Edge,
+//! Brave and Arc, reduced to its scheme and host. See [`crate::browser`].
 //!
 //! # Autorelease pools
 //!
@@ -45,7 +51,7 @@
 //! [`autoreleasepool`], which drains those objects before returning (the
 //! values we return are plain Rust data).
 
-use faro_platform::{AppInfo, ForegroundInfo};
+use faro_platform::{AppInfo, BrowserContext, ForegroundInfo};
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement};
@@ -56,10 +62,11 @@ use objc2_core_graphics::{
 };
 use std::ptr::NonNull;
 
+use crate::browser::{self, Browser};
 use crate::cf;
 
 /// How long one Accessibility request may block, in seconds.
-const AX_TIMEOUT_SECS: f32 = 0.25;
+pub(crate) const AX_TIMEOUT_SECS: f32 = 0.25;
 
 /// Normal application windows live on layer 0; menus, the Dock, overlays and
 /// the menu bar live above it.
@@ -134,6 +141,24 @@ impl ForegroundInfo for MacForeground {
             focused_window_title(frontmost_pid_now()?)
         })
     }
+
+    /// See [`crate::browser`].
+    fn browser(&self) -> Option<BrowserContext> {
+        autoreleasepool(|_| {
+            if !accessibility_trusted() {
+                return None;
+            }
+            let pid = frontmost_pid_now()?;
+            let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+            let browser = Browser::from_bundle_id(&app.bundleIdentifier()?.to_string())?;
+            let url = browser::tab_url_now(pid, browser)?;
+            Some(BrowserContext {
+                url: Some(url),
+                title: None,
+                incognito: false,
+            })
+        })
+    }
 }
 
 /// `isActive` on a freshly created `NSRunningApplication` (see module docs).
@@ -200,6 +225,21 @@ fn ax_copy(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFType>>
     NonNull::new(out.cast_mut()).map(|p| unsafe { CFRetained::from_raw(p) })
 }
 
+/// Longest title we report, in characters. Real titles are far shorter; a
+/// longer one is cut (the service bounds it again, `faro_ipc::limits`).
+pub const MAX_TITLE_CHARS: usize = 1024;
+
+/// `raw` trimmed and cut to [`MAX_TITLE_CHARS`]; `None` if empty.
+fn bound_title(raw: &str) -> Option<String> {
+    let title = raw.trim();
+    let end = title
+        .char_indices()
+        .nth(MAX_TITLE_CHARS)
+        .map_or(title.len(), |(i, _)| i);
+    let title = title[..end].trim_end();
+    (!title.is_empty()).then(|| title.to_owned())
+}
+
 fn focused_window_title(pid: i32) -> Option<String> {
     if pid <= 0 {
         return None;
@@ -220,13 +260,22 @@ fn focused_window_title(pid: i32) -> Option<String> {
         .downcast::<CFString>()
         .ok()?
         .to_string();
-    let title = title.trim();
-    (!title.is_empty()).then(|| title.to_owned())
+    bound_title(&title)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_are_trimmed_and_bounded() {
+        assert_eq!(bound_title("  Inbox  ").as_deref(), Some("Inbox"));
+        assert_eq!(bound_title("   "), None);
+        let long = "é".repeat(MAX_TITLE_CHARS * 4);
+        let cut = bound_title(&long).unwrap();
+        assert_eq!(cut.chars().count(), MAX_TITLE_CHARS);
+        assert!(long.starts_with(&cut));
+    }
 
     #[test]
     fn layer0_owners_keep_order_and_dedupe() {
@@ -267,6 +316,19 @@ mod tests {
             assert!(!t.trim().is_empty());
         }
         let _ = accessibility_trusted();
+    }
+
+    #[test]
+    fn smoke_browser_does_not_panic() {
+        if let Some(b) = MacForeground::new().browser() {
+            // No values in the messages: this may be a real tab.
+            let url = b.url.expect("a browser context always has a URL");
+            assert!(
+                browser::reduce_url(&url).as_deref() == Some(url.as_str()),
+                "the URL is already reduced"
+            );
+            assert!(b.title.is_none() && !b.incognito);
+        }
     }
 
     #[test]

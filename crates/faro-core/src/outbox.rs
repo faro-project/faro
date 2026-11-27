@@ -14,6 +14,15 @@
 //! adopts the new head after `commit` returns, a `seq` is never signed for two
 //! different events.
 //!
+//! **Several processes.** On iOS the app and its packet tunnel append to one
+//! chain in one database. [`Outbox::append_exclusive`] does the whole append
+//! (read the head and the recipient checkpoint, seal and sign the event on
+//! them, store it with the new head) in one `BEGIN EXCLUSIVE` transaction,
+//! so no other connection can write in between and `seq` and `prev_hash`
+//! stay strict whichever process appends. [`Outbox::commit`] is for a single
+//! writer that holds the head itself (the desktop service, which also holds
+//! the state directory's lock).
+//!
 //! **Retention.** While offline the outbox keeps about 30 days of events and
 //! prunes clean data first (see [`Outbox::prune`]). Every pruned range is
 //! recorded so the next report can explain the resulting chain gap.
@@ -55,11 +64,13 @@
 //! transaction that reads the version, so an upgrade is all-or-nothing and
 //! existing rows are kept.
 
+use crate::clock::Clock;
 use crate::recipients::{ManifestDecision, RecipientError, RecipientSet};
 use crate::report::SealedReport;
-use crate::writer::PreparedEvent;
+use crate::writer::{EventWriter, PreparedEvent, WriterError};
 use faro_crypto::ChainHead;
 use faro_proto::api::SignedRecipientManifest;
+use faro_proto::body::EventBody;
 use faro_proto::keys::ManifestRef;
 use faro_proto::report::ReportUpload;
 use faro_proto::{DeviceId, Hash32, InstanceId, SignPublicKey, SignedEvent, Urgency, UserId};
@@ -442,6 +453,118 @@ fn migrate(tx: &rusqlite::Transaction<'_>, from: u32) -> Result<(), OutboxError>
     Ok(())
 }
 
+/// The chain head through `conn` (a plain connection or an open
+/// transaction).
+fn read_head(conn: &Connection) -> Result<ChainHead, OutboxError> {
+    let (next, prev): (i64, String) = conn.query_row(
+        "SELECT next_seq, prev_hash FROM chain_state WHERE id = 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(ChainHead {
+        next_seq: to_u64(next, "next_seq")?,
+        prev_hash: Hash32::from_prefixed_hex(&prev)
+            .ok_or_else(|| OutboxError::Corrupt("prev_hash".into()))?,
+    })
+}
+
+/// Check `prepared` against the head and checkpoint read in `tx`, then
+/// store it and the new head there (see [`Outbox::commit`]). The caller
+/// commits `tx`.
+fn commit_in(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &PreparedEvent,
+    instance_id: &InstanceId,
+    device_id: &DeviceId,
+) -> Result<ChainHead, OutboxError> {
+    let ev = prepared.event();
+    let h = &ev.header;
+    if &h.instance_id != instance_id || &h.device_id != device_id {
+        return Err(OutboxError::ForeignEvent);
+    }
+    ev.check_shape(true)?;
+    let json = serde_json::to_string(ev)?;
+    require_current_manifest(tx, prepared.manifest_ref())?;
+    let stored = read_head(tx)?;
+    if h.seq != stored.next_seq {
+        return Err(OutboxError::NotNextSeq {
+            expected: stored.next_seq,
+            got: h.seq,
+        });
+    }
+    if h.prev_hash != stored.prev_hash {
+        return Err(OutboxError::PrevHashMismatch { seq: h.seq });
+    }
+    let mut successor = stored;
+    successor.advance(h);
+    if prepared.new_head() != successor || prepared.prev_head() != stored {
+        return Err(OutboxError::NotSuccessor);
+    }
+    let age_ms = bump_age_clock(tx, h.ts_ms)?;
+    tx.execute(
+        "INSERT INTO events (seq, kind, urgency, ts_ms, size, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            to_i64(h.seq, "seq")?,
+            h.kind.as_str(),
+            h.urgency.as_str(),
+            age_ms,
+            to_i64(json.len() as u64, "size")?,
+            json
+        ],
+    )?;
+    tx.execute(
+        "UPDATE chain_state SET next_seq = ?1, prev_hash = ?2 WHERE id = 0",
+        params![
+            to_i64(successor.next_seq, "next_seq")?,
+            successor.prev_hash.to_prefixed_hex()
+        ],
+    )?;
+    Ok(successor)
+}
+
+/// The recipient set of the checkpoint stored in `conn`, re-verified (see
+/// [`Outbox::current_recipients`]).
+fn current_recipients_in(
+    conn: &Connection,
+    instance_id: &InstanceId,
+    pinned_member_sign_pubkey: &SignPublicKey,
+    member_id: &UserId,
+) -> Result<Option<RecipientSet>, OutboxError> {
+    let row: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT version, hash, manifest_json FROM manifest_checkpoint WHERE id = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((version, hash, json)) = row else {
+        return Ok(None);
+    };
+    let stored = ManifestRef {
+        version: to_u64(version, "manifest version")?,
+        hash: Hash32::from_prefixed_hex(&hash)
+            .ok_or_else(|| OutboxError::Corrupt("manifest checkpoint hash".into()))?,
+    };
+    let manifest: SignedRecipientManifest = serde_json::from_str(&json)
+        .map_err(|e| OutboxError::Corrupt(format!("stored recipient manifest: {e}")))?;
+    let (set, decision) = RecipientSet::from_manifest(
+        &manifest,
+        pinned_member_sign_pubkey,
+        instance_id,
+        member_id,
+        Some(stored),
+    )
+    .map_err(|e| OutboxError::Corrupt(format!("stored recipient manifest: {e}")))?;
+    if decision != ManifestDecision::Unchanged {
+        return Err(OutboxError::Corrupt(format!(
+            "stored recipient manifest is version {}, checkpoint is version {}",
+            set.manifest_ref().version,
+            stored.version
+        )));
+    }
+    Ok(Some(set))
+}
+
 impl Outbox {
     /// Open (or create) the outbox in `dir` for this device.
     ///
@@ -464,6 +587,12 @@ impl Outbox {
         let path = dir.join(OUTBOX_FILE);
         restrict_perms(&path)?;
         let mut conn = Connection::open(&path)?;
+        // How long to wait for another connection's transaction. SQLite's
+        // busy handler polls rather than queues, so a connection that
+        // commits and begins again straight away can keep the others
+        // waiting past this. Nothing does that here: the service has one
+        // connection, shared by all its tasks, and the `status` and `enroll`
+        // commands make a few short transactions (#53).
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -558,16 +687,7 @@ impl Outbox {
 
     /// The durable chain head.
     pub fn head(&self) -> Result<ChainHead, OutboxError> {
-        let (next, prev): (i64, String) = self.conn.query_row(
-            "SELECT next_seq, prev_hash FROM chain_state WHERE id = 0",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok(ChainHead {
-            next_seq: to_u64(next, "next_seq")?,
-            prev_hash: Hash32::from_prefixed_hex(&prev)
-                .ok_or_else(|| OutboxError::Corrupt("prev_hash".into()))?,
-        })
+        read_head(&self.conn)
     }
 
     /// Durably store `prepared` and advance the stored head, atomically.
@@ -578,66 +698,82 @@ impl Outbox {
     /// exactly the stored head's `seq` and `prev_hash`, and its `new_head` is
     /// the true successor.
     pub fn commit(&mut self, prepared: &PreparedEvent) -> Result<ChainHead, OutboxError> {
-        let ev = prepared.event();
-        let h = &ev.header;
-        if h.instance_id != self.instance_id || h.device_id != self.device_id {
-            return Err(OutboxError::ForeignEvent);
-        }
-        ev.check_shape(true)?;
-        let json = serde_json::to_string(ev)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        require_current_manifest(&tx, prepared.manifest_ref())?;
-        let (next, prev): (i64, String) = tx.query_row(
-            "SELECT next_seq, prev_hash FROM chain_state WHERE id = 0",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let stored = ChainHead {
-            next_seq: to_u64(next, "next_seq")?,
-            prev_hash: Hash32::from_prefixed_hex(&prev)
-                .ok_or_else(|| OutboxError::Corrupt("prev_hash".into()))?,
-        };
-        if h.seq != stored.next_seq {
-            return Err(OutboxError::NotNextSeq {
-                expected: stored.next_seq,
-                got: h.seq,
-            });
-        }
-        if h.prev_hash != stored.prev_hash {
-            return Err(OutboxError::PrevHashMismatch { seq: h.seq });
-        }
-        let mut successor = stored;
-        successor.advance(h);
-        if prepared.new_head() != successor || prepared.prev_head() != stored {
-            return Err(OutboxError::NotSuccessor);
-        }
-        let age_ms = bump_age_clock(&tx, h.ts_ms)?;
-        tx.execute(
-            "INSERT INTO events (seq, kind, urgency, ts_ms, size, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                to_i64(h.seq, "seq")?,
-                h.kind.as_str(),
-                h.urgency.as_str(),
-                age_ms,
-                to_i64(json.len() as u64, "size")?,
-                json
-            ],
-        )?;
-        tx.execute(
-            "UPDATE chain_state SET next_seq = ?1, prev_hash = ?2 WHERE id = 0",
-            params![
-                to_i64(successor.next_seq, "next_seq")?,
-                successor.prev_hash.to_prefixed_hex()
-            ],
-        )?;
+        let head = commit_in(&tx, prepared, &self.instance_id, &self.device_id)?;
         tx.commit()?;
-        Ok(successor)
+        Ok(head)
+    }
+
+    /// Append one event to a chain that several processes write, such as
+    /// the iOS app and its packet tunnel sharing one database in the app
+    /// group container (docs/IOS.md §13).
+    ///
+    /// Everything happens in one `BEGIN EXCLUSIVE` transaction, so no other
+    /// connection, in this process or another, can write in between:
+    ///
+    /// 1. the stored chain head and the recipient checkpoint are read;
+    /// 2. `writer` is moved to that head, and the event is sealed to that
+    ///    checkpoint's recipients and signed on it ([`EventWriter::prepare`]);
+    /// 3. it is checked exactly as [`Outbox::commit`] checks an event, and
+    ///    stored together with the new head;
+    /// 4. only after the commit does `writer` adopt the new head.
+    ///
+    /// So `seq` and `prev_hash` stay strict whichever process appends, a
+    /// `seq` is never signed for two events, and the body is sealed to the
+    /// checkpoint in force at that moment, never to a set another process
+    /// has since replaced. If anything fails the transaction rolls back and
+    /// nothing is stored; the signed event is dropped unseen.
+    ///
+    /// A device with no checkpoint yet is [`OutboxError::NotBootstrapped`].
+    /// The lock is held while one body is sealed and signed, a few
+    /// milliseconds; other writers wait for it up to the busy timeout
+    /// ([`Outbox::set_busy_timeout`]).
+    pub fn append_exclusive<C: Clock>(
+        &mut self,
+        writer: &mut EventWriter<C>,
+        body: &EventBody,
+        urgency: Urgency,
+        pinned_member_sign_pubkey: &SignPublicKey,
+        member_id: &UserId,
+    ) -> Result<SignedEvent, WriterError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Exclusive)
+            .map_err(OutboxError::from)?;
+        let recipients =
+            current_recipients_in(&tx, &self.instance_id, pinned_member_sign_pubkey, member_id)?
+                .ok_or(OutboxError::NotBootstrapped)?;
+        writer.set_head(read_head(&tx)?);
+        let prepared = writer.prepare(body, urgency, &recipients)?;
+        commit_in(&tx, &prepared, &self.instance_id, &self.device_id)?;
+        tx.commit().map_err(OutboxError::from)?;
+        writer.adopt_committed(&prepared)?;
+        Ok(prepared.into_event())
+    }
+
+    /// How long a statement waits for another connection's lock before
+    /// failing with `SQLITE_BUSY` ([`Outbox::open`] sets 5 seconds).
+    pub fn set_busy_timeout(&self, timeout: std::time::Duration) -> Result<(), OutboxError> {
+        self.conn.busy_timeout(timeout)?;
+        Ok(())
     }
 
     /// Up to `limit` unacknowledged events, oldest first.
     pub fn pending(&self, limit: usize) -> Result<Vec<SignedEvent>, OutboxError> {
+        self.pending_within(limit, usize::MAX)
+    }
+
+    /// Up to `limit` unacknowledged events, oldest first, whose stored JSON
+    /// adds up to at most `max_bytes`; always at least the oldest one, so an
+    /// event larger than `max_bytes` still comes out (alone). Rows are read
+    /// one at a time, so a large backlog is never loaded whole.
+    pub fn pending_within(
+        &self,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<SignedEvent>, OutboxError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = self
             .conn
@@ -646,8 +782,13 @@ impl Outbox {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })?;
         let mut out = Vec::new();
+        let mut bytes = 0usize;
         for row in rows {
             let (seq, json) = row?;
+            bytes = bytes.saturating_add(json.len());
+            if !out.is_empty() && bytes > max_bytes {
+                break;
+            }
             let ev: SignedEvent = serde_json::from_str(&json)
                 .map_err(|e| OutboxError::Corrupt(format!("event {seq}: {e}")))?;
             if to_i64(ev.header.seq, "seq")? != seq {
@@ -989,40 +1130,12 @@ impl Outbox {
         pinned_member_sign_pubkey: &SignPublicKey,
         member_id: &UserId,
     ) -> Result<Option<RecipientSet>, OutboxError> {
-        let row: Option<(i64, String, String)> = self
-            .conn
-            .query_row(
-                "SELECT version, hash, manifest_json FROM manifest_checkpoint WHERE id = 0",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let Some((version, hash, json)) = row else {
-            return Ok(None);
-        };
-        let stored = ManifestRef {
-            version: to_u64(version, "manifest version")?,
-            hash: Hash32::from_prefixed_hex(&hash)
-                .ok_or_else(|| OutboxError::Corrupt("manifest checkpoint hash".into()))?,
-        };
-        let manifest: SignedRecipientManifest = serde_json::from_str(&json)
-            .map_err(|e| OutboxError::Corrupt(format!("stored recipient manifest: {e}")))?;
-        let (set, decision) = RecipientSet::from_manifest(
-            &manifest,
-            pinned_member_sign_pubkey,
+        current_recipients_in(
+            &self.conn,
             &self.instance_id,
+            pinned_member_sign_pubkey,
             member_id,
-            Some(stored),
         )
-        .map_err(|e| OutboxError::Corrupt(format!("stored recipient manifest: {e}")))?;
-        if decision != ManifestDecision::Unchanged {
-            return Err(OutboxError::Corrupt(format!(
-                "stored recipient manifest is version {}, checkpoint is version {}",
-                set.manifest_ref().version,
-                stored.version
-            )));
-        }
-        Ok(Some(set))
     }
 
     #[cfg(test)]
@@ -1162,6 +1275,11 @@ mod tests {
         assert!(gaps.is_empty());
         assert_eq!(head, e.ob.head().unwrap());
         assert_eq!(e.ob.pending(2).unwrap().len(), 2);
+        // By bytes: always the oldest, then as many as fit.
+        let one = serde_json::to_string(&pend[0]).unwrap().len();
+        assert_eq!(e.ob.pending_within(100, 0).unwrap().len(), 1);
+        assert_eq!(e.ob.pending_within(100, one * 2 + 1).unwrap().len(), 2);
+        assert_eq!(e.ob.pending_within(100, usize::MAX).unwrap().len(), 5);
         assert_eq!(e.ob.ack_through(2).unwrap(), 3);
         assert_eq!(e.ob.pending(100).unwrap()[0].header.seq, 3);
         assert!(matches!(
@@ -1673,6 +1791,20 @@ mod tests {
     }
 
     #[test]
+    fn format_2_names_persist_across_reopen() {
+        let mut e = env();
+        let v2 = e.f.sign(e.f.named_body(2));
+        let (set, _) = e.accept(&v2).unwrap();
+        e.reopen();
+        let back =
+            e.ob.current_recipients(&e.pinned(), &e.f.member)
+                .unwrap()
+                .unwrap();
+        assert_eq!(back, set);
+        assert_eq!(back.allies()[0].display_name().as_deref(), Some("Ally 0"));
+    }
+
+    #[test]
     fn checkpoint_cannot_regress() {
         let mut e = env();
         let v2 = e.f.manifest(2);
@@ -1735,39 +1867,74 @@ mod tests {
         );
     }
 
+    /// Six connections race to move the checkpoint, each presenting the
+    /// versions in its own order. After its own `accept_manifest`, a
+    /// connection must never read a checkpoint below the version it
+    /// presented, and the newest manifest wins in the end.
+    ///
+    /// The connections are opened first and then race in rounds: in each
+    /// round every connection makes one `accept_manifest` call, all at once.
+    /// That is how the outbox is shared in practice (one update, then other
+    /// work), and every round has six writers contending for the lock.
+    ///
+    /// Free-running loops are not a race at all. SQLite's busy handler polls
+    /// instead of queueing, so a connection that commits and begins again
+    /// straight away keeps the lock while the others sleep: the threads ran
+    /// one after another, and the last one to get the lock waited for the
+    /// others' whole runs. On the Windows runner that passed the 5 s busy
+    /// timeout (#53). In rounds, a connection waits for at most five single
+    /// updates.
     #[test]
     fn racing_checkpoint_updates_never_move_backwards() {
         let e = env();
         const VERSIONS: u64 = 40;
+        const THREADS: u64 = 6;
         let manifests: std::sync::Arc<Vec<SignedRecipientManifest>> =
             std::sync::Arc::new((1..=VERSIONS).map(|v| e.f.manifest(v)).collect());
-        let threads: Vec<_> = (0..6u64)
+        let round = std::sync::Arc::new(std::sync::Barrier::new(THREADS as usize));
+        let threads: Vec<_> = (0..THREADS)
             .map(|t| {
-                let dir = e.dir.clone();
-                let inst = e.f.inst.clone();
-                let dev = e.w.device_id().clone();
+                let mut ob = Outbox::open(&e.dir, &e.f.inst, e.w.device_id()).unwrap();
                 let pinned = e.pinned();
                 let member = e.f.member.clone();
                 let manifests = manifests.clone();
-                std::thread::spawn(move || {
-                    let mut ob = Outbox::open(&dir, &inst, &dev).unwrap();
-                    // Each thread walks the versions in a different order.
-                    for i in 0..VERSIONS {
+                let round = round.clone();
+                std::thread::spawn(move || -> Result<(), String> {
+                    let mut step = |i: u64| -> Result<(), String> {
+                        // Each thread walks the versions in a different order.
                         let v = (i * (2 * t + 1) + t) % VERSIONS + 1;
                         let m = &manifests[(v - 1) as usize];
                         match ob.accept_manifest(m, &pinned, &member) {
                             Ok(_) => {}
                             Err(OutboxError::Manifest(RecipientError::Rollback { .. })) => {}
-                            Err(other) => panic!("unexpected {other:?}"),
+                            Err(other) => return Err(format!("accepting v{v}: {other:?}")),
                         }
-                        let now = ob.manifest_checkpoint().unwrap().unwrap();
-                        assert!(now.version >= v, "checkpoint went below {v}: {now:?}");
+                        let now = ob
+                            .manifest_checkpoint()
+                            .map_err(|err| format!("reading after v{v}: {err:?}"))?
+                            .ok_or("checkpoint disappeared")?;
+                        if now.version < v {
+                            return Err(format!("checkpoint went below {v}: {now:?}"));
+                        }
+                        Ok(())
+                    };
+                    let mut result = Ok(());
+                    for i in 0..VERSIONS {
+                        // Keep meeting the others after a failure, so they
+                        // are not left waiting at the barrier.
+                        round.wait();
+                        if result.is_ok() {
+                            result = step(i);
+                        }
                     }
+                    result
                 })
             })
             .collect();
-        for t in threads {
-            t.join().unwrap();
+        for (t, handle) in threads.into_iter().enumerate() {
+            if let Err(err) = handle.join().unwrap() {
+                panic!("thread {t}: {err}");
+            }
         }
         let last = manifests.last().unwrap().body.reference();
         assert_eq!(e.ob.manifest_checkpoint().unwrap(), Some(last));
@@ -1990,6 +2157,56 @@ mod tests {
             ob2.manifest_checkpoint().unwrap(),
             Some(v3.body.reference())
         );
+    }
+
+    /// #180: a new computer is anchored to version 2 (the ally was removed
+    /// there), but the instance had the member's page build a version 3 on
+    /// the pre-removal version 1. Its format 3 link gives it away.
+    #[test]
+    fn bootstrap_refuses_a_successor_from_another_branch() {
+        use faro_proto::keys::MANIFEST_FORMAT_V3;
+        let f = Fixture::new(1);
+        let pinned = f.member_sign.public();
+        let linked = |version: u64, prev: Hash32, allies: bool| {
+            let mut b = f.named_body(version);
+            b.format = MANIFEST_FORMAT_V3;
+            b.prev_hash = Some(prev);
+            if !allies {
+                b.allies.clear();
+            }
+            f.sign(b)
+        };
+        let mut v1 = f.named_body(1);
+        v1.format = MANIFEST_FORMAT_V3;
+        let v1 = f.sign(v1);
+        let v2 = linked(2, v1.body.hash(), false);
+        let fork3 = linked(3, v1.body.hash(), true);
+        let anchor = ManifestAnchor::AtLeast(v2.body.reference());
+        let td = tempfile::tempdir().unwrap();
+        let mut ob = Outbox::open(td.path(), &f.inst, &DeviceId::new("dev_new")).unwrap();
+        assert!(matches!(
+            ob.bootstrap_manifest(&fork3, &pinned, &f.member, anchor),
+            Err(OutboxError::Manifest(RecipientError::Fork {
+                version: 3,
+                ..
+            }))
+        ));
+        assert_eq!(ob.manifest_checkpoint().unwrap(), None);
+        let v3 = linked(3, v2.body.hash(), false);
+        let set = ob
+            .bootstrap_manifest(&v3, &pinned, &f.member, anchor)
+            .unwrap();
+        assert!(set.allies().is_empty());
+        // And once bootstrapped, the next version is held to the link too.
+        let fork4 = linked(4, fork3.body.hash(), true);
+        assert!(matches!(
+            ob.accept_manifest(&fork4, &pinned, &f.member),
+            Err(OutboxError::Manifest(RecipientError::Fork {
+                version: 4,
+                ..
+            }))
+        ));
+        assert_eq!(ob.manifest_checkpoint().unwrap(), Some(v3.body.reference()));
     }
 
     /// Regression: a set obtained before another component accepted a
@@ -2384,5 +2601,190 @@ mod tests {
             .execute("UPDATE events SET json = 'not json' WHERE seq = 0", [])
             .unwrap();
         assert!(matches!(e.ob.pending(10), Err(OutboxError::Corrupt(_))));
+    }
+
+    /// A writer with the same device key and a fresh connection, as another
+    /// process (the iOS tunnel next to the app) has.
+    fn second_writer(e: &Env) -> (Outbox, EventWriter<ManualClock>) {
+        let ob = Outbox::open(&e.dir, &e.f.inst, e.w.device_id()).unwrap();
+        let w = EventWriter::new(
+            SigningKey::from_bytes(&e.w.signing_key().to_bytes()),
+            e.f.inst.clone(),
+            e.w.device_id().clone(),
+            ChainHead::genesis(&e.f.inst, e.w.device_id()),
+            e.clock.clone(),
+        );
+        (ob, w)
+    }
+
+    #[test]
+    fn append_exclusive_follows_heads_written_by_other_connections() {
+        let mut e = env();
+        let pinned = e.pinned();
+        let member = e.f.member.clone();
+        let (mut other, mut w2) = second_writer(&e);
+        // Both writers start at genesis; each append reads the stored head.
+        for i in 0..6 {
+            let (ob, w) = if i % 2 == 0 {
+                (&mut e.ob, &mut e.w)
+            } else {
+                (&mut other, &mut w2)
+            };
+            let ev = ob
+                .append_exclusive(w, &EventBody::Resumed, Urgency::None, &pinned, &member)
+                .unwrap();
+            assert_eq!(ev.header.seq, i);
+            assert_eq!(w.head(), ob.head().unwrap(), "the writer adopts the head");
+        }
+        let all = e.ob.pending(100).unwrap();
+        assert_eq!(
+            all.iter().map(|p| p.header.seq).collect::<Vec<_>>(),
+            (0..6).collect::<Vec<_>>()
+        );
+        let (head, gaps) = verify_chain(
+            &e.f.inst,
+            e.w.device_id(),
+            &e.w.signing_key().public(),
+            &all,
+            true,
+        )
+        .unwrap();
+        assert!(gaps.is_empty());
+        assert_eq!(head, e.ob.head().unwrap());
+    }
+
+    #[test]
+    fn append_exclusive_is_strict_across_concurrent_connections() {
+        let e = env();
+        let seed = e.w.signing_key().to_bytes();
+        let pinned = e.pinned();
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let (dir, inst, dev, member) = (
+                    e.dir.clone(),
+                    e.f.inst.clone(),
+                    e.w.device_id().clone(),
+                    e.f.member.clone(),
+                );
+                let seed = *seed;
+                let clock = e.clock.clone();
+                std::thread::spawn(move || {
+                    let mut ob = Outbox::open(&dir, &inst, &dev).unwrap();
+                    ob.set_busy_timeout(std::time::Duration::from_secs(60))
+                        .unwrap();
+                    let head = ob.head().unwrap();
+                    let mut w =
+                        EventWriter::new(SigningKey::from_bytes(&seed), inst, dev, head, clock);
+                    for _ in 0..25 {
+                        ob.append_exclusive(
+                            &mut w,
+                            &EventBody::Resumed,
+                            Urgency::None,
+                            &pinned,
+                            &member,
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let all = e.ob.pending(1000).unwrap();
+        assert_eq!(all.len(), 100);
+        let (_, gaps) = verify_chain(
+            &e.f.inst,
+            e.w.device_id(),
+            &e.w.signing_key().public(),
+            &all,
+            true,
+        )
+        .unwrap();
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn append_exclusive_seals_to_the_checkpoint_in_force() {
+        let mut e = env();
+        let pinned = e.pinned();
+        let member = e.f.member.clone();
+        let (mut other, _) = second_writer(&e);
+        // Another process accepts v2, which removes the ally.
+        let mut body = e.f.body(2);
+        body.allies.clear();
+        let v2 = e.f.member_sign.endorse(body);
+        other.accept_manifest(&v2, &pinned, &member).unwrap();
+        // This process never fetched v2, and its append is sealed to it.
+        let ev =
+            e.ob.append_exclusive(
+                &mut e.w,
+                &EventBody::Resumed,
+                Urgency::None,
+                &pinned,
+                &member,
+            )
+            .unwrap();
+        let (ally, ally_key) = &e.f.allies[0];
+        assert!(open_event_body(&ev, ally, ally_key).is_err());
+        assert_eq!(
+            open_event_body(&ev, &member, &e.f.member_enc).unwrap(),
+            EventBody::Resumed
+        );
+        // A set obtained before v2 is still refused by `commit`.
+        let stale =
+            e.w.prepare(&EventBody::Resumed, Urgency::None, &e.set)
+                .unwrap();
+        assert!(matches!(
+            e.ob.commit(&stale),
+            Err(OutboxError::StaleRecipients { .. })
+        ));
+    }
+
+    #[test]
+    fn append_exclusive_needs_a_checkpoint_and_stores_nothing_on_failure() {
+        let td = tempfile::tempdir().unwrap();
+        let f = Fixture::new(0);
+        let dev = DeviceId::new("dev_test");
+        let mut ob = Outbox::open(td.path(), &f.inst, &dev).unwrap();
+        let mut w = EventWriter::new(
+            SigningKey::generate(),
+            f.inst.clone(),
+            dev.clone(),
+            ob.head().unwrap(),
+            ManualClock::new(1_800_000_000_000, 0),
+        );
+        let pinned = f.member_sign.public();
+        assert!(matches!(
+            ob.append_exclusive(
+                &mut w,
+                &EventBody::Resumed,
+                Urgency::None,
+                &pinned,
+                &f.member
+            ),
+            Err(WriterError::Outbox(OutboxError::NotBootstrapped))
+        ));
+        // A wrong pinned key makes the stored checkpoint unverifiable.
+        ob.bootstrap_manifest(
+            &f.manifest(1),
+            &pinned,
+            &f.member,
+            ManifestAnchor::TrustOnFirstUse,
+        )
+        .unwrap();
+        let wrong = SigningKey::generate().public();
+        assert!(matches!(
+            ob.append_exclusive(
+                &mut w,
+                &EventBody::Resumed,
+                Urgency::None,
+                &wrong,
+                &f.member
+            ),
+            Err(WriterError::Outbox(OutboxError::Corrupt(_)))
+        ));
+        assert_eq!(ob.head().unwrap(), ChainHead::genesis(&f.inst, &dev));
+        assert!(ob.pending(10).unwrap().is_empty());
     }
 }

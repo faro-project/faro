@@ -48,4 +48,9 @@ pub enum DetectError {
     /// A configuration value is out of range.
     #[error("invalid configuration: {0}")]
     Config(String),
+
+    /// The model benchmark could not run: a malformed test set, an image
+    /// that does not decode, or results that cannot be compared.
+    #[error("model benchmark: {0}")]
+    Bench(String),
 }

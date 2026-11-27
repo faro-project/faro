@@ -1,12 +1,13 @@
 //! `notifications` and `notification_prefs` (§5.4).
 //!
 //! A notification row records that one recipient should be (or, with status
-//! `suppressed`, chose not to be) told about one alert or report. Delivery
-//! state: `pending` → `sent`, or after [`crate::notify::policy::MAX_ATTEMPTS`]
+//! `suppressed`, chose not to be) told about one alert, report or
+//! [`admin_log`](super::admin_log) entry. Delivery state: `pending` → `sent`, or after [`crate::notify::policy::MAX_ATTEMPTS`]
 //! failures `failed`. `last_error` holds a short machine code only (never a
 //! server response, which could echo addresses).
 
-use super::parse_col;
+use super::admin_log::{Action, Via};
+use super::{parse_col, parse_opt_col};
 use crate::notify::policy::{Mode, QuietHours};
 use crate::tokens::new_hex_id;
 use faro_proto::{DeviceId, Urgency, UserId};
@@ -17,6 +18,11 @@ use sqlx::{Any, Executor, Row};
 pub enum Target {
     Alert(String),
     Report(String),
+    /// An admin log entry: a role change, told to the person and every
+    /// other admin ([`crate::roles`]).
+    AdminLog(String),
+    /// A content-free notice about a group ([`super::group_notices`]).
+    GroupNotice(String),
 }
 
 pub struct NewNotification<'a> {
@@ -34,29 +40,34 @@ pub async fn insert<'e>(
     e: impl Executor<'e, Database = Any>,
     n: &NewNotification<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let (alert_id, report_id) = match n.target {
-        Target::Alert(a) => (Some(a.clone()), None),
-        Target::Report(r) => (None, Some(r.clone())),
+    let (alert_id, report_id, log_id, group_notice_id) = match n.target {
+        Target::Alert(a) => (Some(a.clone()), None, None, None),
+        Target::Report(r) => (None, Some(r.clone()), None, None),
+        Target::AdminLog(l) => (None, None, Some(l.clone()), None),
+        Target::GroupNotice(g) => (None, None, None, Some(g.clone())),
     };
     let (status, mode) = match n.mode {
         None | Some(Mode::Off) => ("suppressed", Mode::Immediate),
         Some(m) => ("pending", m),
     };
     let r = sqlx::query(
-        "INSERT INTO notifications (id, alert_id, report_id, recipient_id, channel, urgency,
-                                    status, attempts, created_at, mode, due_at, next_attempt_at)
-         VALUES ($1, $2, $3, $4, 'email', $5, $6, 0, $7, $8, $9, $9)
+        "INSERT INTO notifications (id, alert_id, report_id, admin_log_id, group_notice_id,
+                                    recipient_id, channel, urgency, status, attempts,
+                                    created_at, mode, due_at, next_attempt_at)
+         VALUES ($1, $2, $3, $4, $11, $5, 'email', $6, $7, 0, $8, $9, $10, $10)
          ON CONFLICT DO NOTHING",
     )
     .bind(new_hex_id())
     .bind(alert_id)
     .bind(report_id)
+    .bind(log_id)
     .bind(n.recipient.as_str())
     .bind(n.urgency.as_str())
     .bind(status)
     .bind(n.now_ms)
     .bind(mode.as_str())
     .bind(n.due_at_ms)
+    .bind(group_notice_id)
     .execute(e)
     .await?;
     Ok(r.rows_affected() == 1)
@@ -72,8 +83,10 @@ pub struct DueNotification {
     pub recipient_disabled: bool,
     /// The recipient is still entitled to hear about this member (they are
     /// the member, an active ally, or the alert's extra recipient). An ally
-    /// removed after the row was queued is not.
+    /// removed after the row was queued is not. Always true for an admin
+    /// log entry: its recipients were chosen when it was written.
     pub entitled: bool,
+    /// The member, or for an admin log entry the account it is about.
     pub member_id: UserId,
     pub member_name: String,
     pub device_id: Option<DeviceId>,
@@ -89,9 +102,71 @@ pub struct DueNotification {
     /// Display name of the account the alert is about, when that is not the
     /// member (the ally whose account was disabled or re-enabled).
     pub about_name: Option<String>,
+    /// The alert's `detail` code (account-status emails take dates from it).
+    pub alert_detail: Option<String>,
+    /// When the alert was raised.
+    pub alert_created_at_ms: Option<i64>,
+    /// `Some` for an admin log entry.
+    pub admin_log: Option<AdminLogNotice>,
+    /// `Some` for a notice about a group.
+    pub group_notice: Option<GroupNoticeInfo>,
 }
 
-/// Due pending notifications of one mode, oldest first.
+/// What a notification about a group needs to word it: never the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupNoticeInfo {
+    pub kind: String,
+    /// A daily summary rather than one notice per change.
+    pub summary: bool,
+    /// The display name of the person who caused it, for the notices that
+    /// name them (proposals); `None` once their account is deleted.
+    pub actor_name: Option<String>,
+    /// A meeting reminder's time (see `group_notices.detail`).
+    pub detail: Option<String>,
+}
+
+/// What a notification about an admin log entry needs to word it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminLogNotice {
+    pub action: Action,
+    pub via: Via,
+    /// The email address of the account it is about.
+    pub user_email: String,
+    /// The admin who did it, if any and not deleted since.
+    pub actor_id: Option<UserId>,
+    pub actor_name: Option<String>,
+    /// What changed (`settings_changed` only).
+    pub detail: Option<String>,
+}
+
+/// When `recipient` was last sent an immediate alert or report email about
+/// `member`, if ever.
+pub async fn last_immediate_sent<'e>(
+    e: impl Executor<'e, Database = Any>,
+    recipient: &UserId,
+    member: &UserId,
+) -> Result<Option<i64>, sqlx::Error> {
+    let t: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(n.sent_at) FROM notifications n
+         LEFT JOIN alerts a ON a.id = n.alert_id
+         LEFT JOIN reports rp ON rp.id = n.report_id
+         WHERE n.recipient_id = $1 AND n.status = 'sent' AND n.mode = 'immediate'
+           AND COALESCE(a.member_id, rp.member_id) = $2
+           AND (a.extra_recipient_id IS NULL OR a.extra_recipient_id <> n.recipient_id)
+           AND NOT (a.source = 'server' AND a.kind IN (
+                'account_disabled', 'account_enabled', 'ally_disabled', 'ally_enabled',
+                'account_deleted', 'ally_deleted', 'account_deletion_cancelled'))",
+    )
+    .bind(recipient.as_str())
+    .bind(member.as_str())
+    .fetch_one(e)
+    .await?;
+    Ok(t)
+}
+
+/// Due pending notifications of one mode, **round-robin by member**: every
+/// member's oldest row comes before any member's second, so one member's
+/// flood cannot starve the others. Oldest first within a member.
 pub async fn due<'e>(
     e: impl Executor<'e, Database = Any>,
     mode: Mode,
@@ -101,13 +176,23 @@ pub async fn due<'e>(
     let rows = sqlx::query(
         "SELECT n.id, n.recipient_id, n.urgency, n.attempts, n.created_at,
                 r.email AS recipient_email, r.disabled AS recipient_disabled,
-                COALESCE(a.member_id, rp.member_id) AS member_id,
+                COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id) AS member_id,
                 COALESCE(a.device_id, rp.device_id) AS device_id,
                 a.source AS alert_source, a.kind AS alert_kind,
+                a.detail AS alert_detail, a.created_at AS alert_created_at,
                 a.extra_recipient_id,
-                m.display_name AS member_name, d.name AS device_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id)
+                    ORDER BY n.created_at, n.id) AS rn,
+                m.display_name AS member_name, m.email AS member_email, d.name AS device_name,
                 ab.display_name AS about_name,
-                CASE WHEN n.recipient_id = COALESCE(a.member_id, rp.member_id)
+                al.action AS log_action, al.detail AS log_detail, al.via AS log_via, al.actor_id AS log_actor_id,
+                act.display_name AS log_actor_name,
+                gn.kind AS group_kind, gn.summary AS group_summary, gn.detail AS group_detail,
+                gna.display_name AS group_actor_name,
+                CASE WHEN n.admin_log_id IS NOT NULL
+                       OR n.group_notice_id IS NOT NULL
+                       OR n.recipient_id = COALESCE(a.member_id, rp.member_id)
                        OR n.recipient_id = a.extra_recipient_id
                        OR EXISTS (SELECT 1 FROM ally_links l
                                   WHERE l.member_id = COALESCE(a.member_id, rp.member_id)
@@ -117,12 +202,16 @@ pub async fn due<'e>(
          JOIN users r ON r.id = n.recipient_id
          LEFT JOIN alerts a ON a.id = n.alert_id
          LEFT JOIN reports rp ON rp.id = n.report_id
-         JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id)
+         LEFT JOIN admin_log al ON al.id = n.admin_log_id
+         LEFT JOIN group_notices gn ON gn.id = n.group_notice_id
+         LEFT JOIN users gna ON gna.id = gn.actor_id
+         JOIN users m ON m.id = COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id)
          LEFT JOIN devices d ON d.id = COALESCE(a.device_id, rp.device_id)
          LEFT JOIN users ab ON ab.id = a.about_user_id
+         LEFT JOIN users act ON act.id = al.actor_id
          WHERE n.status = 'pending' AND n.mode = $1 AND n.due_at <= $2
            AND n.next_attempt_at <= $2
-         ORDER BY n.created_at, n.id
+         ORDER BY rn, n.created_at, n.id
          LIMIT $3",
     )
     .bind(mode.as_str())
@@ -136,6 +225,19 @@ pub async fn due<'e>(
             let extra: Option<String> = r.try_get("extra_recipient_id")?;
             let source: Option<String> = r.try_get("alert_source")?;
             let kind: Option<String> = r.try_get("alert_kind")?;
+            let admin_log = match parse_opt_col(r, "log_action", Action::parse)? {
+                None => None,
+                Some(action) => Some(AdminLogNotice {
+                    action,
+                    via: parse_col(r, "log_via", Via::parse)?,
+                    user_email: r.try_get("member_email")?,
+                    actor_id: r
+                        .try_get::<Option<String>, _>("log_actor_id")?
+                        .map(UserId::new),
+                    actor_name: r.try_get("log_actor_name")?,
+                    detail: r.try_get("log_detail")?,
+                }),
+            };
             Ok(DueNotification {
                 id: r.try_get("id")?,
                 to_extra_recipient: extra.as_deref() == Some(recipient_id.as_str()),
@@ -154,6 +256,21 @@ pub async fn due<'e>(
                 created_at_ms: r.try_get("created_at")?,
                 alert: source.zip(kind),
                 about_name: r.try_get("about_name")?,
+                alert_detail: r.try_get("alert_detail")?,
+                alert_created_at_ms: r.try_get("alert_created_at")?,
+                admin_log,
+                group_notice: r
+                    .try_get::<Option<String>, _>("group_kind")?
+                    .map(|kind| {
+                        Ok::<_, sqlx::Error>(GroupNoticeInfo {
+                            kind,
+                            summary: r.try_get::<Option<i64>, _>("group_summary")?.unwrap_or(0)
+                                != 0,
+                            actor_name: r.try_get("group_actor_name")?,
+                            detail: r.try_get("group_detail")?,
+                        })
+                    })
+                    .transpose()?,
             })
         })
         .collect()

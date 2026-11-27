@@ -3,8 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(unix)]
-use faro_ipc::{AllowUids, PeerVerifier};
+use faro_ipc::{AllowSameUser, AllowSystemService, PeerVerifier};
 
 use crate::identity;
 
@@ -17,8 +16,12 @@ use crate::identity;
 /// both ends can override it (`--socket`, `FARO_AGENT_SOCKET`).
 #[cfg(target_os = "macos")]
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/faro/agent.sock";
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub const DEFAULT_SOCKET_PATH: &str = "/run/faro/agent.sock";
+/// Windows: the service's base pipe (`faro_ipc`); it binds one per account
+/// next to it, `agent.<SID>`.
+#[cfg(windows)]
+pub const DEFAULT_SOCKET_PATH: &str = r"\\.\pipe\faro\agent";
 
 /// The service's idle threshold (`faro_core` scheduler default and the
 /// heartbeat's `idle` state).
@@ -27,24 +30,21 @@ pub const DEFAULT_IDLE_THRESHOLD_SECS: u64 = 300;
 /// Who the agent accepts as "the service" on the other end of the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceTrust {
-    /// Production: the listener must run as root. The real service is a
-    /// LaunchDaemon / system unit, so anything else on the socket path is an
+    /// Production: the listener must run as root (LocalSystem on Windows).
+    /// The real service is a LaunchDaemon / system unit / Windows service, so anything else on the socket path is an
     /// impostor and must not receive frames.
     Root,
-    /// Development and tests: the listener runs as our own uid. Never use
+    /// Development and tests: the listener runs as our own uid (account). Never use
     /// this in production; any process of the session user could then pose
     /// as the service.
     SameUid,
 }
 
 impl ServiceTrust {
-    /// Unix only, like the agent loop that uses it: faro-ipc has no other
-    /// transport yet.
-    #[cfg(unix)]
     pub(crate) fn verifier(self) -> Box<dyn PeerVerifier> {
         match self {
-            ServiceTrust::Root => Box::new(AllowUids::root()),
-            ServiceTrust::SameUid => Box::new(faro_ipc::AllowSameUid),
+            ServiceTrust::Root => Box::new(AllowSystemService),
+            ServiceTrust::SameUid => Box::new(AllowSameUser),
         }
     }
 }

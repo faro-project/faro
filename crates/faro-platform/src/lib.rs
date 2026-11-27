@@ -10,9 +10,10 @@
 //! privileged **service**.
 
 pub mod frame;
+pub mod logfile;
 pub mod synthetic;
 
-pub use faro_proto::body::{AppInfo, TamperSignal};
+pub use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};
 pub use frame::{Frame, FrameError, PixelFormat, MAX_FRAME_SIDE};
 
 /// OS permission state for screen capture (TCC on macOS, portal on Wayland).
@@ -49,6 +50,14 @@ pub trait ScreenCapture: Send {
 pub trait ForegroundInfo: Send {
     fn active_app(&self) -> Option<AppInfo>;
     fn window_title(&self) -> Option<String>;
+    /// The active tab, when the frontmost app is a browser the platform can
+    /// read without an extension (the OS fallback in ARCHITECTURE.md §3.3).
+    /// `None` when it is not a browser, the browser is not supported, or the
+    /// tab can't be read. Implementations reduce the URL before returning
+    /// it (see `faro_platform_macos::browser`). Sensitive: never log it.
+    fn browser(&self) -> Option<BrowserContext> {
+        None
+    }
 }
 
 /// A change in the interactive session, used to pause capture and to explain

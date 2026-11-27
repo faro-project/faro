@@ -5,28 +5,53 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import icon from '$brand/faro-icon.svg';
+	import { describeError } from '#lib/api.ts';
+	import { branding } from '#lib/branding.svelte.ts';
+	import { directory } from '#lib/directory.svelte.ts';
+	import { date } from '#lib/format.ts';
 	import { instance } from '#lib/instance.svelte.ts';
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
-	import Logo from '#lib/ui/Logo.svelte';
+	import BrandMark from '#lib/ui/BrandMark.svelte';
+	import SupportContact from '#lib/ui/SupportContact.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
 
 	let signOutError = $state('');
+	let cancelBusy = $state(false);
+	let cancelError = $state('');
+	let cancelled = $state(false);
+
+	async function cancelDeletion() {
+		cancelBusy = true;
+		cancelError = '';
+		try {
+			await session.cancelDeletion();
+			cancelled = true;
+		} catch (e) {
+			cancelError = describeError(e);
+		} finally {
+			cancelBusy = false;
+		}
+	}
 
 	// The sign-in pages show their own state; a "Sign in" link there is noise.
 	let onSignInPage = $derived(/\/(signin|auth\/verify)$/.test(page.url.pathname));
 
 	// Pages that are a single form or message read better narrow.
 	let narrow = $derived(
-		/\/(signin|auth\/verify|invite|setup|keys|privacy)$/.test(page.url.pathname)
+		/\/(signin|auth\/verify|invite|group-invite|setup|keys|privacy|licenses)$/.test(
+			page.url.pathname
+		)
 	);
 
 	type NavItem = {
-		path: '/' | '/activity' | '/computers' | '/allies' | '/supporting' | '/admin';
+		path: '/' | '/activity' | '/computers' | '/allies' | '/groups' | '/supporting' | '/admin';
 		label: string;
 		match: RegExp;
+		/** Jumps to a part of the page, as "Find a group" does on Groups. */
+		hash?: string;
 	};
 	let nav = $derived.by((): NavItem[] => {
 		const r = session.user?.roles;
@@ -40,6 +65,17 @@
 			);
 		}
 		if (r.ally) items.push({ path: '/supporting', label: 'Supporting', match: /^\/supporting/ });
+		// Groups are for everyone with an account: joining one needs neither role.
+		items.push({ path: '/groups', label: 'Groups', match: /^\/groups/ });
+		// "Find a group" (GROUPS.md §17) is shown when the instance lists groups.
+		if (directory.has) {
+			items.push({
+				path: '/groups',
+				label: 'Find a group',
+				hash: '#find-a-group',
+				match: /^$never/
+			});
+		}
 		if (r.admin) items.push({ path: '/admin', label: 'Admin', match: /^\/admin/ });
 		return items;
 	});
@@ -49,6 +85,15 @@
 		return item.match.test(page.url.pathname.slice(base.length) || '/');
 	}
 
+	// The instance's branding (operator content, see #lib/branding.ts): its
+	// logo next to Faro's, its name, and a support contact in the footer.
+	let showName = $derived(
+		!!instance.info && instance.info.name !== 'Faro' && (branding.info?.show_name ?? true)
+	);
+	let homeLabel = $derived(
+		branding.info?.logo ? `${branding.info.instance_name} and Faro, home` : 'Faro home'
+	);
+
 	let footerText = $derived.by(() => {
 		const i = instance.info;
 		if (!i) return 'Powered by Faro';
@@ -56,10 +101,18 @@
 		return i.name === 'Faro' ? powered : `${i.name} · ${powered}`;
 	});
 
+	// Whether to offer "Find a group": asked once per person who is signed in.
+	$effect(() => {
+		const u = session.user;
+		if (u) void directory.check(u.id);
+		else directory.clear();
+	});
+
 	onMount(() => {
 		// Header only: pages that need the session handle errors themselves.
 		session.refresh().catch(() => {});
 		instance.load().catch(() => {});
+		branding.load().catch(() => {});
 	});
 
 	async function signOut() {
@@ -81,9 +134,9 @@
 
 <header class="site-header">
 	<div class="bar">
-		<a class="brand" href={resolve('/')} aria-label="Faro home">
-			<Logo height={26} alt="Faro" />
-			{#if instance.info && instance.info.name !== 'Faro'}
+		<a class="brand" href={resolve('/')} aria-label={homeLabel}>
+			<BrandMark logo={branding.info?.logo} name={branding.info?.instance_name} />
+			{#if showName && instance.info}
 				<span class="instance" title="This instance">{instance.info.name}</span>
 			{/if}
 		</a>
@@ -110,8 +163,11 @@
 	</div>
 	{#if nav.length > 1}
 		<nav class="main-nav" aria-label="Main">
-			{#each nav as item (item.path)}
-				<a href={resolve(item.path)} aria-current={current(item) ? 'page' : undefined}>
+			{#each nav as item (item.label)}
+				<a
+					href="{resolve(item.path)}{item.hash ?? ''}"
+					aria-current={current(item) ? 'page' : undefined}
+				>
 					{item.label}
 				</a>
 			{/each}
@@ -123,10 +179,46 @@
 	{#if signOutError}
 		<div class="notice error" role="alert">{signOutError}</div>
 	{/if}
-	{#if keyring.memberRecovered && !page.url.pathname.endsWith('/settings')}
+	{#if session.user && session.deletion}
 		<div class="notice warn" role="status">
 			<p>
-				You unlocked your keys with your recovery code.
+				<strong>Your account will be deleted on {date(session.deletion.purge_after_ms)}.</strong>
+				{#if session.deletion.by_admin}
+					The instance administrator asked for this.
+				{/if}
+				{#if session.deletion.started_at_ms}
+					The deletion has started and can no longer be cancelled.
+				{:else}
+					Until then nothing changes, and you can cancel. Everyone who was told about the deletion
+					is told if you cancel.
+				{/if}
+			</p>
+			{#if !session.deletion.started_at_ms}
+				<div class="actions">
+					<button
+						class="secondary small"
+						type="button"
+						onclick={cancelDeletion}
+						disabled={cancelBusy}
+					>
+						{cancelBusy ? 'Cancelling…' : 'Cancel deletion'}
+					</button>
+				</div>
+			{/if}
+			{#if cancelError}<p class="field-error" role="alert">{cancelError}</p>{/if}
+		</div>
+	{:else if cancelled && session.user}
+		<div class="notice ok" role="status">
+			<p>
+				✓ Your account will not be deleted. Everyone who was told about the deletion is being told
+				it was cancelled.
+			</p>
+		</div>
+	{/if}
+	{#if (keyring.memberRecovered || keyring.allyRecovered) && !page.url.pathname.endsWith('/settings')}
+		<div class="notice warn" role="status">
+			<p>
+				You unlocked your {keyring.memberRecovered ? 'keys' : 'ally key'} with your recovery code.
 				<a href={resolve('/settings')}>Choose a new passphrase</a> so you don't need it next time.
 			</p>
 		</div>
@@ -137,7 +229,9 @@
 <footer class="site-footer">
 	<div class="inner">
 		<span>{footerText}</span>
+		<SupportContact contact={branding.info?.support} />
 		<a href={resolve('/privacy')}>What this instance can see</a>
+		<a href={resolve('/licenses')}>Licences</a>
 	</div>
 </footer>
 

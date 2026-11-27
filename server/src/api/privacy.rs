@@ -1,7 +1,9 @@
 //! `GET /v1/privacy-notice`: what this instance's operator can and cannot
 //! see, in plain language (§5.3, §5.4 trade-off, §12 "operator privacy
-//! notice"). Generated from the instance name and live settings, so it is
-//! always accurate for this instance. Public: members are shown it before
+//! notice"). Generated from the instance name and live settings. The list of
+//! what the operator can see is written by hand: when a migration adds a
+//! table that holds something readable by the operator, add a line here
+//! and to `docs/operators/PRIVACY-NOTICE.md`. Public: members are shown it before
 //! they sign up.
 
 use crate::config::{RegistrationMode, RetentionConfig};
@@ -35,7 +37,7 @@ pub fn build(
          people sign in."
             .to_owned(),
         "Who is connected to whom: which members have which allies.".to_owned(),
-        "Devices: their names and platforms, when each one last checked in, and whether it \
+        "Devices (computers and phones): their names and platforms, when each one last checked in, and whether it \
          reported being asleep or shutting down."
             .to_owned(),
         "When events happen, what kind they are (for example a flagged capture, a tamper \
@@ -46,9 +48,21 @@ pub fn build(
          and invalid signatures."
             .to_owned(),
         "When notifications are sent and whether delivery failed. Notification emails \
-         never contain details, only a member's name, a device name and an urgency."
+         never contain details: a member's name, a device name and an urgency, or that \
+         someone is reaching out. They never name a group."
             .to_owned(),
         "The size and upload time of encrypted reports and attachments.".to_owned(),
+        "Groups: each group's name and description, its facilitators and participants, its \
+         history, and join requests and alliance proposals (who, to whom, when and the \
+         outcome). Listed groups are visible to everyone signed in. The text of notes, \
+         check-ins and reach outs is encrypted; the operator cannot read it."
+            .to_owned(),
+        "Reach outs: who sent one, to which people or group, when, and each person's answer \
+         (\"I'll call\" or \"I'm here\") and when they answered. Also who has asked to hear \
+         about whose reach outs differently or during quiet hours. Check-ins and replies: \
+         who wrote them, in which group and when. Pairing suggestions: which two people a \
+         facilitator suggested, in which group."
+            .to_owned(),
         "Network addresses of devices and browsers, as any web server does. This server \
          keeps them only in memory, for rate limiting."
             .to_owned(),
@@ -56,6 +70,9 @@ pub fn build(
     let cannot_see = vec![
         "Screenshots. Full screenshots never leave the device; only blurred thumbnails do, \
          and only encrypted."
+            .to_owned(),
+        "What check-ins, reach outs and notes say. They are encrypted for the people they \
+         are addressed to."
             .to_owned(),
         "What reports and alerts say: ratings, reasons, websites, apps and thumbnails. \
          They are encrypted on the device for the member and the allies the member \
@@ -81,6 +98,11 @@ pub fn build(
          always emails the person and everyone in an accountability partnership with them, \
          and their computers keep being monitored and alerting their allies."
             .to_owned(),
+        "Anyone can delete their account. Faro first emails everyone in an accountability \
+         partnership with them, keeps everything for 7 days (they can cancel until then), \
+         and then removes their data from this server. The operator's backups keep a copy \
+         until they are rotated out."
+            .to_owned(),
     ];
     let mode_text = match mode {
         RegistrationMode::InviteOnly => "by invitation only",
@@ -98,8 +120,8 @@ pub fn build(
          The people who run this server (the operator) CAN see:\n{}\n\n\
          The operator CANNOT see:\n{}\n\n\
          Limits:\n{}\n\n\
-         How long data is kept: encrypted reports and attachments {} days, event \
-         metadata {} days, alerts {} days. Members may choose shorter, never longer. \
+         How long data is kept: encrypted reports, attachments and check-ins {} days, event \
+         metadata {} days, alerts and reach outs {} days. Members may choose shorter, never longer. \
          Deleted data is removed for good.\n\n\
          Registration on this instance is {mode_text}.\n",
         bullet(&can_see),
@@ -159,5 +181,10 @@ mod tests {
             "§5.4 trade-off stated"
         );
         assert_eq!(n.registration_mode, "open");
+        assert!(n.text.contains("Reach outs") && n.text.contains("Check-ins"));
+        assert!(
+            n.text.contains("Pairing suggestions")
+                && n.text.contains("Devices (computers and phones)")
+        );
     }
 }

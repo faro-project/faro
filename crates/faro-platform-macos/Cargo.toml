@@ -17,14 +17,18 @@ thiserror.workspace = true
 zeroize.workspace = true
 libc = "0.2"
 plist = "1.8"
+# Reduces browser tab URLs to scheme and host (`browser`).
+url = "2.5"
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSArray",
+    "NSData",
     "NSNotification",
     "NSBundle",
     "NSError",
+    "NSGeometry",
     "NSString",
     "NSURL",
     "NSEnumerator",
@@ -34,16 +38,21 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "libc",
     "NSAlert",
     "NSApplication",
+    "NSBitmapImageRep",
     "NSButton",
     "NSControl",
     "NSImage",
+    "NSImageRep",
     "NSMenu",
     "NSMenuItem",
+    "NSPasteboard",
     "NSResponder",
     "NSRunningApplication",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSText",
+    "NSTextField",
     "NSView",
     "NSWindow",
     "NSWorkspace",
@@ -59,6 +68,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFDictionary",
     "CFNumber",
     "CFString",
+    "CFURL",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -105,3 +115,19 @@ objc2-service-management = { version = "0.3.2", default-features = false, featur
     "SMAppService",
 ] }
 
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The `hidden_window_probe` example opens a window of its own.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSWindow",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFDate",
+    "CFRunLoop",
+] }

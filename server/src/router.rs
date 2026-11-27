@@ -17,6 +17,9 @@
 //!    `frame-ancestors 'none'`, `X-Frame-Options: DENY`,
 //!    `Cache-Control: no-store`, and HSTS unless `--dev`.
 //!
+//! Inside those, [`crate::csrf::require_same_origin`] refuses cookie-bearing
+//! non-GET requests that are not same-origin (`Sec-Fetch-Site` / `Origin`).
+//!
 //! Endpoints that take secrets from the URL or body before any session
 //! exists, or send email (setup, magic link request/verify, device
 //! enrollment, invite lookup/accept) are additionally wrapped in the per-IP
@@ -28,8 +31,9 @@
 //!
 
 use crate::api::{
-    admin, allies, auth, devices, events, feed, heartbeat, invites, keys, manifests, prefs,
-    privacy, reports, setup, well_known,
+    account, admin, allies, auth, branding, devices, events, feed, group_listing, group_posts,
+    group_roster, group_sharing, groups, heartbeat, invites, keys, manifests, prefs, privacy,
+    proposals, reach_outs, reports, setup, well_known,
 };
 use crate::error::AppError;
 use crate::ratelimit;
@@ -79,7 +83,13 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             post(auth::verify_link.layer(limited.clone())),
         )
         .route("/v1/auth/logout", post(auth::logout))
-        .route("/v1/me", get(auth::me).patch(auth::update_me))
+        .route(
+            "/v1/me",
+            get(auth::me)
+                .patch(auth::update_me)
+                .delete(account::delete_me),
+        )
+        .route("/v1/me/deletion/cancel", post(account::cancel_deletion))
         // Member keys and the key directory.
         .route("/v1/me/keys", get(keys::get_my_keys).put(keys::put_my_keys))
         .route("/v1/me/keys/wrapped", put(keys::put_my_wrapped_keys))
@@ -112,16 +122,175 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         )
         .route(
             "/v1/invites/{token}/accept",
-            post(invites::accept.layer(limited)),
+            post(invites::accept.layer(limited.clone())),
         )
-        .route("/v1/me/ally-key", get(invites::get_my_ally_key))
+        .route(
+            "/v1/me/ally-key",
+            get(invites::get_my_ally_key).put(group_roster::put_my_enc_key),
+        )
+        .route(
+            "/v1/me/ally-key/challenge",
+            post(invites::ally_key_challenge),
+        )
+        .route(
+            "/v1/me/ally-key/wrapped",
+            put(invites::put_my_wrapped_ally_key),
+        )
         .route("/v1/me/allies", get(allies::list_my_allies))
         .route("/v1/me/allies/{ally_id}", delete(allies::remove))
         .route("/v1/me/allies/{ally_id}/approve", post(allies::approve))
         .route("/v1/ally/members", get(allies::list_my_members))
         .route("/v1/ally/members/{member_id}", delete(allies::leave))
         .route("/v1/ally/feed", get(feed::get_feed))
+        .route("/v1/ally/chain", get(feed::get_chain))
         .route("/v1/blobs/{id}", get(feed::get_blob))
+        // Groups (docs/GROUPS.md).
+        .route("/v1/groups", get(groups::list_mine).post(groups::create))
+        .route(
+            "/v1/groups/{id}",
+            get(groups::get)
+                .patch(groups::patch)
+                .delete(groups::archive),
+        )
+        .route("/v1/groups/{id}/participants", get(groups::roster))
+        .route("/v1/groups/{id}/history", get(groups::history))
+        .route("/v1/groups/{id}/me/allies", get(groups::my_allies_here))
+        .route("/v1/groups/{id}/user-search", get(groups::user_search))
+        // Opt-in sharing and pairing suggestions (GROUPS.md §8.2, §8.5).
+        .route(
+            "/v1/groups/{id}/me/sharing",
+            put(group_sharing::set_sharing),
+        )
+        .route(
+            "/v1/groups/{id}/participants/{user_id}/allies",
+            get(group_sharing::shared_allies),
+        )
+        .route(
+            "/v1/groups/{id}/suggestions",
+            get(group_sharing::posted).post(group_sharing::suggest),
+        )
+        .route(
+            "/v1/groups/{id}/suggestions/{suggestion_id}",
+            delete(group_sharing::withdraw),
+        )
+        .route(
+            "/v1/groups/{id}/me/suggestions",
+            get(group_sharing::my_cards),
+        )
+        .route(
+            "/v1/groups/{id}/me/suggestions/{suggestion_id}/dismiss",
+            post(group_sharing::dismiss),
+        )
+        .route(
+            "/v1/groups/{id}/invites",
+            get(groups::list_invites).post(groups::create_invites),
+        )
+        .route("/v1/groups/{id}/me", delete(groups::leave))
+        .route(
+            "/v1/groups/{id}/participants/{user_id}",
+            delete(groups::remove),
+        )
+        .route(
+            "/v1/groups/{id}/participants/{user_id}/role",
+            put(groups::set_role),
+        )
+        .route(
+            "/v1/groups/{id}/facilitator-offer/accept",
+            post(groups::accept_facilitator_offer),
+        )
+        .route(
+            "/v1/groups/{id}/facilitator-offer/decline",
+            post(groups::decline_facilitator_offer),
+        )
+        // Alliance proposals (GROUPS.md §7). None of these activates a
+        // link: only `POST /v1/me/allies/{ally_id}/approve` does.
+        .route("/v1/groups/{id}/proposals", post(proposals::create))
+        .route("/v1/me/proposals", get(proposals::list_mine))
+        .route("/v1/proposals/{id}", delete(proposals::withdraw))
+        .route("/v1/proposals/{id}/accept", post(proposals::accept))
+        .route("/v1/proposals/{id}/decline", post(proposals::decline))
+        .route("/v1/me/proposal-blocks", get(proposals::list_blocks))
+        .route(
+            "/v1/me/proposal-blocks/{user_id}",
+            put(proposals::put_block).delete(proposals::delete_block),
+        )
+        // Reach out and signed, encrypted messages (GROUPS.md §8.3, §10.2).
+        .route(
+            "/v1/groups/{id}/posts",
+            get(group_posts::feed).post(group_posts::create),
+        )
+        .route("/v1/me/message-recipients", get(reach_outs::recipients))
+        .route(
+            "/v1/me/reach-outs",
+            get(reach_outs::list_mine).post(reach_outs::create),
+        )
+        .route("/v1/reach-outs/{id}/answer", post(reach_outs::answer))
+        .route("/v1/group-messages/{id}", get(reach_outs::get_message))
+        .route("/v1/me/reach-out-settings", get(reach_outs::settings))
+        .route(
+            "/v1/me/quiet-hours-bypass/{user_id}",
+            put(reach_outs::put_bypass).delete(reach_outs::delete_bypass),
+        )
+        .route(
+            "/v1/me/reach-out-prefs/{user_id}",
+            put(reach_outs::put_prefs),
+        )
+        .route("/v1/group-directory", get(group_listing::directory))
+        .route(
+            "/v1/groups/{id}/join-requests",
+            get(group_listing::list_requests).post(group_listing::create_request),
+        )
+        .route(
+            "/v1/groups/{id}/join-requests/me",
+            delete(group_listing::withdraw_request),
+        )
+        .route("/v1/me/join-requests", get(group_listing::my_requests))
+        .route(
+            "/v1/join-requests/{id}/accept",
+            post(group_listing::accept_request),
+        )
+        .route(
+            "/v1/join-requests/{id}/decline",
+            post(group_listing::decline_request),
+        )
+        .route(
+            "/v1/groups/{id}/me/meeting-reminders",
+            put(group_listing::set_reminders),
+        )
+        .route("/v1/me/group-invites", get(groups::my_invites))
+        .route(
+            "/v1/group-invites/{token}",
+            get(groups::get_invite.layer(limited.clone())),
+        )
+        .route(
+            "/v1/group-invites/{token}/accept",
+            post(groups::accept_invite.layer(limited.clone())),
+        )
+        .route(
+            "/v1/group-invites/{token}/decline",
+            post(groups::decline_invite.layer(limited)),
+        )
+        // Group roster log and epoch keys (GROUPS.md §10.3, Phase C).
+        .route(
+            "/v1/groups/{id}/roster",
+            get(group_roster::get_roster).post(group_roster::post_entry),
+        )
+        .route(
+            "/v1/groups/{id}/roster/snapshot",
+            get(group_roster::get_snapshot).post(group_roster::post_snapshot),
+        )
+        .route(
+            "/v1/groups/{id}/roster/pending",
+            get(group_roster::get_pending),
+        )
+        .route(
+            "/v1/groups/{id}/epoch-key",
+            get(group_roster::get_epoch_key),
+        )
+        .route(
+            "/v1/me/group-sign-key",
+            get(group_roster::get_my_sign_key).put(group_roster::put_my_sign_key),
+        )
         // Preferences.
         .route(
             "/v1/me/notification-prefs",
@@ -132,6 +301,9 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
             get(prefs::get_retention).put(prefs::put_retention),
         )
         .route("/v1/privacy-notice", get(privacy::get))
+        // Instance branding: public, shown before sign-in.
+        .route("/v1/branding", get(branding::get_public))
+        .route("/v1/branding/logo/{file}", get(branding::get_logo))
         // The update mirror: public, project-signed releases (§3.8).
         .route(UPDATES_PATH, get(updates::info))
         .route(
@@ -155,9 +327,30 @@ pub fn api_routes(state: &AppState) -> Router<AppState> {
         .route("/admin/api/users", get(admin::list_users))
         .route("/admin/api/users/{id}/disable", post(admin::disable_user))
         .route("/admin/api/users/{id}/enable", post(admin::enable_user))
+        .route("/admin/api/users/{id}", delete(admin::delete_user))
+        .route(
+            "/admin/api/users/{id}/deletion/cancel",
+            post(admin::cancel_user_deletion),
+        )
+        .route("/admin/api/users/{id}/admin", put(admin::set_admin_role))
+        .route("/admin/api/log", get(admin::log))
+        .route("/admin/api/groups", get(admin::list_groups))
+        .route("/admin/api/groups/{id}", delete(admin::archive_group))
+        .route(
+            "/admin/api/groups/{id}/listed",
+            put(admin::set_group_listed),
+        )
         .route(
             "/admin/api/settings",
             get(admin::get_settings).patch(admin::patch_settings),
+        )
+        .route(
+            "/admin/api/branding",
+            get(branding::admin_get).patch(branding::admin_patch),
+        )
+        .route(
+            "/admin/api/branding/logo",
+            put(branding::admin_put_logo).delete(branding::admin_delete_logo),
         )
         .route("/admin/api/smtp-test", post(admin::smtp_test))
         .route("/admin/api/invites", post(admin::invite_member))
@@ -173,6 +366,10 @@ fn set_default(name: HeaderName, value: HeaderValue) -> SetResponseHeaderLayer<H
 pub fn build(state: AppState) -> Router {
     let hsts = !state.config().dev;
     let mut app = api_routes(&state)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::csrf::require_same_origin,
+        ))
         .layer(set_default(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),

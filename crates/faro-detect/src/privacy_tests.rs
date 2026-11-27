@@ -403,16 +403,73 @@ fn preprocess_output_is_zeroized() {
         width: 224,
         height: 224,
     };
+    // Resized and cropped, the larger intermediate is zeroized too.
+    for resize in [
+        crate::Resize::Direct,
+        crate::Resize::ResizeCrop { side: 256 },
+    ] {
+        info.resize = resize;
+        audit::arm();
+        let pixels = pattern_bytes();
+        audit::watch(pixels.as_ptr(), pixels.len());
+        let frame = Frame::new(W, H, PixelFormat::Rgba8, 0, pixels).unwrap();
+        let tensor = crate::classifier::preprocess(&frame, &info);
+        assert_eq!(tensor.len(), 3 * 224 * 224);
+        drop(tensor);
+        drop(frame);
+        let r = audit::disarm();
+        assert_clean_report(&r, 3);
+    }
+}
+
+/// The model benchmark reads images from disk: the file bytes, the decode
+/// buffer and the frame are all zeroed when freed, nothing frame-sized
+/// survives the run, and only metrics come out.
+#[test]
+fn benchmark_frames_are_zeroized() {
+    use crate::bench::{allowed_classes, run, EvalSet, RunOptions};
+    use crate::PolicyEngine;
+    let dir = tempfile::tempdir().unwrap();
+    let rgba = pattern_bytes();
+    let rgb: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    for (name, data, color) in [
+        ("explicit/rgba.png", &rgba, image::ExtendedColorType::Rgba8),
+        ("neutral/rgb.png", &rgb, image::ExtendedColorType::Rgb8),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut png = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut png),
+            data,
+            W,
+            H,
+            color,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    let set = EvalSet::open(dir.path(), &allowed_classes(&Default::default())).unwrap();
+    let mut c = ScriptedClassifier::new(ImageScores::new([("explicit", 0.99)]).unwrap());
+    let policy = PolicyEngine::default();
+
     audit::arm();
-    let pixels = pattern_bytes();
-    audit::watch(pixels.as_ptr(), pixels.len());
-    let frame = Frame::new(W, H, PixelFormat::Rgba8, 0, pixels).unwrap();
-    let tensor = crate::classifier::preprocess(&frame, &info);
-    assert_eq!(tensor.len(), 3 * 224 * 224);
-    drop(tensor);
-    drop(frame);
+    let report = run(&mut c, &policy, &set, &RunOptions { warmup: 1 }).unwrap();
     let r = audit::disarm();
-    assert_clean_report(&r, 3);
+    // Per image: file bytes and frame; the RGB image also has a decode
+    // buffer.
+    assert_clean_report(&r, 5);
+    assert_eq!(c.calls(), 3);
+    assert_eq!(c.seen_dimensions(), &[(W, H); 3]);
+
+    let needles = windows(&rgba);
+    assert!(!contains_any(&report.to_json(), &needles));
+    assert!(!contains_any(report.to_text().as_bytes(), &needles));
 }
 
 /// The audit must actually catch violations, or the tests above prove

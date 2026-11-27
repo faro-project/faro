@@ -32,7 +32,21 @@
 //! server about an account, nothing a device recorded, and the people
 //! affected must understand it from the email alone (the disabled person
 //! cannot sign in to read the feed). The disabled person is the one
-//! recipient told although their account is disabled.
+//! recipient told although their account is disabled. Deletion notices
+//! (`account_deleted` on the person, `ally_deleted` on each member they are
+//! an ally for, and `account_deletion_cancelled` on both) are worded the
+//! same way, with the dates taken from the alert's detail (§12). When an
+//! admin asked for the deletion (`requested_by=admin`), they say the
+//! account is "being deleted by the instance administrator", and a
+//! disabled person is told too: it is their data.
+//!
+//! **Admin log entries** are told the same way, in words: role changes to
+//! the person and every other admin ([`crate::roles`]), deletions an admin
+//! asked for and their cancellation to every admin, and disabling or
+//! re-enabling an account to every admin but the one who did it. They are
+//! not alerts: no member's feed shows them and no ally hears of them.
+//! [`crate::roles::tell`] writes their notification rows itself, always
+//! immediate, so there is nothing to fan out.
 //!
 //! **Delivery.** A failure about one recipient (an unknown mailbox, a full
 //! one) is charged to that notification: retried with exponential backoff
@@ -52,7 +66,10 @@
 
 pub mod policy;
 
-use crate::db::repo::notifications::{self as notif, DueNotification, NewNotification, Target};
+use crate::db::repo::admin_log::{Action, Via};
+use crate::db::repo::notifications::{
+    self as notif, AdminLogNotice, DueNotification, NewNotification, Target,
+};
 use crate::db::repo::{alerts, allies, reports, users};
 use crate::error::AppError;
 use crate::mailer::Email;
@@ -159,17 +176,36 @@ async fn fan_out(
     match target {
         Target::Alert(id) => alerts::mark_dispatched(&mut *tx, id, now).await?,
         Target::Report(id) => reports::mark_dispatched(&mut *tx, id, now).await?,
+        // Written with their recipients by `crate::roles` and
+        // `crate::groups`; never fanned out.
+        Target::AdminLog(_) | Target::GroupNotice(_) => {}
     }
     tx.commit().await?;
     Ok(created)
 }
 
 /// Whether a due row must be dropped rather than sent. A disabled account
-/// hears nothing, except that it was disabled.
+/// hears nothing, except that it was disabled, and that an admin is
+/// deleting it (or cancelled that): it is their data.
 fn undeliverable(n: &DueNotification) -> bool {
-    let told_while_disabled = account_status(n) == Some(ServerAlertKind::AccountDisabled)
-        && n.recipient_id == n.member_id;
+    let told_while_disabled = n.recipient_id == n.member_id
+        && matches!(
+            account_status(n),
+            Some(
+                ServerAlertKind::AccountDisabled
+                    | ServerAlertKind::AccountDeleted
+                    | ServerAlertKind::AccountDeletionCancelled
+            )
+        );
     (n.recipient_disabled && !told_while_disabled) || !n.entitled
+}
+
+/// Whether an alert's `key=value;…` detail has `key=value`.
+fn detail_is(n: &DueNotification, key: &str, value: &str) -> bool {
+    n.alert_detail.as_deref().is_some_and(|d| {
+        d.split(';')
+            .any(|part| part.strip_prefix(key).and_then(|r| r.strip_prefix('=')) == Some(value))
+    })
 }
 
 /// The account-status kind of an alert notification, if it is one.
@@ -185,8 +221,292 @@ fn account_status(n: &DueNotification) -> Option<ServerAlertKind> {
                 | ServerAlertKind::AccountEnabled
                 | ServerAlertKind::AllyDisabled
                 | ServerAlertKind::AllyEnabled
+                | ServerAlertKind::AccountDeleted
+                | ServerAlertKind::AllyDeleted
+                | ServerAlertKind::AccountDeletionCancelled
         )
     })
+}
+
+/// A millisecond value from an alert's `key=value;…` detail code.
+fn detail_ms(n: &DueNotification, key: &str) -> Option<i64> {
+    n.alert_detail
+        .as_deref()?
+        .split(';')
+        .find_map(|part| part.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| v.parse().ok())
+}
+
+fn utc(ms: i64) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).ok()
+}
+
+/// `2 December 2026` (UTC).
+pub fn utc_date(ms: i64) -> String {
+    utc(ms).map_or_else(
+        || "an unknown date".to_owned(),
+        |t| format!("{} {} {}", t.day(), t.month(), t.year()),
+    )
+}
+
+/// `25 November 2026 at 14:03 UTC`.
+pub fn utc_time(ms: i64) -> String {
+    utc(ms).map_or_else(
+        || "an unknown time".to_owned(),
+        |t| {
+            format!(
+                "{} {} {} at {:02}:{:02} UTC",
+                t.day(),
+                t.month(),
+                t.year(),
+                t.hour(),
+                t.minute()
+            )
+        },
+    )
+}
+
+/// Subject and text of a deletion notice: `account_deleted`,
+/// `ally_deleted` or `account_deletion_cancelled` (§12). The dates come
+/// from the alert itself, so a notice still says what was decided when it
+/// was raised, whatever happened since.
+fn deletion_text(instance: &str, n: &DueNotification, k: ServerAlertKind) -> (String, String) {
+    let member = &n.member_name;
+    let to_member = n.recipient_id == n.member_id;
+    let ally = n.about_name.as_deref().unwrap_or("an ally");
+    let date = detail_ms(n, "purge_after").map_or_else(|| "in 7 days".to_owned(), utc_date);
+    let requested = detail_ms(n, "requested").map_or_else(|| "earlier".to_owned(), utc_time);
+    let cancelled = n
+        .alert_created_at_ms
+        .map_or_else(|| "later".to_owned(), utc_time);
+    let about_ally = n.about_name.is_some();
+    if detail_is(n, "requested_by", "admin") {
+        return admin_deletion_text(instance, n, k);
+    }
+    match (k, about_ally, to_member) {
+        (ServerAlertKind::AccountDeleted, _, true) => (
+            format!("Your Faro account on {instance} will be deleted on {date}"),
+            format!(
+                "You asked for your Faro account on {instance} to be deleted. On {date}, \
+                 everything this server stores about you is permanently deleted: your \
+                 computers, activity, alerts, reports, keys, allies and settings. Until then \
+                 nothing changes: your computers are still monitored and your allies still \
+                 receive alerts. Everyone in an accountability partnership with you has been \
+                 told. You can cancel until then: sign in and choose Cancel deletion. After \
+                 {date}, {instance} no longer accepts anything from your computers, so \
+                 uninstall Faro from them. Copies in the operator's backups last until those \
+                 backups are rotated out. If you didn't ask for this, sign in, cancel the \
+                 deletion and contact the people who run {instance}."
+            ),
+        ),
+        (ServerAlertKind::AccountDeleted, _, false) => (
+            format!("{member} is deleting their Faro account on {instance}"),
+            format!(
+                "{member} asked for their Faro account on {instance} to be deleted. Until \
+                 {date} nothing changes: their computers are still monitored, you still \
+                 receive alerts about them, and {member} can still cancel. On {date}, \
+                 everything about {member} is permanently deleted from this server, and their \
+                 computers are no longer monitored through {instance}, even if Faro is still \
+                 installed on them."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, true) => (
+            format!("Your ally {ally} is deleting their Faro account"),
+            format!(
+                "{ally}, one of your allies on {instance}, asked for their Faro account to be \
+                 deleted. Until {date} they are still your ally, and they can still cancel. On \
+                 {date} they stop being your ally and can no longer see anything about you. \
+                 Then open Faro and confirm your updated ally list: until you do, your \
+                 computers keep encrypting new items to a key that no longer exists."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, false) => (
+            format!("{ally}, also an ally for {member}, is deleting their Faro account"),
+            format!(
+                "{ally}, who is also an ally for {member} on {instance}, asked for their Faro \
+                 account to be deleted. On {date} they stop being an ally for {member}. You \
+                 still receive {member}'s alerts."
+            ),
+        ),
+        (_, false, true) => (
+            format!("You cancelled the deletion of your Faro account on {instance}"),
+            format!(
+                "You asked for your Faro account on {instance} to be deleted on {requested} \
+                 and cancelled it on {cancelled}. Nothing will be deleted. Everyone in an \
+                 accountability partnership with you has been told. If you didn't do this, \
+                 contact the people who run {instance}."
+            ),
+        ),
+        (_, false, false) => (
+            format!("{member} cancelled the deletion of their Faro account"),
+            format!(
+                "{member} asked for their Faro account on {instance} to be deleted on \
+                 {requested} and cancelled it on {cancelled}. Nothing will be deleted, and you \
+                 still receive alerts about them."
+            ),
+        ),
+        (_, true, true) => (
+            format!("Your ally {ally} cancelled the deletion of their Faro account"),
+            format!(
+                "{ally}, one of your allies, asked for their Faro account on {instance} to be \
+                 deleted on {requested} and cancelled it on {cancelled}. They stay your ally."
+            ),
+        ),
+        (_, true, false) => (
+            format!("{ally}, also an ally for {member}, cancelled the deletion of their account"),
+            format!(
+                "{ally}, who is also an ally for {member}, asked for their Faro account on \
+                 {instance} to be deleted on {requested} and cancelled it on {cancelled}. They \
+                 stay an ally for {member}."
+            ),
+        ),
+    }
+}
+
+/// [`deletion_text`] for a deletion an admin asked for
+/// (`requested_by=admin`): "deleted by the instance administrator". The
+/// admin is not named: the admin log says who.
+fn admin_deletion_text(
+    instance: &str,
+    n: &DueNotification,
+    k: ServerAlertKind,
+) -> (String, String) {
+    const ADMIN: &str = "the instance administrator";
+    let member = &n.member_name;
+    let to_member = n.recipient_id == n.member_id;
+    let ally = n.about_name.as_deref().unwrap_or("an ally");
+    let about_ally = n.about_name.is_some();
+    let date = detail_ms(n, "purge_after").map_or_else(|| "in 7 days".to_owned(), utc_date);
+    let requested = detail_ms(n, "requested").map_or_else(|| "earlier".to_owned(), utc_time);
+    let cancelled = n
+        .alert_created_at_ms
+        .map_or_else(|| "later".to_owned(), utc_time);
+    // Who cancelled, as the start of a sentence.
+    let by_admin = detail_is(n, "cancelled_by", "admin");
+    let canceller = match (by_admin, about_ally, to_member) {
+        (true, _, _) => "The instance administrator".to_owned(),
+        (false, true, _) => ally.to_owned(),
+        (false, false, true) => "You".to_owned(),
+        (false, false, false) => member.clone(),
+    };
+    match (k, about_ally, to_member) {
+        (ServerAlertKind::AccountDeleted, _, true) => {
+            // A disabled person can't sign in to cancel.
+            let keep = if n.recipient_disabled {
+                format!(
+                    "Your account is disabled, so you can't sign in. To keep your account, \
+                     contact the people who run {instance} before {date}."
+                )
+            } else {
+                format!(
+                    "To keep your account, sign in before {date} and choose Cancel deletion, or \
+                     ask the people who run {instance}."
+                )
+            };
+            (
+                format!("Your Faro account on {instance} is being deleted by {ADMIN}"),
+                format!(
+                    "Your Faro account on {instance} is being deleted by {ADMIN}. On {date}, \
+                     everything this server stores about you is permanently deleted: your \
+                     computers, activity, alerts, reports, keys, allies and settings. Until then \
+                     nothing changes: your computers are still monitored and your allies still \
+                     receive alerts. Everyone in an accountability partnership with you has been \
+                     told. {keep} After {date}, {instance} no longer accepts anything from your \
+                     computers, so uninstall Faro from them. Copies in the operator's backups \
+                     last until those backups are rotated out."
+                ),
+            )
+        }
+        (ServerAlertKind::AccountDeleted, _, false) => (
+            format!("{member}'s Faro account on {instance} is being deleted by {ADMIN}"),
+            format!(
+                "{member}'s Faro account on {instance} is being deleted by {ADMIN}. Until \
+                 {date} nothing changes: their computers are still monitored, you still receive \
+                 alerts about them, and the deletion can still be cancelled. On {date}, \
+                 everything about {member} is permanently deleted from this server, and their \
+                 computers are no longer monitored through {instance}, even if Faro is still \
+                 installed on them."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, true) => (
+            format!("Your ally {ally}'s Faro account is being deleted by {ADMIN}"),
+            format!(
+                "The Faro account of {ally}, one of your allies on {instance}, is being deleted \
+                 by {ADMIN}. Until {date} they are still your ally, and the deletion can still \
+                 be cancelled. On {date} they stop being your ally and can no longer see \
+                 anything about you. Then open Faro and confirm your updated ally list: until \
+                 you do, your computers keep encrypting new items to a key that no longer \
+                 exists."
+            ),
+        ),
+        (ServerAlertKind::AllyDeleted, _, false) => (
+            format!(
+                "The Faro account of {ally}, also an ally for {member}, is being deleted by \
+                 {ADMIN}"
+            ),
+            format!(
+                "The Faro account of {ally}, who is also an ally for {member} on {instance}, is \
+                 being deleted by {ADMIN}. On {date} they stop being an ally for {member}. You \
+                 still receive {member}'s alerts."
+            ),
+        ),
+        (_, false, true) => {
+            let subject = if by_admin {
+                format!("The deletion of your Faro account on {instance} was cancelled")
+            } else {
+                format!("You cancelled the deletion of your Faro account on {instance}")
+            };
+            let unexpected = if by_admin {
+                String::new()
+            } else {
+                format!(" If you didn't do this, contact the people who run {instance}.")
+            };
+            (
+                subject,
+                format!(
+                    "On {requested}, {ADMIN} asked for your Faro account on {instance} to be \
+                     deleted. {canceller} cancelled it on {cancelled}. Nothing will be deleted. \
+                     Everyone in an accountability partnership with you has been told.\
+                     {unexpected}"
+                ),
+            )
+        }
+        (_, false, false) => (
+            format!("The deletion of {member}'s Faro account was cancelled"),
+            format!(
+                "On {requested}, {ADMIN} asked for {member}'s Faro account on {instance} to be \
+                 deleted. {canceller} cancelled it on {cancelled}. Nothing will be deleted, and \
+                 you still receive alerts about them."
+            ),
+        ),
+        (_, true, true) => (
+            format!("The deletion of your ally {ally}'s Faro account was cancelled"),
+            format!(
+                "On {requested}, {ADMIN} asked for the Faro account of {ally}, one of your \
+                 allies on {instance}, to be deleted. {canceller} cancelled it on {cancelled}. \
+                 They stay your ally."
+            ),
+        ),
+        (_, true, false) => (
+            format!(
+                "The deletion of the account of {ally}, also an ally for {member}, was cancelled"
+            ),
+            format!(
+                "On {requested}, {ADMIN} asked for the Faro account of {ally}, who is also an \
+                 ally for {member} on {instance}, to be deleted. {canceller} cancelled it on \
+                 {cancelled}. They stay an ally for {member}."
+            ),
+        ),
+    }
+}
+
+fn is_deletion_notice(k: ServerAlertKind) -> bool {
+    matches!(
+        k,
+        ServerAlertKind::AccountDeleted
+            | ServerAlertKind::AllyDeleted
+            | ServerAlertKind::AccountDeletionCancelled
+    )
 }
 
 /// Subject and text of an account-status notification (see the module docs).
@@ -195,6 +515,9 @@ fn account_status_text(
     n: &DueNotification,
     k: ServerAlertKind,
 ) -> (String, String) {
+    if is_deletion_notice(k) {
+        return deletion_text(instance, n, k);
+    }
     let member = &n.member_name;
     let to_member = n.recipient_id == n.member_id;
     let ally = n.about_name.as_deref().unwrap_or("an ally");
@@ -261,15 +584,235 @@ fn account_status_text(
     }
 }
 
+/// Subject, text and link of an admin role notice (see the module docs).
+fn admin_log_text(
+    instance: &str,
+    url: &str,
+    n: &DueNotification,
+    a: &AdminLogNotice,
+) -> (String, String, String) {
+    let person = &n.member_name;
+    let email = &a.user_email;
+    let by_you = a.actor_id.as_ref() == Some(&n.recipient_id);
+    let who = match (a.via, by_you, a.actor_name.as_deref()) {
+        (Via::CommandLine, _, _) => "Someone with access to the server".to_owned(),
+        (Via::Console, true, _) => "You".to_owned(),
+        (Via::Console, false, Some(name)) => name.to_owned(),
+        (Via::Console, false, None) => "An admin".to_owned(),
+    };
+    let how = match a.via {
+        Via::CommandLine => " from the server's command line",
+        Via::Console => "",
+    };
+    let people = format!("{url}/admin/people");
+    let no_content = "Being an admin gives no access to anyone's reports, alerts or screenshots.";
+    // Deletions (§12): only admins get these; the person and their
+    // partners have their own notices.
+    match a.action {
+        Action::DeletionRequested => {
+            let date = utc_date(n.created_at_ms.saturating_add(crate::api::account::HOLD_MS));
+            return (
+                format!("{person}'s account on {instance} is being deleted"),
+                format!(
+                    "{who} asked for the Faro account of {person} ({email}) on {instance} to be \
+                     deleted. {person} and everyone in an accountability partnership with them \
+                     have been told. It is deleted on {date}. Until then, {person} or any admin \
+                     can cancel it. Every admin is told about deletions an admin asks for. If you \
+                     didn't expect this, check the People page:"
+                ),
+                people,
+            );
+        }
+        Action::DeletionCancelled => {
+            let line = if a.actor_id.as_ref() == Some(&n.member_id) {
+                format!(
+                    "{person} ({email}) cancelled the deletion of their Faro account on {instance}"
+                )
+            } else {
+                format!(
+                    "{who} cancelled the deletion of the Faro account of {person} ({email}) on \
+                     {instance}"
+                )
+            };
+            return (
+                format!("The deletion of {person}'s account on {instance} was cancelled"),
+                format!(
+                    "{line}. An admin had asked for it. Nothing will be deleted. {person} and \
+                     everyone in an accountability partnership with them have been told. The \
+                     admin log on the People page shows who asked:"
+                ),
+                people,
+            );
+        }
+        // `faro-server admin grant --create`: the person's welcome. The
+        // role notice follows separately.
+        Action::AccountCreated if n.recipient_id == n.member_id => {
+            return (
+                format!("A Faro account was created for you on {instance}"),
+                format!(
+                    "{who} created a Faro account for you on {instance}{how}, with this email \
+                     address. To sign in, open the link below and enter this address: Faro \
+                     emails you a sign-in link. No password is needed. If you didn't expect \
+                     this, contact the people who run {instance}."
+                ),
+                format!("{url}/signin"),
+            );
+        }
+        Action::AccountCreated => {
+            return (
+                format!("An account was created for {person} on {instance}"),
+                format!("{who} created a Faro account for {person} ({email}) on {instance}{how}."),
+                people,
+            );
+        }
+        // Disabling and re-enabling: only the other admins get these; the
+        // person and their partners have their own notices (invariant 6).
+        Action::AccountDisabled => {
+            return (
+                format!("{person}'s account on {instance} was disabled"),
+                format!(
+                    "{who} disabled the Faro account of {person} ({email}) on {instance}. \
+                     {person} can't sign in, but their computers keep reporting. {person} and \
+                     everyone in an accountability partnership with them have been told. Every \
+                     admin is told when an account is disabled or re-enabled. If you didn't \
+                     expect this, check the People page:"
+                ),
+                people,
+            );
+        }
+        Action::AccountEnabled => {
+            return (
+                format!("{person}'s account on {instance} was re-enabled"),
+                format!(
+                    "{who} re-enabled the Faro account of {person} ({email}) on {instance}. \
+                     {person} can sign in again. {person} and everyone in an accountability \
+                     partnership with them have been told. Every admin is told when an account \
+                     is disabled or re-enabled. If you didn't expect this, check the People \
+                     page:"
+                ),
+                people,
+            );
+        }
+        // Never queued as a notification (participants have their own
+        // content-free notice); worded in case it ever is.
+        Action::GroupArchived => {
+            return (
+                format!("A group on {instance} was archived"),
+                format!("{who} archived a group on {instance}."),
+                people,
+            );
+        }
+        // Only the other admins get these. The detail is setting names and
+        // values (`retention.blob_days:30>7`), never content.
+        Action::SettingsChanged => {
+            let changes = a
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .split(';')
+                .filter(|c| !c.is_empty())
+                .map(|c| format!("\n  {}", c.replace('>', " -> ")))
+                .collect::<String>();
+            return (
+                format!("Settings on {instance} were changed"),
+                format!(
+                    "{who} changed the settings of {instance}:{changes}\n\nEvery admin is told \
+                     when settings change. Shorter retention or a longer liveness grace period \
+                     also raises an alert to each member's allies. If you didn't expect this, \
+                     check the settings:"
+                ),
+                format!("{url}/admin/settings"),
+            );
+        }
+        Action::GroupListed | Action::GroupUnlisted => {
+            return (
+                format!("A group on {instance} was listed or unlisted"),
+                format!("{who} changed whether a group is listed on {instance}."),
+                people,
+            );
+        }
+        Action::AdminGranted | Action::AdminRevoked => {}
+    }
+    if n.recipient_id == n.member_id {
+        let (subject, line) = match a.action {
+            Action::AdminGranted => (
+                format!("You are now an admin of {instance}"),
+                format!(
+                    "{who} made you an admin of {instance}{how}. You can now change its \
+                     settings, invite people and disable accounts. {no_content} Every other admin \
+                     has been told. If you didn't expect this, contact the other admins of \
+                     {instance}."
+                ),
+            ),
+            // Deletions, new accounts and account status were worded above.
+            Action::AdminRevoked
+            | Action::DeletionRequested
+            | Action::DeletionCancelled
+            | Action::AccountCreated
+            | Action::AccountDisabled
+            | Action::AccountEnabled
+            | Action::GroupArchived
+            | Action::GroupListed
+            | Action::GroupUnlisted
+            | Action::SettingsChanged => (
+                format!("You are no longer an admin of {instance}"),
+                format!(
+                    "{who} removed your admin role on {instance}{how}. You can still sign in, and \
+                     nothing else about your account changed. Every other admin has been told. If \
+                     you think this is a mistake, contact the other admins of {instance}."
+                ),
+            ),
+        };
+        return (subject, line, url.to_owned());
+    }
+    let (subject, line) = match a.action {
+        Action::AdminGranted => (
+            format!("{person} is now an admin of {instance}"),
+            format!(
+                "{who} made {person} ({email}) an admin of {instance}{how}. {no_content} Every \
+                 admin is told when someone becomes an admin or stops being one. If you didn't \
+                 expect this, check who is an admin on the People page:"
+            ),
+        ),
+        // Deletions, new accounts and account status were worded above.
+        Action::AdminRevoked
+        | Action::DeletionRequested
+        | Action::DeletionCancelled
+        | Action::AccountCreated
+        | Action::AccountDisabled
+        | Action::AccountEnabled
+        | Action::GroupArchived
+        | Action::GroupListed
+        | Action::GroupUnlisted
+        | Action::SettingsChanged => (
+            format!("{person} is no longer an admin of {instance}"),
+            format!(
+                "{who} removed the admin role from {person} ({email}) on {instance}{how}. Every \
+                 admin is told when someone becomes an admin or stops being one. If you didn't \
+                 expect this, check who is an admin on the People page:"
+            ),
+        ),
+    };
+    (subject, line, people)
+}
+
 /// Re-check quiet hours at send time (a retry or a digest may fall inside
-/// them). Returns the deferral instant, if any.
+/// them). Returns the deferral instant, if any. A reach out its recipient
+/// lets through quiet hours is never held back
+/// ([`crate::groups::QUIET_BYPASS_DETAIL`]).
 async fn quiet_deferral(
     state: &AppState,
     cache: &mut HashMap<(UserId, UserId), Option<i64>>,
-    recipient: &UserId,
-    member: &UserId,
+    n: &DueNotification,
     now: i64,
 ) -> Result<Option<i64>, AppError> {
+    if n.group_notice.as_ref().is_some_and(|g| {
+        g.kind == crate::db::repo::group_notices::NoticeKind::ReachOut.as_str()
+            && g.detail.as_deref() == Some(crate::groups::QUIET_BYPASS_DETAIL)
+    }) {
+        return Ok(None);
+    }
+    let (recipient, member) = (&n.recipient_id, &n.member_id);
     let key = (recipient.clone(), member.clone());
     if let Some(v) = cache.get(&key) {
         return Ok(*v);
@@ -337,47 +880,157 @@ async fn record_failure(
     Ok(())
 }
 
-/// Send every due immediate notification.
+/// Whether an immediate notification may be combined with others for the same
+/// recipient and member: routine alerts and reports, not notices that carry
+/// their own wording (account status, removal, admin log, groups).
+fn coalescible(n: &DueNotification) -> bool {
+    n.admin_log.is_none()
+        && n.group_notice.is_none()
+        && !n.to_extra_recipient
+        && account_status(n).is_none()
+}
+
+/// One unit of immediate sending: a single notification, or everything due
+/// for one (recipient, member) combined into one email.
+#[allow(clippy::large_enum_variant)]
+enum SendItem {
+    Single(DueNotification),
+    Group(Vec<DueNotification>),
+}
+
+impl SendItem {
+    fn ids(&self) -> Vec<String> {
+        match self {
+            SendItem::Single(n) => vec![n.id.clone()],
+            SendItem::Group(g) => g.iter().map(|n| n.id.clone()).collect(),
+        }
+    }
+}
+
+/// Send every due immediate notification. At most one email per recipient and
+/// member goes out per `device_limits.email_interval_secs`; rows that arrive
+/// meanwhile wait and are sent together as one coalesced email.
 pub async fn send_immediate(state: &AppState) -> Result<SendSummary, AppError> {
     let now = state.now_ms();
+    let interval_ms = i64::try_from(state.config().device_limits.email_interval_secs)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
     let mut s = SendSummary::default();
     let mut quiet = HashMap::new();
     let due = notif::due(state.db().pool(), Mode::Immediate, now, SEND_BATCH).await?;
-    let mut rows = due.into_iter();
-    while let Some(n) = rows.next() {
+    let mut items: Vec<SendItem> = Vec::new();
+    let mut groups: BTreeMap<(String, String), Vec<DueNotification>> = BTreeMap::new();
+    for n in due {
         if undeliverable(&n) {
             notif::suppress(state.db().pool(), &n.id).await?;
             s.dropped += 1;
             continue;
         }
-        if let Some(until) =
-            quiet_deferral(state, &mut quiet, &n.recipient_id, &n.member_id, now).await?
-        {
+        if let Some(until) = quiet_deferral(state, &mut quiet, &n, now).await? {
             notif::defer(state.db().pool(), &n.id, until).await?;
             s.deferred += 1;
             continue;
         }
-        let email = compose_immediate(state, &n);
+        if interval_ms > 0 && coalescible(&n) {
+            let key = (
+                n.recipient_id.as_str().to_owned(),
+                n.member_id.as_str().to_owned(),
+            );
+            groups.entry(key).or_default().push(n);
+        } else {
+            items.push(SendItem::Single(n));
+        }
+    }
+    for g in groups.into_values() {
+        let (recipient, member) = (g[0].recipient_id.clone(), g[0].member_id.clone());
+        if let Some(last) =
+            notif::last_immediate_sent(state.db().pool(), &recipient, &member).await?
+        {
+            let until = last.saturating_add(interval_ms);
+            if until > now {
+                for n in &g {
+                    notif::defer(state.db().pool(), &n.id, until).await?;
+                }
+                s.deferred += g.len();
+                continue;
+            }
+        }
+        items.push(if g.len() == 1 {
+            SendItem::Single(g.into_iter().next().expect("one"))
+        } else {
+            SendItem::Group(g)
+        });
+    }
+    let mut items = items.into_iter();
+    while let Some(item) = items.next() {
+        let (email, attempts) = match &item {
+            SendItem::Single(n) => (compose_immediate(state, n), n.attempts),
+            SendItem::Group(g) => (
+                compose_coalesced(state, g),
+                g.iter().map(|n| n.attempts).max().unwrap_or(0),
+            ),
+        };
+        let ids = item.ids();
         match state.mailer().send(email).await {
             Ok(()) => {
-                notif::mark_sent(state.db().pool(), &n.id, now).await?;
-                s.sent += 1;
+                for id in &ids {
+                    notif::mark_sent(state.db().pool(), id, now).await?;
+                }
+                s.sent += ids.len();
             }
             Err(e) if e.is_instance_wide() => {
                 // Nothing else would get through either: stop the pass.
-                let ids: Vec<String> = std::iter::once(n.id).chain(rows.map(|r| r.id)).collect();
-                pause_for_outage(state, &ids, &e, now).await?;
+                let mut all = ids;
+                for rest in items.by_ref() {
+                    all.extend(rest.ids());
+                }
+                pause_for_outage(state, &all, &e, now).await?;
                 s.failed_attempts += 1;
-                s.paused += ids.len();
+                s.paused += all.len();
                 break;
             }
             Err(e) => {
-                record_failure(state, std::slice::from_ref(&n.id), n.attempts, &e, now).await?;
+                record_failure(state, &ids, attempts, &e, now).await?;
                 s.failed_attempts += 1;
             }
         }
     }
     Ok(s)
+}
+
+/// One email for several notifications about the same member.
+fn compose_coalesced(state: &AppState, group: &[DueNotification]) -> Email {
+    let cfg = state.config();
+    let n0 = &group[0];
+    let member = &n0.member_name;
+    // Alerts that were themselves folded count for the alerts folded in.
+    let total: i64 = group
+        .iter()
+        .map(|n| 1 + detail_ms(n, "folded").unwrap_or(0))
+        .sum();
+    let urgent = group
+        .iter()
+        .filter(|n| n.urgency == Urgency::Urgent)
+        .count();
+    let subject = if urgent > 0 {
+        format!("Urgent: {total} new alerts for {member}")
+    } else {
+        format!("{total} new alerts for {member}")
+    };
+    let urgent_line = if urgent > 0 {
+        format!(" {urgent} of them urgent.")
+    } else {
+        String::new()
+    };
+    Email {
+        to: n0.recipient_email.clone(),
+        subject,
+        text: format!(
+            "{total} new alerts and reports for {member} on {}.{urgent_line} \
+             They are combined into one message. Open Faro to view.\n\n{}\n",
+            cfg.instance.name, cfg.public_url
+        ),
+    }
 }
 
 /// Send one digest per recipient with due digest items.
@@ -393,9 +1046,7 @@ pub async fn send_digests(state: &AppState) -> Result<SendSummary, AppError> {
             s.dropped += 1;
             continue;
         }
-        if let Some(until) =
-            quiet_deferral(state, &mut quiet, &n.recipient_id, &n.member_id, now).await?
-        {
+        if let Some(until) = quiet_deferral(state, &mut quiet, &n, now).await? {
             notif::defer(state.db().pool(), &n.id, until).await?;
             s.deferred += 1;
             continue;
@@ -444,6 +1095,98 @@ pub async fn send_digests(state: &AppState) -> Result<SendSummary, AppError> {
     Ok(s)
 }
 
+/// Subject and text of a group notice. **Never names the group or anything
+/// about it** (GROUPS.md principle 7): email passes through third parties,
+/// and a group's name is often sensitive. The name is shown only inside
+/// Faro, after sign-in.
+pub(crate) fn group_notice_text(
+    instance: &str,
+    g: &crate::db::repo::notifications::GroupNoticeInfo,
+) -> (String, String) {
+    use crate::db::repo::group_notices::NoticeKind;
+    let who = g.actor_name.as_deref().unwrap_or("Someone");
+    let (subject, line) = match (NoticeKind::parse(&g.kind), g.summary) {
+        (Some(NoticeKind::GroupJoined | NoticeKind::GroupLeft), true) => (
+            format!("People joined or left a group you facilitate on {instance}"),
+            "People joined or left a group you facilitate today. Open Faro to see who.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupJoined), false) => (
+            format!("Someone joined a group you facilitate on {instance}"),
+            "Someone joined your group. Open Faro to see who.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupLeft), false) => (
+            format!("Someone left a group you facilitate on {instance}"),
+            "Someone left your group. Open Faro to see who.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupRemoved), _) => (
+            format!("You were removed from a group on {instance}"),
+            "You were removed from a group. Your alliances are not affected.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupArchived), _) => (
+            format!("A group you are in on {instance} was closed"),
+            "A group you're in was closed. It stays readable for 30 days. Your alliances are \
+             not affected."
+                .to_owned(),
+        ),
+        (Some(NoticeKind::GroupFacilitatorOffered), _) => (
+            format!("You were offered to facilitate a group on {instance}"),
+            "A group you're in has no facilitator. Open Faro to take it on, within 14 days."
+                .to_owned(),
+        ),
+        // Proposals name the person (never the group): "Sam asked you to
+        // be their ally."
+        (Some(NoticeKind::AllianceRequested), _) => (
+            format!("{who} asked you to be their ally on {instance}"),
+            format!("{who} asked you to be their ally. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AllianceOffered), _) => (
+            format!("{who} offered to be your ally on {instance}"),
+            format!("{who} offered to be your ally. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AlliancePartnership), _) => (
+            format!("{who} asked to partner up on {instance}"),
+            format!("{who} asked to partner up: to be each other's allies. Open Faro to answer."),
+        ),
+        (Some(NoticeKind::AllianceAccepted), _) => (
+            format!("{who} accepted on {instance}"),
+            format!("{who} accepted. Compare safety codes with them in Faro to finish."),
+        ),
+        // Content-free, and never the group: "Sam is reaching out."
+        (Some(NoticeKind::ReachOut), _) => (
+            format!("{who} is reaching out on {instance}"),
+            format!("{who} is reaching out. Open Faro to see."),
+        ),
+        (Some(NoticeKind::ReachOutAnswered), _) => (
+            format!("{who} answered on {instance}"),
+            format!("{who} answered your reach out. Open Faro to see."),
+        ),
+        (Some(NoticeKind::GroupJoinRequested), _) => (
+            format!("Someone asked to join a group you facilitate on {instance}"),
+            "Someone asked to join your group. Open Faro to answer.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupJoinAccepted), _) => (
+            format!("You were added to a group on {instance}"),
+            "You've been added to a group you asked to join.".to_owned(),
+        ),
+        (Some(NoticeKind::GroupUnlisted), _) => (
+            format!("An admin removed a group you facilitate from the directory on {instance}"),
+            "An admin removed your group from the directory.".to_owned(),
+        ),
+        (Some(NoticeKind::MeetingReminder), _) => {
+            let when = crate::meetings::reminder_words(g.detail.as_deref());
+            (
+                format!("Your group on {instance} meets {when}"),
+                format!("Your group on {instance} meets {when}."),
+            )
+        }
+        (None, _) => (
+            format!("News about a group on {instance}"),
+            "There is news about a group you're in. Open Faro to see.".to_owned(),
+        ),
+    };
+    (subject, line)
+}
+
 fn on_device(n: &DueNotification) -> String {
     match &n.device_name {
         Some(d) => format!(" on {d}"),
@@ -458,6 +1201,22 @@ pub fn compose_immediate(state: &AppState, n: &DueNotification) -> Email {
     let instance = &cfg.instance.name;
     let url = &cfg.public_url;
     let member = &n.member_name;
+    if let Some(a) = &n.admin_log {
+        let (subject, line, link) = admin_log_text(instance, url, n, a);
+        return Email {
+            to: n.recipient_email.clone(),
+            subject,
+            text: format!("{line}\n\n{link}\n"),
+        };
+    }
+    if let Some(g) = &n.group_notice {
+        let (subject, line) = group_notice_text(instance, g);
+        return Email {
+            to: n.recipient_email.clone(),
+            subject,
+            text: format!("{line}\n\n{url}\n"),
+        };
+    }
     if let Some(k) = account_status(n) {
         let (subject, line) = account_status_text(instance, n, k);
         return Email {
@@ -520,12 +1279,30 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
     }
     let cfg = state.config();
     let mut per: BTreeMap<&str, Counts> = BTreeMap::new();
+    // Group notices (content-free, one line each).
+    let mut group_lines: Vec<String> = Vec::new();
     for n in items {
+        if let Some(g) = &n.group_notice {
+            let (subject, _) = group_notice_text(&cfg.instance.name, g);
+            group_lines.push(format!("- {subject}."));
+            continue;
+        }
         let c = per.entry(n.member_id.as_str()).or_default();
         c.name.clone_from(&n.member_name);
-        if let Some(k) = account_status(n) {
-            let (subject, _) = account_status_text(&cfg.instance.name, n, k);
-            c.status.push(subject);
+        if let Some(a) = &n.admin_log {
+            // Always sent immediately (`crate::roles`); worded in full if a
+            // digest ever carries one.
+            let (subject, line, _) = admin_log_text(&cfg.instance.name, &cfg.public_url, n, a);
+            c.status.push(format!("{subject}. {line}"));
+        } else if let Some(k) = account_status(n) {
+            let (subject, line) = account_status_text(&cfg.instance.name, n, k);
+            // A deletion notice's dates and what to do are the point of
+            // it, so the digest carries its whole text.
+            c.status.push(if is_deletion_notice(k) {
+                format!("{subject}. {line}")
+            } else {
+                format!("{subject}.")
+            });
         } else if n.to_extra_recipient {
             c.removed = true;
         } else if n.alert.is_none() {
@@ -543,13 +1320,13 @@ pub fn compose_digest(state: &AppState, to: &str, items: &[DueNotification]) -> 
             format!("{n} {many}")
         }
     };
-    let mut lines = Vec::new();
+    let mut lines = group_lines;
     for c in per.values() {
         if c.removed {
             lines.push(format!("- You are no longer an ally for {}.", c.name));
         }
         for s in &c.status {
-            lines.push(format!("- {s}."));
+            lines.push(format!("- {s}"));
         }
         let mut parts = Vec::new();
         if c.urgent > 0 {
@@ -606,4 +1383,190 @@ pub fn send_notice(state: &AppState, to_user: &UserId, subject: String, line: St
             tracing::warn!(code = e.code(), "could not send notice");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-11-25T14:03:00Z and seven days later.
+    const REQUESTED: i64 = 1_795_615_380_000;
+    const PURGE: i64 = REQUESTED + 7 * 24 * 3600 * 1000;
+
+    fn due(
+        kind: ServerAlertKind,
+        to_member: bool,
+        about: Option<&str>,
+        detail: &str,
+    ) -> DueNotification {
+        DueNotification {
+            id: "n".into(),
+            recipient_id: UserId::new(if to_member { "usr_m" } else { "usr_r" }),
+            recipient_email: "r@example.org".into(),
+            recipient_disabled: false,
+            entitled: true,
+            member_id: UserId::new("usr_m"),
+            member_name: "Sam".into(),
+            device_id: None,
+            device_name: None,
+            urgency: kind.urgency(),
+            attempts: 0,
+            created_at_ms: REQUESTED,
+            alert: Some(("server".into(), kind.as_str().into())),
+            to_extra_recipient: false,
+            about_name: about.map(str::to_owned),
+            alert_detail: Some(detail.to_owned()),
+            alert_created_at_ms: Some(REQUESTED + 3600 * 1000),
+            admin_log: None,
+            group_notice: None,
+        }
+    }
+
+    fn text(n: &DueNotification) -> (String, String) {
+        let k = account_status(n).expect("an account-status kind");
+        account_status_text("Faro Test", n, k)
+    }
+
+    #[test]
+    fn dates_are_utc_words() {
+        assert_eq!(utc_date(REQUESTED), "25 November 2026");
+        assert_eq!(utc_time(REQUESTED), "25 November 2026 at 14:03 UTC");
+        assert_eq!(utc_date(PURGE), "2 December 2026");
+    }
+
+    #[test]
+    fn deletion_notices_name_the_date_and_who() {
+        let d = format!("purge_after={PURGE}");
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, true, None, &d));
+        assert_eq!(
+            s,
+            "Your Faro account on Faro Test will be deleted on 2 December 2026"
+        );
+        assert!(t.contains("Cancel deletion"), "{t}");
+        assert!(t.contains("still monitored"), "{t}");
+        assert!(t.contains("backups"), "{t}");
+
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, false, None, &d));
+        assert_eq!(s, "Sam is deleting their Faro account on Faro Test");
+        assert!(t.contains("Until 2 December 2026 nothing changes"), "{t}");
+
+        let d = format!("ally=usr_a;purge_after={PURGE}");
+        let (s, t) = text(&due(ServerAlertKind::AllyDeleted, true, Some("Pat"), &d));
+        assert_eq!(s, "Your ally Pat is deleting their Faro account");
+        assert!(t.contains("confirm your updated ally list"), "{t}");
+        let (s, t) = text(&due(ServerAlertKind::AllyDeleted, false, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "Pat, also an ally for Sam, is deleting their Faro account"
+        );
+        assert!(t.contains("You still receive Sam's alerts"), "{t}");
+    }
+
+    #[test]
+    fn admin_deletion_notices_say_the_instance_administrator() {
+        let by = "deleted by the instance administrator";
+        let d = format!("purge_after={PURGE};requested_by=admin");
+        let mut n = due(ServerAlertKind::AccountDeleted, true, None, &d);
+        let (s, t) = text(&n);
+        assert_eq!(
+            s,
+            "Your Faro account on Faro Test is being deleted by the instance administrator"
+        );
+        assert!(t.contains("On 2 December 2026"), "{t}");
+        assert!(t.contains("sign in before 2 December 2026"), "{t}");
+        assert!(!t.contains("You asked"), "{t}");
+        // A disabled person can't sign in to cancel.
+        n.recipient_disabled = true;
+        let (_, t) = text(&n);
+        assert!(t.contains("Your account is disabled"), "{t}");
+        assert!(!t.contains("sign in before"), "{t}");
+        assert!(!undeliverable(&n), "a disabled person is told");
+
+        let (s, t) = text(&due(ServerAlertKind::AccountDeleted, false, None, &d));
+        assert!(s.contains(by) && s.starts_with("Sam's"), "{s}");
+        assert!(t.contains("Until 2 December 2026 nothing changes"), "{t}");
+        let d = format!("ally=usr_a;purge_after={PURGE};requested_by=admin");
+        for to_member in [true, false] {
+            let (s, t) = text(&due(
+                ServerAlertKind::AllyDeleted,
+                to_member,
+                Some("Pat"),
+                &d,
+            ));
+            assert!(s.contains(by) && s.contains("Pat"), "{s}");
+            assert!(!t.contains("asked for their"), "{t}");
+        }
+
+        let k = ServerAlertKind::AccountDeletionCancelled;
+        let d = format!("requested={REQUESTED};requested_by=admin");
+        let (s, t) = text(&due(k, true, None, &d));
+        assert_eq!(
+            s,
+            "You cancelled the deletion of your Faro account on Faro Test"
+        );
+        assert!(
+            t.contains("On 25 November 2026 at 14:03 UTC, the instance administrator asked"),
+            "{t}"
+        );
+        let mut n = due(k, true, None, &format!("{d};cancelled_by=admin"));
+        let (s, t) = text(&n);
+        assert_eq!(
+            s,
+            "The deletion of your Faro account on Faro Test was cancelled"
+        );
+        assert!(
+            t.contains("The instance administrator cancelled it on 25 November 2026 at 15:03"),
+            "{t}"
+        );
+        n.recipient_disabled = true;
+        assert!(!undeliverable(&n), "a disabled person is told");
+        let (s, t) = text(&due(k, false, None, &d));
+        assert_eq!(s, "The deletion of Sam's Faro account was cancelled");
+        assert!(t.contains("Sam cancelled it on"), "{t}");
+        let d = format!("ally=usr_a;{d}");
+        let (s, t) = text(&due(k, true, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "The deletion of your ally Pat's Faro account was cancelled"
+        );
+        assert!(t.contains("Pat cancelled it on"), "{t}");
+
+        // Other notices still drop for a disabled recipient.
+        let mut n = due(ServerAlertKind::AllyDeleted, true, Some("Pat"), &d);
+        n.recipient_disabled = true;
+        assert!(undeliverable(&n));
+    }
+
+    #[test]
+    fn cancellation_notices_give_both_times() {
+        let k = ServerAlertKind::AccountDeletionCancelled;
+        let d = format!("requested={REQUESTED}");
+        let (s, t) = text(&due(k, true, None, &d));
+        assert_eq!(
+            s,
+            "You cancelled the deletion of your Faro account on Faro Test"
+        );
+        assert!(
+            t.contains("deleted on 25 November 2026 at 14:03 UTC"),
+            "{t}"
+        );
+        assert!(
+            t.contains("cancelled it on 25 November 2026 at 15:03 UTC"),
+            "{t}"
+        );
+        let (s, _) = text(&due(k, false, None, &d));
+        assert_eq!(s, "Sam cancelled the deletion of their Faro account");
+        let d = format!("ally=usr_a;requested={REQUESTED}");
+        let (s, t) = text(&due(k, true, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "Your ally Pat cancelled the deletion of their Faro account"
+        );
+        assert!(t.contains("They stay your ally"), "{t}");
+        let (s, _) = text(&due(k, false, Some("Pat"), &d));
+        assert_eq!(
+            s,
+            "Pat, also an ally for Sam, cancelled the deletion of their account"
+        );
+    }
 }

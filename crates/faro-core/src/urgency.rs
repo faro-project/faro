@@ -9,16 +9,33 @@
 //!    instance enforces the same floor, so a modified client gains nothing by
 //!    signing a tamper event as `none`; we apply it here so the device and
 //!    instance agree and the signed header is already correct.
-//! 2. The member may make flags **more** urgent than the defaults (e.g. treat
-//!    `medium` as urgent) but never less: the defaults are floors. A policy
-//!    that silenced high-rated flags would let a member quietly disable the
-//!    alerts their allies rely on.
+//! 2. The member may set each rating's urgency anywhere from its **floor** up
+//!    to `urgent`, never below the floor. A policy that silenced high-rated
+//!    flags would let a member quietly disable the alerts their allies rely
+//!    on.
+//!
+//! The default mapping is not the floor everywhere: `medium` flags are
+//! `urgent` by default ([`UrgencyPolicy::MEDIUM_DEFAULT`], ARCHITECTURE.md
+//! §14) but may be lowered to `normal` ([`UrgencyPolicy::MEDIUM_FLOOR`]).
+//! Every change to the mapping, in either direction, is announced to allies
+//! as a `settings_change` event ([`UrgencyPolicy::diff`]).
+//!
+//! A policy stored before `medium` defaulted to `urgent` keeps its value:
+//! deserializing never fills in the defaults, so such a device stays at
+//! `normal` until the member changes it. Only new devices start at the new
+//! default (`faro_service::state::settings_in_effect`).
 
 use faro_proto::body::{EventBody, Rating, SettingChange, TamperSignal};
 use faro_proto::Urgency;
 use serde::{Deserialize, Serialize};
 
 /// How flag ratings map to urgency. Member-configurable within floors.
+///
+/// | Rating | Default | Floor |
+/// |---|---|---|
+/// | `low` | `none` | `none` |
+/// | `medium` | `urgent` | `normal` |
+/// | `high` | `urgent` | `urgent` |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawPolicy", into = "RawPolicy")]
 pub struct UrgencyPolicy {
@@ -66,19 +83,27 @@ impl Default for UrgencyPolicy {
     fn default() -> Self {
         UrgencyPolicy {
             low: Self::LOW_FLOOR,
-            medium: Self::MEDIUM_FLOOR,
+            medium: Self::MEDIUM_DEFAULT,
             high: Self::HIGH_FLOOR,
         }
     }
 }
 
 impl UrgencyPolicy {
+    /// The lowest urgency each rating may be given. `low` and `high` default
+    /// to their floors; `medium` defaults to [`Self::MEDIUM_DEFAULT`].
     pub const LOW_FLOOR: Urgency = Urgency::None;
     pub const MEDIUM_FLOOR: Urgency = Urgency::Normal;
     pub const HIGH_FLOOR: Urgency = Urgency::Urgent;
 
-    /// Build a policy. Each level must be at least its default (the floor)
-    /// and the mapping must be monotone (`low <= medium <= high`).
+    /// The urgency of `medium` flags on a new device. Deliberately above
+    /// [`Self::MEDIUM_FLOOR`]: the member may lower it to `normal`, and
+    /// allies are told when they do.
+    pub const MEDIUM_DEFAULT: Urgency = Urgency::Urgent;
+
+    /// Build a policy. Each level must be at least its floor (which is not
+    /// always its default) and the mapping must be monotone
+    /// (`low <= medium <= high`).
     pub fn new(low: Urgency, medium: Urgency, high: Urgency) -> Result<Self, PolicyError> {
         for (rating, value, floor) in [
             ("low", low, Self::LOW_FLOOR),
@@ -123,7 +148,7 @@ impl UrgencyPolicy {
     /// | `flag` | from the rating mapping |
     /// | `tamper`, `goodbye` | urgent |
     /// | `settings_change`, `paused`, `resumed` | normal |
-    /// | `capture`, `agent_restarted`, `boot`, `shutdown` | none |
+    /// | `capture`, `blocked_summary`, `shield_summary`, `agent_restarted`, `boot`, `shutdown` | none |
     ///
     /// A single `agent_restarted` is routine (updates, crashes); repeated
     /// kills are escalated separately as the `agent_killed_repeatedly` tamper
@@ -136,6 +161,8 @@ impl UrgencyPolicy {
                 Urgency::Normal
             }
             EventBody::Capture { .. }
+            | EventBody::BlockedSummary { .. }
+            | EventBody::ShieldSummary { .. }
             | EventBody::AgentRestarted { .. }
             | EventBody::Boot { .. }
             | EventBody::Shutdown => Urgency::None,
@@ -218,7 +245,7 @@ mod tests {
                 signal: TamperSignal::WaylandTokenLost,
                 account: None,
             },
-            EventBody::SettingsChange { changes: vec![] },
+            EventBody::settings_change(vec![]),
             EventBody::AgentRestarted { count_last_hour: 9 },
             EventBody::Paused {
                 reason: None,
@@ -241,13 +268,61 @@ mod tests {
         let p = UrgencyPolicy::default();
         assert_eq!(p.urgency_for(&flag(Rating::Clean)), Urgency::None);
         assert_eq!(p.urgency_for(&flag(Rating::Low)), Urgency::None);
-        assert_eq!(p.urgency_for(&flag(Rating::Medium)), Urgency::Normal);
+        assert_eq!(p.urgency_for(&flag(Rating::Medium)), Urgency::Urgent);
         assert_eq!(p.urgency_for(&flag(Rating::High)), Urgency::Urgent);
         assert_eq!(
-            p.urgency_for(&EventBody::SettingsChange { changes: vec![] }),
+            p.urgency_for(&EventBody::settings_change(vec![])),
             Urgency::Normal
         );
         assert_eq!(p.urgency_for(&EventBody::Shutdown), Urgency::None);
+    }
+
+    #[test]
+    fn medium_default_is_above_its_floor() {
+        let p = UrgencyPolicy::default();
+        assert_eq!(p.low(), UrgencyPolicy::LOW_FLOOR);
+        assert_eq!(p.medium(), UrgencyPolicy::MEDIUM_DEFAULT);
+        assert_eq!(p.high(), UrgencyPolicy::HIGH_FLOOR);
+        assert!(UrgencyPolicy::MEDIUM_DEFAULT > UrgencyPolicy::MEDIUM_FLOOR);
+        // The member may still lower medium flags to the floor...
+        let lowered = UrgencyPolicy::new(
+            UrgencyPolicy::LOW_FLOOR,
+            UrgencyPolicy::MEDIUM_FLOOR,
+            UrgencyPolicy::HIGH_FLOOR,
+        )
+        .unwrap();
+        assert_eq!(lowered.urgency_for(&flag(Rating::Medium)), Urgency::Normal);
+        // ...allies are told, with a `normal` settings change...
+        let changes = p.diff(&lowered);
+        assert_eq!(
+            changes,
+            vec![SettingChange {
+                key: "urgency.medium".into(),
+                old: Some("urgent".into()),
+                new: Some("normal".into())
+            }]
+        );
+        assert_eq!(
+            p.urgency_for(&EventBody::settings_change(changes)),
+            Urgency::Normal
+        );
+        // ...and it can't go below the floor.
+        assert!(matches!(
+            UrgencyPolicy::new(Urgency::None, Urgency::None, Urgency::Urgent),
+            Err(PolicyError::BelowFloor {
+                rating: "medium",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn stored_policy_keeps_its_medium() {
+        // As written by a client from before `medium` defaulted to `urgent`.
+        let old = r#"{"low":"none","medium":"normal","high":"urgent"}"#;
+        let p: UrgencyPolicy = serde_json::from_str(old).unwrap();
+        assert_eq!(p.medium(), Urgency::Normal);
+        assert_ne!(p, UrgencyPolicy::default());
     }
 
     #[test]
@@ -311,15 +386,22 @@ mod tests {
     #[test]
     fn policy_diff() {
         let a = UrgencyPolicy::default();
-        let b = UrgencyPolicy::new(Urgency::None, Urgency::Urgent, Urgency::Urgent).unwrap();
+        let b = UrgencyPolicy::new(Urgency::Normal, Urgency::Normal, Urgency::Urgent).unwrap();
         assert!(a.diff(&a).is_empty());
         assert_eq!(
             a.diff(&b),
-            vec![SettingChange {
-                key: "urgency.medium".into(),
-                old: Some("normal".into()),
-                new: Some("urgent".into())
-            }]
+            vec![
+                SettingChange {
+                    key: "urgency.low".into(),
+                    old: Some("none".into()),
+                    new: Some("normal".into())
+                },
+                SettingChange {
+                    key: "urgency.medium".into(),
+                    old: Some("urgent".into()),
+                    new: Some("normal".into())
+                }
+            ]
         );
     }
 
@@ -342,8 +424,13 @@ mod tests {
             TamperSignal::UnmonitoredUserSession {
                 user: "guest".into(),
             },
+            // A window hidden from capture shows things Faro can't see.
+            TamperSignal::WindowHiddenFromCapture {
+                app: "Viewer".into(),
+            },
             TamperSignal::PermissionRevoked {
                 permission: "screen".into(),
+                never_granted: false,
             },
             TamperSignal::AgentKilledRepeatedly {
                 count: 3,

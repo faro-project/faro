@@ -1,0 +1,57 @@
+[package]
+name = "faro-mobile"
+description = "Faro's Rust core for iOS (event log, chain, outbox, keys, enrollment, heartbeats, data bundles) behind UniFFI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# A development build: a `dev_thresholds.json` may lower the burst
+# thresholds (docs/DEVELOPMENT.md, "lower only"). Never in a release build.
+dev = ["faro-dnsfilter/dev"]
+
+[lib]
+# `staticlib` for the XCFramework the app links (docs/IOS.md §13); `lib`
+# for the tests and for Rust callers such as the DNS filter.
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+faro-proto.workspace = true
+faro-crypto.workspace = true
+faro-core.workspace = true
+faro-client.workspace = true
+faro-update.workspace = true
+# The packet tunnel's DNS filter engine (docs/IOS.md §7).
+faro-dnsfilter.workspace = true
+# Only the domain categorizer is used (`load_domains`); the `onnx` feature
+# stays off, so no ONNX Runtime is linked.
+faro-detect.workspace = true
+# Proc-macro mode only: no UDL, no build script, no bindgen at build time.
+# MPL-2.0, used unmodified (deny.toml).
+uniffi = { version = "0.29", default-features = false }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true }
+zeroize.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+faro-update = { workspace = true, features = ["testing"] }
+axum.workspace = true
+url = "2.5"
+# The tests run the real instance in-process and reuse its integration-test
+# harness (server/tests/common/mod.rs), as faro-service's end-to-end tests do.
+faro-server = { path = "../../server", version = "0.1.0-beta.1" }
+sqlx.workspace = true
+tower = { workspace = true, features = ["util"] }

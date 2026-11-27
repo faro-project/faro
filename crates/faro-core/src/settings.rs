@@ -178,7 +178,7 @@ impl MemberSettings {
     /// The `settings_change` body for a transition, or `None` if nothing changed.
     pub fn change_event(old: &MemberSettings, new: &MemberSettings) -> Option<EventBody> {
         let changes = Self::diff(old, new);
-        (!changes.is_empty()).then_some(EventBody::SettingsChange { changes })
+        (!changes.is_empty()).then_some(EventBody::settings_change(changes))
     }
 }
 
@@ -223,7 +223,8 @@ mod tests {
         assert!(MemberSettings::change_event(&a, &a).is_none());
         let b = MemberSettings::new(
             300,
-            UrgencyPolicy::new(Urgency::Normal, Urgency::Urgent, Urgency::Urgent).unwrap(),
+            // Raises `low` and lowers `medium` from its default to its floor.
+            UrgencyPolicy::new(Urgency::Normal, Urgency::Normal, Urgency::Urgent).unwrap(),
             true,
             true,
             Some(7),

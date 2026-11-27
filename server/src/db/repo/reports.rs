@@ -91,7 +91,9 @@ pub async fn undispatched<'e>(
 ) -> Result<Vec<UndispatchedReport>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, member_id FROM reports WHERE dispatched_at IS NULL
-         ORDER BY received_at, id LIMIT $1",
+         ORDER BY ROW_NUMBER() OVER (PARTITION BY member_id ORDER BY received_at, id),
+                  received_at, id
+         LIMIT $1",
     )
     .bind(limit)
     .fetch_all(e)

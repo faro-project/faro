@@ -1,0 +1,4 @@
+# UniFFI's Kotlin bindings for faro-android (build-android.sh).
+[bindings.kotlin]
+package_name = "org.faro.core"
+cdylib_name = "faro_android"

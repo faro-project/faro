@@ -34,12 +34,17 @@
 //! Faro's own code is AGPL-3.0-or-later, but third-party components must be
 //! permissive so that every edition of Faro can include them (§11). **No model
 //! weights and no blocklists are bundled in this crate.** Models and domain
-//! bundles are shipped separately through the signed update channel (§3.8),
-//! and every one of them must be under a permissive licence: Apache-2.0, MIT,
-//! BSD or CC0 are fine; GPL, AGPL or non-commercial weights (and blocklists
-//! that forbid redistribution) are not. [`load_model`] enforces this against the SPDX
-//! identifier in the model manifest (see [`ALLOWED_MODEL_LICENSES`]), in
-//! addition to verifying the weights' BLAKE3 hash.
+//! bundles are shipped separately (the beta's model in the macOS package,
+//! built by `models/opennsfw/build.sh`; newer ones, and domain bundles,
+//! through the signed update channel, §3.8), and every one of them must be
+//! under a permissive licence: Apache-2.0, MIT, BSD or CC0 are fine; GPL,
+//! AGPL or non-commercial weights (and blocklists that forbid
+//! redistribution) are not. [`load_model`] enforces this against the SPDX
+//! identifier in the model manifest (see [`ALLOWED_MODEL_LICENSES`]),
+//! requires the attribution and licence text that licence asks for
+//! ([`attribution`]), and verifies the weights' BLAKE3 hash.
+//! [`load_domains`] does the same for a domain bundle and every source in
+//! its manifest.
 //!
 //! ## Features
 //!
@@ -48,10 +53,16 @@
 //!   and the [`ScriptedClassifier`] test double are available, and
 //!   [`classifier::preprocess`]/[`classifier::postprocess`] remain usable and
 //!   tested.
+//! * The [`bench`](mod@bench) harness (test-set layout, metrics, regression gate) is
+//!   always built; its command line, the `model-bench` example, needs
+//!   `onnx`.
 
+pub mod attribution;
+pub mod bench;
 pub mod classifier;
 pub mod context;
 pub mod dhash;
+pub mod domain_manifest;
 pub mod domains;
 mod error;
 pub mod fusion;
@@ -63,14 +74,20 @@ pub mod thumbnail;
 #[cfg(test)]
 mod privacy_tests;
 
+pub use attribution::Attribution;
 #[cfg(feature = "onnx")]
 pub use classifier::onnx::OnnxClassifier;
 pub use classifier::{
-    load_model, ChannelOrder, Classifier, ImageScores, InputSize, ModelInfo, NullClassifier,
-    OutputActivation, ScriptedClassifier, TensorLayout, VerifiedModel, ALLOWED_MODEL_LICENSES,
+    load_model, load_model_at, ChannelOrder, Classifier, ImageScores, InputSize, ModelInfo,
+    NullClassifier, OutputActivation, Resize, ScriptedClassifier, TensorLayout, VerifiedModel,
+    ALLOWED_MODEL_LICENSES,
 };
 pub use context::{AppRule, ContextAnalyzer, ContextConfig, ContextFinding, ContextSignals};
 pub use dhash::{dhash, hamming, DedupeDecision, Deduper, DEFAULT_DEDUPE_THRESHOLD};
+pub use domain_manifest::{
+    load_domains, DomainSource, DomainsBundleInfo, DomainsManifest, LoadedDomains,
+    DOMAINS_MANIFEST_FORMAT,
+};
 pub use domains::{Category, CompileStats, DomainCategorizer, DomainCategorizerBuilder};
 pub use error::DetectError;
 pub use fusion::{FusionResult, PolicyConfig, PolicyEngine};

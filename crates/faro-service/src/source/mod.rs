@@ -1,7 +1,8 @@
 //! Where frames and session context come from (ARCHITECTURE.md §3.1).
 //!
 //! In production the capture side is the per-session **agent**, connected
-//! over `faro-ipc` ([`ipc::IpcFrameSource`], Unix only for now). Tests, the
+//! over `faro-ipc` ([`ipc::IpcFrameSource`]: Unix sockets, or named pipes
+//! on Windows, where [`win_agents`] also launches the agents). Tests, the
 //! headless E2E client and development builds can instead drive an
 //! [`AgentPlatform`](faro_platform::AgentPlatform) in-process
 //! ([`InProcessFrameSource`], e.g. over `faro_platform::synthetic::Script`).
@@ -26,23 +27,37 @@
 //! zeroized when dropped (including if a channel is closed with frames still
 //! queued). `SourceEvent`'s `Debug` never prints pixels.
 
-#[cfg(unix)]
+// The agent over IPC, its code-signature checks and the OS session list
+// are desktop only: Android has no agent process, and captures in-process
+// (`crates/faro-android`).
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
+pub mod agent_tamper;
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod codesign;
 mod in_process;
-#[cfg(unix)]
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod ipc;
-#[cfg(unix)]
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 pub mod sessions;
+#[cfg(windows)]
+pub mod win_agents;
 
 pub use in_process::InProcessFrameSource;
 
-use faro_ipc::CaptureReason;
+use faro_ipc::{CaptureReason, StatusReport};
 use faro_platform::{Frame, PermissionState, SessionChange};
 use faro_proto::body::{AppInfo, BrowserContext, TamperSignal};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
+
+/// What an in-process platform's capture returns, as
+/// `PlatformError::Unavailable`, when a window kept out of captures is in
+/// front and nothing else could be captured
+/// ([`SourceEvent::CaptureHidden`]).
+pub const HIDDEN_FROM_CAPTURE: &str = "window hidden from capture";
 
 /// Commands from the service to the capture side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +80,8 @@ pub enum SourceCommand {
 /// One interactive session, as a source sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatus {
-    /// The session id agents send in `Hello` (`uid:<uid>`).
+    /// The session id agents send in `Hello` (`uid:<uid>`, `wts:<id>` on
+    /// Windows).
     pub id: String,
     /// The account's short name (the label in events, §3.6).
     pub account: String,
@@ -115,6 +131,14 @@ pub enum SourceEvent {
     CaptureFailed {
         reason: String,
     },
+    /// A requested capture saw only a window that keeps itself out of
+    /// captures (Android's `FLAG_SECURE`: the screenshot is refused). The
+    /// source reports the window as a tamper signal itself, after its own
+    /// debounce, so the core counts this as a failed capture but not
+    /// towards `capture_failing` (one cause, one signal: ARCHITECTURE.md
+    /// §3.7). Only the in-process source produces it, from a platform
+    /// error reading [`HIDDEN_FROM_CAPTURE`].
+    CaptureHidden,
     Foreground {
         app: Option<AppInfo>,
         title: Option<String>,
@@ -131,7 +155,8 @@ pub enum SourceEvent {
         accessibility: Option<bool>,
     },
     /// A tamper or context signal from an agent, with its session's account
-    /// (`None` if unknown).
+    /// (`None` if unknown). From an IPC agent, only the signals
+    /// [`agent_tamper`] lets through, with their text bounded.
     Tamper {
         signal: TamperSignal,
         account: Option<String>,
@@ -170,6 +195,7 @@ impl fmt::Debug for SourceEvent {
                 .debug_struct("CaptureFailed")
                 .field("reason", reason)
                 .finish(),
+            SourceEvent::CaptureHidden => f.write_str("CaptureHidden"),
             // Window titles and URLs are sensitive; keep them out of logs.
             SourceEvent::Foreground { app, .. } => f
                 .debug_struct("Foreground")
@@ -210,6 +236,24 @@ pub struct SourceIo {
     /// then stop.
     pub commands: mpsc::Receiver<SourceCommand>,
     pub events: mpsc::Sender<SourceEvent>,
+    /// The service's latest status report (`None` until the first). A
+    /// source with agents sends each one its
+    /// [`MemberStatus`](faro_ipc::MemberStatus) view of it
+    /// (`ServiceMsg::Status`); others ignore it.
+    pub status: watch::Receiver<Option<Arc<StatusReport>>>,
+}
+
+impl SourceIo {
+    /// The channels with a status feed that never changes (tests, and
+    /// sources driven without a service).
+    pub fn new(commands: mpsc::Receiver<SourceCommand>, events: mpsc::Sender<SourceEvent>) -> Self {
+        let (_tx, status) = watch::channel(None);
+        SourceIo {
+            commands,
+            events,
+            status,
+        }
+    }
 }
 
 /// A boxed, sendable future.
@@ -223,4 +267,10 @@ pub trait FrameSource: Send + 'static {
 
     /// Short name for logs.
     fn name(&self) -> &'static str;
+
+    /// The OS permission captures need, as `permission_revoked` names it:
+    /// Screen Recording on desktops, the accessibility service on Android.
+    fn capture_permission(&self) -> &'static str {
+        crate::runtime::SCREEN_RECORDING
+    }
 }

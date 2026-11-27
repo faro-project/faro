@@ -10,8 +10,9 @@
 //! binary: it holds private keys in memory and exists to sign whatever a
 //! test asks for.
 
+use crate::envelope::Envelope;
 use crate::metadata::{
-    RoleKeys, Root, RootRoles, TargetCustom, TargetFile, TargetKind, Targets, TargetsMeta,
+    Role, RoleKeys, Root, RootRoles, TargetCustom, TargetFile, TargetKind, Targets, TargetsMeta,
     Timestamp,
 };
 use crate::signer::MetadataSigner;
@@ -35,6 +36,7 @@ pub struct Artifact {
     pub version: Version,
     pub channels: Vec<String>,
     pub min_os: Option<String>,
+    pub min_client: Option<Version>,
     pub content: Vec<u8>,
 }
 
@@ -56,6 +58,7 @@ impl Artifact {
             version: Version::parse(version).expect("valid semver"),
             channels: vec![crate::STABLE_CHANNEL.to_owned()],
             min_os: None,
+            min_client: None,
             content: content.to_vec(),
         }
     }
@@ -63,6 +66,12 @@ impl Artifact {
     /// Replace the channels.
     pub fn channels(mut self, channels: &[&str]) -> Self {
         self.channels = channels.iter().map(|c| (*c).to_owned()).collect();
+        self
+    }
+
+    /// Set the minimum client version.
+    pub fn min_client(mut self, version: &str) -> Self {
+        self.min_client = Some(Version::parse(version).expect("valid semver"));
         self
     }
 
@@ -77,6 +86,7 @@ impl Artifact {
                 version: self.version.clone(),
                 channels: self.channels.clone(),
                 min_os: self.min_os.clone(),
+                min_client: self.min_client.clone(),
             },
         }
     }
@@ -114,6 +124,38 @@ impl ToyProject {
             timestamp_version: 0,
             root_expires_ms,
         }
+    }
+
+    /// Like [`new`](Self::new), with every key derived from `seed`, so two
+    /// processes build byte-identical documents (Ed25519 signing is
+    /// deterministic). The fuzz targets rely on this: their seed corpus is
+    /// written by one program and must verify against the root another one
+    /// trusts.
+    pub fn from_seed(seed: [u8; 32], root_expires_ms: i64) -> Self {
+        let key = |role: &str| {
+            let context = format!("faro-update testing ToyProject {role} key");
+            SigningKey::from_bytes(&blake3::derive_key(&context, &seed))
+        };
+        ToyProject {
+            root_key: key("root"),
+            targets_key: key("targets"),
+            timestamp_key: key("timestamp"),
+            ..ToyProject::new(root_expires_ms)
+        }
+    }
+
+    /// Sign arbitrary `payload` bytes as `role` with that role's key and
+    /// return the serialized envelope. Unlike every other method this does
+    /// **not** validate the payload: it is for testing how verifiers treat
+    /// documents that carry a valid project signature but are malformed
+    /// (a buggy release tool, or a compromised key).
+    pub fn sign_raw(&self, role: Role, payload: &[u8]) -> Vec<u8> {
+        let key = match role {
+            Role::Root => &self.root_key,
+            Role::Targets => &self.targets_key,
+            Role::Timestamp => &self.timestamp_key,
+        };
+        Envelope::sign_raw(role.payload_type(), payload, &[key]).to_bytes()
     }
 
     fn root_meta(&self, version: u64) -> Root {
@@ -243,4 +285,45 @@ pub fn write_root(dir: &Path, version: u64, envelope: &[u8]) -> std::io::Result<
     let roots = dir.join("roots");
     std::fs::create_dir_all(&roots)?;
     std::fs::write(roots.join(format!("{version}.json")), envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{UpdateError, Updater};
+
+    #[test]
+    fn seeded_projects_sign_identical_documents() {
+        let mut a = ToyProject::from_seed([1; 32], DAY_MS);
+        let mut b = ToyProject::from_seed([1; 32], DAY_MS);
+        let c = ToyProject::from_seed([2; 32], DAY_MS);
+        assert_eq!(a.first_root(), b.first_root());
+        assert_ne!(a.first_root(), c.first_root());
+        let art = Artifact::new("a", TargetKind::Model, "any", "any", "1.0.0", b"x");
+        let ra = a.release(std::slice::from_ref(&art), DAY_MS);
+        let rb = b.release(&[art], DAY_MS);
+        assert_eq!((ra.timestamp, ra.targets), (rb.timestamp, rb.targets));
+    }
+
+    #[test]
+    fn sign_raw_signs_without_validating() {
+        let p = ToyProject::from_seed([1; 32], DAY_MS);
+        let mut u = Updater::bootstrap(&p.first_root()).unwrap();
+        // Signed by the timestamp key, so it gets past the signatures and
+        // fails only on the payload.
+        let env = p.sign_raw(Role::Timestamp, b"not json");
+        assert!(matches!(
+            u.verify_timestamp(&env, 0),
+            Err(UpdateError::InvalidMetadata { .. })
+        ));
+        // Another role's key does not count.
+        let env = p.sign_raw(Role::Targets, b"{}");
+        let env = String::from_utf8(env)
+            .unwrap()
+            .replace("targets+json", "timestamp+json");
+        assert!(matches!(
+            u.verify_timestamp(env.as_bytes(), 0),
+            Err(UpdateError::ThresholdNotMet { .. })
+        ));
+    }
 }

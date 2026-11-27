@@ -149,15 +149,33 @@ async fn may_register(state: &AppState, email: &str, now: i64) -> AppResult<bool
     if reg.mode == RegistrationMode::Open && reg.domain_allowed(email) {
         return Ok(true);
     }
-    Ok(
-        !invites::live_kinds_for_email(state.db().pool(), email, now)
-            .await?
-            .is_empty(),
-    )
+    if !invites::live_kinds_for_email(state.db().pool(), email, now)
+        .await?
+        .is_empty()
+    {
+        return Ok(true);
+    }
+    group_invite_allows(state, state.db().pool(), email, now).await
+}
+
+/// Whether a live group invitation lets `email` create an account: only
+/// while groups are on and the admin allows it (GROUPS.md §13). Like an ally
+/// invite, it opens registration for that address only.
+async fn group_invite_allows<'e>(
+    state: &AppState,
+    e: impl sqlx::Executor<'e, Database = sqlx::Any>,
+    email: &str,
+    now: i64,
+) -> AppResult<bool> {
+    let g = state.settings().groups;
+    if !g.enabled || !g.invites_create_accounts {
+        return Ok(false);
+    }
+    Ok(crate::db::repo::groups::live_invite_for_email(e, email, now).await?)
 }
 
 /// Local part of an email, as a starting display name for self-registered users.
-fn default_display_name(email: &str) -> String {
+pub(crate) fn default_display_name(email: &str) -> String {
     let local = email.split('@').next().unwrap_or("member");
     let name: String = local.chars().take(64).collect();
     if name.is_empty() {
@@ -203,7 +221,12 @@ pub async fn verify_link(
                 let reg = state.settings().registration;
                 let kinds = invites::live_kinds_for_email(&mut *tx, &link.email, now).await?;
                 let open_ok = reg.mode == RegistrationMode::Open && reg.domain_allowed(&link.email);
-                if reg.mode == RegistrationMode::Closed || (!open_ok && kinds.is_empty()) {
+                let group_ok = !open_ok
+                    && kinds.is_empty()
+                    && group_invite_allows(&state, &mut *tx, &link.email, now).await?;
+                if reg.mode == RegistrationMode::Closed
+                    || (!open_ok && kinds.is_empty() && !group_ok)
+                {
                     return Err(AppError::Forbidden("registration_closed"));
                 }
                 let u = users::User {
@@ -220,6 +243,7 @@ pub async fn verify_link(
                     },
                     disabled: false,
                     created_at_ms: now,
+                    deletion: None,
                 };
                 users::insert(&mut *tx, &u).await?;
                 (u, true)
@@ -260,6 +284,11 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppRes
 pub struct MeResponse {
     pub user: users::User,
     pub has_member_keys: bool,
+    /// When this session signed in: deleting the account needs a sign-in
+    /// within the last [`super::account::REAUTH_WINDOW_MS`].
+    pub session_started_at_ms: i64,
+    /// The pending deletion of this account, if the person asked for one.
+    pub deletion: Option<users::PendingDeletion>,
 }
 
 /// `PATCH /v1/me` body: the fields a person may change about themself.
@@ -293,8 +322,10 @@ pub async fn update_me(
         .await?
         .is_some();
     Ok(Json(MeResponse {
+        deletion: user.deletion,
         user,
         has_member_keys,
+        session_started_at_ms: s.session_started_at_ms,
     }))
 }
 
@@ -307,7 +338,9 @@ pub async fn me(
         .await?
         .is_some();
     Ok(Json(MeResponse {
+        deletion: s.user.deletion,
         user: s.user,
         has_member_keys,
+        session_started_at_ms: s.session_started_at_ms,
     }))
 }

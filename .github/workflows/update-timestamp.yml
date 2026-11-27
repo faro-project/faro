@@ -1,0 +1,215 @@
+# Keeps the published update metadata fresh (docs/DEVELOPMENT.md
+# "Releasing", PROTOCOL.md §8).
+#
+# - Every 8 hours: re-signs timestamp.json, which expires 24 hours after it
+#   is signed. Instances and clients each check about every 6 hours
+#   (docs/KEY-CEREMONY.md §4.2), so a copy they hold is never too old, and
+#   one or two failed runs still leave time to fix things.
+# - When targets.json has fewer than 21 days left (it lasts 42), or when
+#   release/update-root.json names a targets key that didn't sign it (the
+#   key was replaced, docs/KEY-CEREMONY.md §6.3): re-signs it with the same
+#   entries, then a timestamp for it, instead of the timestamp alone.
+# - Roots committed to release/roots go out with either.
+#
+# Each signing job reads only the keys it needs: `timestamp` only
+# FARO_TIMESTAMP_KEY, `renew-targets` also FARO_TARGETS_KEY (and only when
+# renewal is due). They run on GitHub's runners unless FARO_SIGNING_RUNNER
+# says otherwise. On failure, `alert` opens an issue (or comments on the open
+# one), on top of GitHub's usual email about a failed scheduled run.
+#
+# Before the key ceremony (no release/update-root.json) or the first
+# release, nothing is published and the run stops after `check`.
+
+name: Update timestamp
+
+on:
+  schedule:
+    - cron: "23 */8 * * *" # 00:23, 08:23 and 16:23 UTC
+  workflow_dispatch:
+
+# Never at the same time as a release (release.yml) or another run.
+concurrency:
+  group: updates-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  FARO_UPDATES_URL: ${{ vars.FARO_UPDATES_URL || 'https://updates.faro-project.org/' }}
+
+jobs:
+  # No secrets: reads what is published, which is public.
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      published: ${{ steps.check.outputs.published }}
+      renew: ${{ steps.check.outputs.renew }}
+      key_changed: ${{ steps.check.outputs.key_changed }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: check
+        run: |
+          if [[ ! -f release/update-root.json ]]; then
+            echo "No root of trust yet (docs/KEY-CEREMONY.md): nothing is released, nothing to re-sign."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pub="$RUNNER_TEMP/published"
+          rm -rf "$pub"
+          # Fails (and alerts) if the publishing location can't be read.
+          release/publish-layout.sh pull "$pub"
+          if [[ ! -f "$pub/timestamp.json" ]]; then
+            echo "Nothing is published yet: nothing to re-sign."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Unverified, only to decide which job runs; the signing jobs
+          # verify everything they sign.
+          decode() {
+            local s
+            s="$(jq -r .payload "$1" | tr '_-' '/+')"
+            while (( ${#s} % 4 )); do s="$s="; done
+            printf '%s' "$s" | base64 -d
+          }
+          expires="$(decode "$pub/targets.json" | jq -er .expires_ms)"
+          days=$(( (expires - $(date -u +%s) * 1000) / 86400000 ))
+          echo "targets.json expires in $days days"
+          key_changed=false
+          if ! jq -e --argjson want "$(decode release/update-root.json | jq -c .roles.targets.keyids)" \
+              'any(.signatures[]; .keyid as $k | $want | index($k))' "$pub/targets.json" > /dev/null; then
+            key_changed=true
+            echo "targets.json isn't signed by the targets key in release/update-root.json: re-signing it"
+          fi
+          renew=false
+          if (( days < 21 )) || [[ "$key_changed" == true ]]; then renew=true; fi
+          {
+            echo "published=true"
+            echo "renew=$renew"
+            echo "key_changed=$key_changed"
+          } >> "$GITHUB_OUTPUT"
+          rm -rf "$pub"
+
+  # When targets.json is renewed, renew-targets signs the timestamp instead.
+  timestamp:
+    needs: check
+    if: needs.check.outputs.published == 'true' && needs.check.outputs.renew != 'true'
+    runs-on: ${{ fromJSON(vars.FARO_SIGNING_RUNNER || '"ubuntu-24.04"') }}
+    environment: ${{ vars.FARO_TIMESTAMP_ENVIRONMENT }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # A fresh CARGO_HOME: see release.yml.
+      - name: Build faro-release
+        run: |
+          export CARGO_HOME="$RUNNER_TEMP/cargo-home"
+          rm -rf "$CARGO_HOME" && mkdir -p "$CARGO_HOME"
+          cargo build --release --locked -p faro-update --example faro-release
+          rm -rf "$CARGO_HOME"
+      - name: Re-sign the timestamp
+        env:
+          FARO_TIMESTAMP_KEY: ${{ secrets.FARO_TIMESTAMP_KEY }}
+        run: |
+          if [[ -z "$FARO_TIMESTAMP_KEY" ]]; then
+            echo "::error title=No timestamp key::The Actions secret FARO_TIMESTAMP_KEY is missing (docs/KEY-CEREMONY.md §4.3)."
+            exit 1
+          fi
+          keys="$RUNNER_TEMP/keys"
+          rm -rf "$keys" "$RUNNER_TEMP/published" "$RUNNER_TEMP/layout"
+          (umask 077 && mkdir -p "$keys" && printf '%s' "$FARO_TIMESTAMP_KEY" > "$keys/timestamp.key.json")
+          release/publish-layout.sh pull "$RUNNER_TEMP/published"
+          release/resign-timestamp.sh --roots release --published "$RUNNER_TEMP/published" \
+            --timestamp-key "$keys/timestamp.key.json" --out "$RUNNER_TEMP/layout"
+      - name: Delete the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"
+      - name: Publish
+        env:
+          FARO_UPDATES_DEPLOY_KEY: ${{ secrets.FARO_UPDATES_DEPLOY_KEY }}
+        run: release/publish-layout.sh push "$RUNNER_TEMP/layout" "Re-sign the timestamp"
+      - name: Check what is served
+        run: release/check-served.sh "$RUNNER_TEMP/layout" release
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/published" "$RUNNER_TEMP/layout"
+
+  renew-targets:
+    needs: check
+    if: needs.check.outputs.published == 'true' && needs.check.outputs.renew == 'true'
+    runs-on: ${{ fromJSON(vars.FARO_SIGNING_RUNNER || '"ubuntu-24.04"') }}
+    # If the targets key lives in an environment limited to v* tags, allow
+    # main there too (with your approval, if you like: this runs about once
+    # every three weeks).
+    environment: ${{ vars.FARO_RELEASE_ENVIRONMENT }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build faro-release
+        run: |
+          export CARGO_HOME="$RUNNER_TEMP/cargo-home"
+          rm -rf "$CARGO_HOME" && mkdir -p "$CARGO_HOME"
+          cargo build --release --locked -p faro-update --example faro-release
+          rm -rf "$CARGO_HOME"
+      - name: Renew targets.json
+        env:
+          FARO_TARGETS_KEY: ${{ secrets.FARO_TARGETS_KEY }}
+          FARO_TIMESTAMP_KEY: ${{ secrets.FARO_TIMESTAMP_KEY }}
+          KEY_CHANGED: ${{ needs.check.outputs.key_changed }}
+        run: |
+          # A replaced targets key: renew whatever the days left.
+          if [[ "$KEY_CHANGED" == true ]]; then export FARO_TARGETS_RENEW_DAYS=100000; fi
+          if [[ -z "$FARO_TARGETS_KEY" || -z "$FARO_TIMESTAMP_KEY" ]]; then
+            echo "::error title=No signing keys::The Actions secrets FARO_TARGETS_KEY and FARO_TIMESTAMP_KEY are missing (docs/KEY-CEREMONY.md §4.3)."
+            exit 1
+          fi
+          keys="$RUNNER_TEMP/keys"
+          rm -rf "$keys" "$RUNNER_TEMP/published" "$RUNNER_TEMP/layout"
+          (umask 077 && mkdir -p "$keys"
+           printf '%s' "$FARO_TARGETS_KEY" > "$keys/targets.key.json"
+           printf '%s' "$FARO_TIMESTAMP_KEY" > "$keys/timestamp.key.json")
+          release/publish-layout.sh pull "$RUNNER_TEMP/published"
+          release/resign-timestamp.sh --roots release --published "$RUNNER_TEMP/published" \
+            --renew-targets "$keys/targets.key.json" --timestamp-key "$keys/timestamp.key.json" \
+            --out "$RUNNER_TEMP/layout"
+      - name: Delete the keys
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"
+      - name: Publish
+        env:
+          FARO_UPDATES_DEPLOY_KEY: ${{ secrets.FARO_UPDATES_DEPLOY_KEY }}
+        run: |
+          if [[ -z "$(ls -A "$RUNNER_TEMP/layout")" ]]; then
+            echo "targets.json didn't need renewing after all."
+            exit 0
+          fi
+          release/publish-layout.sh push "$RUNNER_TEMP/layout" "Renew targets.json"
+          release/check-served.sh "$RUNNER_TEMP/layout" release
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/published" "$RUNNER_TEMP/layout"
+
+  alert:
+    needs: [check, timestamp, renew-targets]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - run: |
+          title="Update metadata re-signing failed"
+          body="The scheduled re-signing failed: $RUN_URL
+
+          The timestamp expires 24 hours after it was last signed. After that, instances and computers stop taking updates (they keep running). See docs/DEVELOPMENT.md, \"If the timestamp job fails\"."
+          n="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')"
+          if [[ -n "$n" ]]; then
+            gh issue comment "$n" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+          echo "::error title=Re-signing failed::$title. See $RUN_URL"

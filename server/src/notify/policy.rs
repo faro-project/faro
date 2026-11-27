@@ -52,13 +52,18 @@ pub fn default_mode(u: Urgency) -> Mode {
 ///
 /// * device events of kind `tamper` and `goodbye` (uninstall / move);
 /// * server alerts `chain_gap`, `invalid_signature`, `missed_checkin` (when
-///   urgent; the normal-urgency "back online" follow-up is not tamper) and
-///   `ally_removed` (removing an ally is the most direct way to stop being
-///   watched, so the people affected are always told), and
+///   urgent; the normal-urgency "back online" follow-up is not tamper),
+///   `upload_stalled` (the device is alive but not uploading what it
+///   records), `ally_removed` (removing an ally is the most direct way to
+///   stop being watched, so the people affected are always told),
 ///   `device_removed` (retiring a monitored device stops its monitoring
 ///   just as directly), and `account_disabled` / `ally_disabled` (an admin
 ///   disabling an account is always told to that person and every
-///   accountability partner).
+///   accountability partner), and `account_deleted` / `ally_deleted` /
+///   `account_deletion_cancelled` (deleting an account, or cancelling the
+///   deletion, is told to the same people).
+///
+/// ARCHITECTURE.md §5.4 lists the same kinds; keep the two in step.
 ///
 /// `source` is the alert row's source column (`device` / `server`).
 pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
@@ -74,8 +79,13 @@ pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
                 ServerAlertKind::AllyRemoved
                 | ServerAlertKind::DeviceRemoved
                 | ServerAlertKind::UploadStalled
+                | ServerAlertKind::AlertsCoalesced
+                | ServerAlertKind::StorageQuota
                 | ServerAlertKind::AccountDisabled
-                | ServerAlertKind::AllyDisabled,
+                | ServerAlertKind::AllyDisabled
+                | ServerAlertKind::AccountDeleted
+                | ServerAlertKind::AllyDeleted
+                | ServerAlertKind::AccountDeletionCancelled,
             ) => true,
             _ => false,
         },
@@ -222,6 +232,9 @@ mod tests {
     fn tamper_class_membership() {
         assert!(is_tamper_class("device", "tamper", Urgency::Urgent));
         assert!(is_tamper_class("device", "goodbye", Urgency::Urgent));
+        // iPhone signals (screen_time_revoked, filter_off, settings_cleared)
+        // are `tamper` events, so they are tamper-class by kind.
+        assert!(is_tamper_class("device", "tamper", Urgency::None));
         assert!(!is_tamper_class("device", "flag", Urgency::Urgent));
         assert!(!is_tamper_class(
             "device",
@@ -256,6 +269,23 @@ mod tests {
             Urgency::Normal
         ));
         assert!(!is_tamper_class("server", "ally_enabled", Urgency::Normal));
+        // Deleting an account is never silent, and neither is cancelling it.
+        assert!(is_tamper_class(
+            "server",
+            "account_deleted",
+            Urgency::Urgent
+        ));
+        assert!(is_tamper_class("server", "ally_deleted", Urgency::Normal));
+        assert!(is_tamper_class(
+            "server",
+            "account_deletion_cancelled",
+            Urgency::Normal
+        ));
+        assert!(!is_tamper_class(
+            "device",
+            "account_deleted",
+            Urgency::Urgent
+        ));
         // A device cannot smuggle a server kind (or vice versa).
         assert!(!is_tamper_class("device", "chain_gap", Urgency::Urgent));
         assert!(!is_tamper_class("server", "tamper", Urgency::Urgent));

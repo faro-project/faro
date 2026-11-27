@@ -58,10 +58,16 @@ pub struct LinkView {
     /// allies, the member's when listing an ally's members).
     pub other_display_name: String,
     pub other_email: String,
+    /// The end of the hold, if the other party asked for their account to
+    /// be deleted (§12).
+    pub other_deletion_purge_after_ms: Option<i64>,
     /// The ally's live encryption key, if any.
     pub ally_enc_pubkey: Option<EncPublicKey>,
     /// The member's signing key, if set.
     pub member_sign_pubkey: Option<SignPublicKey>,
+    /// The group the link was proposed in, if any: a label only, never used
+    /// to authorize anything (GROUPS.md §5).
+    pub origin_group_id: Option<String>,
 }
 
 /// The shared `SELECT … FROM ally_links l` prefix of the link views, as a
@@ -69,12 +75,13 @@ pub struct LinkView {
 macro_rules! view_select {
     () => {
         "SELECT l.id, l.member_id, l.ally_id, l.state, l.created_at,
-            l.activated_at, o.display_name, o.email,
+            l.activated_at, o.display_name, o.email, o.deletion_purge_after,
             (SELECT k.enc_pubkey FROM ally_keys k
               WHERE k.user_id = l.ally_id AND k.revoked_at IS NULL
               ORDER BY k.created_at DESC LIMIT 1) AS ally_enc_pubkey,
             (SELECT m.sign_pubkey FROM member_keys m WHERE m.user_id = l.member_id)
-              AS member_sign_pubkey
+              AS member_sign_pubkey,
+            l.origin_group_id
          FROM ally_links l"
     };
 }
@@ -89,8 +96,10 @@ fn view_from_row(r: &sqlx::any::AnyRow) -> Result<LinkView, sqlx::Error> {
         activated_at_ms: r.try_get("activated_at")?,
         other_display_name: r.try_get("display_name")?,
         other_email: r.try_get("email")?,
+        other_deletion_purge_after_ms: r.try_get("deletion_purge_after")?,
         ally_enc_pubkey: super::parse_opt_col(r, "ally_enc_pubkey", EncPublicKey::from_b64)?,
         member_sign_pubkey: super::parse_opt_col(r, "member_sign_pubkey", SignPublicKey::from_b64)?,
+        origin_group_id: r.try_get("origin_group_id")?,
     })
 }
 
@@ -173,23 +182,27 @@ pub async fn count_live<'e>(
         .try_get("n")
 }
 
-/// Create a pending link. A live link for the pair already existing
-/// surfaces as a unique violation.
+/// Create a pending link, never an active one: only the member's signed
+/// approval ([`activate`]) does that. `origin_group` is the group it was
+/// proposed in (a label only, never used to authorize anything). A live
+/// link for the pair already existing surfaces as a unique violation.
 pub async fn insert_pending<'e>(
     e: impl Executor<'e, Database = Any>,
     member: &UserId,
     ally: &UserId,
+    origin_group: Option<&str>,
     now_ms: i64,
 ) -> Result<String, sqlx::Error> {
     let id = new_hex_id();
     sqlx::query(
-        "INSERT INTO ally_links (id, member_id, ally_id, state, created_at)
-         VALUES ($1, $2, $3, 'pending', $4)",
+        "INSERT INTO ally_links (id, member_id, ally_id, state, created_at, origin_group_id)
+         VALUES ($1, $2, $3, 'pending', $4, $5)",
     )
     .bind(&id)
     .bind(member.as_str())
     .bind(ally.as_str())
     .bind(now_ms)
+    .bind(origin_group.map(str::to_owned))
     .execute(e)
     .await?;
     Ok(id)
@@ -294,6 +307,28 @@ pub async fn insert_key<'e>(
     Ok(())
 }
 
+/// Replace the wrapped private half of the live ally key `key_row_id`, if
+/// it still holds exactly `old` (so of two changes made from the same
+/// challenge, only one lands). The public key is never touched. Returns
+/// whether a row changed.
+pub async fn replace_wrapped<'e>(
+    e: impl Executor<'e, Database = Any>,
+    key_row_id: &str,
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE ally_keys SET wrapped_privkey = $1
+         WHERE id = $2 AND wrapped_privkey = $3 AND revoked_at IS NULL",
+    )
+    .bind(new.to_string())
+    .bind(key_row_id)
+    .bind(old.to_string())
+    .execute(e)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 /// Ids of the member's active allies (notification recipients).
 pub async fn active_ally_ids<'e>(
     e: impl Executor<'e, Database = Any>,
@@ -325,6 +360,30 @@ pub async fn active_member_ids<'e>(
     .await?;
     rows.iter()
         .map(|r| Ok(UserId::new(r.try_get::<String, _>("member_id")?)))
+        .collect()
+}
+
+/// Every live (pending or active) link `user` is part of, as member or as
+/// ally: `(member, ally)` pairs.
+pub async fn live_links_of<'e>(
+    e: impl Executor<'e, Database = Any>,
+    user: &UserId,
+) -> Result<Vec<(UserId, UserId)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT member_id, ally_id FROM ally_links
+         WHERE (member_id = $1 OR ally_id = $1) AND state <> 'removed'
+         ORDER BY created_at, id",
+    )
+    .bind(user.as_str())
+    .fetch_all(e)
+    .await?;
+    rows.iter()
+        .map(|r| {
+            Ok((
+                UserId::new(r.try_get::<String, _>("member_id")?),
+                UserId::new(r.try_get::<String, _>("ally_id")?),
+            ))
+        })
         .collect()
 }
 

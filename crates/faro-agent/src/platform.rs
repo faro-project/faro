@@ -20,7 +20,8 @@ use std::thread::JoinHandle;
 
 use faro_ipc::{WireFrame, WireFrameError};
 use faro_platform::{
-    AgentPlatform, AppInfo, PermissionState, PlatformError, SessionChange, TamperSignal,
+    AgentPlatform, AppInfo, BrowserContext, PermissionState, PlatformError, SessionChange,
+    TamperSignal,
 };
 use tokio::sync::oneshot;
 
@@ -37,6 +38,9 @@ pub struct Observation {
     pub app: Option<AppInfo>,
     /// Sensitive; see the crate docs. Not printed by `Debug`.
     pub title: Option<String>,
+    /// The active browser tab, already reduced by the platform. Sensitive:
+    /// not printed by `Debug`.
+    pub browser: Option<BrowserContext>,
     pub idle_secs: u64,
     pub locked: bool,
     pub display_asleep: bool,
@@ -54,6 +58,7 @@ impl std::fmt::Debug for Observation {
         f.debug_struct("Observation")
             .field("app", &self.app)
             .field("title", &self.title.as_ref().map(|_| "<redacted>"))
+            .field("browser", &self.browser.as_ref().map(|_| "<redacted>"))
             .field("idle_secs", &self.idle_secs)
             .field("locked", &self.locked)
             .field("display_asleep", &self.display_asleep)
@@ -179,6 +184,7 @@ fn serve(
                 let obs = Observation {
                     app: p.foreground.active_app(),
                     title: p.foreground.window_title(),
+                    browser: p.foreground.browser(),
                     idle_secs: p.session.idle_secs(),
                     locked: p.session.is_locked(),
                     display_asleep: p.session.display_asleep(),
@@ -215,10 +221,7 @@ fn capture(p: &mut AgentPlatform) -> Result<Capture, CaptureError> {
     })
 }
 
-// Unix only: `identity::mono_ms` has no Windows source yet (it must be a
-// since-boot clock shared with the service, not a per-process `Instant`),
-// and there is no Windows agent for it to serve.
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use faro_platform::synthetic::Script;
@@ -229,6 +232,11 @@ mod tests {
         script.with(|s| {
             s.displays = 2;
             s.tamper.push(TamperSignal::VpnActive);
+            s.browser = Some(BrowserContext {
+                url: Some("https://example.test/".into()),
+                title: None,
+                incognito: false,
+            });
         });
         let w = PlatformWorker::spawn(script.platform(), Some(Box::new(|| true))).unwrap();
         let out = w.capture().unwrap().await.unwrap();
@@ -239,7 +247,10 @@ mod tests {
 
         let obs = w.observe().unwrap().await.unwrap();
         assert_eq!(obs.tamper, vec![TamperSignal::VpnActive]);
-        assert!(!format!("{obs:?}").contains("Untitled"), "title redacted");
+        assert!(obs.browser.is_some());
+        let debug = format!("{obs:?}");
+        assert!(!debug.contains("Untitled"), "title redacted");
+        assert!(!debug.contains("example.test"), "URL redacted");
     }
 
     #[tokio::test]

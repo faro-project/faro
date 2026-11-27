@@ -8,8 +8,11 @@
 
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
-	import Logo from '#lib/ui/Logo.svelte';
+	import BrandMark from '#lib/ui/BrandMark.svelte';
+	import OperatorNote from '#lib/ui/OperatorNote.svelte';
+	import SupportContact from '#lib/ui/SupportContact.svelte';
 	import { api, ApiError, describeError } from '#lib/api.ts';
+	import { branding } from '#lib/branding.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import type { MagicLinkResponse, WellKnown } from '#lib/types.ts';
 
@@ -24,6 +27,7 @@
 		// The invitation page passes the invited address along.
 		email = new URLSearchParams(location.search).get('email') ?? '';
 		void session.refresh().catch(() => {});
+		void branding.load().catch(() => {});
 		api
 			.get<WellKnown>('/.well-known/faro')
 			.then((w) => (instanceName = w.name))
@@ -72,9 +76,16 @@
 	<title>Sign in · Faro</title>
 </svelte:head>
 
-<div class="brand-mark"><Logo height={56} /></div>
+<div class="brand-mark">
+	<BrandMark size="large" logo={branding.info?.logo} name={branding.info?.instance_name} />
+</div>
 
 <h1>Sign in{instanceName ? ` to ${instanceName}` : ''}</h1>
+
+{#if !session.user}
+	<!-- The instance's own welcome line: labelled, quiet page chrome. -->
+	<OperatorNote text={branding.info?.welcome} />
+{/if}
 
 {#if error}
 	<div class="notice error" role="alert">{error}</div>
@@ -135,10 +146,21 @@
 	</form>
 {/if}
 
+{#if !session.user && branding.info?.support}
+	<p class="support muted">
+		<SupportContact contact={branding.info.support} />
+	</p>
+{/if}
+
 <style>
 	.brand-mark {
 		display: flex;
 		justify-content: center;
 		margin: 0.5rem 0 2rem;
+	}
+
+	.support {
+		margin-top: 1.5rem;
+		font-size: 0.92rem;
 	}
 </style>

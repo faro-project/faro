@@ -2,12 +2,61 @@
 # Check a built package without installing it: the payload has every file
 # at its fixed location with root ownership, the agent app carries the
 # right bundle identifier, the install scripts are present, and the
-# installer only installs for the whole computer.
+# installer only installs for the whole computer. PackageInfo and the
+# Distribution carry the package's full semver version (the updater reads
+# it before installing), and the packaged faro-service reports the same
+# one. Every program must be
+# universal (arm64 + x86_64) and built for the minimum macOS, unless
+# `--arch` names the one architecture of a local single-architecture build.
+#
+# The image model must be there with its manifest, and the notices with
+# the model's BSD-2-Clause text and attribution, ONNX Runtime's licence
+# and third-party notices, and the Rust crates' licences (third-party.txt,
+# from release/notices/third-party.sh). faro-service must link ONNX Runtime statically,
+# and the slice for this Mac's architecture must load the model (licence,
+# attribution and digest checks) and score three solid colours within
+# MODEL_TOLERANCE of Yahoo's original Caffe model. Each program must name
+# its log file, and neither launchd job may send output to a file. A
+# release package's service must ignore [dev_thresholds] in service.toml.
+#
+# The domain list must be there with its manifest, at the bundle_version
+# of crates/faro-detect/domains/sources.toml and with no refused source,
+# and notices/domains.txt with every source's attribution and the licence
+# texts. The slice for this Mac's architecture must load it as the service
+# does (faro-service domains-check: faro_detect::load_domains), with adult
+# and gambling sources, each of them named in the notice.
 #
 #   installers/macos/check-pkg.sh target/pkg/Faro-<version>[-dev].pkg
+#   installers/macos/check-pkg.sh --arch arm64 target/pkg/Faro-<version>-dev.pkg
 set -euo pipefail
 
-pkg="${1:?usage: check-pkg.sh PKG}"
+usage="usage: check-pkg.sh [--arch universal|arm64|x86_64] PKG"
+arch=universal
+case "${1:-}" in
+    --arch) arch="${2:-}"; shift 2 || { echo "$usage" >&2; exit 2; } ;;
+    --arch=*) arch="${1#--arch=}"; shift ;;
+esac
+pkg="${1:?$usage}"
+case "$arch" in
+    universal) want_archs=arm64,x86_64 ;;
+    arm64|x86_64) want_archs="$arch" ;;
+    *) echo "$usage" >&2; exit 2 ;;
+esac
+# The oldest macOS Faro supports (ARCHITECTURE.md §3.3).
+min_os=13.0
+# p(nsfw) of Yahoo's Caffe model for solid black, white and grey (128), as
+# crates/faro-detect/models/opennsfw/parity.py computes them with OpenCV.
+# A solid colour is the same classifier input whatever the resize, so the
+# packaged int8 model must agree within its parity tolerance.
+model_reference=("solid-black 0.066799" "solid-white 0.014106" "solid-grey 0.197584")
+MODEL_TOLERANCE=0.05
+# What the domain list was compiled from: its version and the sources the
+# maintainer turned down (`refused = ...`), which must never ship.
+domains_config="$(cd "$(dirname "$0")/../.." && pwd)/crates/faro-detect/domains/sources.toml"
+domains_version="$(sed -n 's/^bundle_version = "\(.*\)"$/\1/p' "$domains_config")"
+[[ -n "$domains_version" ]] || { echo "check-pkg: cannot read bundle_version from $domains_config" >&2; exit 1; }
+refused_sources="$(awk -F'"' '/^\[\[source\]\]/ { name = "" } /^name = / { name = $2 } /^refused = / && name != "" { print name }' "$domains_config")"
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 fail() { echo "check-pkg: $*" >&2; exit 1; }
@@ -19,7 +68,38 @@ component="$work/x/faro-component.pkg"
 dist="$work/x/Distribution"
 grep -q 'enable_localSystem="true"' "$dist" || fail "must install for the whole computer"
 grep -q 'enable_currentUserHome="false"' "$dist" || fail "must not offer a per-user install"
-grep -q 'hostArchitectures="[a-z0-9_,]*"' "$dist" || fail "hostArchitectures not filled in"
+host_archs="$(sed -n 's/.*hostArchitectures="\([^"]*\)".*/\1/p' "$dist")"
+[[ "$host_archs" == "$want_archs" ]] || fail "hostArchitectures is \"$host_archs\" (want $want_archs)"
+[[ "$(sed -n 's/.*<os-version min="\([0-9.]*\)".*/\1/p' "$dist")" == "$min_os" ]] \
+    || fail "the installer must require macOS $min_os"
+
+# The full semver version, which the updater reads from PackageInfo and the
+# Distribution before it installs a package (PROTOCOL.md §8.2, step 6;
+# crates/faro-service/src/update/package_version.rs). Both must name the
+# version in the file name, and the Distribution must install exactly the
+# one component, org.faro.pkg. The packaged faro-service must report the
+# same version (below). The app bundle can't carry a pre-release.
+pkg_stem="$(basename "$pkg" .pkg)"
+pkg_stem="${pkg_stem%-dev}"
+version="${pkg_stem#Faro-}"
+semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+[[ "$version" =~ $semver_re ]] || fail "cannot read a semver version from the file name $(basename "$pkg")"
+info_xml="$component/PackageInfo"
+[[ "$(xmllint --xpath 'string(/pkg-info/@identifier)' "$info_xml")" == org.faro.pkg ]] \
+    || fail "PackageInfo's identifier is not org.faro.pkg"
+got="$(xmllint --xpath 'string(/pkg-info/@version)' "$info_xml")"
+[[ "$got" == "$version" ]] || fail "PackageInfo's version is \"$got\" (want $version)"
+[[ "$(xmllint --xpath 'count(//pkg-ref[normalize-space(text()) != ""])' "$dist")" == 1 ]] \
+    || fail "the Distribution must install exactly one component"
+[[ "$(xmllint --xpath 'string(//pkg-ref[normalize-space(text()) != ""])' "$dist")" == "#faro-component.pkg" ]] \
+    || fail "the Distribution must install faro-component.pkg"
+[[ "$(xmllint --xpath 'string(//pkg-ref[normalize-space(text()) != ""]/@id)' "$dist")" == org.faro.pkg ]] \
+    || fail "the Distribution's component is not org.faro.pkg"
+for got in $(xmllint --xpath '//pkg-ref[@id="org.faro.pkg"]/@version' "$dist" | sed 's/ *version="\([^"]*\)"/\1 /g'); do
+    [[ "$got" == "$version" ]] || fail "the Distribution names version \"$got\" (want $version)"
+done
+[[ "$(xmllint --xpath 'string(//pkg-ref[normalize-space(text()) != ""]/@version)' "$dist")" == "$version" ]] \
+    || fail "the Distribution's component has no version $version"
 
 for s in preinstall postinstall lib.sh; do
     [[ -f "$component/Scripts/$s" ]] || fail "missing script $s"
@@ -51,14 +131,177 @@ expect "Library/Faro/bin/faro-service" 100755
 expect "Library/Faro/bin/faro-uninstall" 100755
 expect "Library/Faro/Faro Agent.app/Contents/MacOS/faro-agent" 100755
 expect "Library/Faro/Faro Agent.app/Contents/Info.plist" 100644
+expect "Library/Faro/Faro Agent.app/Contents/Resources/Faro.icns" 100644
 expect "Library/Faro/service.toml.default" 100644
 expect "Library/LaunchDaemons/org.faro.service.plist" 100644
 expect "Library/LaunchAgents/org.faro.agent.plist" 100644
+model_dir="Library/Faro/models/opennsfw"
+expect "$model_dir/manifest.json" 100644
+expect "$model_dir/opennsfw-int8.onnx" 100644
+expect "Library/Faro/notices/opennsfw.txt" 100644
+expect "Library/Faro/notices/onnxruntime-LICENSE.txt" 100644
+expect "Library/Faro/notices/onnxruntime-ThirdPartyNotices.txt" 100644
+expect "Library/Faro/notices/third-party.txt" 100644
+domains_dir="Library/Faro/domains"
+expect "$domains_dir/domains.manifest.json" 100644
+expect "$domains_dir/domains.bin" 100644
+expect "Library/Faro/notices/domains.txt" 100644
+# What the licences ask to travel with the binaries.
+notices="$work/payload/Library/Faro/notices"
+has() { grep -qF -- "$2" "$notices/$1" || fail "notices/$1 lacks \"$2\""; }
+has opennsfw.txt "Copyright 2016, Yahoo Inc."
+has opennsfw.txt "BSD-2-Clause"
+has opennsfw.txt "Redistributions in binary form must reproduce the above copyright notice"
+has opennsfw.txt "https://github.com/yahoo/open_nsfw/"
+has onnxruntime-LICENSE.txt "Copyright (c) Microsoft Corporation"
+has onnxruntime-LICENSE.txt "Permission is hereby granted, free of charge"
+has onnxruntime-ThirdPartyNotices.txt "THIRD PARTY SOFTWARE NOTICES AND INFORMATION"
+# Both programs' crates, each listed with its licence's text.
+has third-party.txt "Third-party software in the Faro package for macOS"
+for section in faro-service faro-agent; do
+    grep -qx -- "$section" "$notices/third-party.txt" || fail "notices/third-party.txt has no $section section"
+done
+has third-party.txt "  ort "
+has third-party.txt "  ed25519-dalek "
+has third-party.txt "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
+has third-party.txt "Permission is hereby granted, free of charge"
+# The domain list's sources (MIT and CC BY 4.0): their attribution, MIT's
+# text and the CC BY 4.0 link. Refused sources are in neither file.
+domains_manifest="$work/payload/$domains_dir/domains.manifest.json"
+got="$(plutil -extract version raw "$domains_manifest")" || fail "cannot read the domain list's manifest"
+[[ "$got" == "$domains_version" ]] || fail "the domain list is version $got (sources.toml says $domains_version)"
+[[ "$(plutil -extract unapproved_included raw "$domains_manifest")" == false ]] \
+    || fail "the domain list includes unapproved sources"
+has domains.txt "Domain list $domains_version ("
+has domains.txt "Author:  "
+has domains.txt "--- MIT ---"
+has domains.txt "Permission is hereby granted, free of charge"
+has domains.txt "https://creativecommons.org/licenses/by/4.0/"
+for name in $refused_sources; do
+    for f in "$domains_manifest" "$notices/domains.txt"; do
+        if grep -qF -- "$name" "$f"; then
+            fail "$(basename "$f") names the refused source $name"
+        fi
+    done
+done
+# The update root of trust: required in a release package (without it the
+# service never updates), optional in a development one.
+update_root="$work/payload/Library/Faro/update-root.json"
+if [[ -e "$update_root" ]]; then
+    expect "Library/Faro/update-root.json" 100644
+    grep -q '"application/vnd.faro.root+json"' "$update_root" || fail "update-root.json is not a signed root document"
+elif [[ "$(basename "$pkg")" != *-dev.pkg ]]; then
+    fail "a release package must ship /Library/Faro/update-root.json"
+fi
 
 bash -n "$work/payload/Library/Faro/bin/faro-uninstall" || fail "faro-uninstall does not parse"
 
+# Every program in the payload has a slice for each architecture. Our own
+# programs are built for exactly the minimum macOS (MACOSX_DEPLOYMENT_TARGET);
+# anything else in the payload may be built for an older one, never a newer.
+not_newer() { [[ "$(printf '%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" == "$1" ]]; }
+machos=0
+while IFS= read -r -d '' f; do
+    file -b "$f" | grep -q '^Mach-O' || continue
+    machos=$((machos + 1))
+    rel="${f#"$work/payload/"}"
+    got="$(lipo -archs "$f" | tr ' ' '\n' | sort | paste -sd, -)"
+    [[ "$got" == "$want_archs" ]] || fail "/$rel has architectures $got (want $want_archs)"
+    for a in ${want_archs//,/ }; do
+        minos="$(vtool -arch "$a" -show-build "$f" | awk '$1 == "minos" { print $2; exit }')"
+        [[ -n "$minos" ]] || fail "/$rel ($a) has no minimum macOS version"
+        case "$rel" in
+            Library/Faro/bin/faro-service | */Contents/MacOS/faro-agent)
+                [[ "$minos" == "$min_os" ]] || fail "/$rel ($a) is built for macOS $minos (want $min_os)" ;;
+            *)
+                not_newer "$minos" "$min_os" || fail "/$rel ($a) needs macOS $minos, newer than $min_os" ;;
+        esac
+    done
+done < <(find "$work/payload" -type f -print0)
+(( machos >= 2 )) || fail "the payload has $machos Mach-O files (want faro-service and faro-agent)"
+
+# ONNX Runtime is linked into faro-service, never loaded from a dylib.
+service="$work/payload/Library/Faro/bin/faro-service"
+# A release package's faro-service has the Team ID compiled in (it checks
+# update packages' signatures with it; without it, it refuses them all):
+# the one the default config's agent requirement names, in every slice.
+if [[ "$(basename "$pkg")" != *-dev.pkg ]]; then
+    team="$(sed -n 's/.*certificate leaf\[subject.OU\] = "\([A-Z0-9]\{10\}\)".*/\1/p' \
+        "$work/payload/Library/Faro/service.toml.default")"
+    [[ -n "$team" ]] || fail "service.toml.default names no Team ID"
+    for a in ${want_archs//,/ }; do
+        if [[ "$want_archs" == *,* ]]; then
+            lipo -thin "$a" -output "$work/faro-service.$a" "$service"
+        else
+            cp "$service" "$work/faro-service.$a"
+        fi
+        LC_ALL=C grep -qaF "$team" "$work/faro-service.$a" \
+            || fail "faro-service ($a) was built without the Team ID $team (FARO_TEAM_ID)"
+    done
+fi
+# The logs (faro_platform_macos::pkg_layout): the programs write them
+# themselves, rotated, so launchd must not open them as the jobs' stdout or
+# stderr. Each program names its log.
+service_log=/Library/Logs/Faro/faro-service.log
+agent_log=Library/Logs/Faro/faro-agent.log
+LC_ALL=C grep -qaF "$service_log" "$service" || fail "faro-service does not log to $service_log"
+LC_ALL=C grep -qaF "$agent_log" "$work/payload/Library/Faro/Faro Agent.app/Contents/MacOS/faro-agent" \
+    || fail "faro-agent does not log to ~/$agent_log"
+for plist in Library/LaunchDaemons/org.faro.service.plist Library/LaunchAgents/org.faro.agent.plist; do
+    if grep -qE 'Standard(Out|Error)Path' "$work/payload/$plist"; then
+        fail "/$plist sends output to a file; the programs keep their own logs"
+    fi
+done
+if otool -L "$service" | grep -qi onnxruntime; then
+    fail "faro-service loads ONNX Runtime dynamically: $(otool -L "$service" | grep -i onnxruntime)"
+fi
+# The model, through the packaged service, on this Mac's architecture.
+host_arch="$(uname -m)"
+if [[ ",$want_archs," == *",$host_arch,"* ]]; then
+    got="$("$service" --version)" || fail "faro-service ($host_arch) --version failed"
+    [[ "$got" == "faro-service $version" ]] || fail "faro-service --version printed \"$got\" (want $version)"
+    check="$("$service" model-check --manifest "$work/payload/$model_dir/manifest.json" --runs 5)" \
+        || fail "faro-service ($host_arch) cannot use the packaged model"
+    echo "$check"
+    for ref in "${model_reference[@]}"; do
+        read -r frame want <<< "$ref"
+        got="$(echo "$check" | awk -v f="$frame" '$1 == f { for (i = 2; i < NF; i++) if ($i == "nsfw") print $(i + 1) }')"
+        [[ -n "$got" ]] || fail "model-check printed no nsfw score for $frame"
+        awk -v a="$got" -v b="$want" -v t="$MODEL_TOLERANCE" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }' \
+            || fail "$frame: the packaged model gives p(nsfw) $got, the original $want (tolerance $MODEL_TOLERANCE)"
+    done
+    # The domain list, as the service loads it (faro_detect::load_domains).
+    check="$("$service" domains-check --manifest "$domains_manifest")" \
+        || fail "faro-service ($host_arch) cannot load the packaged domain list"
+    echo "$check"
+    got="$(echo "$check" | awk '$1 == "domains" { print $2 }')"
+    [[ "$got" == "$domains_version" ]] || fail "domains-check loaded version \"$got\" (want $domains_version)"
+    for category in adult gambling; do
+        echo "$check" | awk -v c="$category" '$1 == "source" && $3 == c { found = 1 } END { exit !found }' \
+            || fail "the packaged domain list has no $category source"
+    done
+    for name in $(echo "$check" | awk '$1 == "source" { print $2 }'); do
+        grep -q "^$name (" "$notices/domains.txt" || fail "notices/domains.txt does not attribute $name"
+    done
+    # Only a development build may lower the detection thresholds
+    # (crates/faro-service/src/thresholds.rs): a release package's service
+    # must ignore [dev_thresholds], a --dev one must apply it.
+    printf '[dev_thresholds]\nexplicit_high = 0.5\nexplicit_medium = 0.05\nany_low = 0.03\n' > "$work/dev-thresholds.toml"
+    thresholds="$("$service" --config "$work/dev-thresholds.toml" --state-dir "$work/state" status | grep '^Thresholds:')" \
+        || fail "faro-service status printed no Thresholds line for [dev_thresholds]"
+    if [[ "$(basename "$pkg")" == *-dev.pkg ]]; then
+        [[ "$thresholds" == *LOWERED* ]] || fail "the development service does not apply [dev_thresholds]: $thresholds"
+    else
+        [[ "$thresholds" == *ignored* ]] || fail "the release service does not ignore [dev_thresholds]: $thresholds"
+    fi
+else
+    echo "check-pkg: no $host_arch slice to run; the model, domain list and threshold checks are skipped"
+fi
+
 info="$work/payload/Library/Faro/Faro Agent.app/Contents/Info.plist"
 [[ "$(plutil -extract CFBundleIdentifier raw "$info")" == org.faro.agent ]] || fail "agent bundle id"
+[[ "$(plutil -extract CFBundleIconFile raw "$info")" == Faro ]] || fail "agent CFBundleIconFile (want Faro)"
+[[ "$(plutil -extract LSMinimumSystemVersion raw "$info")" == "$min_os" ]] || fail "agent LSMinimumSystemVersion (want $min_os)"
 [[ "$(plutil -extract LimitLoadToSessionType raw "$work/payload/Library/LaunchAgents/org.faro.agent.plist")" == Aqua ]] \
     || fail "the agent must load in every GUI session"
 codesign --verify --strict "$work/payload/Library/Faro/Faro Agent.app" || fail "agent signature"

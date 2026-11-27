@@ -1,0 +1,424 @@
+//! The domain bundle from the signed update channel, served by the real
+//! instance's update mirror (docs/IOS.md §7.2, §14; PROTOCOL.md §8.2).
+//!
+//! A toy project (`faro_update::testing`) signs the releases. The instance
+//! is configured with its root and imports each release as an air-gapped
+//! mirror would; the phone verifies against the root the test passes in,
+//! as the app passes the one it ships with.
+
+mod support;
+
+use faro_detect::attribution::Attribution;
+use faro_detect::{
+    Category, DomainCategorizerBuilder, DomainSource, DomainsBundleInfo, DomainsManifest,
+    DOMAINS_MANIFEST_FORMAT,
+};
+use faro_mobile::{DomainsUpdate, FaroError};
+use faro_proto::body::{EventBody, TamperSignal};
+use faro_server::updates::upstream::Upstream;
+use faro_server::updates::Prefetch;
+use faro_update::bundle::bundle_bytes;
+use faro_update::testing::{Artifact, ToyProject, DAY_MS};
+use faro_update::{Channel, TargetKind};
+use std::path::PathBuf;
+use support::{approved_phone, blocking, Phone, World};
+
+fn now() -> i64 {
+    use faro_core::Clock;
+    faro_core::SystemClock::new().wall_ms()
+}
+
+fn domains_manifest(version: &str, bytes: &[u8]) -> DomainsManifest {
+    DomainsManifest {
+        format: DOMAINS_MANIFEST_FORMAT.into(),
+        notice: "Compiled from the lists below.".into(),
+        version: version.into(),
+        bundle: DomainsBundleInfo {
+            file: "domains.bin".into(),
+            bytes: bytes.len() as u64,
+            blake3: blake3::hash(bytes).to_hex().to_string(),
+        },
+        domains: 1,
+        unapproved_included: false,
+        sources: vec![DomainSource {
+            name: "adult-list".into(),
+            category: Category::Adult,
+            format: "domains".into(),
+            license: "MIT".into(),
+            approved: true,
+            origin: "https://example.org/list.txt".into(),
+            homepage: None,
+            blake3: "0".repeat(64),
+            attribution: Some(Attribution {
+                author: "Test Authors".into(),
+                copyright: vec!["Copyright 2026 Test Authors".into()],
+                source_url: "https://example.org/list".into(),
+                license_url: "https://example.org/list/LICENSE".into(),
+                changes: "None.".into(),
+            }),
+            lines: 1,
+            domains: 1,
+            skipped: 0,
+        }],
+        license_texts: [(
+            "MIT".to_owned(),
+            "Permission is hereby granted (test).".to_owned(),
+        )]
+        .into(),
+    }
+}
+
+fn host(version: &str) -> String {
+    format!("adult-{}.test", version.replace('.', "-"))
+}
+
+/// A blocklist target for `version`; `edit` changes its manifest.
+fn blocklist_with(version: &str, edit: impl FnOnce(&mut DomainsManifest)) -> Artifact {
+    let mut b = DomainCategorizerBuilder::new();
+    b.add_domain(&host(version), Category::Adult).unwrap();
+    let bytes = b.build().unwrap().to_bytes();
+    let mut m = domains_manifest(version, &bytes);
+    edit(&mut m);
+    let content = bundle_bytes(&serde_json::to_vec(&m).unwrap(), &bytes).unwrap();
+    Artifact::new(
+        &format!("blocklist/any/domains-{version}-stable.data"),
+        TargetKind::Blocklist,
+        "any",
+        "any",
+        version,
+        &content,
+    )
+}
+
+fn blocklist(version: &str) -> Artifact {
+    blocklist_with(version, |_| {})
+}
+
+/// The project, where it publishes, and an instance whose mirror trusts it.
+struct Channelled {
+    project: ToyProject,
+    release_dir: tempfile::TempDir,
+    w: World,
+}
+
+impl Channelled {
+    async fn new() -> Self {
+        let project = ToyProject::new(now() + 365 * DAY_MS);
+        let release_dir = tempfile::tempdir().unwrap();
+        let root_file = release_dir.path().join("trusted-root.json");
+        std::fs::write(&root_file, project.first_root()).unwrap();
+        let w = World::with_config(move |c| c.updates.root = Some(root_file)).await;
+        Channelled {
+            project,
+            release_dir,
+            w,
+        }
+    }
+
+    fn dir(&self) -> PathBuf {
+        self.release_dir.path().join("release")
+    }
+
+    /// Publish `artifacts` and have the instance import the release.
+    async fn publish(&mut self, artifacts: &[Artifact]) {
+        let dir = self.dir();
+        self.project
+            .publish(&dir, artifacts, now() + 7 * DAY_MS)
+            .unwrap();
+        let status = self
+            .w
+            .t
+            .state
+            .updates()
+            .expect("mirror configured")
+            .refresh_from(
+                &Upstream::Dir(dir),
+                self.w.t.clock_ms(),
+                &Channel::stable(),
+                Prefetch::All,
+            )
+            .await
+            .expect("the instance imports the release");
+        assert!(status.last_error.is_none(), "{:?}", status.last_error);
+    }
+
+    fn root(&self) -> Vec<u8> {
+        self.project.first_root()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn installs_newer_bundles_from_the_instance_mirror() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+
+    let c = core.clone();
+    assert_eq!(blocking(move || c.installed_domains().unwrap()).await, None);
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let (first, again) = blocking(move || {
+        (
+            c.update_domains(root.clone()).unwrap(),
+            c.update_domains(root).unwrap(),
+        )
+    })
+    .await;
+    let DomainsUpdate::Installed { info } = first else {
+        panic!("{first:?}")
+    };
+    assert_eq!(info.version, "1.0.0");
+    assert_eq!(info.domains, 1);
+    assert_eq!(again, DomainsUpdate::UpToDate);
+    let c = core.clone();
+    let (installed, loaded) = blocking(move || {
+        (
+            c.installed_domains().unwrap(),
+            c.load_installed_domains().unwrap(),
+        )
+    })
+    .await;
+    assert_eq!(installed, Some(info.clone()));
+    let (loaded, _) = loaded.unwrap();
+    assert_eq!(
+        loaded
+            .categorizer
+            .categorize_url(&format!("https://{}/", host("1.0.0"))),
+        vec![Category::Adult]
+    );
+
+    // A newer release replaces it, and the old directory goes.
+    ch.publish(&[blocklist("1.0.0"), blocklist("1.1.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let second = blocking(move || c.update_domains(root).unwrap()).await;
+    let DomainsUpdate::Installed { info: newer } = second else {
+        panic!("{second:?}")
+    };
+    assert_eq!(newer.version, "1.1.0");
+    assert!(!std::path::Path::new(&info.manifest_path).exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refuses_metadata_not_signed_under_the_root_passed_in() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.0.0")]).await;
+    // Another project's root: the instance's release isn't signed by it.
+    let other = ToyProject::new(now() + 365 * DAY_MS).first_root();
+    let c = core.clone();
+    let (wrong, garbage, installed) = blocking(move || {
+        (
+            c.update_domains(other),
+            c.update_domains(b"not a root".to_vec()),
+            c.installed_domains().unwrap(),
+        )
+    })
+    .await;
+    assert!(matches!(wrong, Err(FaroError::Update { .. })), "{wrong:?}");
+    assert!(
+        matches!(garbage, Err(FaroError::Update { .. })),
+        "{garbage:?}"
+    );
+    assert_eq!(installed, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signed_bundle_that_fails_the_checks_is_rejected_for_good() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    // Signed, but the manifest says another version than the target.
+    ch.publish(&[blocklist_with("1.0.0", |m| m.version = "9.9.9".into())])
+        .await;
+    let (c, root) = (core.clone(), ch.root());
+    let (first, again, installed) = blocking(move || {
+        (
+            c.update_domains(root.clone()).unwrap(),
+            c.update_domains(root).unwrap(),
+            c.installed_domains().unwrap(),
+        )
+    })
+    .await;
+    assert!(
+        matches!(&first, DomainsUpdate::Rejected { version, .. } if version == "1.0.0"),
+        "{first:?}"
+    );
+    assert_eq!(first, again, "recorded, not retried");
+    assert_eq!(installed, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_installed_bundle_that_changed_is_removed_and_reported() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let up = blocking(move || c.update_domains(root).unwrap()).await;
+    let DomainsUpdate::Installed { info } = up else {
+        panic!("{up:?}")
+    };
+    // Someone edits the installed list.
+    let bin = std::path::Path::new(&info.manifest_path).with_file_name("domains.bin");
+    std::fs::write(&bin, b"edited").unwrap();
+    let c = core.clone();
+    let (installed, events) = blocking(move || {
+        (
+            c.installed_domains().unwrap(),
+            c.pending_events(10).unwrap(),
+        )
+    })
+    .await;
+    assert_eq!(installed, None);
+    let body =
+        faro_core::open_event_body(events.last().unwrap(), &ch.w.member, &ch.w.member_keys.enc)
+            .unwrap();
+    assert_eq!(
+        body,
+        EventBody::tamper(TamperSignal::IntegrityFailure {
+            component: "domain list update (changed)".into()
+        })
+    );
+    // The next update installs it again.
+    let (c, root) = (core.clone(), ch.root());
+    let again = blocking(move || c.update_domains(root).unwrap()).await;
+    assert!(
+        matches!(again, DomainsUpdate::Installed { .. }),
+        "{again:?}"
+    );
+}
+
+/// A query for `name` as the tunnel reads it, and the reply's rcode.
+fn tunnel_rcode(f: &faro_mobile::DnsFilter, name: &str) -> u8 {
+    let mut m = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for l in name.split('.') {
+        m.push(l.len() as u8);
+        m.extend_from_slice(l.as_bytes());
+    }
+    m.extend_from_slice(&[0, 0, 1, 0, 1]);
+    let p = faro_dnsfilter::packet::build_udp(
+        "10.0.0.2:5000".parse().unwrap(),
+        "198.18.0.53:53".parse().unwrap(),
+        &m,
+    )
+    .unwrap();
+    match f.handle_packet(p, now(), true) {
+        faro_mobile::DnsStep::Reply { packets } => packets[0][28 + 3] & 0x0f,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tunnel_switches_to_a_newer_installed_bundle() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    // The packaged list: version 0.9.0, which doesn't list 1.0.0's host.
+    let dir = tempfile::tempdir().unwrap();
+    let packaged = {
+        let mut b = DomainCategorizerBuilder::new();
+        b.add_domain(&host("0.9.0"), Category::Adult).unwrap();
+        let bytes = b.build().unwrap().to_bytes();
+        std::fs::write(dir.path().join("domains.bin"), &bytes).unwrap();
+        let path = dir.path().join("domains.manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&domains_manifest("0.9.0", &bytes)).unwrap(),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let f = faro_mobile::DnsFilter::new(Some(packaged), None, None).unwrap();
+    // No upstream: an allowed name gets SERVFAIL (2), a blocked one 3.
+    assert_eq!(tunnel_rcode(&f, &host("1.0.0")), 2);
+    let c = core.clone();
+    let none_yet = blocking(move || f.refresh_domains(c).map(|v| (v, f))).await;
+    let (v, f) = none_yet.unwrap();
+    assert_eq!(v, None, "nothing installed");
+
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    blocking(move || c.update_domains(root).unwrap()).await;
+    let c = core.clone();
+    let (switched, again, f) = blocking(move || {
+        let s = f.refresh_domains(c.clone()).unwrap();
+        let a = f.refresh_domains(c).unwrap();
+        (s, a, f)
+    })
+    .await;
+    assert_eq!(switched.as_deref(), Some("1.0.0"));
+    assert_eq!(again, None, "already in use");
+    assert_eq!(f.status().domains_source, "installed");
+    assert_eq!(tunnel_rcode(&f, &host("1.0.0")), 3);
+    assert_eq!(tunnel_rcode(&f, &host("0.9.0")), 2);
+
+    // A packaged list newer than the installed one stays in use.
+    let dir2 = tempfile::tempdir().unwrap();
+    let newer = {
+        let mut b = DomainCategorizerBuilder::new();
+        b.add_domain(&host("2.0.0"), Category::Adult).unwrap();
+        let bytes = b.build().unwrap().to_bytes();
+        std::fs::write(dir2.path().join("domains.bin"), &bytes).unwrap();
+        let path = dir2.path().join("domains.manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&domains_manifest("2.0.0", &bytes)).unwrap(),
+        )
+        .unwrap();
+        path.display().to_string()
+    };
+    let f2 = faro_mobile::DnsFilter::new(Some(newer), None, None).unwrap();
+    let c = core.clone();
+    let (kept, f2) = blocking(move || (f2.refresh_domains(c).unwrap(), f2)).await;
+    assert_eq!(kept, None);
+    assert_eq!(f2.status().domains_version.as_deref(), Some("2.0.0"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn never_goes_below_the_installed_version() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.1.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let up = blocking(move || c.update_domains(root).unwrap()).await;
+    assert!(matches!(up, DomainsUpdate::Installed { .. }), "{up:?}");
+
+    // The mirror now lists only an older bundle (a stale or rolled back
+    // instance): older, and then equal, are both left alone.
+    ch.publish(&[blocklist("1.0.0")]).await;
+    let (c, root) = (core.clone(), ch.root());
+    let (older, equal, installed) = blocking(move || {
+        let older = c.update_domains(root.clone());
+        let equal = c.update_domains(root);
+        (older, equal, c.installed_domains().unwrap())
+    })
+    .await;
+    assert!(matches!(older, Ok(DomainsUpdate::UpToDate)), "{older:?}");
+    assert!(matches!(equal, Ok(DomainsUpdate::UpToDate)), "{equal:?}");
+    assert_eq!(installed.unwrap().version, "1.1.0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bundle_the_instance_altered_is_never_installed() {
+    let mut ch = Channelled::new().await;
+    let phone = Phone::new();
+    let (core, _) = approved_phone(&ch.w, &phone).await;
+    ch.publish(&[blocklist("1.0.0")]).await;
+    // The instance swaps the stored bundle for its own bytes; the signed
+    // metadata still names the project's length and BLAKE3.
+    let mut swapped = 0;
+    let artifacts = ch.w.t.dir.path().join("data/updates/artifacts");
+    for e in std::fs::read_dir(&artifacts).unwrap().flatten() {
+        let len = e.metadata().unwrap().len() as usize;
+        std::fs::write(e.path(), vec![0u8; len]).unwrap();
+        swapped += 1;
+    }
+    assert!(swapped > 0, "found no stored bundle to alter");
+    let (c, root) = (core.clone(), ch.root());
+    let (got, installed) =
+        blocking(move || (c.update_domains(root), c.installed_domains().unwrap())).await;
+    assert!(got.is_err(), "{got:?}");
+    assert_eq!(installed, None);
+}

@@ -59,10 +59,11 @@ pub const AGENT_LABEL: &str = "org.faro.agent";
 /// that a gap in coverage is short (and the restart is reported).
 pub const DEFAULT_THROTTLE_SECS: u32 = 10;
 
-/// Lowest uid of a regular (human) macOS account. Lower uids are system
-/// accounts such as `_mbsetupuser` (Setup Assistant), which own CGS sessions
-/// but are not people Faro monitors.
-pub const FIRST_REGULAR_UID: u32 = 501;
+/// CGS session owners that are not a person at the screen: the login window
+/// and Setup Assistant's account. Everything else with a finished login is
+/// monitored whatever its uid: Guest (201 when enabled), root, and admin
+/// accounts created with a low uid.
+const NON_PERSON_SESSION_USERS: [&str; 2] = ["loginwindow", "_mbsetupuser"];
 
 /// Why a launchd plist could not be generated.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -108,7 +109,8 @@ pub struct LaunchdJob {
     /// Items show the job under the Faro app instead of an anonymous entry.
     pub associated_bundle_ids: Vec<String>,
     /// `StandardOutPath` / `StandardErrorPath`. Unset for production jobs
-    /// (they log through the unified log); handy for spike tools.
+    /// (they write their own rotated log files, `pkg_layout::SERVICE_LOG`
+    /// and `pkg_layout::agent_log`); handy for spike tools.
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
     /// `StartInterval`: also start the job every N seconds (spike tools).
@@ -298,6 +300,83 @@ pub mod pkg_layout {
     /// The installed **global** LaunchAgent: launchd starts it in every
     /// account's GUI session, including accounts created after install.
     pub const AGENT_PLIST: &str = "/Library/LaunchAgents/org.faro.agent.plist";
+    /// The project's update root of trust (a signed root document), shipped
+    /// in release packages (§3.8). Without it the service doesn't update.
+    pub const UPDATE_ROOT: &str = "/Library/Faro/update-root.json";
+    /// The image model's manifest (`faro_detect::ModelInfo`); the model
+    /// file sits next to it. Built by `crates/faro-detect/models/opennsfw`.
+    pub const MODEL_MANIFEST: &str = "/Library/Faro/models/opennsfw/manifest.json";
+    /// The domain category list's manifest (`faro_detect::DomainsManifest`);
+    /// the bundle (`domains.bin`) sits next to it. Compiled by
+    /// `domains-compile` from `crates/faro-detect/domains/sources.toml`. A
+    /// newer list from the update channel takes over; this one stays as the
+    /// fallback.
+    pub const DOMAINS_MANIFEST: &str = "/Library/Faro/domains/domains.manifest.json";
+    /// Licences and attribution for the third-party parts of the package
+    /// (the image model, the domain list, ONNX Runtime, the Rust crates).
+    pub const NOTICES_DIR: &str = "/Library/Faro/notices";
+
+    // ---- logs ---------------------------------------------------------
+    //
+    // The packaged programs write their own log files (`init_logging` in
+    // each binary, through `faro_platform::logfile::RotatingFile`), not
+    // launchd's `StandardErrorPath`: the agent's plist is one global
+    // LaunchAgent for every account and launchd doesn't expand `~` in it,
+    // and a file launchd opens can't be rotated under a running job. What
+    // reads the logs (`faro-service diagnose`, the docs, `check-pkg.sh`)
+    // takes the paths from here. Rotated files are `<log>.1` … `<log>.<LOG_KEEP>`
+    // (`faro_platform::logfile::log_files`).
+
+    /// The service's log directory: root:admin, 0750.
+    pub const LOG_DIR: &str = "/Library/Logs/Faro";
+    /// The service's log: root:admin, 0640, so an administrator of the Mac
+    /// can read it without `sudo`.
+    pub const SERVICE_LOG: &str = "/Library/Logs/Faro/faro-service.log";
+    /// The service's log mode.
+    pub const SERVICE_LOG_MODE: u32 = 0o640;
+    /// The service's log directory mode.
+    pub const LOG_DIR_MODE: u32 = 0o750;
+    /// The group that may read the service's log: macOS's `admin`, which
+    /// is always gid 80.
+    pub const LOG_GID: u32 = 80;
+    /// Each account's agent log directory, relative to its home.
+    pub const AGENT_LOG_DIR_IN_HOME: &str = "Library/Logs/Faro";
+    /// Each account's agent log, relative to its home ([`agent_log`]):
+    /// owned by the account, 0600 in a 0700 directory.
+    pub const AGENT_LOG_IN_HOME: &str = "Library/Logs/Faro/faro-agent.log";
+    /// The agent's log mode.
+    pub const AGENT_LOG_MODE: u32 = 0o600;
+    /// The agent's log directory mode.
+    pub const AGENT_LOG_DIR_MODE: u32 = 0o700;
+    /// A log is rotated before it grows past this.
+    pub const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+    /// Rotated files kept next to each log, so each takes at most
+    /// `(LOG_KEEP + 1) * LOG_MAX_BYTES`.
+    pub const LOG_KEEP: u32 = 3;
+
+    /// The agent's log for the account whose home is `home`
+    /// (`~/Library/Logs/Faro/faro-agent.log`).
+    pub fn agent_log(home: &std::path::Path) -> std::path::PathBuf {
+        home.join(AGENT_LOG_IN_HOME)
+    }
+
+    /// The service log's rotation policy.
+    pub fn service_log_rotation() -> faro_platform::logfile::Rotation {
+        faro_platform::logfile::Rotation {
+            max_bytes: LOG_MAX_BYTES,
+            keep: LOG_KEEP,
+            mode: SERVICE_LOG_MODE,
+        }
+    }
+
+    /// The agent log's rotation policy.
+    pub fn agent_log_rotation() -> faro_platform::logfile::Rotation {
+        faro_platform::logfile::Rotation {
+            max_bytes: LOG_MAX_BYTES,
+            keep: LOG_KEEP,
+            mode: AGENT_LOG_MODE,
+        }
+    }
 }
 
 /// The daemon job the `.pkg` installs ([`pkg_layout`]).
@@ -335,8 +414,8 @@ pub struct ConsoleSession {
     pub login_done: bool,
 }
 
-/// Turn raw session records into [`SessionInfo`]s: drop system accounts and
-/// sessions still at the login window, dedupe by uid (one GUI session per
+/// Turn raw session records into [`SessionInfo`]s: drop the login window, Setup
+/// Assistant and sessions still at the login window, dedupe by uid (one GUI session per
 /// user on macOS), and identify sessions as `uid:<uid>`.
 ///
 /// `console_uid` is the user currently on the console as reported by the
@@ -356,10 +435,7 @@ pub fn sessions_from_records(
     };
     let mut out: Vec<SessionInfo> = Vec::new();
     for r in records {
-        if r.uid < FIRST_REGULAR_UID
-            || !r.login_done
-            || r.user.is_empty()
-            || r.user == "loginwindow"
+        if !r.login_done || r.user.is_empty() || NON_PERSON_SESSION_USERS.contains(&r.user.as_str())
         {
             continue;
         }
@@ -731,6 +807,23 @@ mod tests {
         assert!(!s[0].active && s[0].graphical);
         assert_eq!(s[1].id, SessionId("uid:502".into()));
         assert!(s[1].active);
+    }
+
+    /// Regression: sessions below uid 501 (Guest is 201, root is 0) used to
+    /// be dropped, so nothing monitored or flagged them.
+    #[test]
+    fn low_uid_sessions_are_listed() {
+        let records = [
+            rec("alice", 501, false, true),
+            rec("Guest", 201, true, true),
+            rec("root", 0, false, true),
+            rec("_mbsetupuser", 248, false, true),
+        ];
+        let s = sessions_from_records(&records, Some(201));
+        let ids: Vec<_> = s.iter().map(|s| s.id.0.as_str()).collect();
+        assert_eq!(ids, ["uid:501", "uid:201", "uid:0"]);
+        assert_eq!((s[1].user.as_str(), s[1].active), ("Guest", true));
+        assert!(!s[0].active && !s[2].active);
     }
 
     #[test]

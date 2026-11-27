@@ -26,10 +26,14 @@ mod goodbye;
 pub mod journal;
 mod net;
 pub mod spawn;
-mod status;
+pub mod status;
 pub mod supervisor;
+mod updates;
 
-pub use self::core::{PauseRequest, AGENT_ABSENT_MS};
+pub use self::core::{
+    capture_stall_ms, PauseRequest, ABSENCE_RERAISE_MS, ABSENT_IN_WINDOW_MS, AGENT_ABSENT_MS,
+    SCREEN_RECORDING,
+};
 pub use goodbye::{say_goodbye, GoodbyeError, GoodbyeOptions, GoodbyeOutcome};
 pub use spawn::AgentSpawn;
 pub use status::{Phase, ServiceStatus};
@@ -39,18 +43,22 @@ use crate::backoff::Backoff;
 use crate::client::{ClientError, ClientOptions, InstanceClient};
 use crate::config::Config;
 use crate::enroll::{self, EndorsementPoll, EnrollError};
+use crate::model::ModelRuntime;
 use crate::source::{FrameSource, SourceCommand, SourceEvent, SourceIo};
 use crate::state::{self, Enrollment, StateDir, StateError, ENDORSEMENT_FILE};
+use crate::update::artifacts::{self, ArtifactConfig, Artifacts, Swaps};
+use crate::update::fetch::{FetchError, UpdateFetcher};
+use crate::update::install::{platform_installer, Installer};
+use crate::update::{CheckError, ClientSpec, ClientUpdater};
 use faro_core::clock::{Clock, SystemClock};
 use faro_core::{
     EventWriter, MemberSettings, OutboxError, PrunePolicy, Scheduler, SchedulerConfig,
     SchedulerError,
 };
 use faro_crypto::SigningKey;
-use faro_detect::{
-    Classifier, DetectError, Detector, DetectorConfig, DomainCategorizer, NullClassifier,
-};
+use faro_detect::{Classifier, DetectError, Detector, DomainCategorizer};
 use faro_proto::api::DeviceState;
+use faro_proto::body::TamperSignal;
 use net::{
     periodic, Heartbeater, IdentityGate, ManifestRefresher, OutboxHandle, UploadStop, Uploader,
 };
@@ -95,6 +103,55 @@ pub enum ServiceError {
     DeviceRemoved,
     #[error("the service task failed: {0}")]
     Join(String),
+    #[error("updates: {0}")]
+    Update(#[from] Box<CheckError>),
+    #[error("updates: {0}")]
+    UpdateFetch(#[from] Box<FetchError>),
+}
+
+/// Test overrides for the update task ([`ServiceBuilder::updates`]).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateOverrides {
+    /// The root of trust instead of the packaged file.
+    pub root: Option<Vec<u8>>,
+    /// The installer instead of the platform one.
+    pub installer: Option<Arc<dyn Installer>>,
+    /// This computer, instead of [`ClientSpec::this_machine`].
+    pub spec: Option<ClientSpec>,
+    /// Delay before the first check.
+    pub first_check: Option<Duration>,
+    /// What runs models from the update channel, instead of this build's
+    /// ([`crate::model::default_runtime`]).
+    pub model_runtime: Option<Arc<dyn ModelRuntime>>,
+    /// Where notices of installed models and blocklists go, instead of
+    /// [`artifacts::default_notices_dir`].
+    pub notices_dir: Option<PathBuf>,
+}
+
+/// The packaged root of trust, if this platform ships one and it exists.
+fn packaged_update_root() -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    let path = Some(std::path::Path::new(
+        faro_platform_macos::pkg_layout::UPDATE_ROOT,
+    ));
+    #[cfg(windows)]
+    let path = Some(std::path::Path::new(
+        faro_platform_windows::layout::UPDATE_ROOT,
+    ));
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let path: Option<&std::path::Path> = None;
+    let path = path?;
+    match std::fs::read(path) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(path = %path.display(), "no update root of trust; updates are off");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "cannot read the update root of trust; updates are off");
+            None
+        }
+    }
 }
 
 /// Builds a [`Service`]. See the module docs.
@@ -103,11 +160,14 @@ pub struct ServiceBuilder {
     clock: Option<Arc<dyn Clock>>,
     source: Option<Box<dyn FrameSource>>,
     classifier: Option<Box<dyn Classifier>>,
+    model_manifest: Option<PathBuf>,
     domains: Option<DomainCategorizer>,
+    domains_manifest: Option<PathBuf>,
     base_url: Option<Url>,
     seed: Option<u64>,
     tick: Duration,
     spawn_agent: Option<AgentSpawn>,
+    updates: UpdateOverrides,
 }
 
 impl ServiceBuilder {
@@ -117,11 +177,14 @@ impl ServiceBuilder {
             clock: None,
             source: None,
             classifier: None,
+            model_manifest: None,
             domains: None,
+            domains_manifest: None,
             base_url: None,
             seed: None,
             tick: Duration::from_secs(1),
             spawn_agent: None,
+            updates: UpdateOverrides::default(),
         }
     }
 
@@ -148,15 +211,32 @@ impl ServiceBuilder {
         self
     }
 
-    /// Default: [`NullClassifier`] (context-only ratings) until the ONNX
-    /// model ships through the signed update channel.
+    /// Use this classifier instead of loading a model (tests).
     pub fn classifier(mut self, classifier: Box<dyn Classifier>) -> Self {
         self.classifier = Some(classifier);
         self
     }
 
+    /// Load the image model from this manifest instead of the packaged one
+    /// ([`crate::model::packaged_manifest`]). A model missing from here is
+    /// reported like a missing packaged one.
+    pub fn model_manifest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.model_manifest = Some(path.into());
+        self
+    }
+
     pub fn domains(mut self, domains: DomainCategorizer) -> Self {
         self.domains = Some(domains);
+        self
+    }
+
+    /// Without [`Self::domains`], load the domain bundle from this manifest
+    /// instead of the packaged one
+    /// ([`artifacts::packaged_domains_manifest`]). Tests point it at a path
+    /// that doesn't exist, so a Faro package installed on the machine running
+    /// them isn't picked up.
+    pub fn domains_manifest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.domains_manifest = Some(path.into());
         self
     }
 
@@ -181,6 +261,12 @@ impl ServiceBuilder {
         self
     }
 
+    /// Override parts of the update task (tests).
+    pub fn updates(mut self, o: UpdateOverrides) -> Self {
+        self.updates = o;
+        self
+    }
+
     /// Development: launch and relaunch the agent binary.
     pub fn spawn_agent(mut self, spec: AgentSpawn) -> Self {
         self.spawn_agent = Some(spec);
@@ -198,6 +284,7 @@ impl ServiceBuilder {
         let opts = ClientOptions {
             timeout: self.config.network.request_timeout(),
             ca_file: self.config.network.ca_file.clone(),
+            ..ClientOptions::default()
         };
         let key_for_net = Arc::new(SigningKey::from_bytes(&key.to_bytes()));
         let client = enroll::device_client(
@@ -207,6 +294,28 @@ impl ServiceBuilder {
             &opts,
             self.base_url,
         )?;
+        let updater = match self.updates.root.clone().or_else(packaged_update_root) {
+            Some(root) => {
+                let fetch = UpdateFetcher::new(client.base_url().clone(), &opts)
+                    .map_err(|e| ServiceError::UpdateFetch(Box::new(e)))?;
+                let installer = self
+                    .updates
+                    .installer
+                    .clone()
+                    .or_else(|| platform_installer(dir.path()));
+                let spec = self
+                    .updates
+                    .spec
+                    .clone()
+                    .unwrap_or_else(ClientSpec::this_machine);
+                Some(
+                    ClientUpdater::new(dir.clone(), root, fetch, clock.clone(), spec, installer)
+                        .map_err(|e| ServiceError::Update(Box::new(e)))?,
+                )
+            }
+            None => None,
+        };
+        let update_first_check = self.updates.first_check;
         let outbox =
             faro_core::Outbox::open(dir.path(), &enrollment.instance_id, &enrollment.device_id)?;
         let head = outbox.head()?;
@@ -214,11 +323,68 @@ impl ServiceBuilder {
             Some(s) => s,
             None => default_source(&self.config)?,
         };
-        let classifier = self
-            .classifier
-            .unwrap_or_else(|| Box::new(NullClassifier::new()));
-        let detector = Detector::new(&DetectorConfig::default(), classifier, self.domains)?;
-        let settings = self.config.member_settings.clone();
+        let packaged_model = match self.classifier {
+            Some(classifier) => crate::model::ModelLoad {
+                classifier,
+                tamper: None,
+            },
+            None => {
+                let (path, required) = match self.model_manifest {
+                    Some(p) => (Some(p), true),
+                    None => (
+                        crate::model::packaged_manifest(),
+                        crate::model::model_required(),
+                    ),
+                };
+                crate::model::load_classifier(path.as_deref(), required)
+            }
+        };
+        let (packaged_domains, domains_tamper) = match self.domains {
+            Some(categorizer) => (
+                Some(artifacts::PackagedDomains {
+                    categorizer,
+                    version: None,
+                }),
+                None,
+            ),
+            None => match self
+                .domains_manifest
+                .or_else(artifacts::packaged_domains_manifest)
+            {
+                Some(p) => artifacts::load_packaged_domains(&p, artifacts::is_packaged_service()),
+                None => (None, None),
+            },
+        };
+        let start = Artifacts::start(
+            ArtifactConfig {
+                dir: dir.clone(),
+                notices: self
+                    .updates
+                    .notices_dir
+                    .clone()
+                    .unwrap_or_else(|| artifacts::default_notices_dir(dir.path())),
+                runtime: self
+                    .updates
+                    .model_runtime
+                    .clone()
+                    .or_else(crate::model::default_runtime),
+            },
+            packaged_model,
+            packaged_domains,
+        );
+        let mut detection = start_detection(&start, domains_tamper.as_ref());
+        let mut model_tamper = start.tamper;
+        model_tamper.extend(domains_tamper);
+        let thresholds = crate::thresholds::build_use(self.config.dev_thresholds.as_ref());
+        thresholds.log();
+        detection.thresholds = thresholds.report();
+        let detector = Detector::new(
+            &crate::thresholds::detector_config(&thresholds),
+            start.classifier,
+            start.domains,
+        )?;
+        let artifacts = start.artifacts;
+        let settings = state::settings_in_effect(&dir, self.config.member_settings.as_ref());
         let rng = match self.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::rngs::StdRng::from_entropy(),
@@ -238,6 +404,21 @@ impl ServiceBuilder {
             clock.clone(),
         );
         let (status, status_rx) = StatusTx::new();
+        let updates = faro_ipc::status::UpdatesReport {
+            enabled: updater.is_some(),
+            disabled_reason: updater
+                .is_none()
+                .then(|| "this build has no root of trust for updates".to_owned()),
+            ..Default::default()
+        };
+        status.update(|s| {
+            s.model = Some(start.model_label);
+            s.blocklist = start.blocklist_label;
+            s.detection = detection;
+            s.updates = updates;
+            s.instance_name = Some(enrollment.instance_name.clone());
+            s.instance_url = Some(enrollment.instance_url.clone());
+        });
         let (control_tx, control_rx) = mpsc::channel(64);
         Ok(Service {
             config: self.config,
@@ -259,20 +440,76 @@ impl ServiceBuilder {
             control_tx,
             control_rx,
             pokes: Pokes::default(),
+            updater,
+            update_first_check,
+            model_tamper,
+            artifacts,
             lock,
         })
     }
 }
 
-#[cfg(unix)]
+/// The model and domain list the service starts with, for the status; when
+/// there is none, why (the integrity failure reported for it, if any).
+fn start_detection(
+    start: &artifacts::Start,
+    domains_tamper: Option<&TamperSignal>,
+) -> faro_ipc::status::DetectionReport {
+    let reason = |prefix: &str| {
+        start
+            .tamper
+            .iter()
+            .chain(domains_tamper)
+            .find_map(|t| match t {
+                TamperSignal::IntegrityFailure { component } if component.starts_with(prefix) => {
+                    Some(component.clone())
+                }
+                _ => None,
+            })
+    };
+    let (model, model_missing) = if start.classifier.info().name == "null" {
+        let why = reason("image model").unwrap_or_else(|| {
+            if crate::model::default_runtime().is_none() {
+                "this build has no ONNX Runtime; rating from context signals only".to_owned()
+            } else {
+                "no image model installed; rating from context signals only".to_owned()
+            }
+        });
+        (None, Some(why))
+    } else {
+        let a = status::artifact(&start.model_label, start.model_from_channel);
+        (Some(a), None)
+    };
+    let (domains, domains_missing) = match &start.blocklist_label {
+        Some(l) => (
+            Some(status::artifact(l, start.blocklist_from_channel)),
+            None,
+        ),
+        None => (
+            None,
+            Some(reason("domain list").unwrap_or_else(|| "no domain list installed".to_owned())),
+        ),
+    };
+    faro_ipc::status::DetectionReport {
+        model,
+        model_missing,
+        domains,
+        domains_missing,
+        thresholds: Default::default(),
+    }
+}
+
+#[cfg(all(any(unix, windows), not(target_os = "android")))]
 fn default_source(config: &Config) -> Result<Box<dyn FrameSource>, ServiceError> {
     let ping = Duration::from_secs(config.capture.agent_ping_secs);
-    let source = crate::source::ipc::IpcFrameSource::new(
-        &config.ipc.socket_path,
-        config.ipc.allowed_uids.iter().copied(),
-    )
-    .with_ping(ping, faro_ipc::DEFAULT_PING_TIMEOUT.min(ping))
-    .with_code_requirement(config.ipc.agent_requirement.clone());
+    // `allowed_uids` are Unix uids; Windows has no such setting.
+    #[cfg(unix)]
+    let allowed = config.ipc.allowed_uids.iter().copied();
+    #[cfg(windows)]
+    let allowed = std::iter::empty();
+    let source = crate::source::ipc::IpcFrameSource::new(&config.ipc.socket_path, allowed)
+        .with_ping(ping, faro_ipc::DEFAULT_PING_TIMEOUT.min(ping))
+        .with_code_requirement(config.ipc.agent_requirement.clone());
     // Refuse to start rather than run a service no agent can connect to
     // (or, worse, one any program can pose as the agent to).
     source
@@ -281,9 +518,10 @@ fn default_source(config: &Config) -> Result<Box<dyn FrameSource>, ServiceError>
     Ok(Box::new(source))
 }
 
-#[cfg(not(unix))]
+/// Android has no agent: its app injects an in-process source
+/// (`crates/faro-android`).
+#[cfg(not(all(any(unix, windows), not(target_os = "android"))))]
 fn default_source(_config: &Config) -> Result<Box<dyn FrameSource>, ServiceError> {
-    // TODO(windows): faro-ipc has no named-pipe transport yet.
     Err(ServiceError::NoFrameSource)
 }
 
@@ -315,6 +553,14 @@ pub struct Service {
     control_tx: mpsc::Sender<Control>,
     control_rx: mpsc::Receiver<Control>,
     pokes: Pokes,
+    updater: Option<ClientUpdater>,
+    update_first_check: Option<Duration>,
+    /// The image model or domain list is missing, altered or unusable
+    /// ([`crate::model::ModelLoad::tamper`], [`Artifacts::start`]);
+    /// reported at start.
+    model_tamper: Vec<TamperSignal>,
+    /// Models and blocklists from the update channel.
+    artifacts: Artifacts,
     /// Held until `run` returns ([`StateDir::try_lock`]).
     lock: state::StateLock,
 }
@@ -326,6 +572,15 @@ impl Service {
 
     pub fn enrollment(&self) -> &Enrollment {
         &self.enrollment
+    }
+
+    /// A handle for reporting things the OS tells the service about
+    /// itself (the Windows service control handler), usable while
+    /// [`Service::run`] runs.
+    pub fn signals(&self) -> ServiceSignals {
+        ServiceSignals {
+            control: self.control_tx.clone(),
+        }
     }
 
     /// Run on the current task until `shutdown` completes, then stop
@@ -348,12 +603,17 @@ impl Service {
             tick,
             spawn_agent,
             status,
-            status_rx: _,
+            status_rx,
             control_tx,
             mut control_rx,
             pokes,
+            updater,
+            update_first_check,
+            model_tamper,
+            artifacts,
             lock: _lock,
         } = self;
+        let swaps: Arc<Swaps> = artifacts.swaps();
         tokio::pin!(shutdown);
         let (stop_tx, stop_rx) = watch::channel(false);
         let gate = IdentityGate::new_open();
@@ -374,6 +634,9 @@ impl Service {
             status: status.clone(),
             gate: gate.clone(),
             prune: PrunePolicy::default(),
+            control: Some(control_tx.clone()),
+            deferral: Default::default(),
+            last_refused: Default::default(),
         });
         let refresher = Arc::new(ManifestRefresher {
             client: client.clone(),
@@ -383,11 +646,39 @@ impl Service {
             gate: gate.clone(),
         });
         let mut tasks = JoinSet::new();
+        let started_ms = clock.wall_ms();
+        tasks.spawn(status::write_loop(
+            dir.clone(),
+            status_rx.clone(),
+            clock.clone(),
+            started_ms,
+            stop_rx.clone(),
+        ));
+        let final_status = |status: &StatusTx| {
+            status.update(|s| s.phase = Phase::Stopped);
+            let last = status_rx.borrow().clone();
+            if let Err(e) = status::write_status_file(&dir, &last, started_ms, clock.wall_ms()) {
+                tracing::warn!(error = %e, "cannot write the status file");
+            }
+        };
 
         // The pin is checked before anything is sent; a transient failure
         // here is fine (the refresh loop re-checks).
         if let Err(e) = refresher.check_identity().await {
             tracing::warn!(error = %e, "could not confirm the instance identity at start");
+        }
+        // Updates run from the start, before activation too: a computer
+        // waiting for its member's endorsement still gets fixes.
+        if let Some(updater) = updater {
+            tasks.spawn(updates::update_loop(
+                updater,
+                artifacts,
+                update_first_check.unwrap_or_else(updates::default_first_check),
+                config.updates.check_interval(),
+                control_tx.clone(),
+                status.clone(),
+                stop_rx.clone(),
+            ));
         }
         tasks.spawn(heartbeat_loop(
             heartbeater.clone(),
@@ -421,7 +712,7 @@ impl Service {
                     )
                     .await;
                     finish(tasks).await;
-                    status.update(|s| s.phase = Phase::Stopped);
+                    final_status(&status);
                     return Ok(());
                 }
             }
@@ -432,12 +723,26 @@ impl Service {
         let (src_cmd_tx, src_cmd_rx) = mpsc::channel::<SourceCommand>(8);
         let (src_ev_tx, src_ev_rx) = mpsc::channel::<SourceEvent>(64);
         tracing::info!(source = source.name(), "starting capture driver");
+        let capture_permission = source.capture_permission();
+        let (feed_tx, feed_rx) = watch::channel(None);
+        tasks.spawn(status::feed_loop(
+            status_rx.clone(),
+            feed_tx,
+            clock.clone(),
+            started_ms,
+            stop_rx.clone(),
+        ));
         let mut source_task = tokio::spawn(source.run(SourceIo {
             commands: src_cmd_rx,
             events: src_ev_tx,
+            status: feed_rx,
         }));
         if let Some(spec) = spawn_agent {
+            #[cfg(not(target_os = "android"))]
             tasks.spawn(spawn::supervise(spec, stop_rx.clone()));
+            // No agent process to launch: the capture side is in-process.
+            #[cfg(target_os = "android")]
+            tracing::warn!(program = %spec.program.display(), "agent spawning is desktop only; ignored");
         }
         {
             let up = uploader.clone();
@@ -504,12 +809,17 @@ impl Service {
                 config.capture.agent_kill_window_secs,
             ),
             capture_failure_threshold: config.capture.capture_failure_threshold,
+            capture_permission,
             source_tx: src_cmd_tx,
             hb_state: hb_state_tx,
             upload_poke: pokes.upload.clone(),
             status: status.clone(),
+            swaps,
         });
         core.startup().await;
+        for sig in model_tamper {
+            core.signal(sig).await;
+        }
         pokes.upload.notify_one();
 
         let mut ticker = tokio::time::interval(tick);
@@ -568,7 +878,7 @@ impl Service {
             tracing::warn!(error = ?e, "could not send the shutting-down heartbeat");
         }
         finish(tasks).await;
-        status.update(|s| s.phase = Phase::Stopped);
+        final_status(&status);
         Ok(())
     }
 
@@ -612,6 +922,13 @@ async fn upload_pass(up: &Uploader) -> bool {
     match up.drain().await {
         Ok(()) | Err(UploadStop::Gated) => true,
         Err(UploadStop::Client(e)) if e.is_pending_endorsement() => true,
+        Err(UploadStop::Deferred(left)) => {
+            tracing::debug!(
+                left_secs = left.as_secs(),
+                "upload deferred at the instance's request"
+            );
+            false
+        }
         Err(UploadStop::Client(e)) => {
             tracing::info!(error = %e, "upload failed; events stay queued");
             false
@@ -732,6 +1049,30 @@ async fn activate_once(
         "device endorsed; recipient manifest bootstrapped"
     );
     Ok(true)
+}
+
+/// Reports OS-level tamper evidence to a running [`Service`]
+/// ([`Service::signals`]). Cheap to clone.
+#[derive(Debug, Clone)]
+pub struct ServiceSignals {
+    control: mpsc::Sender<Control>,
+}
+
+impl ServiceSignals {
+    /// The system clock was set: check it against the monotonic clock now
+    /// (`ClockManipulation`, §3.7).
+    pub fn clock_changed(&self) {
+        let _ = self.control.try_send(Control::ClockChanged);
+    }
+
+    /// An active tamper signal from outside the core, for example Faro's
+    /// own files changing (`IntegrityFailure`).
+    ///
+    /// Returns whether the core's queue took it; if not (it is full), the
+    /// caller should report the same signal again later.
+    pub fn tamper(&self, signal: TamperSignal) -> bool {
+        self.control.try_send(Control::Tamper(signal)).is_ok()
+    }
 }
 
 /// Controls a service started with [`Service::spawn`].

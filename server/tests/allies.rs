@@ -6,7 +6,9 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::*;
-use faro_proto::api::{FeedItem, MemberKeysResponse, SignedRecipientManifest};
+use faro_proto::api::{FeedItem, MemberKeysResponse, SignedRecipientManifest, REQUEST_MAX_SKEW_MS};
+use faro_proto::encoding::b64_decode;
+use faro_proto::keys::{AllyKeyRewrap, ProvenAllyKeyRewrap};
 use faro_proto::{EncryptedItem, EventKind, Urgency, UserId};
 use faro_server::api::feed::FeedResponse;
 use faro_server::config::RegistrationMode;
@@ -859,4 +861,239 @@ async fn feed_pages_never_skip_items_sharing_a_millisecond() {
         .await,
     );
     assert!(f.items.is_empty());
+}
+
+#[tokio::test]
+async fn the_feed_says_which_devices_are_iphones_to_those_who_can_read_it() {
+    let t = TestApp::new().await;
+    let (member, ms, mkeys, mut mac) = t.active_device().await;
+    let code = t.enroll_code(&ms).await;
+    let mut phone = t.enroll_as(&code, &mkeys.enc, "ios", "iPhone-X").await;
+    assert_eq!(t.endorse(&phone, &mkeys, &ms).await.status, StatusCode::OK);
+    // A third device that never sends anything stays out of the map.
+    let code = t.enroll_code(&ms).await;
+    let quiet = t.enroll_as(&code, &mkeys.enc, "windows", "Desk").await;
+    assert_eq!(t.endorse(&quiet, &mkeys, &ms).await.status, StatusCode::OK);
+
+    let pat = t.link_ally(&member, &mkeys, &ms, "pat@elsewhere.net").await;
+    let bye = phone.next_event(EventKind::Goodbye, Urgency::Urgent);
+    let flag = mac.next_event(EventKind::SettingsChange, Urgency::Normal);
+    t.post_events(&phone, &[bye]).await;
+    t.post_events(&mac, &[flag]).await;
+
+    let want = |f: &FeedResponse| {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(phone.id.to_string(), faro_proto::api::Platform::Ios);
+        m.insert(mac.id.to_string(), faro_proto::api::Platform::Macos);
+        assert_eq!(f.device_platforms, m);
+    };
+    // The ally and the member both get it.
+    want(&feed_of(&t.feed(&member, &pat.session).await));
+    want(&feed_of(&t.feed(&member, &ms).await));
+
+    // Someone who is not an ally gets a 404, and so no map.
+    let (_stranger, ss) = t.sign_in("stranger@example.org").await;
+    let r = t.feed(&member, &ss).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.body);
+    assert!(r.body.get("device_platforms").is_none());
+    // Neither does a removed ally.
+    let r = t.remove_ally(&member, &mkeys, &ms, &pat.id).await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.body);
+    let r = t.feed(&member, &pat.session).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{:?}", r.body);
+    assert!(r.body.get("device_platforms").is_none());
+}
+
+/// Ask for a re-wrap challenge as `session` and open it with `keys`.
+async fn open_challenge(t: &TestApp, session: &str, keys: &AllyKeys) -> (i64, [u8; 32]) {
+    let r = t
+        .post("/v1/me/ally-key/challenge", json!({}), Some(session))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["enc_pubkey"], json!(keys.enc.public()));
+    let sealed = b64_decode(r.body["sealed_challenge"].as_str().unwrap()).unwrap();
+    let opened = keys.enc.unseal(&sealed).expect("sealed to the ally key");
+    let challenge = <[u8; 32]>::try_from(opened.as_slice()).expect("32 bytes");
+    (r.body["issued_at_ms"].as_i64().unwrap(), challenge)
+}
+
+/// An ally's wrapped key as the web app stores it: the secret under `pass`,
+/// plus a `recovery` copy under `recovery`.
+fn ally_wrapped(keys: &AllyKeys, pass: &[u8], recovery: &[u8]) -> serde_json::Value {
+    let p = faro_crypto::KdfParams::insecure_for_tests();
+    let secret = keys.enc.secret_bytes();
+    let mut w = json!(faro_crypto::wrap_secret(secret.as_slice(), pass, p).unwrap());
+    w["recovery"] = json!(faro_crypto::wrap_secret(secret.as_slice(), recovery, p).unwrap());
+    w
+}
+
+/// A `PUT /v1/me/ally-key/wrapped` body, proven with `challenge`.
+fn ally_rewrap_body(
+    t: &TestApp,
+    ally: &Ally,
+    issued_at_ms: i64,
+    challenge: &[u8; 32],
+    wrapped: &serde_json::Value,
+) -> serde_json::Value {
+    let body = AllyKeyRewrap {
+        instance_id: t.instance_id(),
+        ally_id: ally.id.clone(),
+        enc_pubkey: ally.keys.enc.public(),
+        issued_at_ms,
+        wrapped_privkey: wrapped.to_string(),
+    };
+    let proof = body.proof(challenge);
+    serde_json::to_value(ProvenAllyKeyRewrap { body, proof }).unwrap()
+}
+
+#[tokio::test]
+async fn allies_can_rewrap_their_key_by_answering_a_sealed_challenge() {
+    let t = TestApp::new().await;
+    let (member, ms, mkeys, mut dev) = t.active_device().await;
+    let pat = t.link_ally(&member, &mkeys, &ms, "pat@elsewhere.net").await;
+    let to_pat = [(pat.id.clone(), pat.keys.enc.public())];
+    let ev = dev.next_event_to(EventKind::Flag, Urgency::Urgent, SECRET, &to_pat);
+    t.post_events(&dev, std::slice::from_ref(&ev)).await;
+    let before_blob = newest_event_blob(&t, &member, &ms).await;
+    let before_key = t.get("/v1/me/ally-key", Some(&pat.session)).await;
+    let before_allies = t.get("/v1/me/allies", Some(&ms)).await;
+    t.notify_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mails = t.mailer.sent().len();
+    let alerts = t.alerts(&member).await.len();
+
+    let put = |body| {
+        t.call(
+            Method::PUT,
+            "/v1/me/ally-key/wrapped",
+            Some(body),
+            Some(&pat.session),
+        )
+    };
+    let junk = ally_wrapped(&pat.keys, b"x", b"y");
+
+    // A session alone can't do it: the proof needs the opened challenge.
+    let (at, challenge) = open_challenge(&t, &pat.session, &pat.keys).await;
+    let r = put(ally_rewrap_body(&t, &pat, at, &[7; 32], &junk)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.error_code(), "bad_rewrap_proof");
+    // Sending the challenge itself instead of a proof doesn't work either.
+    let mut b = ally_rewrap_body(&t, &pat, at, &challenge, &junk);
+    b["proof"] = json!(faro_proto::Hash32(challenge));
+    assert_eq!(put(b).await.error_code(), "bad_rewrap_proof");
+    // The proof covers the wrapped key and the time.
+    let mut b = ally_rewrap_body(&t, &pat, at, &challenge, &junk);
+    b["wrapped_privkey"] = json!(ally_wrapped(&pat.keys, b"z", b"y").to_string());
+    assert_eq!(put(b).await.error_code(), "bad_rewrap_proof");
+    let r = put(ally_rewrap_body(&t, &pat, at - 1, &challenge, &junk)).await;
+    assert_eq!(r.error_code(), "bad_rewrap_proof");
+
+    // The public key can never change, even with a good proof.
+    let mut b = ally_rewrap_body(&t, &pat, at, &challenge, &junk);
+    b["enc_pubkey"] = json!(AllyKeys::generate().enc.public());
+    let r = put(b).await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.error_code(), "ally_key_mismatch");
+
+    // Only for this instance and this account.
+    let mut b = ally_rewrap_body(&t, &pat, at, &challenge, &junk);
+    b["ally_id"] = json!("usr_someoneelse");
+    assert_eq!(put(b).await.error_code(), "rewrap_mismatch");
+
+    // The wrapped key must be a JSON object of at most 8 KiB.
+    let r = put(ally_rewrap_body(&t, &pat, at, &challenge, &json!("text"))).await;
+    assert_eq!(r.error_code(), "invalid_wrapped_key");
+    let big = json!({ "pad": "x".repeat(9000) });
+    let r = put(ally_rewrap_body(&t, &pat, at, &challenge, &big)).await;
+    assert_eq!(r.error_code(), "invalid_wrapped_key");
+
+    // The real thing: stored as given, the key itself untouched.
+    t.clock.advance_ms(1_000);
+    let new = ally_wrapped(&pat.keys, b"new ally pass", b"NEW-RECOVERY");
+    let r = put(ally_rewrap_body(&t, &pat, at, &challenge, &new)).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    let k = t.get("/v1/me/ally-key", Some(&pat.session)).await;
+    assert_eq!(k.body["wrapped_privkey"], new);
+    for f in ["enc_pubkey", "key_id", "created_at_ms"] {
+        assert_eq!(k.body[f], before_key.body[f], "{f}");
+    }
+    let w: faro_crypto::WrappedSecret =
+        serde_json::from_value(k.body["wrapped_privkey"].clone()).unwrap();
+    assert_eq!(
+        &**faro_crypto::unwrap_secret(&w, b"new ally pass").unwrap(),
+        pat.keys.enc.secret_bytes().as_slice()
+    );
+
+    // The challenge was good for one change: replaying it can't restore
+    // the old passphrase.
+    let old = before_key.body["wrapped_privkey"].clone();
+    let r = put(ally_rewrap_body(&t, &pat, at, &challenge, &old)).await;
+    assert_eq!(r.error_code(), "bad_rewrap_proof");
+    let k = t.get("/v1/me/ally-key", Some(&pat.session)).await;
+    assert_eq!(k.body["wrapped_privkey"], new);
+
+    // Challenges expire.
+    let (at, challenge) = open_challenge(&t, &pat.session, &pat.keys).await;
+    t.clock.advance_ms(REQUEST_MAX_SKEW_MS + 1);
+    let r = put(ally_rewrap_body(&t, &pat, at, &challenge, &junk)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.error_code(), "stale_request");
+
+    // Nobody is told, and nothing the member sees changed: the same key and
+    // so the same safety code, and the same endorsement for devices.
+    t.notify_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(t.mailer.sent().len(), mails, "{:?}", t.mailer.sent());
+    assert_eq!(t.alerts(&member).await.len(), alerts);
+    assert_eq!(
+        t.get("/v1/me/allies", Some(&ms)).await.body,
+        before_allies.body
+    );
+    let dir = directory(&t, &dev).await;
+    assert_eq!(dir.allies.len(), 1);
+    assert_eq!(dir.allies[0].body.ally_enc_pubkey, pat.keys.enc.public());
+
+    // pat still reads what was sealed before, and what is sealed after.
+    t.clock.advance_ms(1);
+    let ev2 = dev.next_event_to(EventKind::Flag, Urgency::Urgent, SECRET, &to_pat);
+    t.post_events(&dev, std::slice::from_ref(&ev2)).await;
+    let after_blob = newest_event_blob(&t, &member, &ms).await;
+    for (blob, ev) in [(&before_blob, &ev), (&after_blob, &ev2)] {
+        let b = t.get(blob, Some(&pat.session)).await;
+        assert_eq!(b.status, StatusCode::OK);
+        let item: EncryptedItem = serde_json::from_slice(&b.raw).unwrap();
+        let pt =
+            faro_crypto::open_item(&item, &ev.header.body_aad(), &pat.id, &pat.keys.enc).unwrap();
+        assert_eq!(pt.as_slice(), SECRET);
+    }
+}
+
+#[tokio::test]
+async fn rewrapping_needs_an_ally_key() {
+    let t = TestApp::new().await;
+    let (member, ms, _mkeys, _dev) = t.active_device().await;
+    let r = t
+        .post("/v1/me/ally-key/challenge", json!({}), Some(&ms))
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let not_an_ally = Ally {
+        id: member,
+        session: ms.clone(),
+        keys: AllyKeys::generate(),
+        email: "sam@example.org".into(),
+    };
+    let wrapped = ally_wrapped(&not_an_ally.keys, b"x", b"y");
+    let body = ally_rewrap_body(&t, &not_an_ally, t.clock_ms(), &[0; 32], &wrapped);
+    let r = t
+        .call(
+            Method::PUT,
+            "/v1/me/ally-key/wrapped",
+            Some(body),
+            Some(&ms),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.error_code(), "ally_key_required");
+    let r = t.post("/v1/me/ally-key/challenge", json!({}), None).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
 }

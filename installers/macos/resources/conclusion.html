@@ -12,12 +12,12 @@
 <h1>Faro is installed</h1>
 <p>Faro is running, but it does not monitor anything until you enroll this computer with your instance.</p>
 <ol>
-  <li>On your instance's web app, add a device. It shows an enrollment link that starts with <code>faro://enroll</code>.</li>
-  <li>Open Terminal and run, with your link:<br>
-    <code>sudo "/Library/Faro/bin/faro-service" enroll --link 'faro://enroll?…'</code><br>
-    Check the instance name and the list of accounts it shows, then confirm.</li>
+  <li>On your instance's web app, add a computer. It shows an enrollment link that starts with <code>faro://enroll</code>.</li>
+  <li>On this Mac, click <strong>Open in Faro</strong> next to the link, or choose <strong>Enroll this computer…</strong> from the Faro icon (a lighthouse) in the menu bar and paste the link.
+    Check the instance name and the list of accounts it shows, then click <strong>Enroll</strong>. An administrator of this Mac approves with their name and password.<br>
+    In Terminal instead: <code>sudo "/Library/Faro/bin/faro-service" enroll --link 'faro://enroll?…'</code></li>
   <li>Approve the device in the web app. Monitoring starts once you do.</li>
-  <li>When macOS asks, allow <strong>Faro Agent</strong> to record the screen. Every account that uses this computer is asked once.</li>
+  <li>Allow <strong>Faro Agent</strong> to record the screen. The first time Faro runs in each account, macOS may ask. If it does not, or you chose Don't Allow, open System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording and switch on Faro Agent (the Faro icon in the menu bar has a shortcut). Every account that uses this computer needs to do this once.</li>
 </ol>
 <p>To remove Faro later, run <code>sudo /Library/Faro/bin/faro-uninstall</code>. Your allies are told that Faro was uninstalled. If Faro is removed any other way or stops running, they are told when this computer stops checking in.</p>
 </body>

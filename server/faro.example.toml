@@ -7,7 +7,9 @@
 # Where the identity key, the SQLite database and encrypted blobs are stored.   FARO_DATA_DIR
 data_dir = "/var/lib/faro"
 
-# Leave unset for SQLite in data_dir. For larger instances use Postgres:        FARO_DATABASE_URL
+# Leave unset for SQLite in data_dir. The beta supports SQLite only.            FARO_DATABASE_URL
+# Postgres is experimental and NOT supported in this release (doctor and the
+# startup log warn about it):
 # database_url = "postgres://faro:secret@localhost/faro"
 
 # The address members and allies use to reach this instance.                   FARO_PUBLIC_URL
@@ -79,7 +81,7 @@ magic_links_per_email_per_hour = 5
 # root = "/usr/share/faro/update-root.json"
 # Where the project publishes releases. Leave unset on an air-gapped instance FARO_UPDATES_UPSTREAM
 # and load releases with `faro-server updates import --from DIR`.
-# upstream = "https://updates.example.org/faro"
+# upstream = "https://updates.faro-project.org/"
 # Seconds between upstream checks (300 to 21600).                             FARO_UPDATES_REFRESH_SECS
 refresh_secs = 3600
 # stable, beta, ... or stable-1 (the previous version's newest release, for   FARO_UPDATES_CHANNEL

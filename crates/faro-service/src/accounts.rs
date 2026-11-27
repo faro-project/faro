@@ -126,12 +126,33 @@ mod imp {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod imp {
+    use super::Accounts;
+
+    /// The accounts with a session now (`WTSEnumerateSessions`): it names
+    /// who is logged on, not every account that exists. Faro monitors
+    /// whatever sessions Windows reports, listed here or not.
+    pub fn local_accounts() -> Option<Accounts> {
+        let mut names: Vec<String> = faro_platform_windows::service::enumerate_sessions()
+            .ok()?
+            .into_iter()
+            .map(|s| s.user)
+            .collect();
+        names.sort();
+        names.dedup();
+        Some(Accounts {
+            names,
+            guest_enabled: false,
+        })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod imp {
     use super::Accounts;
 
     pub fn local_accounts() -> Option<Accounts> {
-        // TODO(windows): NetUserEnum, once there is a Windows client.
         None
     }
 }

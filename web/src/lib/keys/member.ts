@@ -30,7 +30,6 @@ import {
 	type Progress
 } from '../crypto/passphrase.ts';
 import {
-	checkManifest,
 	keyRewrapSigningBytes,
 	manifestRef,
 	manifestSigningBytes,
@@ -38,12 +37,21 @@ import {
 	nextManifest,
 	signWith,
 	verifySigned,
-	type ManifestAlly,
 	type RecipientManifest,
 	type Signed
 } from '../crypto/proto.ts';
 import type { MemberKeysBlob, PutMemberKeys, RecoveryWrapped, User } from '../types.ts';
 import type { MemberKeys } from './keyring.svelte.ts';
+import {
+	acceptServed,
+	ensureManifestWith,
+	ManifestTrustError,
+	recordSigned,
+	storageManifestStore,
+	type ManifestCheckpointStore,
+	type ManifestSource
+} from './manifest-trust.ts';
+import { rewrapMemberWrapped, type RewrapChoice } from './wrapping.ts';
 
 export const MIN_PASSPHRASE = 10;
 
@@ -187,37 +195,47 @@ export async function unlockMemberKeys(
 }
 
 // ---- Recipient manifests --------------------------------------------------
+//
+// The rules are in `manifest-trust.ts`; this binds them to the API and to
+// localStorage.
 
-export class ManifestTrustError extends Error {
-	constructor(reason: string) {
-		super(`The recipient list the server returned can't be trusted: ${reason}.`);
-		this.name = 'ManifestTrustError';
+function storage(): Storage | null {
+	try {
+		return globalThis.localStorage ?? null;
+	} catch {
+		return null;
 	}
+}
+
+/** The highest list this browser has signed or seen for the member. */
+export function manifestStore(keys: MemberKeys, instanceId: string): ManifestCheckpointStore {
+	return storageManifestStore(storage(), instanceId, keys.userId);
 }
 
 /**
  * The member's latest recipient manifest, verified against their own
- * signing key. Null if they have none yet.
+ * signing key and against the highest one this browser has signed or seen
+ * (no rollback, no fork). Null if they have none yet.
  */
 export async function latestManifest(
 	keys: MemberKeys,
 	instanceId: string
 ): Promise<Signed<RecipientManifest> | null> {
-	let m: Signed<RecipientManifest>;
-	try {
-		m = await api.get<Signed<RecipientManifest>>(
-			`/v1/members/${seg(keys.userId)}/recipient-manifest`
-		);
-	} catch (e) {
-		if (e instanceof ApiError && e.status === 404) return null;
-		throw e;
-	}
-	const bad = checkManifest(m, keys.signPk, instanceId, keys.userId);
-	if (bad) throw new ManifestTrustError(bad);
-	if (!equal(unb64Fixed(m.member_enc_pubkey, 32), keys.encPk)) {
-		throw new ManifestTrustError('it lists a different key for you');
-	}
-	return m;
+	const served = await apiSource(keys).latest();
+	return acceptServed(served, keys, instanceId, manifestStore(keys, instanceId));
+}
+
+function apiSource(keys: MemberKeys): ManifestSource {
+	return {
+		latest: () =>
+			api
+				.get<Signed<RecipientManifest>>(`/v1/members/${seg(keys.userId)}/recipient-manifest`)
+				.catch((e) => {
+					if (e instanceof ApiError && e.status === 404) return null;
+					throw e;
+				}),
+		put: (m) => api.put('/v1/me/recipient-manifest', m)
+	};
 }
 
 /** Sign a manifest body with the member key. */
@@ -226,98 +244,69 @@ export function signManifest(keys: MemberKeys, m: RecipientManifest): Signed<Rec
 }
 
 /**
- * The first manifest (version 1). Lists `allies` (normally none: allies are
- * added by approving them, which signs the next version).
+ * Sign `body` and hand it to `send` (the upload). Once the instance has
+ * accepted it, this browser remembers it as the highest list it signed.
  */
-export function firstManifest(
+export async function signAndSend<T>(
 	keys: MemberKeys,
 	instanceId: string,
-	allies: ManifestAlly[] = []
-): Signed<RecipientManifest> {
-	const base: RecipientManifest = {
-		instance_id: instanceId,
-		member_id: keys.userId,
-		version: 0,
-		issued_at_ms: 0,
-		member_enc_pubkey: b64(keys.encPk),
-		allies: []
-	};
-	return signManifest(keys, nextManifest(base, allies));
+	body: RecipientManifest,
+	send: (m: Signed<RecipientManifest>) => Promise<T>
+): Promise<T> {
+	const m = signManifest(keys, body);
+	const r = await send(m);
+	recordSigned(manifestStore(keys, instanceId), m);
+	return r;
 }
 
-/** Sign and upload the first manifest if there is none. Returns the latest. */
-export async function ensureManifest(
+/**
+ * The checked latest list; signs and uploads the first one (no allies) if
+ * there is none.
+ */
+export function ensureManifest(
 	keys: MemberKeys,
-	instanceId: string,
-	activeAllies: () => Promise<ManifestAlly[]>
+	instanceId: string
 ): Promise<Signed<RecipientManifest>> {
-	const latest = await latestManifest(keys, instanceId);
-	if (latest) return latest;
-	const m = firstManifest(keys, instanceId, await activeAllies());
-	await api.put('/v1/me/recipient-manifest', m);
-	return m;
+	return ensureManifestWith(apiSource(keys), keys, instanceId, manifestStore(keys, instanceId));
 }
 
 // ---- Changing the passphrase ----------------------------------------------
 
 /**
- * Re-wrap the unlocked member keys under a new passphrase (and, if asked, a
- * new recovery code), signed with the member key so the server accepts the
+ * Re-wrap the unlocked member keys under a new passphrase and/or a new
+ * recovery code, signed with the member key so the server accepts the
  * replacement (`PUT /v1/me/keys/wrapped`, PROTOCOL.md §4.3). The keys
- * themselves don't change. Returns the new recovery code, if one was made.
+ * themselves don't change, and each new copy is checked before it is sent
+ * (`wrapping.ts`). Returns the new recovery code, if one was made.
  */
 export async function rewrapMemberKeys(
 	keys: MemberKeys,
 	instanceId: string,
-	passphrase: string,
-	newRecovery: boolean,
+	choice: RewrapChoice,
 	onProgress?: Progress
 ): Promise<string | null> {
 	const current = await getMemberKeys();
 	if (!current) throw new Error('Your keys are not set up.');
-	if (!equal(unb64Fixed(current.sign_pubkey, 32), keys.signPk)) {
+	if (
+		!equal(unb64Fixed(current.sign_pubkey, 32), keys.signPk) ||
+		!equal(unb64Fixed(current.enc_binding.member_enc_pubkey, 32), keys.encPk)
+	) {
 		throw new UnwrapError('unsupported', 'The keys on the server are not the ones you unlocked.');
 	}
-	const steps = newRecovery ? 2 : 1;
-	const pw = await deriveWrapKey(passphrase, undefined, undefined, (f) => onProgress?.(f / steps));
-	let recoveryCode: string | null = null;
-	let recovery: string;
-	try {
-		if (newRecovery) {
-			recoveryCode = generateRecoveryCode();
-			const rc = await deriveWrapKey(recoveryCode, undefined, undefined, (f) =>
-				onProgress?.(0.5 + f / 2)
-			);
-			try {
-				const r: RecoveryWrapped = {
-					sign: wrapWithKey(keys.signSeed, rc),
-					enc: wrapWithKey(keys.encSecret, rc)
-				};
-				recovery = JSON.stringify(r);
-			} finally {
-				wipe(rc.key);
-			}
-		} else {
-			recovery = JSON.stringify(current.recovery_wrapped);
-		}
-		const body = signWith(
-			keys.signSeed,
-			{
-				instance_id: instanceId,
-				member_id: keys.userId,
-				sign_pubkey: b64(keys.signPk),
-				issued_at_ms: Date.now(),
-				wrapped_sign_key: JSON.stringify(wrapWithKey(keys.signSeed, pw)),
-				wrapped_enc_key: JSON.stringify(wrapWithKey(keys.encSecret, pw)),
-				recovery_wrapped: recovery
-			},
-			keyRewrapSigningBytes
-		);
-		await api.put('/v1/me/keys/wrapped', body);
-	} finally {
-		wipe(pw.key);
-	}
+	const { recoveryCode, ...wrapped } = await rewrapMemberWrapped(keys, current, choice, onProgress);
+	const body = signWith(
+		keys.signSeed,
+		{
+			instance_id: instanceId,
+			member_id: keys.userId,
+			sign_pubkey: b64(keys.signPk),
+			issued_at_ms: Date.now(),
+			...wrapped
+		},
+		keyRewrapSigningBytes
+	);
+	await api.put('/v1/me/keys/wrapped', body);
 	return recoveryCode;
 }
 
-export { manifestRef, nextManifest };
+export { ManifestTrustError, manifestRef, nextManifest };

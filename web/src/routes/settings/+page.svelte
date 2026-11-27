@@ -1,6 +1,7 @@
 <script lang="ts">
-	// Account settings: who you are here, your keys, and (for members) how
-	// long your history is kept and how you hear about your own alerts.
+	// Account settings: who you are here, your keys and their passphrases,
+	// (for members) how long your history is kept and how you hear about
+	// your own alerts, and deleting your account.
 	import { resolve } from '$app/paths';
 	import { api, describeError } from '#lib/api.ts';
 	import { unb64 } from '#lib/crypto/bytes.ts';
@@ -12,9 +13,12 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { AllyKeyBlob, MemberKeysBlob, RetentionView, RetentionWindows } from '#lib/types.ts';
 	import ChangePassphrase from '#lib/ui/ChangePassphrase.svelte';
+	import DeleteAccount from '#lib/ui/DeleteAccount.svelte';
 	import DisplayName from '#lib/ui/DisplayName.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
+	import ProposalBlocks from '#lib/ui/groups/ProposalBlocks.svelte';
+	import ReachOutSettings from '#lib/ui/ReachOutSettings.svelte';
 
 	let memberKeys = $state<MemberKeysBlob | null | undefined>(undefined);
 	let allyKey = $state<AllyKeyBlob | null | undefined>(undefined);
@@ -150,8 +154,12 @@
 				</button>
 			{/if}
 			{#if user.roles.member && memberKeys}
-				<h3>Passphrase</h3>
-				<ChangePassphrase {user} />
+				<h3>{user.roles.ally && allyKey ? 'Member key passphrase' : 'Passphrase'}</h3>
+				<ChangePassphrase {user} kind="member" />
+			{/if}
+			{#if user.roles.ally && allyKey}
+				<h3>{user.roles.member && memberKeys ? 'Ally key passphrase' : 'Passphrase'}</h3>
+				<ChangePassphrase {user} kind="ally" />
 			{/if}
 			<p class="muted small">
 				Keys unlock in one browser tab at a time and lock again after 30 idle minutes. Forgot your
@@ -210,6 +218,27 @@
 				<NotificationPrefs memberId={user.id} about="yourself" />
 			</section>
 		{/if}
+
+		<section class="card">
+			<h2>Group proposals</h2>
+			<p class="muted">
+				People in your groups can ask you to be allies. If someone's proposals aren't welcome, you
+				can stop them from sending any, in any group. They aren't told.
+			</p>
+			<ProposalBlocks />
+		</section>
+
+		<section class="card">
+			<h2>Reach outs</h2>
+			<p class="muted">
+				When someone reaches out to you, you're told right away, after your quiet hours. For each
+				person you can let their reach outs through quiet hours, move them to the digest, or switch
+				them off.
+			</p>
+			<ReachOutSettings />
+		</section>
+
+		<DeleteAccount {user} />
 	{/snippet}
 </Gate>
 

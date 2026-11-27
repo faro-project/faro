@@ -1,5 +1,5 @@
 //! Command-line interface: `faro-server serve | init | backup | doctor |
-//! updates | version`.
+//! updates | admin | version`.
 //!
 //! * `init` creates the data directory and the instance identity key,
 //!   migrates the database, and prints a one-time setup token for the web
@@ -14,6 +14,11 @@
 //! * `updates status` shows what the update mirror holds; `updates import
 //!   --from DIR` loads a release by hand on an air-gapped instance. See
 //!   [`crate::updates`].
+//! * `admin grant --email ADDRESS` makes an existing account an admin: the
+//!   way back in when nobody can sign in as an admin. Told to the person and
+//!   every other admin like a change in the console; see [`crate::roles`].
+//!   With `--create` (and optionally `--name`), an address with no account
+//!   gets one first ([`crate::roles::create_admin`]).
 //! * `version` prints the server and protocol versions.
 //!
 //! Secrets printed here (setup tokens) go to **stdout/stderr only**, never
@@ -95,8 +100,41 @@ pub enum Command {
         #[command(subcommand)]
         action: UpdatesCommand,
     },
+    /// Manage admins from the server itself.
+    Admin {
+        #[command(subcommand)]
+        action: AdminCommand,
+    },
     /// Print version information.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminCommand {
+    /// Make an account an admin, for when nobody can sign in as an admin
+    /// any more. The person and every other admin are emailed, by the
+    /// running server (or when it next starts).
+    Grant {
+        /// Path to faro.toml (optional; FARO_* env vars override it).
+        #[arg(long, env = "FARO_CONFIG")]
+        config: Option<PathBuf>,
+        /// Development mode (see `serve --dev`).
+        #[arg(long)]
+        dev: bool,
+        /// The account's email address. Without --create, the account must
+        /// exist (the person signed in once).
+        #[arg(long)]
+        email: String,
+        /// If no account has this address, create one (a member, as at
+        /// setup) and make it an admin. The person signs in with an email
+        /// link as usual.
+        #[arg(long)]
+        create: bool,
+        /// The new account's display name (with --create). By default, the
+        /// part of the address before the @, as when someone signs up.
+        #[arg(long, requires = "create")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,6 +192,10 @@ pub enum CliError {
     UpdatesOff,
     #[error("update mirror: {0}")]
     Updates(Box<crate::updates::MirrorError>),
+    #[error("{0}")]
+    Refused(String),
+    #[error(transparent)]
+    App(Box<crate::error::AppError>),
     #[error("cannot listen on {addr}: {source}")]
     Listen {
         addr: std::net::SocketAddr,
@@ -263,6 +305,9 @@ async fn run_init(cfg: Config) -> Result<(), CliError> {
 }
 
 async fn run_serve(cfg: Config) -> Result<(), CliError> {
+    if cfg.uses_postgres() {
+        tracing::warn!("Postgres database: {}", crate::db::POSTGRES_UNSUPPORTED);
+    }
     let listen = cfg.listen;
     let mailer = mailer_for(&cfg)?;
     let state = bootstrap::open(cfg, mailer, Arc::new(SystemClock)).await?;
@@ -416,6 +461,101 @@ async fn run_updates(action: UpdatesCommand) -> Result<(), CliError> {
     }
 }
 
+/// `admin grant`: make the account with `email` an admin, creating it
+/// first with `create` (module docs). `name` is the new account's display
+/// name. Returns what to print. Running it again changes nothing.
+pub async fn admin_grant(
+    state: &crate::state::AppState,
+    email: &str,
+    create: bool,
+    name: Option<&str>,
+) -> Result<String, CliError> {
+    use crate::db::repo::users;
+    let email = crate::auth::normalize_email(email)
+        .ok_or_else(|| CliError::Refused(format!("{email:?} is not an email address")))?;
+    let Some(user) = users::by_email(state.db().pool(), &email).await? else {
+        if !create {
+            return Err(CliError::Refused(format!(
+                "there is no account with the address {email}: the person must sign in once \
+                 first, or add --create to create the account"
+            )));
+        }
+        let display_name = match name {
+            Some(n) => crate::auth::normalize_display_name(n).ok_or_else(|| {
+                CliError::Refused("--name must be 1-64 printable characters".to_owned())
+            })?,
+            None => crate::api::auth::default_display_name(&email),
+        };
+        let r = crate::roles::create_admin(state, &email, &display_name)
+            .await
+            .map_err(|e| CliError::App(Box::new(e)))?;
+        return Ok(format!(
+            "Created an account for {email} ({display_name}) and made it an admin. Faro emails \
+             the person how to sign in, and tells {} {} about the new admin (the person and every \
+             other admin), from the running server or when it next starts. They sign in at {}/signin \
+             with an email link.",
+            r.told,
+            if r.told == 1 { "person" } else { "people" },
+            state.config().public_url
+        ));
+    };
+    let unused = if name.is_some() {
+        " The account already exists, so --name was not used."
+    } else {
+        ""
+    };
+    if user.roles.admin {
+        return Ok(format!(
+            "{email} is already an admin. Nothing changed.{unused}"
+        ));
+    }
+    match crate::roles::set_admin(state, &user.id, true, crate::roles::By::CommandLine).await {
+        Ok(r) => Ok(format!(
+            "{email} is now an admin. Faro emails {} {} about it (the person and every other \
+             admin), from the running server or when it next starts.",
+            r.told,
+            if r.told == 1 { "person" } else { "people" }
+        )),
+        Err(crate::error::AppError::Conflict { code, message }) => {
+            Err(CliError::Refused(match code {
+                "account_disabled" => format!(
+                    "{email}'s account is disabled, so it can't be made an admin. Choose \
+                     another account."
+                ),
+                "account_deleting" => format!(
+                    "{email}'s account is being deleted, so it can't be made an admin. Choose \
+                     another account."
+                ),
+                _ => message,
+            }))
+        }
+        Err(e) => Err(CliError::App(Box::new(e))),
+    }
+}
+
+async fn run_admin(action: AdminCommand) -> Result<(), CliError> {
+    match action {
+        AdminCommand::Grant {
+            config,
+            dev,
+            email,
+            create,
+            name,
+        } => {
+            let cfg = load_config(config.as_deref(), std::env::vars(), false, dev)?;
+            // Nothing is sent from here: the server's notifier sends the
+            // notices this writes.
+            let state =
+                bootstrap::open(cfg, Arc::new(LogMailer::new(false)), Arc::new(SystemClock))
+                    .await?;
+            let result = admin_grant(&state, &email, create, name.as_deref()).await;
+            state.db().close().await;
+            println!("{}", result?);
+            Ok(())
+        }
+    }
+}
+
 /// Entry point used by `main`.
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -470,6 +610,7 @@ pub fn main() -> ExitCode {
                         run_doctor(cfg, !no_smtp_check).await
                     }
                     Command::Updates { action } => run_updates(action).await,
+                    Command::Admin { action } => run_admin(action).await,
                     Command::Version => Ok(()),
                 }
             })
@@ -491,6 +632,47 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn admin_grant_takes_an_email() {
+        let cli = Cli::try_parse_from(["faro-server", "admin", "grant", "--email", "a@b.org"])
+            .expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Grant { email, .. }
+            } if email == "a@b.org"
+        ));
+        assert!(Cli::try_parse_from(["faro-server", "admin", "grant"]).is_err());
+        let cli = Cli::try_parse_from([
+            "faro-server",
+            "admin",
+            "grant",
+            "--email",
+            "a@b.org",
+            "--create",
+            "--name",
+            "Ann",
+        ])
+        .expect("parses");
+        assert!(matches!(
+            cli.command,
+            Command::Admin {
+                action: AdminCommand::Grant { create: true, name: Some(n), .. }
+            } if n == "Ann"
+        ));
+        // --name only means something with --create.
+        let r = Cli::try_parse_from([
+            "faro-server",
+            "admin",
+            "grant",
+            "--email",
+            "a@b.org",
+            "--name",
+            "Ann",
+        ]);
+        assert!(r.is_err());
     }
 
     #[test]

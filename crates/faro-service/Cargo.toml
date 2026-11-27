@@ -16,6 +16,11 @@ workspace = true
 # configured. Never enable in release builds: without the signature check
 # any program the user runs can pose as the agent (source/ipc.rs).
 dev = []
+# The image classifier on ONNX Runtime (faro-detect's `onnx`). On in the
+# macOS release and package builds (installers/macos/build-pkg.sh), which
+# link ONNX Runtime statically. Without it the service runs with no image
+# model, rating frames from context signals only.
+onnx = ["faro-detect/onnx"]
 
 [lib]
 name = "faro_service"
@@ -32,6 +37,8 @@ faro-core.workspace = true
 faro-detect.workspace = true
 faro-ipc.workspace = true
 faro-platform.workspace = true
+faro-update.workspace = true
+faro-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -43,20 +50,53 @@ tokio.workspace = true
 rand.workspace = true
 zeroize.workspace = true
 hex.workspace = true
+crc32fast = "1"
 url = "2.5"
 httpdate = "1.0"
 hostname = "0.4"
 # rustls (ring provider, like the rest of the workspace) with the OS trust
 # store, so instances using a locally installed CA work; no native-tls/OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+# Reading the version inside a macOS update package (src/update/
+# package_version.rs): the xar archive's zlib streams, its SHA checksums
+# and its XML table of contents.
+flate2 = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+roxmltree = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+faro-platform-windows.workspace = true
+# Reading the version inside a Windows update package (src/update/msi.rs):
+# the MSI's Property table, without running anything.
+msi = "0.11"
+# Pipe-client tokens (the enroll approval), the session of a process, and
+# finding a running agent (src/win.rs, src/source/win_agents.rs).
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 faro-platform-macos.workspace = true
 
 [dev-dependencies]
+# tests/runtime_mock.rs breaks the outbox the way a full volume does.
+rusqlite.workspace = true
+blake3.workspace = true
+faro-update = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum.workspace = true
@@ -64,9 +104,11 @@ axum.workspace = true
 # its integration-test harness (server/tests/common/mod.rs), which needs
 # sqlx (direct SQL, e.g. the malicious-instance rollback) and tower's
 # `oneshot` for the simulated browsers.
-faro-server = { path = "../../server", version = "0.1.0" }
+faro-server = { path = "../../server", version = "0.1.0-beta.1" }
 sqlx.workspace = true
 tower = { workspace = true, features = ["util"] }
+# tests/update.rs serves a directory as a fake instance's mirror.
+tower-http.workspace = true
 # Decodes the blurred thumbnail an ally downloads, to check its size.
 image.workspace = true
 # tests/agent_ipc.rs runs the real session agent (synthetic platform) against

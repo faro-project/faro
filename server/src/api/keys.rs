@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum serialized size of each opaque wrapped-key blob. A `WrappedSecret`
 /// is a few hundred bytes; this leaves room for future formats.
-const MAX_WRAPPED_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_WRAPPED_BYTES: usize = 8 * 1024;
 
 /// `PUT /v1/me/keys` body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,7 +162,7 @@ pub async fn put_my_keys(
 }
 
 /// Parse one signed wrapped-key text into the object that is stored.
-fn parse_wrapped(name: &'static str, text: &str) -> Result<serde_json::Value, AppError> {
+pub(crate) fn parse_wrapped(name: &'static str, text: &str) -> Result<serde_json::Value, AppError> {
     if text.len() > MAX_WRAPPED_BYTES {
         return Err(AppError::bad_request(
             "invalid_wrapped_key",
