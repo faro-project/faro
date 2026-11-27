@@ -551,7 +551,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
 
 ## 8. Data retention
 
-- Configurable per instance by the admin. Members can choose **shorter** retention, never longer.
+- Configurable per instance by the admin, at least 7 days for each window when set in the console (the same floor members have). A shorter window applies only to data received after the change; older data keeps the window it arrived under. Members can choose **shorter** retention, never longer.
+- Changing instance settings is never silent: every change goes in the admin log and is emailed to the other admins, and a longer liveness grace period or a shorter retention window also raises a `member_settings_changed` alert (`instance_weakened:…`) for every member, so each member's allies hear of it.
 - Defaults: event headers 90 days, report and thumbnail blobs 30 days, alerts 90 days.
 - A retention worker hard-deletes expired rows and blobs. Backups follow the same windows (the docs explain backup rotation).
 - Deleting an account (§12) removes everything about the person through the same code path, after a 7-day hold. **Older backups still hold it until they are rotated out**, and restoring a backup taken before a deletion brings that account back, including its computers' tokens (SELF-HOSTING.md §9).

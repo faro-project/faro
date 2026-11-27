@@ -304,7 +304,7 @@ An instance can have several admins. Two is a good idea: if one admin loses acce
 
 - Nobody can change their own admin role, and the last enabled admin can't lose it.
 - A disabled account can't be made an admin. Nothing can be changed on an account that is being deleted.
-- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists accounts disabled or re-enabled (emailed to every admin except the one who did it), deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
+- Faro emails every change to the person and to every other admin. These emails can't be switched off. The **admin log** at the bottom of the People page lists every change: who, by whom and when. It also lists changes to the instance settings (what changed, from what to what; emailed to every admin except the one who made them), accounts disabled or re-enabled (emailed to every admin except the one who did it), deletions an admin asked for and accounts created from the command line. Faro never removes log entries, even with retention, but takes a deleted account's name out of them.
 - Being an admin gives no access to anyone's reports, alerts or screenshots.
 
 **If nobody can sign in as an admin** (for example, the only admin lost access to their email address), make another account an admin from the server itself:
@@ -444,7 +444,7 @@ curl -s -b faro-admin.cookies -X PATCH "$FARO/admin/api/settings" \
   -d '{"retention": {"blob_days": 14}}'
 ```
 
-The answer shows the settings now in effect. Registration modes are `invite-only`, `open` (needs `allowed_email_domains`; `["*"]` means any domain) and `closed`. Retention can only be set in days, from 1 to 3650. Settings changed this way are stored in the database and take priority over `faro.env` from then on.
+The answer shows the settings now in effect. Registration modes are `invite-only`, `open` (needs `allowed_email_domains`; `["*"]` means any domain) and `closed`. Retention can only be set in days, from 7 to 3650 (the `faro.env` values keep their own rule of at least 1). A shorter period applies only to data received after the change; what is already stored keeps the period it arrived under. A longer missed check-in grace period or a shorter retention period also raises an alert to every member's allies ("an admin changed a setting for all members"), the way a member's own shorter retention does. Settings changed this way are stored in the database and take priority over `faro.env` from then on.
 
 **8. Invite a member:**
 

@@ -35,7 +35,9 @@ use crate::db::repo::stats::{self, DeviceCounts, LastSeenBuckets, StorageBytes, 
 use crate::db::repo::{allies, groups, instance, sessions, users};
 use crate::error::{AppError, AppResult};
 use crate::mailer::Email;
-use crate::settings::{InstanceSettings, SettingsPatch, StoredSettings};
+use crate::settings::{
+    self, InstanceSettings, SettingsPatch, StoredSettings, MIN_INSTANCE_RETENTION_DAYS,
+};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -106,16 +108,68 @@ pub async fn patch_settings(
     ApiJson(patch): ApiJson<SettingsPatch>,
 ) -> AppResult<Json<InstanceSettings>> {
     s.require_admin()?;
+    if patch.below_retention_floor() {
+        return Err(AppError::bad_request(
+            "invalid_settings",
+            format!(
+                "retention must be at least {MIN_INSTANCE_RETENTION_DAYS} days: a shorter \
+                 window could delete a flagged report before an ally has seen it"
+            ),
+        ));
+    }
+    let now = state.now_ms();
     let mut tx = state.db().begin_write().await?;
     let mut stored =
         StoredSettings::from_json(&instance::settings_json(&mut *tx).await?).unwrap_or_default();
+    // What applies now, from the same stored overrides (not the in-memory
+    // copy, which another request may be about to replace).
+    let before = InstanceSettings::resolve(state.config(), &stored)
+        .map_err(|e| AppError::internal(e.to_string()))?;
     stored.apply(&patch);
-    let resolved = InstanceSettings::resolve(state.config(), &stored)
+    let mut resolved = InstanceSettings::resolve(state.config(), &stored)
         .map_err(|e| AppError::bad_request("invalid_settings", e.to_string()))?;
+    // A shorter retention window applies to data received from now on only.
+    let kept = before
+        .retention_before
+        .after_change(&before.retention, &resolved.retention, now);
+    stored.retention_before = Some(kept);
+    resolved.retention_before = kept;
     instance::set_settings_json(&mut *tx, &stored.to_json()).await?;
+
+    let changes = settings::describe_changes(&before, &resolved);
+    if !changes.is_empty() {
+        // The admin log, emailed to every other enabled admin.
+        let entry = admin_log::insert_settings_changed(&mut *tx, &s.user.id, &changes, now).await?;
+        let admins = users::enabled_admin_ids_except(&mut *tx, &s.user.id).await?;
+        crate::roles::tell(&mut tx, entry, &admins, now).await?;
+    }
+    // Longer grace or shorter retention weakens every member's monitoring:
+    // each member's allies are told, as when a member shortens their own.
+    let weakened = settings::weakened(&before, &resolved);
+    if !weakened.is_empty() {
+        let kind = ServerAlertKind::MemberSettingsChanged;
+        for member in users::member_ids(&mut *tx).await? {
+            alerts::insert(
+                &mut *tx,
+                &NewAlert {
+                    member_id: &member,
+                    device_id: None,
+                    source: AlertSource::Server,
+                    kind: kind.as_str(),
+                    urgency: kind.urgency(),
+                    event_seq: None,
+                    // Setting names, never content.
+                    detail: Some(format!("instance_weakened:{}", weakened.join(","))),
+                    dedupe_key: Some(format!("{}:instance:{member}:{now}", kind.as_str())),
+                    now_ms: now,
+                },
+            )
+            .await?;
+        }
+    }
     tx.commit().await?;
     state.set_settings(resolved.clone());
-    tracing::info!(admin = %s.user.id, "instance settings changed");
+    tracing::info!(admin = %s.user.id, changes = %changes, "instance settings changed");
     Ok(Json(resolved))
 }
 

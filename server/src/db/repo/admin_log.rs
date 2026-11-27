@@ -41,6 +41,9 @@ pub enum Action {
     /// An admin removed a group from the directory. The facilitators have
     /// their own notice.
     GroupUnlisted,
+    /// An admin changed instance settings. `user_id` is that admin; the
+    /// entry's `detail` lists what changed. Emailed to the other admins.
+    SettingsChanged,
 }
 
 impl Action {
@@ -56,6 +59,7 @@ impl Action {
             Action::GroupArchived => "group_archived",
             Action::GroupListed => "group_listed",
             Action::GroupUnlisted => "group_unlisted",
+            Action::SettingsChanged => "settings_changed",
         }
     }
 
@@ -71,6 +75,7 @@ impl Action {
             "group_archived" => Some(Action::GroupArchived),
             "group_listed" => Some(Action::GroupListed),
             "group_unlisted" => Some(Action::GroupUnlisted),
+            "settings_changed" => Some(Action::SettingsChanged),
             _ => None,
         }
     }
@@ -129,6 +134,31 @@ pub async fn insert<'e>(
     Ok(id)
 }
 
+/// Record an admin changing instance settings. `detail` lists what changed
+/// (setting names and values, never content). The entry is filed under the
+/// admin, so it is emailed like the others.
+pub async fn insert_settings_changed<'e>(
+    e: impl Executor<'e, Database = Any>,
+    actor: &UserId,
+    detail: &str,
+    now_ms: i64,
+) -> Result<String, sqlx::Error> {
+    let id = new_hex_id();
+    sqlx::query(
+        "INSERT INTO admin_log (id, action, user_id, actor_id, via, created_at, detail)
+         VALUES ($1, $2, $3, $3, $4, $5, $6)",
+    )
+    .bind(&id)
+    .bind(Action::SettingsChanged.as_str())
+    .bind(actor.as_str())
+    .bind(Via::Console.as_str())
+    .bind(now_ms)
+    .bind(detail)
+    .execute(e)
+    .await?;
+    Ok(id)
+}
+
 /// Record an admin's action on a group. The entry is about no account.
 pub async fn insert_for_group<'e>(
     e: impl Executor<'e, Database = Any>,
@@ -176,6 +206,8 @@ pub struct Entry {
     pub at_ms: i64,
     /// The group it was about (group actions only).
     pub group_id: Option<String>,
+    /// What changed (`settings_changed` only).
+    pub detail: Option<String>,
 }
 
 /// The most recent entries, newest first.
@@ -184,7 +216,7 @@ pub async fn recent<'e>(
     limit: i64,
 ) -> Result<Vec<Entry>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT l.id, l.action, l.via, l.created_at, l.group_id,
+        "SELECT l.id, l.action, l.via, l.created_at, l.group_id, l.detail,
                 u.id AS user_id, u.display_name AS user_name, u.email AS user_email,
                 a.id AS actor_id, a.display_name AS actor_name, a.email AS actor_email
          FROM admin_log l
@@ -215,6 +247,7 @@ pub async fn recent<'e>(
                 via: super::parse_col(r, "via", Via::parse)?,
                 at_ms: r.try_get("created_at")?,
                 group_id: r.try_get("group_id")?,
+                detail: r.try_get("detail")?,
             })
         })
         .collect()
