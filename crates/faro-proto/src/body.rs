@@ -219,6 +219,11 @@ pub enum TamperSignal {
     OtherVpn,
     /// iPhone: the phone looks jailbroken.
     JailbreakSuspected,
+    /// Android: battery optimisation is on for Faro, so the system may stop
+    /// it in the background (docs/ANDROID.md §8).
+    BatteryOptimizationOn,
+    /// Android: USB debugging is on (docs/ANDROID.md §8).
+    UsbDebuggingOn,
 }
 
 /// Why an iPhone's DNS filter is off.
@@ -263,6 +268,8 @@ impl TamperSignal {
                 | TamperSignal::DohDropped
                 | TamperSignal::OtherVpn
                 | TamperSignal::JailbreakSuspected
+                | TamperSignal::BatteryOptimizationOn
+                | TamperSignal::UsbDebuggingOn
         )
     }
 }
@@ -592,6 +599,23 @@ mod tests {
             (TamperSignal::DohDropped, "doh_dropped"),
             (TamperSignal::OtherVpn, "other_vpn"),
             (TamperSignal::JailbreakSuspected, "jailbreak_suspected"),
+        ] {
+            assert!(s.is_context_only());
+            assert_eq!(
+                serde_json::to_value(&s).unwrap(),
+                serde_json::json!({ "signal": name })
+            );
+        }
+    }
+
+    #[test]
+    fn android_context_signals_are_context_only() {
+        for (s, name) in [
+            (
+                TamperSignal::BatteryOptimizationOn,
+                "battery_optimization_on",
+            ),
+            (TamperSignal::UsbDebuggingOn, "usb_debugging_on"),
         ] {
             assert!(s.is_context_only());
             assert_eq!(
