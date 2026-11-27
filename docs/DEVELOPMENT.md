@@ -605,8 +605,6 @@ It builds everything from `main`, but:
 - it signs with throwaway keys made in the job, never the real ones, and as if nothing were published yet;
 - it publishes no layout and no image. It makes a **draft** GitHub Release named `dry-run-<version>-<run>` with the artifacts, `SHA256SUMS` and `update-layout.tar.gz` (the verified layout and its throwaway root, `dry-run-root.json`). It deletes the previous dry-run draft. Never publish it.
 
-While GitHub's runners can't start, the amd64 build fails at once and the dry run goes on without that binary: the run passes, `server (x86_64)` shows as failed, `layout` warns, and the draft's notes say which binary is missing. A real release needs every architecture.
-
 To try changes to `release.yml` or `release/` before merging them, run a dry run of their branch: `gh workflow run release.yml --ref <branch> -f dry_run=true`. Only a real release must come from a tag on `main`.
 
 ### Cutting a release
@@ -830,13 +828,15 @@ The app's Gradle build runs `crates/faro-android/build-android.sh <out-dir>`, wh
 
 ## CI runners
 
-Every workflow runs on GitHub's hosted runners. There are no self-hosted runners.
+**CI status (2026-11-27).** GitHub's hosted runners are blocked by an Actions billing problem, so no job has started since the last green run on `main`, `722c1a6` on 2026-11-25. Nothing on `main` after that has been checked by CI; run fmt, clippy and the tests of the crates you touch locally, and see [#201](https://github.com/faro-project/faro/issues/201).
+
+Every workflow runs on GitHub's hosted runners. The project has one self-hosted runner registered (a maintainer's Mac), and **no workflow may use it**: a pull request's code runs on a workflow's runner, so a self-hosted runner would run anyone's code with write access, and a fork's code if the repository goes public. A job that runs on a pull request must name a hosted runner; the `build (linux/amd64)` test job of `container.yml` ignores `FARO_LINUX_X64_RUNNER` for that reason, and the variables below apply only to pushes, manual runs, tags and schedules. Anything that has to run on the project's own hardware (the real model set, `model-eval`) runs on `push` to `main` only.
 
 | Runner | Jobs |
 |---|---|
-| `macos-15` (Apple Silicon) | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`) |
+| `macos-15` (Apple Silicon) | `test (macos)` (also `faro-detect` with ONNX Runtime), `macos-pkg`, `model-eval`, the release package (`release.yml`), `model` in `android.yml` (the image model) |
 | `macos-15-intel` | `test (macos-intel)` (also `faro-detect` with ONNX Runtime), `macos-pkg-intel` |
-| `ubuntu-24.04` | `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the amd64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` everything else on Linux, including the signing jobs; all of `update-timestamp.yml` |
+| `ubuntu-24.04` | `android` (`android.yml`: the Android app and its Rust core, on pushes to `main` and pull requests that touch them), `fmt`, `test (linux)`, `web`, `deny`, `release-scripts`, the amd64 container build and the multi-arch publish, the nightly `fuzz` workflow; in `release.yml` everything else on Linux, including the signing jobs; all of `update-timestamp.yml` |
 | `xcode-27` (Xcode 27 on macOS 27, Apple Silicon) | `ios` |
 | `ubuntu-24.04-arm` | the arm64 container build, and the arm64 server build in `release.yml` |
 | `windows-2025` | `test (windows)`, `windows-msi`, the release MSI (`release.yml`) |
