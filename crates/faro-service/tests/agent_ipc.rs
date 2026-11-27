@@ -849,7 +849,10 @@ async fn a_lasting_absence_is_raised_again() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let st = advance_in(&dev, AGENT_ABSENT_MS * 2, 2_000, |s| s.tamper_events >= 1).await;
     assert_eq!(st.tamper_events, 1, "{st:?}");
-    let st = advance_in(&dev, ABSENCE_RERAISE_MS + 60_000, 2_000, |s| {
+    // At most two hours, stopping at the second raise: the service counts
+    // at most MAX_TICK_GAP_MS of awake time per tick, so on a slow runner
+    // whose ticks fall behind the steps it counts less than is driven.
+    let st = advance_in(&dev, ABSENCE_RERAISE_MS * 2, 2_000, |s| {
         s.tamper_events >= 2
     })
     .await;
