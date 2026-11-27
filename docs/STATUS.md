@@ -28,7 +28,7 @@
 | Privacy notice | A link on the dashboard, and `/privacy` | Showing it at signup | `web/src/routes/+page.svelte` |
 | Postgres | Code path in `server/src/db` | Experimental and unsupported in the beta | `server/faro.example.toml` |
 | Feed verification | In progress ([#181](https://github.com/faro-project/faro/issues/181)) | See the issue; ARCHITECTURE.md §5.3 describes the finished design | |
-| Idle pause, guest sessions, the capture-hiding allowlists | Under review in [#183](https://github.com/faro-project/faro/issues/183), [#185](https://github.com/faro-project/faro/issues/185), [#186](https://github.com/faro-project/faro/issues/186) and [#187](https://github.com/faro-project/faro/issues/187) | See those issues | |
+| Guest sessions, the capture-hiding allowlists | Under review in [#185](https://github.com/faro-project/faro/issues/185), [#186](https://github.com/faro-project/faro/issues/186) and [#187](https://github.com/faro-project/faro/issues/187) | See those issues | |
 
 ## Planned (not built)
 

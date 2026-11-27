@@ -188,6 +188,20 @@ function describeAlert(
 				text: 'It is online but holding back events. Something may be blocking Faro.',
 				tone
 			};
+		case 'alerts_coalesced':
+			return {
+				title: `${device} sent a flood of alerts`,
+				text: d.folded
+					? `${d.folded} more alerts were combined into this one. Faro limits how many alerts one computer can raise at once.`
+					: 'Faro limits how many alerts one computer can raise at once.',
+				tone
+			};
+		case 'storage_quota':
+			return {
+				title: `${device} is over its storage limit`,
+				text: 'Faro has stopped storing new pictures and reports from it. Something may be sending far more than normal.',
+				tone
+			};
 		case 'chain_gap':
 			return {
 				title: `Events from ${device} are missing`,

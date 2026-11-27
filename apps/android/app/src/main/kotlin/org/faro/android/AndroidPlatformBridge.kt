@@ -72,6 +72,10 @@ class AndroidPlatformBridge(private val context: Context) : AndroidPlatform {
 
     override fun idleSecs(): ULong {
         val service = FaroAccessibilityService.instance ?: return 0uL
+        // The accessibility events only see taps and scrolls, and a phone that is awake and
+        // unlocked is nearly always playing something, so it is never idle. (The Rust side
+        // only slows down on idle; it no longer pauses.)
+        if (power.isInteractive && !keyguard.isKeyguardLocked) return 0uL
         return (service.idleMillis() / 1000).coerceAtLeast(0).toULong()
     }
 

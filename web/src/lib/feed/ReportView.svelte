@@ -19,7 +19,7 @@
 
 	const STATE: Record<ActivityState, string> = {
 		active: 'In use',
-		idle: 'Idle',
+		idle: 'Idle (screen on, no input)',
 		locked: 'Locked',
 		asleep: 'Asleep',
 		paused: 'Paused',

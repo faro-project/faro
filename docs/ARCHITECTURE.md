@@ -195,7 +195,8 @@ trait TamperSignals   { fn poll(&self) -> Vec<TamperSignal>; }
 - **Randomized interval**: exponential distribution with a mean of about 60 s, bounded to 15–180 s. The mean is configurable per member (30–300 s), and changing it notifies allies. *Status: today it is set in the service's `service.toml`; no web or menu control exists yet.*
 - **Burst mode**: after a borderline or flagged result, sample every 5–10 s for 2 minutes.
 - **Skip unchanged frames**: if the perceptual hash (dHash) matches the last frame, reuse the previous result.
-- **Pause** while the screen is locked, the session is idle or the display is asleep, and record these states so gaps in the timeline are explained.
+- **Pause** while the screen is locked or the display is asleep, and record these states so gaps in the timeline are explained.
+- **Input-idle is not a pause.** A video or slideshow keeps the display on with no input, so while the display is awake and unlocked capture continues. After 5 minutes without input (the scheduler's `idle_threshold_secs`) each regular interval is multiplied by `idle_interval_factor` (default 3, capped at `idle_interval_max_ms`, 15 minutes), and the unchanged-frame skip avoids repeated work on a still screen. Burst mode is unaffected, and the first input restores the normal rate. The timeline calls this "idle" (display on, no input), distinct from locked, asleep and paused. On Android the idle time reported is 0 whenever the screen is on and unlocked.
 - **Event triggers**: a foreground-app change, a new URL or a watch-listed DNS domain causes a capture 1–3 s later. *Status: the DNS trigger is mapped in the scheduler and never raised on desktop (the DNS and network signals are planned).*
 - **Budget**: under 1% average CPU, under 150 MB RSS including the model.
 
@@ -500,6 +501,8 @@ Every event carries a **plaintext, device-signed `urgency`** so the instance can
   | `invalid_signature` | server | urgent | An event or report arrived that the device's key didn't sign. |
   | `missed_checkin` | server | urgent only | The device went silent past the grace period. The normal-urgency "back online" alert of the same kind is not tamper-class. |
   | `upload_stalled` | server | urgent | The device is alive but not uploading what it records (PROTOCOL.md §7). |
+  | `alerts_coalesced` | server | urgent | A device or member exceeded the alert rate limit; the alerts beyond it are counted on this one (`folded=N`) instead of each paging allies. The events themselves are stored and visible. |
+  | `storage_quota` | server | urgent | A device is over its storage quota: new event bodies are not stored (headers are) and new reports are refused. |
   | `device_removed` | server | urgent | The member removed an active computer, which stops its monitoring. |
   | `ally_removed` | server | normal | The member removed an ally, or an ally left. That is the most direct way to stop being watched. A removed ally is told too. |
   | `account_disabled` | server | urgent | An admin disabled the account (§4.3). The person is told even though their account is disabled. |

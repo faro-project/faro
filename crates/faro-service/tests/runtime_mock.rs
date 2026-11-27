@@ -794,20 +794,21 @@ async fn events_survive_a_failing_outbox() {
         s.acked_through.is_some() && s.acked_through == s.last_seq
     })
     .await;
-    let m = shared.lock().unwrap();
-    let tamper = m
-        .events
-        .iter()
-        .filter(|e| e.header.kind == EventKind::Tamper)
-        .find_map(
-            |e| match open_event_body(e, &member_id, &member_enc).unwrap() {
-                EventBody::Tamper { signal, .. } => Some(signal),
-                _ => None,
-            },
-        );
-    assert_eq!(tamper, Some(TamperSignal::WaylandTokenLost));
-    assert!(m.auth_failures.is_empty(), "{:?}", m.auth_failures);
-    drop(m);
+    {
+        let m = shared.lock().unwrap();
+        let tamper = m
+            .events
+            .iter()
+            .filter(|e| e.header.kind == EventKind::Tamper)
+            .find_map(
+                |e| match open_event_body(e, &member_id, &member_enc).unwrap() {
+                    EventBody::Tamper { signal, .. } => Some(signal),
+                    _ => None,
+                },
+            );
+        assert_eq!(tamper, Some(TamperSignal::WaylandTokenLost));
+        assert!(m.auth_failures.is_empty(), "{:?}", m.auth_failures);
+    }
     handle.shutdown().await.unwrap();
 }
 

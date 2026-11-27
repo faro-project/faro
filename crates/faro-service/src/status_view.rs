@@ -317,7 +317,7 @@ impl StatusView {
         let capture = match state {
             CaptureState::Active => format!("active, from {}", target.unwrap_or("?")),
             CaptureState::Idle => format!(
-                "paused: {} is idle",
+                "paused: the display is off for {}",
                 target.unwrap_or("the person at the screen")
             ),
             CaptureState::Locked => "paused: the screen is locked".to_owned(),

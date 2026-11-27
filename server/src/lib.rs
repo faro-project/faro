@@ -50,6 +50,7 @@ pub mod csrf;
 pub mod db;
 pub mod deletion;
 pub mod device_auth;
+pub mod device_limits;
 pub mod doctor;
 pub mod error;
 pub mod groups;

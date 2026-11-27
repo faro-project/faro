@@ -57,6 +57,10 @@ pub struct FaroCore {
     pub(crate) rt: Rt,
     pub(crate) store: Mutex<Store>,
     outbox: Mutex<Option<Outbox>>,
+    /// Held for a whole [`FaroCore::upload_pending`]: two uploads of one
+    /// core (the tunnel's timers, the app's tasks) run one after the other,
+    /// not interleaved on the outbox.
+    upload: Mutex<()>,
     /// Monotonic time of the last identity check that passed.
     identity_checked: Mutex<Option<u64>>,
     /// The instance's clock minus this phone's, as the last answer's
@@ -540,10 +544,25 @@ impl FaroCore {
         })
     }
 
+    /// Whether anything waits for [`FaroCore::upload_pending`]: an event or
+    /// a report in the outbox. A local read, no key and no network; false
+    /// when not enrolled or after Leave Faro, where there is nothing to send.
+    pub fn has_pending(&self) -> Result<bool, FaroError> {
+        let Some(e) = lock(&self.store).get::<Enrollment>(ENROLLMENT)? else {
+            return Ok(false);
+        };
+        if self.leaving()?.is_some() {
+            return Ok(false);
+        }
+        let stats = self.with_outbox(&e, |o| Ok(o.stats()?))?;
+        Ok(stats.events > 0 || stats.reports > 0)
+    }
+
     /// Upload everything pending: refresh the recipient manifest (a
     /// newer one the member signed is adopted, anything else is refused and
     /// the current one kept), then events in `seq` order, then reports.
     pub fn upload_pending(&self) -> Result<UploadOutcome, FaroError> {
+        let _one_at_a_time = lock(&self.upload);
         let e = self.enrollment()?;
         if !self.is_approved(&e)? {
             return Err(FaroError::NotApproved);
@@ -635,6 +654,7 @@ impl FaroCore {
             rt: Rt(Some(rt)),
             store: Mutex::new(store),
             outbox: Mutex::new(None),
+            upload: Mutex::new(()),
             identity_checked: Mutex::new(None),
             clock_offset: Arc::new(AtomicI64::new(0)),
         }))

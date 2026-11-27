@@ -139,7 +139,34 @@ pub struct AdminLogNotice {
     pub detail: Option<String>,
 }
 
-/// Due pending notifications of one mode, oldest first.
+/// When `recipient` was last sent an immediate alert or report email about
+/// `member`, if ever.
+pub async fn last_immediate_sent<'e>(
+    e: impl Executor<'e, Database = Any>,
+    recipient: &UserId,
+    member: &UserId,
+) -> Result<Option<i64>, sqlx::Error> {
+    let t: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(n.sent_at) FROM notifications n
+         LEFT JOIN alerts a ON a.id = n.alert_id
+         LEFT JOIN reports rp ON rp.id = n.report_id
+         WHERE n.recipient_id = $1 AND n.status = 'sent' AND n.mode = 'immediate'
+           AND COALESCE(a.member_id, rp.member_id) = $2
+           AND (a.extra_recipient_id IS NULL OR a.extra_recipient_id <> n.recipient_id)
+           AND NOT (a.source = 'server' AND a.kind IN (
+                'account_disabled', 'account_enabled', 'ally_disabled', 'ally_enabled',
+                'account_deleted', 'ally_deleted', 'account_deletion_cancelled'))",
+    )
+    .bind(recipient.as_str())
+    .bind(member.as_str())
+    .fetch_one(e)
+    .await?;
+    Ok(t)
+}
+
+/// Due pending notifications of one mode, **round-robin by member**: every
+/// member's oldest row comes before any member's second, so one member's
+/// flood cannot starve the others. Oldest first within a member.
 pub async fn due<'e>(
     e: impl Executor<'e, Database = Any>,
     mode: Mode,
@@ -154,6 +181,9 @@ pub async fn due<'e>(
                 a.source AS alert_source, a.kind AS alert_kind,
                 a.detail AS alert_detail, a.created_at AS alert_created_at,
                 a.extra_recipient_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(a.member_id, rp.member_id, al.user_id, gn.recipient_id)
+                    ORDER BY n.created_at, n.id) AS rn,
                 m.display_name AS member_name, m.email AS member_email, d.name AS device_name,
                 ab.display_name AS about_name,
                 al.action AS log_action, al.detail AS log_detail, al.via AS log_via, al.actor_id AS log_actor_id,
@@ -181,7 +211,7 @@ pub async fn due<'e>(
          LEFT JOIN users act ON act.id = al.actor_id
          WHERE n.status = 'pending' AND n.mode = $1 AND n.due_at <= $2
            AND n.next_attempt_at <= $2
-         ORDER BY n.created_at, n.id
+         ORDER BY rn, n.created_at, n.id
          LIMIT $3",
     )
     .bind(mode.as_str())

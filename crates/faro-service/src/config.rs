@@ -7,7 +7,7 @@
 //!
 //! **What is deliberately not configurable here.** Anything that would let
 //! whoever can edit this file quietly weaken monitoring without allies being
-//! told: the detector thresholds, the idle threshold that pauses capture, and
+//! told: the detector thresholds, the idle threshold and idle capture rate, and
 //! the urgency floors. (The one exception is `[dev_thresholds]`, which only a
 //! service built with the `dev` feature acts on, and which can only lower
 //! thresholds: [`crate::thresholds`]. A release build ignores it.) The

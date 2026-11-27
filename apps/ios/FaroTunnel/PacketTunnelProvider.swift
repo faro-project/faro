@@ -23,7 +23,10 @@ private let log = Logger(subsystem: "org.faro.ios.tunnel", category: "tunnel")
 /// * every minute: bursts of blocked lookups recorded as `flag` events;
 /// * every minute and on wake: Screen Time authorization read (the tunnel
 ///   watches layer 1, docs/IOS.md §10.2), and the tamper ledger's queued
-///   requests recorded and uploaded;
+///   requests recorded;
+/// * at the end of every round (these, start, wake, sleep and stop):
+///   whatever the outbox holds is uploaded (`TunnelRounds`), so a failed
+///   upload is tried again the next minute;
 /// * on stop: the reason, which says whether the member switched the
 ///   filter off and why (`FilterOff` at once);
 /// * every 10 minutes: the ended counter buckets recorded as
@@ -38,7 +41,7 @@ private let log = Logger(subsystem: "org.faro.ios.tunnel", category: "tunnel")
 /// made while the phone is awake counts as made with the screen on.
 ///
 /// Nothing here writes, logs or keeps a looked-up name.
-final class PacketTunnelProvider: NEPacketTunnelProvider {
+final class PacketTunnelProvider: NEPacketTunnelProvider, TunnelWork {
     /// Packets, upstream sockets and the filter.
     private let queue = DispatchQueue(label: "org.faro.ios.tunnel.dns", qos: .userInitiated)
     /// Calls into the Rust core that block (database, network).
@@ -58,9 +61,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Only touched on `coreQueue`.
     private var core: FaroCore?
 
-    static let heartbeatInterval: TimeInterval = 5 * 60
-    static let markerInterval: TimeInterval = 60
-    static let flushInterval: TimeInterval = 10 * 60
+    static let heartbeatInterval = TunnelRounds.heartbeat
+    static let markerInterval = TunnelRounds.minute
+    static let flushInterval = TunnelRounds.flush
     /// How long `sleep` waits for its heartbeat before letting the phone sleep.
     static let sleepHeartbeatWait: TimeInterval = 5
     /// How long `stopTunnel` waits to record and send a `FilterOff`.
@@ -113,11 +116,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.touchMarker()
                     self.checkScreenTime()
                     completionHandler(nil)
-                    self.coreQueue.async {
-                        self.refreshFromCore()
-                        self.heartbeat(.active)
-                        self.recordQueuedTamper()
-                    }
+                    self.coreQueue.async { TunnelRounds.run(.start, on: self) }
                 }
             }
         }
@@ -155,9 +154,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let once = Once()
             let finish = { once.run(completionHandler) }
             queue.asyncAfter(deadline: .now() + Self.stopReportWait, execute: finish)
+            let switchedOff: Bool
+            if case .off = meaning { switchedOff = true } else { switchedOff = false }
             coreQueue.async {
-                if case .off = meaning { self.recordQueuedTamper() }
-                self.flushReports(filterOn: false)
+                TunnelRounds.run(.stop(switchedOff: switchedOff), on: self)
                 finish()
             }
         }
@@ -172,8 +172,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let finish = { once.run(completionHandler) }
             queue.asyncAfter(deadline: .now() + Self.sleepHeartbeatWait, execute: finish)
             coreQueue.async {
-                self.heartbeat(.sleeping)
-                self.flushReports(filterOn: true)
+                TunnelRounds.run(.sleep, on: self)
                 finish()
             }
         }
@@ -184,10 +183,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             awake = true
             touchMarker()
             checkScreenTime()
-            coreQueue.async {
-                self.heartbeat(.active)
-                self.recordQueuedTamper()
-            }
+            coreQueue.async { TunnelRounds.run(.wake, on: self) }
         }
     }
 
@@ -346,28 +342,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard let self else { return }
                 self.touchMarker()
                 self.checkScreenTime()
-                self.coreQueue.async { self.recordQueuedTamper() }
                 // No resolver yet: try again, at most every 5 minutes.
                 if self.filter?.status().upstreams == 0, Date().timeIntervalSince(self.lastReread) > 300 {
                     self.rereadResolvers(reason: "retry")
                 }
-                // A burst is an alert: it waits a minute at most, not ten.
-                self.coreQueue.async { self.flushBursts() }
+                // A burst is an alert: it waits a minute at most, not ten,
+                // and goes out with the tamper events in the same round.
+                self.coreQueue.async { TunnelRounds.run(.minute, on: self) }
             },
             timer(every: Self.heartbeatInterval) { [weak self] in
                 guard let self, self.awake else { return }
-                self.coreQueue.async { self.heartbeat(.active) }
+                self.coreQueue.async { TunnelRounds.run(.heartbeat, on: self) }
             },
             timer(every: Self.flushInterval) { [weak self] in
                 guard let self else { return }
                 self.flushCounters()
                 self.logStatus("periodic")
                 let dohDropped = self.filter?.takeDohDropped() ?? 0
-                self.coreQueue.async {
-                    self.refreshFromCore()
-                    self.flushReports(filterOn: true)
-                    self.noteDohDropped(dohDropped)
-                }
+                self.coreQueue.async { TunnelRounds.run(.flush(dohDropped: dohDropped), on: self) }
             },
         ]
     }
@@ -420,7 +412,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         case .reported:
             log.notice("Screen Time access is off")
-            coreQueue.async { self.recordQueuedTamper() }
+            coreQueue.async { TunnelRounds.run(.minute, on: self) }
         default:
             break
         }
@@ -459,7 +451,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Open the core if it isn't yet (it can't be before the first unlock),
     /// then pick up the instance host, the member's choices and a newer
     /// installed domain list.
-    private func refreshFromCore() {
+    func refreshFromCore() {
         if core == nil, let group {
             core = try? CoreLink.open(group: group)
         }
@@ -498,9 +490,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Records what the watchers queued in the ledger (this tunnel, the
-    /// monitor extension, the app) as urgent `tamper` events, and uploads
-    /// them at once. Before the first unlock, or before approval, they wait.
-    private func recordQueuedTamper() {
+    /// monitor extension, the app) as urgent `tamper` events. The round
+    /// that called this uploads them (`TunnelRounds`). Before the first
+    /// unlock, or before approval, they wait.
+    func recordQueuedTamper() {
         guard let ledger, !ledger.read().pending.isEmpty else { return }
         if core == nil {
             refreshFromCore()
@@ -509,16 +502,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let n = TamperLink.drain(ledger, into: core)
         guard n > 0 else { return }
         log.notice("recorded \(n, privacy: .public) tamper event(s)")
+    }
+
+    /// Whether the outbox holds an event or a report: a local read.
+    func hasPending() -> Bool {
+        guard let core else { return false }
+        return (try? core.hasPending()) ?? false
+    }
+
+    /// Sends what the outbox holds. Only called from `TunnelRounds` on
+    /// `coreQueue`, and the core takes its own lock for an upload, so two
+    /// never run at once. A failure leaves the events where they are: the
+    /// next round finds them still pending and tries again.
+    func uploadPending() {
+        guard let core else { return }
         do {
             _ = try core.uploadPending()
+        } catch FaroError.KeysLocked {
+            log.info("keys locked: upload waits")
+        } catch FaroError.NotEnrolled, FaroError.NotApproved, FaroError.Left {
+            // Nothing to send to yet, or ever.
         } catch {
-            log.error("tamper upload failed: \(String(describing: error), privacy: .public)")
+            log.error("upload failed: \(String(describing: error), privacy: .public)")
         }
     }
 
     /// Notes that encrypted-DNS connections were dropped, as context for
     /// the daily report (never an alert), at most once an hour.
-    private func noteDohDropped(_ count: UInt64) {
+    func noteDohDropped(_ count: UInt64) {
         guard count > 0, let ledger, let core else { return }
         log.notice("dropped \(count, privacy: .public) packet(s) to encrypted-DNS resolvers")
         TamperLink.context(
@@ -527,6 +538,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// One heartbeat. Before the first unlock the keys are locked, and the
     /// heartbeat waits for the next round; the filter runs regardless.
+    func heartbeat(_ state: TunnelHeartbeatState) {
+        heartbeat(state == .active ? HeartbeatState.active : .sleeping)
+    }
+
     private func heartbeat(_ state: HeartbeatState) {
         if core == nil {
             refreshFromCore()
@@ -550,7 +565,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Record the bursts seen so far as `flag` events. A locked key store
     /// (before the first unlock) or a device not yet approved leaves them in
     /// the filter for the next minute.
-    private func flushBursts() {
+    func flushBursts() {
         if core == nil {
             refreshFromCore()
         }
@@ -573,7 +588,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// buckets, the shield counters, a protection sample and, once a day,
     /// the report. Each step is safe to repeat and to run from another
     /// process (the core records each bucket, and each shield count, once).
-    private func flushReports(filterOn: Bool) {
+    func flushReports(filterOn: Bool) {
         if core == nil {
             refreshFromCore()
         }

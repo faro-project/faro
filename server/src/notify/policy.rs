@@ -79,6 +79,8 @@ pub fn is_tamper_class(source: &str, kind: &str, urgency: Urgency) -> bool {
                 ServerAlertKind::AllyRemoved
                 | ServerAlertKind::DeviceRemoved
                 | ServerAlertKind::UploadStalled
+                | ServerAlertKind::AlertsCoalesced
+                | ServerAlertKind::StorageQuota
                 | ServerAlertKind::AccountDisabled
                 | ServerAlertKind::AllyDisabled
                 | ServerAlertKind::AccountDeleted
