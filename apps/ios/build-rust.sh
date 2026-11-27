@@ -115,3 +115,6 @@ rm -rf "$here/FaroCore.xcframework"
 xcodebuild -create-xcframework "${args[@]}" -output "$here/FaroCore.xcframework"
 
 echo "built $here/FaroCore.xcframework and $gen"
+
+# The project's update root, which the app bundles for domain list updates.
+"$here/build-update-root.sh"

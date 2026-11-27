@@ -187,9 +187,11 @@ It would add full-URL matching (`reddit.com/r/…`, not just `reddit.com`), whic
 
 ## 9. Choosing what is blocked
 
-- **At setup**, the defaults are: adult (both layers), Faro protected from deletion, explicit media blocked, automatic time. Each optional extra is one screen: gambling, chosen apps or categories, chosen sites, App Store rating.
+- **At setup**, the defaults are: adult (both layers), Faro protected from deletion, explicit media blocked, automatic time. Setup doesn't ask about the optional extras. They are on the **Choices** screen, one tap from the status screen: gambling, chosen apps or categories, chosen sites, App Store rating.
 - **Tightening** takes effect at once and is a normal-urgency `settings_change`. Allies can switch these notifications off.
 - **Loosening** (removing a category, app or site, or switching a default off) takes effect **after a delay**, 24 hours by default. Allies are told when it is asked for and again when it takes effect, and the member can cancel in between. The delay is the member's own setting (0 to 72 hours). Changing it is itself a loosening when it gets shorter. Desktop has no equivalent, because desktop doesn't block. On a phone, a short pause between the urge and the setting is most of what makes blocking work.
+- **How it is kept.** A loosening is stored as pending with its `takes_effect_at`, in the app group. Whichever of the app, the monitor and the tunnel runs first after that time applies it. The monitor can't link the core, so it leaves a request that the app or the tunnel turns into the `settings_change` event. Waiting loosenings are applied to the settings as they are by then, and asking for something else on the same setting cancels the waiting one (with an event). A cancel that comes after the time is too late. A delay of 0 applies at once and is still an event allies see. Setting the clock back keeps a loosening waiting. Setting it forward is for the automatic date and time requirement (§6.2) and the instance's clock-skew alert to catch.
+- **The tunnel's copy.** The choices are also written into the tunnel's `providerConfiguration`, which it can read before the first unlock, so an opted-in gambling block holds from the first lookup. A copy only changes when the app runs, so each carries a generation number and the tunnel takes the newer one (the configuration when they tie).
 - **Allies can't change anything** (§4 principle 5). They can only see it.
 
 ---
@@ -350,6 +352,7 @@ These are facts the design depends on that Apple's documentation doesn't settle.
 - **Loosening waits 24 hours by default.** The member can set it from 0 to 72 hours, and allies see the setting.
 - **Faro doesn't set up or rely on an ally-held Screen Time passcode.**
 - **Setup can't be finished without both layers.** There is no skip for Screen Time access or the VPN configuration: a phone with only one layer would be enrolled and look protected while half of §5's design is missing. Turning a layer off later is allowed and reported (§10.2).
+- **Optional extras live on the Choices screen, not in setup** (§9), so setup stays short.
 - **The resolver-reading gap is accepted.** On each network change the tunnel turns its DNS settings off for well under a second to read the network's resolvers (§7.4). Layer 1 still covers WebKit during that moment.
 - **No resolver means `SERVFAIL`, never a public one.** Allowed names fail at once until the network's resolvers are found again. No lookup goes to a third party.
 
