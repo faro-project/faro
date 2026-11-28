@@ -13,6 +13,7 @@
 	import type { SupportedMember } from '#lib/types.ts';
 	import AllySafetyCode from '#lib/ui/AllySafetyCode.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
 
 	let memberId = $state('');
@@ -72,7 +73,11 @@
 
 <Gate role="ally">
 	{#snippet children(user)}
-		<p class="back"><a href={resolve('/supporting')}>← People you support</a></p>
+		<p class="back-row">
+			<a class="back" href={resolve('/supporting')}>
+				<Icon name="arrow-left" /> People you support
+			</a>
+		</p>
 		{#if view === 'loading'}
 			<p class="muted" role="status">Loading…</p>
 		{:else if view === 'error'}
@@ -185,13 +190,8 @@
 </Gate>
 
 <style>
-	.back {
+	.back-row {
 		margin: -0.75rem 0 1rem;
-		font-size: 0.92rem;
-	}
-
-	.back a {
-		text-decoration: none;
 	}
 
 	.tabs {
@@ -208,18 +208,25 @@
 		border-bottom: 2px solid transparent;
 		border-radius: 0;
 		color: var(--muted);
-		padding: 0.5rem 0.8rem;
+		font-size: 0.8rem;
+		padding: 0.5rem 0.75rem;
 		margin-bottom: -1px;
 		min-height: 0;
 	}
 
+	.tabs button:hover {
+		color: var(--text);
+	}
+
 	.tabs button[aria-selected='true'] {
 		color: var(--text);
-		border-bottom-color: var(--brand);
+		border-bottom-color: var(--accent);
 	}
 
 	.leave {
 		margin-top: 3rem;
-		font-size: 0.92rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--border);
+		font-size: 0.88rem;
 	}
 </style>

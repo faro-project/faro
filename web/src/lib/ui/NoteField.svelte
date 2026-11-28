@@ -43,7 +43,8 @@
 			aria-describedby="{id}-count"
 			aria-invalid={n > MAX_NOTE_CHARS ? 'true' : undefined}></textarea>
 		<span class="hint" id="{id}-count" class:over={n > MAX_NOTE_CHARS}>
-			{n} / {MAX_NOTE_CHARS}. Encrypted to them and signed by you: the server can't read it.
+			<span class="count">{n} / {MAX_NOTE_CHARS}</span>. Encrypted to them and signed by you: the
+			server can't read it.
 		</span>
 	</div>
 	{#if (alwaysSign || text.trim()) && !unlocked}
@@ -61,12 +62,17 @@
 {/if}
 
 <style>
-	textarea {
-		width: 100%;
+	.count {
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.over {
-		color: var(--danger, #b00020);
+		color: var(--danger);
+	}
+
+	.over .count {
 		font-weight: 600;
 	}
 </style>

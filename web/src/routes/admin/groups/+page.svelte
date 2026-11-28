@@ -79,7 +79,7 @@
 {:else if rows.length === 0}
 	<div class="empty"><p>Nobody has started a group yet.</p></div>
 {:else}
-	<div class="field">
+	<div class="field filter">
 		<label class="visually-hidden" for="group-filter">Filter groups by name</label>
 		<input id="group-filter" type="search" placeholder="Filter by name" bind:value={query} />
 	</div>
@@ -119,7 +119,7 @@
 		{/each}
 	</ul>
 	{#if shown.length === 0}<div class="empty"><p>No group matches that name.</p></div>{/if}
-	<p class="muted small">{count(rows.length)} in all.</p>
+	<p class="total muted">{count(rows.length)} in all.</p>
 {/if}
 
 <dialog bind:this={dialog} onclose={() => (pending = null)} aria-labelledby="archive-title">
@@ -138,3 +138,22 @@
 		</div>
 	{/if}
 </dialog>
+
+<style>
+	.filter {
+		max-width: 22rem;
+	}
+
+	/* Size, facilitators and dates: metadata, in the code face. */
+	.rows .row-meta {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		margin-top: 0.25rem;
+	}
+
+	.total {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		margin-top: 0.75rem;
+	}
+</style>

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
+	import Icon from '#lib/ui/Icon.svelte';
 </script>
 
 <svelte:head>
@@ -11,4 +12,4 @@
 <p class="muted">
 	{page.status === 404 ? 'There is no page at this address.' : page.error?.message}
 </p>
-<p><a href={resolve('/')}>Go to the start page</a></p>
+<p><a class="back" href={resolve('/')}><Icon name="arrow-left" /> Go to the start page</a></p>

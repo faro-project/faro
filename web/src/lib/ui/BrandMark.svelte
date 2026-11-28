@@ -19,7 +19,7 @@
 		size = 'header'
 	}: { logo?: BrandingLogo | null; name?: string; size?: 'header' | 'large' } = $props();
 
-	let height = $derived(size === 'header' ? 26 : 56);
+	let height = $derived(size === 'header' ? 22 : 56);
 	let path = $derived(logoPath(logo));
 </script>
 

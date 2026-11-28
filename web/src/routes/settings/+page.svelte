@@ -16,6 +16,7 @@
 	import DeleteAccount from '#lib/ui/DeleteAccount.svelte';
 	import DisplayName from '#lib/ui/DisplayName.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import NotificationPrefs from '#lib/ui/NotificationPrefs.svelte';
 	import ProposalBlocks from '#lib/ui/groups/ProposalBlocks.svelte';
 	import ReachOutSettings from '#lib/ui/ReachOutSettings.svelte';
@@ -106,15 +107,15 @@
 			<DisplayName />
 			<dl class="facts">
 				<dt>Email</dt>
-				<dd>{user.email}</dd>
+				<dd class="mono">{user.email}</dd>
 				<dt>Here as</dt>
-				<dd>
+				<dd class="mono">
 					{[user.roles.member && 'member', user.roles.ally && 'ally', user.roles.admin && 'admin']
 						.filter(Boolean)
 						.join(', ') || 'no role yet'}
 				</dd>
 				<dt>Joined</dt>
-				<dd>{date(user.created_at_ms)}</dd>
+				<dd class="mono">{date(user.created_at_ms)}</dd>
 			</dl>
 		</section>
 
@@ -150,7 +151,7 @@
 			{/if}
 			{#if keyring.unlocked}
 				<button class="secondary small" type="button" onclick={() => keyring.lock()}>
-					Lock my keys now
+					<Icon name="lock" /> Lock my keys now
 				</button>
 			{/if}
 			{#if user.roles.member && memberKeys}
@@ -203,7 +204,9 @@
 						<button class="primary" type="submit" disabled={retentionBusy}>
 							{retentionBusy ? 'Saving…' : 'Save'}
 						</button>
-						{#if retentionSaved}<span class="ok" role="status">✓ Saved</span>{/if}
+						{#if retentionSaved}<span class="saved" role="status">
+								<Icon name="check" /> Saved
+							</span>{/if}
 					</div>
 				{:else if retentionError}
 					<div class="notice error" role="alert"><p>{retentionError}</p></div>
@@ -244,16 +247,14 @@
 
 <style>
 	h3 {
-		font-size: 0.95rem;
-		margin-top: 0.75rem;
+		margin-top: 1.1rem;
+	}
+
+	h2 + h3 {
+		margin-top: 0;
 	}
 
 	.days input {
 		max-width: 8rem;
-	}
-
-	.ok {
-		color: var(--ok);
-		font-weight: 600;
 	}
 </style>

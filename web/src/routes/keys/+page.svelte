@@ -25,6 +25,7 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { MemberKeysBlob, User, WellKnown } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import NewPassphrase from '#lib/ui/NewPassphrase.svelte';
 	import RecipientList from '#lib/ui/RecipientList.svelte';
 	import RecoveryCode from '#lib/ui/RecoveryCode.svelte';
@@ -173,9 +174,15 @@
 					<dt>Fingerprint</dt>
 					<dd><code>{formatKeyId(keyId(unb64(blob.sign_pubkey)))}</code></dd>
 					<dt>Created</dt>
-					<dd>{date(blob.created_at_ms)}</dd>
+					<dd class="mono">{date(blob.created_at_ms)}</dd>
 					<dt>In this tab</dt>
-					<dd>{keyring.memberFor(user.id) ? 'Unlocked' : 'Locked'}</dd>
+					<dd class="mono lock-state">
+						{#if keyring.memberFor(user.id)}
+							<Icon name="unlock" /> Unlocked
+						{:else}
+							<Icon name="lock" /> Locked
+						{/if}
+					</dd>
 				</dl>
 				<p class="muted small">
 					When you set up Faro on a computer, it checks that it is talking to this key. The
@@ -194,8 +201,8 @@
 						<p class="muted" role="status">Checking…</p>
 					{:else if manifestState === 'ok'}
 						<p>
-							<span class="chip good">✓ Signed</span> Your computers encrypt to you and to the allies
-							you have approved, as listed in the recipient list you signed.
+							<span class="chip good"><Icon name="check" /> Signed</span> Your computers encrypt to you
+							and to the allies you have approved, as listed in the recipient list you signed.
 						</p>
 						{#if current}
 							<RecipientList title="Your computers encrypt to" list={current} />
@@ -237,5 +244,11 @@
 
 	progress {
 		margin-top: 0.5rem;
+	}
+
+	.lock-state {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
 	}
 </style>

@@ -67,7 +67,7 @@
 				{#if item.type === 'entry'}
 					<div class="row-main">
 						<span>{describeHistory(item.entry)}</span>
-						<span class="muted small" title={dateTime(item.entry.at_ms)}>
+						<span class="when" title={dateTime(item.entry.at_ms)}>
 							{date(item.entry.at_ms)}
 						</span>
 					</div>
@@ -89,7 +89,7 @@
 							{#each item.entries as e (e.id)}
 								<li class="row-main">
 									<span>{describeHistory(e)}</span>
-									<span class="muted small" title={dateTime(e.at_ms)}>{date(e.at_ms)}</span>
+									<span class="when" title={dateTime(e.at_ms)}>{date(e.at_ms)}</span>
 								</li>
 							{/each}
 						</ul>
@@ -111,14 +111,31 @@
 {/if}
 
 <style>
+	.rows {
+		font-size: 0.94rem;
+	}
+
+	.rows > li {
+		padding-top: 0.6rem;
+		padding-bottom: 0.6rem;
+	}
+
+	.when {
+		font-family: var(--mono);
+		font-size: 0.75rem;
+		color: var(--muted);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+
 	.run {
 		list-style: none;
-		margin: 0.5rem 0 0;
-		padding: 0 0 0 1rem;
-		border-left: 2px solid var(--border);
+		margin: 0.5rem 0 0.1rem;
+		padding: 0 0 0 0.9rem;
+		border-left: 1px solid var(--border-strong);
 	}
 
 	.run > li {
-		padding: 0.25rem 0;
+		padding: 0.2rem 0;
 	}
 </style>

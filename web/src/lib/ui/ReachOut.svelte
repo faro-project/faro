@@ -226,7 +226,7 @@
 		{#if step === 'sent'}
 			<div class="notice ok" role="status">
 				<p>
-					✓ Sent. {sentTo === 1 ? 'One person was' : `${sentTo} people were`} told you're reaching out.
+					Sent. {sentTo === 1 ? 'One person was' : `${sentTo} people were`} told you're reaching out.
 					You'll see here when someone answers.
 				</p>
 			</div>
@@ -240,22 +240,22 @@
 			</p>
 			<fieldset class="choices">
 				<legend class="visually-hidden">Who</legend>
-				<label>
+				<label class="check">
 					<input type="radio" bind:group={audience} value="allies" />
 					My allies
 				</label>
 				{#if groupId}
-					<label>
+					<label class="check">
 						<input type="radio" bind:group={audience} value="facilitators" />
 						The facilitators
 					</label>
-					<label>
+					<label class="check">
 						<input type="radio" bind:group={audience} value="people" />
 						People I choose
 					</label>
 				{/if}
 				{#if wholeGroupOffered}
-					<label>
+					<label class="check">
 						<input type="radio" bind:group={audience} value="group" disabled={wholeGroupBlocked} />
 						The whole group ({participants} people)
 					</label>
@@ -276,7 +276,7 @@
 					<ul class="pick">
 						{#each people as p (p.user_id)}
 							<li>
-								<label>
+								<label class="check">
 									<input
 										type="checkbox"
 										checked={chosen.includes(p.user_id)}
@@ -369,23 +369,42 @@
 
 <style>
 	.choices {
-		border: none;
-		padding: 0;
-		margin: 0 0 0.75rem;
+		margin: 0 0 0.9rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.35rem;
+		gap: 0.45rem;
 	}
 
+	.choices label {
+		margin: 0;
+	}
+
+	/* People to choose from, in a hairline box that scrolls. */
 	.pick {
 		list-style: none;
-		padding: 0;
-		margin: 0;
+		padding: 0.15rem 0;
+		margin: 0 0 0.4rem;
 		max-height: 16rem;
 		overflow-y: auto;
+		background: var(--input-bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
 	}
 
 	.pick li {
-		padding: 0.2rem 0;
+		padding: 0.35rem 0.7rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.pick li:first-child {
+		border-top: none;
+	}
+
+	.pick label {
+		margin: 0;
+		font-family: var(--mono);
+		font-size: 0.86rem;
+		letter-spacing: -0.01em;
+		overflow-wrap: anywhere;
 	}
 </style>

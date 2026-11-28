@@ -36,6 +36,7 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { AllyLink, InviteCreated, MyAllies } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import RecipientList from '#lib/ui/RecipientList.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
 
@@ -308,7 +309,7 @@
 			</p>
 		</div>
 
-		{#if done}<div class="notice ok" role="status"><p>✓ {done}</p></div>{/if}
+		{#if done}<div class="notice ok" role="status"><p>{done}</p></div>{/if}
 		{#if actionError && !reviewing}<div class="notice error" role="alert">
 				<p>{actionError}</p>
 			</div>{/if}
@@ -385,7 +386,7 @@
 											<span class="chip off">Account being deleted</span>
 										{/if}
 									</div>
-									<div class="row-meta">
+									<div class="row-meta stamp">
 										{a.email} ·
 										<span title={dateTime(a.created_at_ms)}>{ago(a.created_at_ms)}</span>
 									</div>
@@ -509,7 +510,7 @@
 											<span class="chip normal">Leaving {date(a.deletion_purge_after_ms)}</span>
 										{/if}
 									</div>
-									<div class="row-meta">
+									<div class="row-meta stamp">
 										{a.email} · since {date(a.activated_at_ms ?? a.created_at_ms)}
 									</div>
 									{#if a.deletion_purge_after_ms}
@@ -558,12 +559,16 @@
 						{#each invited as i (i.email)}
 							<li>
 								<span>
-									✓ Invitation sent to <strong>{i.email}</strong>, valid until {date(
+									<Icon name="check" /> Invitation sent to <strong>{i.email}</strong>, valid until {date(
 										i.expires_at_ms
 									)}.
 								</span>
 								<button class="link small" type="button" onclick={() => copy(i.invite_url)}>
-									{copied === i.invite_url ? 'Copied' : 'Copy the link'}
+									{#if copied === i.invite_url}
+										<Icon name="check" /> Copied
+									{:else}
+										Copy the link
+									{/if}
 								</button>
 							</li>
 						{/each}
@@ -648,11 +653,7 @@
 		margin-bottom: 2rem;
 	}
 
-	.row-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
+	/* Addresses and dates are data: the code face. */
 
 	.review {
 		margin-top: 1rem;
@@ -676,6 +677,7 @@
 		padding: 0;
 		margin: 1rem 0 0.5rem;
 		color: var(--ok);
+		font-size: 0.92rem;
 	}
 
 	.sent li {

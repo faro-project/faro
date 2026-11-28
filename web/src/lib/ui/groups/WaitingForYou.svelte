@@ -25,6 +25,7 @@
 	import Modal from '../Modal.svelte';
 	import SignedNote from '../SignedNote.svelte';
 	import CompareCodes from './CompareCodes.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let { groupId, readOnly = false }: { groupId: string; readOnly?: boolean } = $props();
 
@@ -240,9 +241,9 @@
 	<Modal title={describeIncoming(answering)} onclose={() => (answering = null)}>
 		{#if accepted}
 			{#if !recovering}
-				<p>
-					✓ Accepted. Now you compare safety codes. You can do it now, or later at your next
-					meeting: it will be waiting under "Compare at your next meeting".
+				<p class="done">
+					<Icon name="check" /> Accepted. Now you compare safety codes. You can do it now, or later at
+					your next meeting: it will be waiting under "Compare at your next meeting".
 				</p>
 				<CompareCodes
 					person={{ id: answering.from.user_id, name: answering.from.display_name }}
@@ -312,13 +313,11 @@
 {/if}
 
 <style>
-	.row-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
+	h3 {
+		margin: 1.5rem 0 0.4rem;
 	}
 
-	h3 {
-		margin: 1.25rem 0 0.4rem;
+	.done :global(.icon) {
+		color: var(--ok);
 	}
 </style>

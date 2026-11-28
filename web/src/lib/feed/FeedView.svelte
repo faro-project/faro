@@ -17,6 +17,7 @@
 	import { keyring } from '../keys/keyring.svelte.ts';
 	import { verifiedKey } from '../keys/verified.ts';
 	import type { ChainLink, FeedEntry, Platform, User } from '../types.ts';
+	import Icon from '../ui/Icon.svelte';
 	import UnlockKeys from '../ui/UnlockKeys.svelte';
 	import {
 		bodyTitle,
@@ -484,8 +485,9 @@
 		<p class="muted small" role="status">Checking each computer's history…</p>
 	{:else if memberKey && (memberKey.trust === 'own' || memberKey.trust === 'checked') && items.length}
 		<p class="muted small checked">
-			✓ Every event and report below is signed by one of {keyKind === 'member' ? 'your' : 'their'} computers,
-			and their history has no gaps.
+			<Icon name="check" /> Every event and report below is signed by one of {keyKind === 'member'
+				? 'your'
+				: 'their'} computers, and their history has no gaps.
 		</p>
 	{/if}
 	{#if chainCapped.length}
@@ -558,7 +560,9 @@
 									</span>{/if}
 							</div>
 							<div class="row-meta">
-								<span title={dateTime(e.received_at_ms)}>{time(e.received_at_ms)}</span>
+								<span class="time" title={dateTime(e.received_at_ms)}>
+									{time(e.received_at_ms)}
+								</span>
 								{#if e.type === 'event' || e.type === 'report'}
 									· {device(e.device_id)}{/if}
 								{#if d.text && e.type === 'alert'}
@@ -566,7 +570,9 @@
 							</div>
 							{#if v.status === 'failed'}
 								<p class="small unverified">
-									⚠ Not verified: {v.reason}. It may not have come from {device(e.device_id)} at all.
+									<Icon name="alert" /> Not verified: {v.reason}. It may not have come from {device(
+										e.device_id
+									)} at all.
 								</p>
 							{/if}
 
@@ -578,7 +584,7 @@
 											Details not shown, because this item failed its checks.
 										</p>
 									{:else if !secret}
-										<p class="locked small">🔒 Details encrypted</p>
+										<p class="locked small"><Icon name="lock" /> Details encrypted</p>
 									{:else if o === 'loading' || o === undefined}
 										<p class="muted small">Decrypting…</p>
 									{:else if typeof o === 'string'}
@@ -659,40 +665,53 @@
 		color: var(--muted);
 		border: none;
 		border-radius: 0;
-		min-height: 2.4rem;
-		padding: 0.4rem 0.8rem;
-		font-size: 0.9rem;
+		min-height: 2.2rem;
+		padding: 0.35rem 0.75rem;
+		font-size: 0.78rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.seg button + button {
 		border-left: 1px solid var(--border-strong);
 	}
 
-	.seg button.on {
-		background: var(--accent-soft);
+	.seg button:hover:not(.on) {
+		background: var(--surface-2);
 		color: var(--text);
 	}
 
+	.seg button.on {
+		background: var(--accent-soft);
+		color: var(--accent);
+	}
+
 	.day {
-		font-size: 0.85rem;
+		font-size: 0.7rem;
+		font-weight: 500;
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
+		letter-spacing: 0.09em;
 		color: var(--muted);
 		margin: 1.5rem 0 0.5rem;
 	}
 
 	.entry {
 		display: flex;
-		gap: 0.8rem;
+		gap: 0.75rem;
 	}
 
 	.dot {
-		width: 0.7rem;
-		height: 0.7rem;
+		width: 0.5rem;
+		height: 0.5rem;
 		border-radius: 50%;
-		margin-top: 0.45rem;
+		margin-top: 0.55rem;
 		flex: none;
 		background: var(--border-strong);
+	}
+
+	.time {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.tone-urgent .dot {
@@ -723,7 +742,12 @@
 	}
 
 	.locked {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
 		color: var(--muted);
+		font-family: var(--mono);
+		font-size: 0.78rem;
 		margin: 0.35rem 0 0;
 	}
 
@@ -741,6 +765,10 @@
 		margin: 0 0 1rem;
 	}
 
+	.checked :global(.icon) {
+		color: var(--ok);
+	}
+
 	.body > p.small {
 		margin: 0.35rem 0 0.2rem;
 	}
@@ -751,7 +779,7 @@
 		width: 160px;
 		max-width: 100%;
 		height: auto;
-		border-radius: 6px;
+		border-radius: var(--radius-sm);
 		border: 1px solid var(--border);
 	}
 </style>

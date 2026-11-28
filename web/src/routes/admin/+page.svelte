@@ -4,6 +4,7 @@
 	import { api, describeError } from '#lib/api.ts';
 	import { bytes, count, plural } from '#lib/format.ts';
 	import type { Overview, PrivacyNotice } from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let overview = $state<Overview | null>(null);
 	let notice = $state<PrivacyNotice | null>(null);
@@ -70,8 +71,8 @@
 	{#if !overview.smtp_configured}
 		<div class="notice warn" role="status">
 			<p>
-				<span aria-hidden="true">⚠</span> <strong>Email is not set up.</strong> Nobody can sign in
-				by email, and alerts can't reach allies.
+				<strong>Email is not set up.</strong> Nobody can sign in by email, and alerts can't reach
+				allies.
 				<a href={resolve('/admin/email')}>Email settings</a>
 			</p>
 		</div>
@@ -79,7 +80,6 @@
 	{#if overview.notifications.failed > 0}
 		<div class="notice error" role="status">
 			<p>
-				<span aria-hidden="true">⚠</span>
 				<strong>
 					{plural(overview.notifications.failed, 'notification')} could not be delivered
 				</strong>
@@ -91,7 +91,6 @@
 	{#if overview.deletions.overdue > 0}
 		<div class="notice error" role="status">
 			<p>
-				<span aria-hidden="true">⚠</span>
 				<strong>
 					{plural(overview.deletions.overdue, 'account deletion')} waiting more than a week
 				</strong>
@@ -147,7 +146,7 @@
 				<li>{count(overview.notifications.pending)} waiting</li>
 				<li>{count(overview.notifications.retrying)} retrying</li>
 				<li class:failed={overview.notifications.failed > 0}>
-					{#if overview.notifications.failed > 0}<span aria-hidden="true">⚠</span>{/if}
+					{#if overview.notifications.failed > 0}<Icon name="alert" />{/if}
 					{count(overview.notifications.failed)} failed
 				</li>
 			</ul>
@@ -249,25 +248,28 @@
 		background: var(--surface);
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
-		padding: 1rem;
+		box-shadow: var(--shadow);
+		padding: 0.9rem 1rem 1rem;
 		display: flex;
 		flex-direction: column;
 	}
 
 	.tile h2 {
-		font-size: 0.85rem;
-		font-weight: 600;
+		font-size: 0.7rem;
+		font-weight: 500;
 		color: var(--muted);
 		text-transform: uppercase;
-		letter-spacing: 0.04em;
+		letter-spacing: 0.09em;
 		margin: 0;
 	}
 
 	.figure {
-		font-size: 2rem;
-		font-weight: 700;
+		font-family: var(--mono);
+		font-size: 1.85rem;
+		font-weight: 500;
+		letter-spacing: -0.04em;
 		line-height: 1.15;
-		margin: 0.3rem 0 0.4rem;
+		margin: 0.35rem 0 0.5rem;
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -281,13 +283,17 @@
 	}
 
 	.sub .failed {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
 		color: var(--danger);
 		font-weight: 600;
 	}
 
 	.more {
 		margin-top: auto;
-		font-size: 0.9rem;
+		font-family: var(--mono);
+		font-size: 0.78rem;
 	}
 
 	.card {
@@ -353,49 +359,28 @@
 	}
 
 	.legend .n {
+		font-family: var(--mono);
+		font-size: 0.85rem;
 		font-variant-numeric: tabular-nums;
-		font-weight: 600;
-	}
-
-	.facts {
-		display: grid;
-		grid-template-columns: max-content 1fr;
-		gap: 0.4rem 1.25rem;
-		margin: 0 0 1rem;
-	}
-
-	.facts dt {
-		color: var(--muted);
-	}
-
-	.facts dd {
-		margin: 0;
-	}
-
-	@media (max-width: 480px) {
-		.facts {
-			grid-template-columns: 1fr;
-			gap: 0.1rem;
-		}
-
-		.facts dd {
-			margin-bottom: 0.5rem;
-		}
+		font-weight: 500;
 	}
 
 	.notice-card summary {
 		cursor: pointer;
-		list-style-position: outside;
+		list-style-position: inside;
 	}
 
 	.notice-card summary h2 {
 		display: inline;
-		font-size: 1.1rem;
+		margin: 0;
+	}
+
+	.notice-card[open] summary {
+		margin-bottom: 0.75rem;
 	}
 
 	.notice-card h3 {
-		font-size: 1rem;
-		margin-top: 1rem;
+		margin-top: 1.25rem;
 	}
 
 	.notice-card ul {

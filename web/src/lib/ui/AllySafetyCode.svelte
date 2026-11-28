@@ -9,6 +9,7 @@
 	import { keyring } from '../keys/keyring.svelte.ts';
 	import { markVerified, verification } from '../keys/verified.ts';
 	import type { SupportedMember, User } from '../types.ts';
+	import Icon from './Icon.svelte';
 	import UnlockKeys from './UnlockKeys.svelte';
 
 	let { member, viewer }: { member: SupportedMember; viewer: User } = $props();
@@ -75,7 +76,7 @@
 	</p>
 	{#if status === 'verified'}
 		<p class="small">
-			<span class="chip good">✓ Checked</span> You compared this code with {member.display_name}.
+			<span class="chip good"><Icon name="check" /> Checked</span> You compared this code with {member.display_name}.
 		</p>
 	{:else}
 		<button class="secondary small" type="button" onclick={mark}>

@@ -33,6 +33,7 @@
 	import { session } from '#lib/session.svelte.ts';
 	import type { DeviceSummary, EnrollCode, Platform } from '#lib/types.ts';
 	import Gate from '#lib/ui/Gate.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import QrCode from '#lib/ui/QrCode.svelte';
 	import RecipientList from '#lib/ui/RecipientList.svelte';
 	import UnlockKeys from '#lib/ui/UnlockKeys.svelte';
@@ -292,7 +293,7 @@
 			</p>
 		</div>
 
-		{#if done}<div class="notice ok" role="status"><p>✓ {done}</p></div>{/if}
+		{#if done}<div class="notice ok" role="status"><p>{done}</p></div>{/if}
 
 		{#if deleting}
 			<div class="notice warn">
@@ -467,7 +468,11 @@
 												type="button"
 												onclick={() => copy(link, 'link')}
 											>
-												{copied === 'link' ? '✓ Copied' : 'Copy link'}
+												{#if copied === 'link'}
+													<Icon name="check" /> Copied
+												{:else}
+													<Icon name="copy" /> Copy link
+												{/if}
 											</button>
 										</div>
 										<p class="muted small">
@@ -516,7 +521,11 @@
 												type="button"
 												onclick={() => copy(link, 'link')}
 											>
-												{copied === 'link' ? '✓ Copied' : 'Copy link'}
+												{#if copied === 'link'}
+													<Icon name="check" /> Copied
+												{:else}
+													<Icon name="copy" /> Copy link
+												{/if}
 											</button>
 										</div>
 										<p class="muted small">
@@ -542,7 +551,11 @@
 															'command'
 														)}
 												>
-													{copied === 'command' ? '✓ Copied' : 'Copy command'}
+													{#if copied === 'command'}
+														<Icon name="check" /> Copied
+													{:else}
+														<Icon name="copy" /> Copy command
+													{/if}
 												</button>
 											</div>
 											<p>On Windows, run this in a terminal opened as administrator:</p>
@@ -559,7 +572,11 @@
 															'command-windows'
 														)}
 												>
-													{copied === 'command-windows' ? '✓ Copied' : 'Copy command'}
+													{#if copied === 'command-windows'}
+														<Icon name="check" /> Copied
+													{:else}
+														<Icon name="copy" /> Copy command
+													{/if}
 												</button>
 											</div>
 										</details>
@@ -675,37 +692,50 @@
 		margin: 0;
 	}
 
-	.row-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
-
 	.approve {
 		margin-top: 1rem;
 		padding-top: 1rem;
 		border-top: 1px dashed var(--border);
 	}
 
+	/* Device names, check-in times and dates are data: the code face. */
+	.row-meta {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		letter-spacing: -0.01em;
+	}
+
+	.row-meta code {
+		font-size: inherit;
+	}
+
 	.big {
-		font-size: 1.8rem;
+		font-size: 1.6rem;
+		letter-spacing: 0.14em;
 		width: fit-content;
 		margin: 0.6rem 0 0.25rem;
 	}
 
 	.command {
-		background: var(--surface-2);
-		border: 1px solid var(--border);
-		border-radius: var(--radius-sm);
-		padding: 0.75rem;
 		margin: 0;
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
 	}
 
-	.command code {
-		background: none;
-		padding: 0;
+	details {
+		margin-top: 0.9rem;
+	}
+
+	summary {
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		color: var(--muted);
+	}
+
+	summary:hover {
+		color: var(--text);
+	}
+
+	details[open] summary {
+		margin-bottom: 0.6rem;
 	}
 
 	.actions.inline {

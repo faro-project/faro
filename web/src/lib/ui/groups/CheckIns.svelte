@@ -43,6 +43,7 @@
 	import type { RosterState } from '../../crypto/roster.ts';
 	import type { GroupView, Page, RosterEntry, User } from '../../types.ts';
 	import UnlockKeys from '../UnlockKeys.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
 		group,
@@ -303,7 +304,7 @@
 	{/if}
 
 	{#if sent}
-		<div class="notice ok" role="status"><p>✓ Posted. Nobody was notified.</p></div>
+		<div class="notice ok" role="status"><p>Posted. Nobody was notified.</p></div>
 	{/if}
 
 	{#if canWrite}
@@ -344,7 +345,7 @@
 				<fieldset class="choices">
 					<legend>Who can read it</legend>
 					{#each ['allies', 'facilitators', 'people', 'group'] as const as a (a)}
-						<label>
+						<label class="check">
 							<input
 								type="radio"
 								bind:group={audience}
@@ -377,7 +378,7 @@
 						<ul class="pick">
 							{#each people as p (p.user_id)}
 								<li>
-									<label>
+									<label class="person">
 										<input
 											type="checkbox"
 											checked={chosen.includes(p.user_id)}
@@ -449,8 +450,8 @@
 				<li>
 					<div class="row-title">
 						<strong>{p.author.user_id === user.id ? 'You' : p.author.display_name}</strong>
-						<span class="muted small">
-							· {ago(p.created_at_ms)} ·
+						<span class="meta">
+							{ago(p.created_at_ms)} ·
 							{p.epoch != null ? 'to the whole group' : 'to some people'}
 						</span>
 					</div>
@@ -472,7 +473,7 @@
 					{:else if r.status === 'unreadable'}
 						<p class="muted small">None of your keys opens this check-in.</p>
 					{:else if r.checkIn}
-						<p>
+						<p class="score">
 							<strong>{r.checkIn.scale} / 5</strong>
 							<span class="muted">{scaleLabel(r.checkIn.scale)}</span>
 						</p>
@@ -485,11 +486,12 @@
 						{#if r.checkIn.ask}
 							<p class="ans"><em>What I'd like from the group.</em> {r.checkIn.ask}</p>
 						{/if}
-						<p class="muted small">
+						<p class="muted small signed">
 							{#if p.author.user_id === user.id}
 								Signed by you.
 							{:else if r.verified === 'verified'}
-								✓ Signed by {p.author.display_name}, whose key you checked with a safety code.
+								<Icon name="check" /> Signed by {p.author.display_name}, whose key you checked with
+								a safety code.
 							{:else if r.verified === 'changed'}
 								Signed with a key that isn't the one you checked with {p.author.display_name}.
 								Compare safety codes again to be sure.
@@ -567,7 +569,7 @@
 				<li>
 					<div class="row-title">
 						<strong>{rp.author.user_id === user.id ? 'You' : rp.author.display_name}</strong>
-						<span class="muted small">· a private reply · {ago(rp.created_at_ms)}</span>
+						<span class="meta">a private reply · {ago(rp.created_at_ms)}</span>
 					</div>
 					{#if rr?.status === 'ok'}
 						<blockquote class="reply">{rr.text}</blockquote>
@@ -586,40 +588,105 @@
 </section>
 
 <style>
+	/* 1 to 5: a row of small square options in the code face. */
 	.scale {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.5rem 1rem;
-		border: none;
-		padding: 0;
-		margin: 0 0 0.75rem;
+		gap: 0.4rem;
+		margin: 0 0 1rem;
 	}
 
 	.scale label {
 		display: flex;
 		align-items: center;
-		gap: 0.35rem;
+		gap: 0.45rem;
+		margin: 0;
+		padding: 0.3rem 0.65rem 0.3rem 0.5rem;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		background: var(--input-bg);
+		cursor: pointer;
+		transition:
+			border-color 0.12s,
+			background-color 0.12s;
+	}
+
+	.scale label:hover {
+		border-color: color-mix(in srgb, var(--border-strong) 55%, var(--text));
+	}
+
+	.scale label:has(input:checked) {
+		border-color: var(--accent);
+		background: var(--accent-soft);
+	}
+
+	.scale .muted {
+		font-size: 0.75rem;
+		font-weight: 400;
 	}
 
 	.n {
+		font-variant-numeric: tabular-nums;
 		font-weight: 600;
 	}
 
 	.choices {
-		border: none;
-		padding: 0;
 		margin: 0 0 0.75rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.35rem;
 	}
 
+	.choices .check {
+		margin: 0;
+	}
+
 	.pick {
 		list-style: none;
-		padding: 0;
-		margin: 0;
+		padding: 0.25rem 0.75rem;
+		margin: 0 0 0.5rem;
 		max-height: 16rem;
 		overflow-y: auto;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--surface);
+	}
+
+	.pick .person {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		margin: 0;
+		padding: 0.3rem 0;
+		font-size: 0.86rem;
+		font-weight: 500;
+		cursor: pointer;
+	}
+
+	.meta {
+		font-family: var(--mono);
+		font-size: 0.75rem;
+		color: var(--muted);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.score {
+		display: flex;
+		align-items: baseline;
+		gap: 0.6rem;
+		margin: 0.35rem 0 0.5rem;
+	}
+
+	.score strong {
+		font-family: var(--mono);
+		font-size: 1.05rem;
+		font-weight: 500;
+		letter-spacing: -0.03em;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.score .muted {
+		font-size: 0.9rem;
 	}
 
 	.ans {
@@ -628,15 +695,41 @@
 		overflow-wrap: anywhere;
 	}
 
+	/* "What went well." reads as a small label before the answer. */
+	.ans em {
+		font-family: var(--mono);
+		font-style: normal;
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted);
+		margin-right: 0.3rem;
+	}
+
+	.signed {
+		margin-top: 0.5rem;
+	}
+
+	.signed :global(.icon) {
+		color: var(--ok);
+	}
+
 	.reply {
-		margin: 0.4rem 0;
-		padding: 0.4rem 0.75rem;
-		border-left: 3px solid var(--border-strong);
+		margin: 0.5rem 0;
+		padding: 0.35rem 0.8rem;
+		border-left: 2px solid var(--border-strong);
+		font-size: 0.94rem;
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
 
+	.reply strong {
+		font-family: var(--mono);
+		font-size: 0.84rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+
 	.over {
-		color: var(--danger, inherit);
+		color: var(--danger);
 	}
 </style>

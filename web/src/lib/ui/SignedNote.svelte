@@ -15,6 +15,7 @@
 	import { readMessage, type MessageView } from '../reach-out.ts';
 	import { loadRoster } from '../roster-api.ts';
 	import type { User } from '../types.ts';
+	import Icon from './Icon.svelte';
 	import UnlockKeys from './UnlockKeys.svelte';
 
 	let {
@@ -143,9 +144,10 @@
 	{#if result.text !== null}
 		<blockquote class="note">{result.text}</blockquote>
 	{/if}
-	<p class="muted small">
+	<p class="muted small signed">
 		{#if result.verified === 'verified'}
-			✓ Signed by {view.author.display_name}, whose key you checked with a safety code.
+			<Icon name="check" /> Signed by {view.author.display_name}, whose key you checked with a
+			safety code.
 		{:else if result.verified === 'changed'}
 			<span class="warn">
 				Signed with a key that isn't the one you checked with {view.author.display_name}. They may
@@ -162,14 +164,26 @@
 
 <style>
 	.note {
-		margin: 0.4rem 0 0.2rem;
-		padding: 0.5rem 0.75rem;
-		border-left: 3px solid var(--border-strong);
+		margin: 0.4rem 0 0.3rem;
+		padding: 0.5rem 0.8rem;
+		background: var(--surface-2);
+		border-left: 2px solid var(--border-strong);
+		border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+		font-size: 0.95rem;
+		line-height: 1.55;
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
 
+	.signed {
+		margin-bottom: 0.4rem;
+	}
+
+	.signed :global(.icon) {
+		color: var(--ok);
+	}
+
 	.warn {
-		color: var(--warn, inherit);
+		color: var(--warn);
 	}
 </style>

@@ -10,6 +10,7 @@
 	import { keyring } from '../keys/keyring.svelte.ts';
 	import { getMemberKeys, unlockMemberKeys } from '../keys/member.ts';
 	import type { AllyKeyBlob, MemberKeysBlob, User } from '../types.ts';
+	import Icon from './Icon.svelte';
 
 	let {
 		kind,
@@ -151,6 +152,7 @@
 		{/if}
 		<div class="actions">
 			<button class="primary" type="submit" disabled={busy}>
+				<Icon name="unlock" />
 				{busy ? 'Unlocking…' : 'Unlock'}
 			</button>
 			<button

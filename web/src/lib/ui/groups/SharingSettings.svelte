@@ -14,6 +14,7 @@
 	import { audienceText } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import type { MySharing } from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
 		groupId = null,
@@ -109,7 +110,7 @@
 	</div>
 
 	{#if error}<div class="notice error" role="alert"><p>{error}</p></div>{/if}
-	{#if saved}<p class="saved small" role="status">✓ Saved</p>{/if}
+	{#if saved}<p class="saved" role="status"><Icon name="check" /> Saved</p>{/if}
 	<p class="muted small">
 		This changes only what other people in the group see. Your allies keep seeing what they see
 		today.
@@ -118,19 +119,49 @@
 
 <style>
 	.choice {
-		margin: 0.75rem 0;
+		margin: 0.6rem 0;
+		padding: 0.8rem 0.95rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		box-shadow: var(--shadow);
 	}
+
+	/* The setting's name in the code face; what it means in prose. */
 	label {
 		display: flex;
-		gap: 0.6rem;
+		gap: 0.65rem;
 		align-items: flex-start;
+		margin: 0;
+		font-family: var(--font);
+		font-size: 0.92rem;
+		font-weight: 400;
+		letter-spacing: 0;
+		line-height: 1.5;
+		cursor: pointer;
 	}
-	label span {
+
+	label input {
+		flex: none;
+		margin-top: 0.15rem;
+	}
+
+	label > span {
 		display: flex;
 		flex-direction: column;
 		gap: 0.15rem;
 	}
+
+	label strong {
+		font-family: var(--mono);
+		font-size: 0.86rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+
 	.audience {
-		margin: 0.2rem 0 0 1.7rem;
+		margin: 0.45rem 0 0 1.65rem;
+		font-family: var(--mono);
+		font-size: 0.75rem;
 	}
 </style>

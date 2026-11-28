@@ -22,14 +22,21 @@
 	.operator-note {
 		color: var(--muted);
 		font-size: 0.92rem;
+		line-height: 1.55;
 		margin: 0 0 1.25rem;
-		padding-left: 0.75rem;
-		border-left: 2px solid var(--border);
+		padding: 0.1rem 0 0.1rem 0.8rem;
+		border-left: 1px solid var(--border-strong);
 		overflow-wrap: anywhere;
 	}
 
+	/* Who the line is from: a small label in the code face. */
 	.from {
 		display: block;
-		font-size: 0.8rem;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		margin-bottom: 0.15rem;
 	}
 </style>

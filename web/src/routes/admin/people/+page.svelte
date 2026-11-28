@@ -29,6 +29,7 @@
 		InviteCreated,
 		MagicLinkResponse
 	} from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	/** Must match `REAUTH_WINDOW_MS` and `HOLD_MS` in server/src/api/account.rs. */
 	const REAUTH_MS = 10 * 60 * 1000;
@@ -339,8 +340,8 @@
 	{#if settings?.registration.mode === 'closed'}
 		<div class="notice warn">
 			<p>
-				<span aria-hidden="true">⚠</span> Registration is closed, so someone without an account can't
-				accept an invitation until you change it in Settings.
+				Registration is closed, so someone without an account can't accept an invitation until you
+				change it in Settings.
 			</p>
 		</div>
 	{/if}
@@ -366,8 +367,7 @@
 		<ul class="sent" aria-live="polite">
 			{#each invited as i (i.email)}
 				<li>
-					<span aria-hidden="true">✓</span> Invitation sent to <strong>{i.email}</strong>, valid
-					until
+					<Icon name="check" /> Invitation sent to <strong>{i.email}</strong>, valid until
 					{date(i.expires_at_ms)}.
 				</li>
 			{/each}
@@ -393,7 +393,7 @@
 	</div>
 
 	{#if statusDone}
-		<div class="notice ok" role="status"><p>✓ {statusDone}</p></div>
+		<div class="notice ok" role="status"><p>{statusDone}</p></div>
 	{/if}
 	{#if loadError}
 		<div class="notice error" role="alert">{loadError}</div>
@@ -726,6 +726,7 @@
 		padding: 0;
 		margin: 1rem 0 0;
 		color: var(--ok);
+		font-size: 0.92rem;
 	}
 
 	.list-head {
@@ -753,24 +754,6 @@
 		min-width: 0;
 	}
 
-	select {
-		font: inherit;
-		color: var(--text);
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 0.55rem 0.6rem;
-	}
-
-	input[type='search'] {
-		font: inherit;
-		color: var(--text);
-		background: var(--surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 0.55rem 0.75rem;
-	}
-
 	.people {
 		list-style: none;
 		padding: 0;
@@ -778,6 +761,7 @@
 		background: var(--surface);
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
+		box-shadow: var(--shadow);
 	}
 
 	.people li {
@@ -796,13 +780,23 @@
 	}
 
 	.people li.head {
-		font-size: 0.8rem;
-		font-weight: 600;
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		font-weight: 500;
 		color: var(--muted);
 		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		padding-top: 0.6rem;
-		padding-bottom: 0.6rem;
+		letter-spacing: 0.09em;
+		padding-top: 0.55rem;
+		padding-bottom: 0.55rem;
+		background: var(--surface-2);
+		border-radius: var(--radius) var(--radius) 0 0;
+	}
+
+	.who strong {
+		font-family: var(--mono);
+		font-size: 0.9rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
 	}
 
 	.people li.disabled .who {
@@ -832,20 +826,6 @@
 		align-items: center;
 	}
 
-	.chip {
-		font-size: 0.78rem;
-		font-weight: 600;
-		padding: 0.1rem 0.5rem;
-		border-radius: 999px;
-		background: var(--surface-2);
-		border: 1px solid var(--border);
-	}
-
-	.chip.off {
-		color: var(--danger);
-		border-color: color-mix(in srgb, var(--danger) 35%, transparent);
-	}
-
 	.asked {
 		color: var(--muted);
 		font-size: 0.8rem;
@@ -873,6 +853,8 @@
 		background: var(--surface);
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
+		box-shadow: var(--shadow);
+		font-size: 0.92rem;
 	}
 
 	.entries li {
@@ -890,12 +872,10 @@
 
 	.entries .at {
 		color: var(--muted);
-		font-size: 0.88rem;
-		min-width: 6.5rem;
-	}
-
-	dialog h2 {
-		font-size: 1.15rem;
+		font-family: var(--mono);
+		font-size: 0.76rem;
+		min-width: 7rem;
+		padding-top: 0.15rem;
 	}
 
 	@media (max-width: 640px) {
@@ -915,7 +895,8 @@
 		.label {
 			display: inline;
 			color: var(--muted);
-			font-size: 0.85rem;
+			font-family: var(--mono);
+			font-size: 0.75rem;
 			margin-right: 0.35rem;
 		}
 

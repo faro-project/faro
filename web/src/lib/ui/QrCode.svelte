@@ -35,7 +35,7 @@
 		width: 14rem;
 		max-width: 100%;
 		height: auto;
-		border: 1px solid var(--border, #ccc);
-		border-radius: 0.5rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
 	}
 </style>

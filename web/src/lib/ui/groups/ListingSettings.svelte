@@ -87,13 +87,10 @@
 
 <style>
 	.shows {
-		border: none;
-		padding: 0;
-		margin: 1rem 0;
+		margin: 1.25rem 0 1rem;
 	}
 
-	.shows legend {
-		font-weight: 600;
-		padding: 0;
+	.shows .check {
+		margin-bottom: 0.5rem;
 	}
 </style>

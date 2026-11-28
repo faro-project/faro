@@ -153,9 +153,3 @@
 		</button>
 	</div>
 </form>
-
-<style>
-	.mono {
-		font-family: var(--mono);
-	}
-</style>

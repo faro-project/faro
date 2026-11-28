@@ -15,6 +15,7 @@
 		SettingsPatch,
 		UpdatesInfo
 	} from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
 		settings,
@@ -351,44 +352,49 @@
 			<button class="link" type="button" onclick={onskip}>{skipLabel}</button>
 		{/if}
 		{#if saved}
-			<span class="saved" role="status">✓ Saved</span>
+			<span class="saved" role="status"><Icon name="check" /> Saved</span>
 		{/if}
 	</div>
 </form>
 
 <style>
 	fieldset {
-		border: none;
-		margin: 0 0 1.25rem;
-		padding: 0;
+		margin-bottom: 1.5rem;
 	}
 
+	/* Each fieldset is a section of the form: a small letter-spaced label,
+	 * quieter than the field labels inside it. */
 	legend {
-		font-weight: 700;
-		margin-bottom: 0.6rem;
-		padding: 0;
+		font-size: 0.72rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--muted);
+		margin-bottom: 0.5rem;
 	}
 
 	fieldset > .hint {
-		margin: 0.25rem 0 0.9rem;
+		margin: 0 0 0.85rem;
 	}
 
+	/* A radio and its option's name (interface, in the code face) with a
+	 * sentence-long hint under it. */
 	.choice {
 		display: flex;
 		gap: 0.6rem;
 		align-items: flex-start;
-		font-weight: 600;
-		padding: 0.55rem 0;
+		margin: 0;
+		padding: 0.4rem 0;
 		cursor: pointer;
 	}
 
 	.choice input {
-		margin-top: 0.3rem;
-		accent-color: var(--accent);
+		flex: none;
+		margin-top: 0.2rem;
 	}
 
 	.nested {
-		margin: 0.25rem 0 0 1.6rem;
+		margin: 0.2rem 0 0.4rem 1.6rem;
 	}
 
 	.days {
@@ -405,10 +411,5 @@
 
 	.days .field input {
 		margin-top: auto;
-	}
-
-	.saved {
-		color: var(--ok);
-		font-weight: 600;
 	}
 </style>

@@ -328,6 +328,10 @@
 {/if}
 
 <style>
+	h1 {
+		margin-bottom: 1rem;
+	}
+
 	progress {
 		margin-top: 0.5rem;
 	}

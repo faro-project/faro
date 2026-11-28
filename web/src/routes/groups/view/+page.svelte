@@ -38,6 +38,7 @@
 	import RosterPersonActions from '#lib/ui/groups/RosterPersonActions.svelte';
 	import SharingSettings from '#lib/ui/groups/SharingSettings.svelte';
 	import WaitingForYou from '#lib/ui/groups/WaitingForYou.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import ReachOut from '#lib/ui/ReachOut.svelte';
 
 	let groupId = $state('');
@@ -191,7 +192,9 @@
 
 <Gate>
 	{#snippet children(user)}
-		<p class="back"><a href={resolve('/groups')}>← Groups</a></p>
+		<p class="crumb">
+			<a class="back" href={resolve('/groups')}><Icon name="arrow-left" /> Groups</a>
+		</p>
 
 		{#if view === 'loading'}
 			<p class="muted" role="status">Loading…</p>
@@ -213,7 +216,7 @@
 					{#if archived}<span class="chip off">Closed</span>{/if}
 				</h1>
 				{#if group.description}<p class="description">{group.description}</p>{/if}
-				<p class="muted small">
+				<p class="meta">
 					{group.participant_count}
 					{group.participant_count === 1 ? 'person' : 'people'}
 					{#if group.facilitators.length}
@@ -400,12 +403,26 @@
 </dialog>
 
 <style>
-	.back {
+	.crumb {
 		margin: 0 0 1rem;
+	}
+
+	h1 {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.3rem 0.6rem;
 	}
 
 	.description {
 		white-space: pre-wrap;
+		margin-bottom: 0.5rem;
+	}
+
+	.page-head .meta {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.reach {
@@ -414,6 +431,12 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.75rem;
+		padding: 1rem 1.25rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-left: 2px solid var(--brand);
+		border-radius: var(--radius);
+		box-shadow: var(--shadow);
 	}
 
 	.reach h2 {
@@ -435,12 +458,17 @@
 		background: none;
 		border: none;
 		border-bottom: 2px solid transparent;
+		border-radius: 0;
 		margin-bottom: -1px;
-		padding: 0.55rem 0.8rem;
+		min-height: 0;
+		padding: 0.5rem 0.75rem;
 		color: var(--muted);
-		font: inherit;
-		font-weight: 600;
-		cursor: pointer;
+		font-size: 0.82rem;
+		font-weight: 500;
+	}
+
+	.tabs button:hover {
+		color: var(--text);
 	}
 
 	.tabs button[aria-current='page'] {

@@ -6,6 +6,7 @@
 	import { onMount } from 'svelte';
 	import { api, describeError } from '../api.ts';
 	import type { DeliveryMode, NotificationPrefs, QuietHours } from '../types.ts';
+	import Icon from './Icon.svelte';
 
 	let { memberId, about }: { memberId: string; about: string } = $props();
 
@@ -143,16 +144,14 @@
 		{#if error}<div class="notice error" role="alert"><p>{error}</p></div>{/if}
 		<div class="actions">
 			<button class="primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
-			{#if saved}<span class="saved" role="status">✓ Saved</span>{/if}
+			{#if saved}<span class="saved" role="status"><Icon name="check" /> Saved</span>{/if}
 		</div>
 	</form>
 {/if}
 
 <style>
 	fieldset {
-		border: none;
-		padding: 0;
-		margin: 0 0 0.75rem;
+		margin-bottom: 0.75rem;
 	}
 
 	.pref {
@@ -180,10 +179,5 @@
 	.quiet label {
 		margin: 0;
 		font-weight: 400;
-	}
-
-	.saved {
-		color: var(--ok);
-		font-weight: 600;
 	}
 </style>

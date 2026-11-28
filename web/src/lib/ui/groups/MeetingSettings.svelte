@@ -14,6 +14,7 @@
 		WEEKDAYS
 	} from '#lib/meetings.ts';
 	import type { GroupPatch, GroupView } from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let { group, onchanged }: { group: GroupView; onchanged: (g?: GroupView) => void } = $props();
 
@@ -123,7 +124,7 @@
 		<button class="primary" type="submit" disabled={busy}>
 			{busy ? 'Saving…' : on ? 'Save the meeting' : group.meeting ? 'Remove the meeting' : 'Save'}
 		</button>
-		{#if saved}<span class="saved" role="status">✓ Saved</span>{/if}
+		{#if saved}<span class="saved" role="status"><Icon name="check" /> Saved</span>{/if}
 	</div>
 </form>
 
@@ -133,10 +134,5 @@
 		grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
 		gap: 0 1rem;
 		margin-top: 1rem;
-	}
-
-	.saved {
-		color: var(--ok);
-		font-weight: 600;
 	}
 </style>

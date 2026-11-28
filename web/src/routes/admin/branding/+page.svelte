@@ -8,6 +8,7 @@
 	import { api, ApiError, describeError } from '#lib/api.ts';
 	import { branding } from '#lib/branding.svelte.ts';
 	import BrandMark from '#lib/ui/BrandMark.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import type { AdminBranding, BrandingPatch } from '#lib/types.ts';
 
 	const MAX_BYTES = 1024 * 1024;
@@ -160,7 +161,7 @@
 				<BrandMark size="large" logo={data.logo} name={data.instance_name} />
 			</div>
 			<p class="muted small">
-				Stored at {data.logo.width} × {data.logo.height} pixels.
+				Stored at <span class="mono">{data.logo.width} × {data.logo.height}</span> pixels.
 				{#if !showLogo}It is hidden: turn on "Show the logo" below.{/if}
 			</p>
 		{:else}
@@ -183,7 +184,6 @@
 			</span>
 		</div>
 		{#if logoError}<p class="field-error" role="alert">{logoError}</p>{/if}
-		{#if logoDone}<p class="ok-text" role="status">✓ {logoDone}</p>{/if}
 		<div class="actions">
 			<button
 				class="primary"
@@ -198,6 +198,7 @@
 					Remove logo
 				</button>
 			{/if}
+			{#if logoDone}<span class="saved" role="status"><Icon name="check" /> {logoDone}</span>{/if}
 		</div>
 	</section>
 
@@ -264,23 +265,24 @@
 		</div>
 
 		{#if error}<p class="field-error" role="alert">{error}</p>{/if}
-		{#if saved}<p class="ok-text" role="status">✓ Saved.</p>{/if}
 		<div class="actions">
 			<button class="primary" type="submit" disabled={busy}>
 				{busy ? 'Saving…' : 'Save'}
 			</button>
+			{#if saved}<span class="saved" role="status"><Icon name="check" /> Saved.</span>{/if}
 		</div>
 	</form>
 {/if}
 
 <style>
+	/* The logo as the header shows it: on the page background. */
 	.preview {
 		display: flex;
 		padding: 1rem;
 		margin-bottom: 0.75rem;
-		border: 1px solid var(--border);
+		border: 1px dashed var(--border-strong);
 		border-radius: var(--radius-sm);
-		background: var(--surface);
+		background: var(--bg);
 		overflow: hidden;
 	}
 
@@ -289,17 +291,36 @@
 	}
 
 	.indent {
-		margin: 0.5rem 0 0 1.65rem;
-	}
-
-	.ok-text {
-		color: var(--ok);
-		margin: 0.5rem 0 0;
+		margin: 0.5rem 0 0 1.6rem;
 	}
 
 	input[type='file'] {
 		display: block;
-		font: inherit;
 		max-width: 100%;
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		color: var(--muted);
+		cursor: pointer;
+	}
+
+	/* The file picker's button, drawn as a secondary button. */
+	input[type='file']::file-selector-button {
+		font: inherit;
+		font-weight: 500;
+		color: var(--text);
+		background: var(--surface);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		padding: 0.35rem 0.8rem;
+		margin-right: 0.75rem;
+		cursor: pointer;
+		transition:
+			background-color 0.12s,
+			border-color 0.12s;
+	}
+
+	input[type='file']:hover::file-selector-button {
+		background: var(--surface-2);
+		border-color: color-mix(in srgb, var(--border-strong) 60%, var(--text));
 	}
 </style>

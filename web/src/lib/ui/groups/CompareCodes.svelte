@@ -117,7 +117,7 @@
 	{#if approved}
 		<div class="notice ok" role="status">
 			<p>
-				✓ {person.name} is now your ally. Your computers start encrypting to them within a few minutes.
+				{person.name} is now your ally. Your computers start encrypting to them within a few minutes.
 			</p>
 		</div>
 	{/if}
@@ -192,9 +192,13 @@
 
 <style>
 	.side {
-		margin: 1rem 0;
-		padding-top: 1rem;
-		border-top: 1px dashed var(--border);
+		margin: 1.25rem 0;
+		padding-top: 1.1rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.side .code-display {
+		margin: 0.5rem 0 1rem;
 	}
 
 	.side h3 {

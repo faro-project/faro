@@ -51,7 +51,7 @@
 	<h4>{title}</h4>
 	<ul>
 		<li>
-			<span class="who">You</span>
+			<span class="who you">You</span>
 			<code class="kid" title="Key id">{kid(list.member_enc_pubkey)}</code>
 		</li>
 		{#each list.allies as a (a.ally_id)}
@@ -107,7 +107,7 @@
 		margin: 1rem 0;
 		padding: 0.75rem 1rem;
 		border: 1px solid var(--border);
-		border-radius: var(--radius-sm);
+		border-radius: var(--radius);
 		background: var(--surface-2);
 	}
 
@@ -118,19 +118,50 @@
 	ul {
 		list-style: none;
 		padding: 0;
-		margin: 0 0 0.5rem;
+		margin: 0 0 0.6rem;
 	}
 
 	li {
 		display: flex;
 		flex-wrap: wrap;
+		align-items: center;
 		justify-content: space-between;
 		gap: 0.25rem 1rem;
-		padding: 0.25rem 0;
+		padding: 0.4rem 0;
+		border-top: 1px solid var(--border);
 	}
 
+	li:first-child {
+		border-top: none;
+	}
+
+	/* A person's signed name, as a row title. */
 	.who {
+		display: inline-flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.25rem 0.5rem;
+		font-family: var(--mono);
+		font-size: 0.88rem;
+		font-weight: 500;
+		letter-spacing: -0.01em;
 		overflow-wrap: anywhere;
+	}
+
+	.who em {
+		font-family: var(--font);
+		font-weight: 400;
+		color: var(--muted);
+	}
+
+	.you {
+		color: var(--muted);
+	}
+
+	.kid {
+		background: var(--surface);
+		font-size: 0.78rem;
+		letter-spacing: 0.02em;
 	}
 
 	.dropped {
@@ -139,5 +170,9 @@
 
 	.changes {
 		margin-top: 0.75rem;
+	}
+
+	.changes .check {
+		margin-bottom: 0.4rem;
 	}
 </style>

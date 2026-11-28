@@ -56,7 +56,11 @@
 {/if}
 
 <style>
-	.delivery {
-		margin-top: 1rem;
+	.delivery ul {
+		margin: 0 0 0.9rem;
+	}
+
+	.delivery li + li {
+		margin-top: 0.25rem;
 	}
 </style>

@@ -156,11 +156,11 @@
 	.brand-mark {
 		display: flex;
 		justify-content: center;
-		margin: 0.5rem 0 2rem;
+		margin: 0.25rem 0 2rem;
 	}
 
 	.support {
 		margin-top: 1.5rem;
-		font-size: 0.92rem;
+		font-size: 0.87rem;
 	}
 </style>

@@ -19,6 +19,7 @@
 		type MyReachOuts
 	} from '../reach-out.ts';
 	import type { User } from '../types.ts';
+	import Icon from './Icon.svelte';
 	import SignedNote from './SignedNote.svelte';
 
 	let { user, version = 0 }: { user: User; version?: number } = $props();
@@ -146,7 +147,7 @@
 		{#each data.outgoing as r (r.id)}
 			{@const answered = r.recipients.filter((p) => p.answer)}
 			<li>
-				<div class="row-title">
+				<div class="row-title to">
 					To {WHO[r.audience] ?? 'people'}{#if r.group_name}
 						in {r.group_name}{/if}
 				</div>
@@ -161,7 +162,7 @@
 				{#if answered.length}
 					<ul class="answers">
 						{#each answered as p (p.user_id)}
-							<li>✓ {p.display_name}: "{answerLabel(p.answer!)}"</li>
+							<li><Icon name="check" /> {p.display_name}: "{answerLabel(p.answer!)}"</li>
 						{/each}
 					</ul>
 				{:else}
@@ -174,17 +175,46 @@
 
 <style>
 	h3 {
-		font-size: 1rem;
-		margin: 1rem 0 0.4rem;
+		margin: 1.1rem 0 0.5rem;
+	}
+
+	.rows li {
+		display: block;
+	}
+
+	.to {
+		font-family: var(--mono);
+		font-size: 0.92rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+
+	/* When and where: metadata, in the code face. */
+	.row-meta {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		margin-bottom: 0.4rem;
 	}
 
 	.answers {
 		list-style: none;
 		padding: 0;
 		margin: 0.3rem 0 0;
+		font-size: 0.92rem;
 	}
 
-	.rows li {
-		display: block;
+	.answers li {
+		display: flex;
+		align-items: baseline;
+		gap: 0.4rem;
+	}
+
+	.answers :global(.icon) {
+		color: var(--ok);
+		align-self: center;
+	}
+
+	.rows .actions {
+		margin-top: 0.6rem;
 	}
 </style>

@@ -28,6 +28,7 @@ allow = [
     "MPL-2.0",             # weak, file-level copyleft; allowed for unmodified dependencies only
     "BSL-1.0",
     "0BSD",                # quoted_printable (via lettre); public-domain equivalent
+    "OFL-1.1",             # Fira Code, the web app's interface font (@fontsource-variable/fira-code)
 ]
 # AGPL/GPL/LGPL and non-commercial licences are rejected by omission.
 

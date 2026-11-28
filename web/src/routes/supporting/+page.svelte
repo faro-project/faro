@@ -8,6 +8,7 @@
 	import type { SupportedMember } from '#lib/types.ts';
 	import AllySafetyCode from '#lib/ui/AllySafetyCode.svelte';
 	import Gate from '#lib/ui/Gate.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let members = $state<SupportedMember[] | null>(null);
 	let error = $state('');
@@ -99,10 +100,14 @@
 												{m.display_name}
 											</a>
 											{#if v === 'changed'}<span class="chip urgent">Key changed</span>{/if}
-											{#if v === 'verified'}<span class="chip good">✓ Code checked</span>{/if}
+											{#if v === 'verified'}<span class="chip good">
+													<Icon name="check" /> Code checked
+												</span>{/if}
 										</div>
 										<div class="row-meta">
-											Ally since {date(m.activated_at_ms ?? m.created_at_ms)}
+											Ally since <span class="when">
+												{date(m.activated_at_ms ?? m.created_at_ms)}
+											</span>
 										</div>
 										{#if m.deletion_purge_after_ms}
 											<div class="notice warn small deleting">
@@ -137,8 +142,22 @@
 	}
 
 	.name {
-		font-weight: 700;
-		font-size: 1.05rem;
+		font-family: var(--mono);
+		font-size: 0.92rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+		text-decoration: none;
+		overflow-wrap: anywhere;
+	}
+
+	.name:hover {
+		text-decoration: underline;
+	}
+
+	.when {
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.deleting {
