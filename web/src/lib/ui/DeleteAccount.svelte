@@ -233,10 +233,6 @@
 		color: var(--danger);
 	}
 
-	.effects {
-		padding-left: 1.2rem;
-	}
-
 	.effects li + li {
 		margin-top: 0.4rem;
 	}

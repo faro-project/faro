@@ -315,13 +315,7 @@
 <style>
 	.description {
 		white-space: pre-wrap;
-		margin: 0.25rem 0;
-	}
-
-	.row-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-		align-items: flex-start;
+		margin: 0.3rem 0 0.15rem;
+		font-size: 0.94rem;
 	}
 </style>

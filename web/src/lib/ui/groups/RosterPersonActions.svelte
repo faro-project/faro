@@ -19,6 +19,7 @@
 	import AllyKeySetup from '../AllyKeySetup.svelte';
 	import Modal from '../Modal.svelte';
 	import NoteField from '../NoteField.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
 		groupId,
@@ -168,7 +169,7 @@
 	<span class="chip pending">Sent you a proposal</span>
 {/if}
 {#if pending}
-	<span class="muted small">{senderStatus(pending).label}</span>
+	<span class="status">{senderStatus(pending).label}</span>
 {:else if actions.askAgainAt}
 	<span class="muted small">You can ask again on {date(actions.askAgainAt)}.</span>
 {/if}
@@ -204,7 +205,9 @@
 {#if dialog === 'block'}
 	<Modal title="Stop {person.display_name} sending you proposals?" onclose={close}>
 		{#if blocked}
-			<p>✓ Done. {person.display_name} isn't told. You can undo this under Settings.</p>
+			<p class="done">
+				<Icon name="check" /> Done. {person.display_name} isn't told. You can undo this under Settings.
+			</p>
 			<div class="actions">
 				<button class="secondary" type="button" onclick={close}>Close</button>
 			</div>
@@ -245,7 +248,7 @@
 		{#if sent && !recovering}
 			<div class="notice ok" role="status">
 				<p>
-					✓ Sent. {person.display_name} sees it and chooses. You'll see "Pending" next to their name until
+					Sent. {person.display_name} sees it and chooses. You'll see "Pending" next to their name until
 					they answer or it runs out in two weeks.
 				</p>
 			</div>
@@ -277,18 +280,52 @@
 	.menu summary {
 		list-style: none;
 		cursor: pointer;
-		display: inline-block;
 	}
 
 	.menu summary::-webkit-details-marker {
 		display: none;
 	}
 
+	.menu[open] summary {
+		background: var(--surface-2);
+		border-color: color-mix(in srgb, var(--border-strong) 60%, var(--text));
+	}
+
 	.items {
 		display: flex;
 		flex-direction: column;
-		align-items: flex-start;
-		gap: 0.35rem;
-		margin-top: 0.4rem;
+		align-items: stretch;
+		margin-top: 0.35rem;
+		padding: 0.25rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		box-shadow: var(--shadow);
+	}
+
+	.items button.link {
+		justify-content: flex-start;
+		text-align: left;
+		padding: 0.35rem 0.55rem;
+		border-radius: 3px;
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		color: var(--text);
+		text-decoration: none;
+	}
+
+	.items button.link:hover:not(:disabled) {
+		background: var(--surface-2);
+		color: var(--accent);
+	}
+
+	.status {
+		font-family: var(--mono);
+		font-size: 0.75rem;
+		color: var(--muted);
+	}
+
+	.done :global(.icon) {
+		color: var(--ok);
 	}
 </style>

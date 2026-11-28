@@ -8,6 +8,7 @@
 	import { parsePairs } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import type { Page, PostedSuggestion, RosterEntry } from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let { groupId, readOnly = false }: { groupId: string; readOnly?: boolean } = $props();
 
@@ -123,7 +124,7 @@
 			</div>
 		{/if}
 		{#if error}<div class="notice error" role="alert"><p>{error}</p></div>{/if}
-		{#if done}<p class="saved" role="status">✓ {done}</p>{/if}
+		{#if done}<p class="saved" role="status"><Icon name="check" /> {done}</p>{/if}
 		<div class="actions">
 			<button class="primary" type="button" disabled={busy || !text.trim()} onclick={post}>
 				{busy ? 'Suggesting…' : 'Suggest'}
@@ -132,7 +133,7 @@
 	{/if}
 
 	{#if posted.length}
-		<h3>Suggested so far</h3>
+		<h3 class="so-far">Suggested so far</h3>
 		<ul class="rows">
 			{#each posted as p (p.id)}
 				<li>
@@ -154,3 +155,18 @@
 		</ul>
 	{/if}
 </section>
+
+<style>
+	.so-far {
+		margin-top: 1.5rem;
+	}
+
+	.row-title {
+		font-size: 0.9rem;
+		color: var(--muted);
+	}
+
+	.row-title strong {
+		color: var(--text);
+	}
+</style>

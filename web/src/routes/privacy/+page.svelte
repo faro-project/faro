@@ -77,7 +77,6 @@
 
 <style>
 	ul {
-		padding-left: 1.2rem;
 		margin: 0;
 	}
 
@@ -85,11 +84,19 @@
 		margin-top: 0.35rem;
 	}
 
+	/* A hairline of colour on the leading edge says which list is which. */
 	.see {
-		border-left: 4px solid var(--brand);
+		border-left: 2px solid var(--brand);
 	}
 
 	.cannot {
-		border-left: 4px solid var(--ok);
+		border-left: 2px solid var(--ok);
+	}
+
+	/* Retention periods are figures. */
+	.facts dd {
+		font-family: var(--mono);
+		font-size: 0.88rem;
+		font-variant-numeric: tabular-nums;
 	}
 </style>

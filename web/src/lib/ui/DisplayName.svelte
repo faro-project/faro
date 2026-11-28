@@ -4,6 +4,7 @@
 	import { api, ApiError, describeError } from '../api.ts';
 	import { session } from '../session.svelte.ts';
 	import type { Me } from '../types.ts';
+	import Icon from './Icon.svelte';
 
 	let {
 		label = 'Your name',
@@ -67,7 +68,7 @@
 		{/if}
 	</div>
 	{#if error}<span class="field-error" id="display-name-error">{error}</span>{/if}
-	{#if saved && !onsaved}<span class="hint" role="status">✓ Saved</span>{/if}
+	{#if saved && !onsaved}<span class="saved" role="status"><Icon name="check" /> Saved</span>{/if}
 </div>
 
 <style>
@@ -80,5 +81,9 @@
 	.name-row input {
 		flex: 1 1 14rem;
 		width: auto;
+	}
+
+	.saved {
+		margin-top: 0.35rem;
 	}
 </style>

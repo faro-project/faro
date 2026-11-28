@@ -394,10 +394,34 @@
 
 <style>
 	.approve {
-		padding-left: 1.2rem;
+		list-style: none;
+		padding: 0;
+		margin: 0 0 1rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--surface-2);
 	}
 
 	.approve li {
-		margin: 0.25rem 0;
+		padding: 0.45rem 0.75rem;
+		border-top: 1px solid var(--border);
+		font-size: 0.94rem;
+	}
+
+	.approve li:first-child {
+		border-top: none;
+	}
+
+	.approve strong {
+		font-family: var(--mono);
+		font-size: 0.86rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+	}
+
+	.approve .mono {
+		font-size: 0.76rem;
+		color: var(--muted);
+		margin-left: 0.25rem;
 	}
 </style>

@@ -4,6 +4,7 @@
 	// sent. There is deliberately no instance-wide group size limit.
 	import { api, ApiError, describeError } from '#lib/api.ts';
 	import type { GroupSettings, InstanceSettings, SettingsPatch } from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
 		groups,
@@ -144,13 +145,13 @@
 		<button class="primary" type="submit" disabled={busy || !limitValid}>
 			{busy ? 'Saving…' : 'Save group settings'}
 		</button>
-		{#if saved}<span class="saved" role="status">✓ Saved</span>{/if}
+		{#if saved}<span class="saved" role="status"><Icon name="check" /> Saved</span>{/if}
 	</div>
 </form>
 
 <style>
-	.saved {
-		color: var(--ok);
-		font-weight: 600;
+	/* A checkbox row gets the same room below it as a field. */
+	.check {
+		margin-bottom: 1.1rem;
 	}
 </style>

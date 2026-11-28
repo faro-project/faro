@@ -1,4 +1,5 @@
 <script lang="ts">
+	import '@fontsource-variable/fira-code';
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -13,6 +14,7 @@
 	import { keyring } from '#lib/keys/keyring.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import BrandMark from '#lib/ui/BrandMark.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import SupportContact from '#lib/ui/SupportContact.svelte';
 	import type { LayoutProps } from './$types';
 
@@ -149,7 +151,7 @@
 						onclick={() => keyring.lock()}
 						title="Forget your unlocked keys in this tab"
 					>
-						<span aria-hidden="true">🔓</span> Lock
+						<Icon name="lock" /> Lock
 					</button>
 				{/if}
 				<a class="who" href={resolve('/settings')} title="{session.user.email} · settings">
@@ -210,8 +212,8 @@
 	{:else if cancelled && session.user}
 		<div class="notice ok" role="status">
 			<p>
-				✓ Your account will not be deleted. Everyone who was told about the deletion is being told
-				it was cancelled.
+				Your account will not be deleted. Everyone who was told about the deletion is being told it
+				was cancelled.
 			</p>
 		</div>
 	{/if}
@@ -228,10 +230,12 @@
 
 <footer class="site-footer">
 	<div class="inner">
-		<span>{footerText}</span>
+		<span class="powered">{footerText}</span>
 		<SupportContact contact={branding.info?.support} />
-		<a href={resolve('/privacy')}>What this instance can see</a>
-		<a href={resolve('/licenses')}>Licences</a>
+		<span class="links">
+			<a href={resolve('/privacy')}>What this instance can see</a>
+			<a href={resolve('/licenses')}>Licences</a>
+		</span>
 	</div>
 </footer>
 
@@ -241,9 +245,12 @@
 		left: -999px;
 		top: 0.5rem;
 		background: var(--surface);
-		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--border-strong);
+		font-family: var(--mono);
+		font-size: 0.85rem;
+		padding: 0.45rem 0.75rem;
 		border-radius: var(--radius-sm);
-		z-index: 10;
+		z-index: 20;
 	}
 
 	.skip:focus {
@@ -251,17 +258,22 @@
 	}
 
 	.site-header {
-		background: var(--surface);
+		position: sticky;
+		top: 0;
+		z-index: 10;
+		background: color-mix(in srgb, var(--bg) 82%, transparent);
+		backdrop-filter: saturate(1.4) blur(10px);
+		-webkit-backdrop-filter: saturate(1.4) blur(10px);
 		border-bottom: 1px solid var(--border);
 	}
 
 	.bar,
 	.main-nav,
 	.site-footer .inner {
-		max-width: 64rem;
+		max-width: 66rem;
 		margin: 0 auto;
-		padding-left: 16px;
-		padding-right: 16px;
+		padding-left: 20px;
+		padding-right: 20px;
 	}
 
 	.bar {
@@ -269,8 +281,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 1rem;
-		padding-top: 0.85rem;
-		padding-bottom: 0.85rem;
+		height: 3.4rem;
 	}
 
 	.brand {
@@ -279,12 +290,14 @@
 		gap: 0.75rem;
 		text-decoration: none;
 		min-width: 0;
+		color: var(--text);
 	}
 
 	.instance {
+		font-family: var(--mono);
 		color: var(--muted);
-		font-size: 0.9rem;
-		font-weight: 600;
+		font-size: 0.8rem;
+		font-weight: 500;
 		padding-left: 0.75rem;
 		border-left: 1px solid var(--border-strong);
 		white-space: nowrap;
@@ -295,14 +308,24 @@
 	.account {
 		display: flex;
 		align-items: center;
-		gap: 0.9rem;
+		gap: 1rem;
 		min-width: 0;
-		font-size: 0.95rem;
+		font-family: var(--mono);
+		font-size: 0.82rem;
+	}
+
+	.account :global(button.link) {
+		color: var(--muted);
+		text-decoration: none;
+	}
+
+	.account :global(button.link:hover) {
+		color: var(--text);
 	}
 
 	.who {
 		color: var(--text);
-		font-weight: 600;
+		font-weight: 500;
 		text-decoration: none;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -316,18 +339,25 @@
 
 	.main-nav {
 		display: flex;
-		gap: 0.25rem;
+		gap: 0.15rem;
 		overflow-x: auto;
 		scrollbar-width: none;
+		margin-top: -0.35rem;
 	}
 
 	.main-nav a {
-		padding: 0.55rem 0.75rem 0.65rem;
+		position: relative;
+		font-family: var(--mono);
+		font-size: 0.82rem;
+		font-weight: 500;
+		padding: 0.45rem 0.65rem 0.7rem;
 		color: var(--muted);
 		text-decoration: none;
-		font-weight: 600;
-		border-bottom: 2px solid transparent;
 		white-space: nowrap;
+	}
+
+	.main-nav a:first-child {
+		margin-left: -0.65rem;
 	}
 
 	.main-nav a:hover {
@@ -336,15 +366,25 @@
 
 	.main-nav a[aria-current='page'] {
 		color: var(--text);
-		border-bottom-color: var(--brand);
+	}
+
+	.main-nav a[aria-current='page']::after {
+		content: '';
+		position: absolute;
+		left: 0.65rem;
+		right: 0.65rem;
+		bottom: -1px;
+		height: 2px;
+		border-radius: 2px 2px 0 0;
+		background: var(--brand);
 	}
 
 	main {
 		flex: 1;
 		width: 100%;
-		max-width: 64rem;
+		max-width: 66rem;
 		margin: 0 auto;
-		padding: 2rem 16px 4rem;
+		padding: 2.25rem 20px 4rem;
 	}
 
 	main.narrow {
@@ -354,16 +394,32 @@
 	.site-footer {
 		border-top: 1px solid var(--border);
 		color: var(--muted);
-		font-size: 0.88rem;
+		font-family: var(--mono);
+		font-size: 0.75rem;
 	}
 
 	.site-footer .inner {
 		display: flex;
 		flex-wrap: wrap;
+		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem 1.5rem;
-		padding-top: 1.25rem;
-		padding-bottom: 1.5rem;
+		padding-top: 1.1rem;
+		padding-bottom: 1.4rem;
+	}
+
+	.site-footer a {
+		color: var(--muted);
+	}
+
+	.site-footer a:hover {
+		color: var(--text);
+	}
+
+	.links {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 1.25rem;
 	}
 
 	@media (max-width: 560px) {
@@ -371,8 +427,26 @@
 			display: none;
 		}
 
-		.lock {
-			padding: 0.3rem 0.5rem;
+		.account {
+			gap: 0.75rem;
+		}
+
+		.bar,
+		.main-nav,
+		.site-footer .inner,
+		main {
+			padding-left: 16px;
+			padding-right: 16px;
+		}
+
+		main {
+			padding-top: 1.5rem;
+		}
+
+		/* The nav scrolls sideways here; fade its edge so that reads. */
+		.main-nav {
+			mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+			padding-right: 2.5rem;
 		}
 	}
 </style>

@@ -191,11 +191,3 @@
 		<button class="secondary" type="button" onclick={() => load(true)}>Show more people</button>
 	</div>
 {/if}
-
-<style>
-	.row-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
-</style>

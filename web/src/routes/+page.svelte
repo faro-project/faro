@@ -11,6 +11,7 @@
 	import Logo from '#lib/ui/Logo.svelte';
 	import ReachOut from '#lib/ui/ReachOut.svelte';
 	import ReachOuts from '#lib/ui/ReachOuts.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let reachOutVersion = $state(0);
 
@@ -152,7 +153,9 @@
 					<ol class="checklist">
 						{#each steps as s (s.title)}
 							<li class:done={s.done}>
-								<span class="mark" aria-hidden="true">{s.done ? '✓' : ''}</span>
+								<span class="mark" aria-hidden="true">
+									{#if s.done}<Icon name="check" />{/if}
+								</span>
 								<div>
 									<strong>{s.title}</strong>
 									{#if !s.done}<p class="muted small">{s.text}</p>{/if}
@@ -281,12 +284,16 @@
 	}
 
 	.tagline {
-		font-size: 1.2rem;
-		font-weight: 600;
+		font-family: var(--mono);
+		font-size: 1.05rem;
+		font-weight: 500;
+		letter-spacing: -0.02em;
+		margin-bottom: 0.75rem;
 	}
 
 	.lead {
 		color: var(--muted);
+		max-width: 32rem;
 	}
 
 	.actions.center {
@@ -306,7 +313,6 @@
 	}
 
 	.reach-head h2 {
-		font-size: 1.1rem;
 		margin: 0;
 	}
 
@@ -325,8 +331,22 @@
 		margin-top: 0;
 	}
 
+	.panel {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	.panel > :global(*) {
+		align-self: stretch;
+	}
+
+	.panel > :global(.button) {
+		align-self: flex-start;
+	}
+
 	.panel h2 {
-		font-size: 1.1rem;
+		margin-bottom: 0.75rem;
 	}
 
 	.checklist {
@@ -356,16 +376,22 @@
 	}
 
 	.mark {
-		width: 1.4rem;
-		height: 1.4rem;
-		border-radius: 50%;
+		width: 1.15rem;
+		height: 1.15rem;
+		border-radius: 4px;
 		border: 1.5px solid var(--border-strong);
 		display: grid;
 		place-items: center;
-		font-size: 0.8rem;
-		font-weight: 700;
+		font-size: 0.75rem;
 		flex: none;
-		margin-top: 0.1rem;
+		margin-top: 0.2rem;
+	}
+
+	.checklist strong {
+		font-family: var(--mono);
+		font-size: 0.9rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
 	}
 
 	.checklist li.done .mark {
@@ -377,6 +403,8 @@
 	.checklist li.done strong {
 		color: var(--muted);
 		font-weight: 500;
+		text-decoration: line-through;
+		text-decoration-color: color-mix(in srgb, var(--muted) 50%, transparent);
 	}
 
 	.stats {
@@ -388,15 +416,23 @@
 	}
 
 	.stats a {
-		color: var(--text);
+		color: var(--muted);
+		font-family: var(--mono);
+		font-size: 0.8rem;
 		text-decoration: none;
+	}
+
+	.stats a:hover {
+		color: var(--text);
 	}
 
 	.stats .n {
 		display: block;
-		font-size: 2rem;
-		font-weight: 700;
-		line-height: 1.1;
+		color: var(--text);
+		font-size: 1.85rem;
+		font-weight: 500;
+		letter-spacing: -0.04em;
+		line-height: 1.15;
 		font-variant-numeric: tabular-nums;
 	}
 
@@ -415,6 +451,8 @@
 	}
 
 	.people a {
-		font-weight: 600;
+		font-family: var(--mono);
+		font-size: 0.9rem;
+		font-weight: 500;
 	}
 </style>

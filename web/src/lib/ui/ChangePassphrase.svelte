@@ -91,7 +91,7 @@
 {#if recoveryCode}
 	<RecoveryCode code={recoveryCode} ondone={() => (recoveryCode = '')} doneLabel="Done" />
 {:else}
-	{#if done}<div class="notice ok" role="status"><p>✓ {done}</p></div>{/if}
+	{#if done}<div class="notice ok" role="status"><p>{done}</p></div>{/if}
 	{#if !mode}
 		<div class="actions">
 			<button class="secondary" type="button" onclick={() => start('passphrase')}>

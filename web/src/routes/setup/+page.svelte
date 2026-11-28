@@ -12,6 +12,7 @@
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import BrandMark from '#lib/ui/BrandMark.svelte';
+	import Icon from '#lib/ui/Icon.svelte';
 	import { api, describeError } from '#lib/api.ts';
 	import { branding } from '#lib/branding.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
@@ -108,7 +109,9 @@
 				class:complete={i < stepIndex}
 				aria-current={i === stepIndex ? 'step' : undefined}
 			>
-				<span class="dot" aria-hidden="true">{i < stepIndex ? '✓' : i + 1}</span>
+				<span class="num" aria-hidden="true">
+					{#if i < stepIndex}<Icon name="check" />{:else}0{i + 1}{/if}
+				</span>
 				<span>{s.label}</span>
 			</li>
 		{/each}
@@ -203,51 +206,49 @@
 	.brand-mark {
 		display: flex;
 		justify-content: center;
-		margin: 0.5rem 0 2rem;
+		margin: 0.25rem 0 2rem;
 	}
 
 	.progress {
 		list-style: none;
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem 1.25rem;
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 0.5rem;
 		padding: 0;
-		margin: 1rem 0 1.5rem;
+		margin: 1.25rem 0 1.5rem;
 		color: var(--muted);
-		font-size: 0.95rem;
+		font-family: var(--mono);
+		font-size: 0.78rem;
 	}
 
 	.progress li {
 		display: flex;
-		align-items: center;
-		gap: 0.45rem;
+		align-items: baseline;
+		gap: 0.5rem;
+		padding-top: 0.55rem;
+		border-top: 2px solid var(--border);
+		line-height: 1.35;
 	}
 
-	.dot {
-		display: inline-grid;
-		place-items: center;
-		width: 1.6rem;
-		height: 1.6rem;
-		border-radius: 50%;
-		border: 1.5px solid var(--border);
-		font-size: 0.8rem;
-		font-weight: 700;
+	.num {
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		flex: none;
 	}
 
 	.progress li.current {
 		color: var(--text);
-		font-weight: 600;
+		font-weight: 500;
+		border-top-color: var(--brand);
 	}
 
-	.progress li.current .dot {
-		border-color: var(--accent);
+	.progress li.current .num,
+	.progress li.complete .num {
 		color: var(--accent);
 	}
 
-	.progress li.complete .dot {
-		background: var(--accent);
-		border-color: var(--accent);
-		color: var(--accent-text);
+	.progress li.complete {
+		border-top-color: color-mix(in srgb, var(--brand) 45%, var(--border));
 	}
 
 	.summary {
@@ -260,6 +261,12 @@
 	}
 
 	h3 {
-		font-size: 1.05rem;
+		margin-top: 1.25rem;
+	}
+
+	@media (max-width: 480px) {
+		.progress {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

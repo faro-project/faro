@@ -73,17 +73,24 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.25rem;
-		margin: -0.5rem 0 1.5rem;
-		border-bottom: 1px solid var(--border);
+		margin: -0.75rem 0 1.75rem;
+		padding: 0.25rem;
+		width: fit-content;
+		max-width: 100%;
+		background: var(--surface-2);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
 	}
 
 	.sections a {
-		padding: 0.55rem 0.8rem;
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		font-weight: 500;
+		padding: 0.3rem 0.7rem;
 		color: var(--muted);
 		text-decoration: none;
-		font-weight: 600;
-		border-bottom: 2px solid transparent;
-		margin-bottom: -1px;
+		border-radius: var(--radius-sm);
+		border: 1px solid transparent;
 	}
 
 	.sections a:hover {
@@ -92,6 +99,8 @@
 
 	.sections a[aria-current='page'] {
 		color: var(--text);
-		border-bottom-color: var(--accent);
+		background: var(--surface);
+		border-color: var(--border);
+		box-shadow: var(--shadow);
 	}
 </style>

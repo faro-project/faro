@@ -155,13 +155,15 @@
 												<span class="chip pending">Needs a facilitator</span>
 											{/if}
 										</div>
-										<div class="row-meta">
+										<div class="row-meta figures">
 											{g.participant_count}
 											{g.participant_count === 1 ? 'person' : 'people'}
 										</div>
 										{#if g.meeting}
 											{@const at = nextStart(g.meeting)}
-											{#if at}<div class="row-meta">Next meeting: {nextMeetingText(at)}</div>{/if}
+											{#if at}<div class="row-meta figures">
+													Next meeting: {nextMeetingText(at)}
+												</div>{/if}
 										{/if}
 										{#if waitingIn(g.id) > 0}
 											<div class="row-meta">
@@ -193,7 +195,7 @@
 											<span class="chip off">Closed</span>
 										</div>
 										{#if g.delete_after_ms}
-											<div class="row-meta">Deleted on {date(g.delete_after_ms)}</div>
+											<div class="row-meta figures">Deleted on {date(g.delete_after_ms)}</div>
 										{/if}
 									</div>
 								</div>
@@ -247,7 +249,24 @@
 
 <style>
 	.attention {
-		border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+		border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+		border-left: 2px solid var(--accent);
 		margin-bottom: 2rem;
+	}
+
+	/* A group's name links to it; in a list of rows it reads as the row's title. */
+	.row-title a {
+		color: var(--text);
+		text-decoration: none;
+	}
+
+	.row-title a:hover {
+		color: var(--accent);
+	}
+
+	.row-meta.figures {
+		font-family: var(--mono);
+		font-size: 0.76rem;
+		font-variant-numeric: tabular-nums;
 	}
 </style>

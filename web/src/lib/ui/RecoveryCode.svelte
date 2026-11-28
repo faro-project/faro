@@ -1,6 +1,8 @@
 <script lang="ts">
 	// Show a freshly generated recovery code once, and make the person
 	// confirm they kept it before moving on.
+	import Icon from './Icon.svelte';
+
 	let {
 		code,
 		ondone,
@@ -30,7 +32,11 @@
 	<p class="code-display" aria-label="Recovery code">{code}</p>
 	<div class="actions">
 		<button class="secondary small" type="button" onclick={copy}>
-			{copied ? '✓ Copied' : 'Copy'}
+			{#if copied}
+				<Icon name="check" /> Copied
+			{:else}
+				<Icon name="copy" /> Copy
+			{/if}
 		</button>
 		<button class="secondary small" type="button" onclick={() => window.print()}>Print</button>
 	</div>

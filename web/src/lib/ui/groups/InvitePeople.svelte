@@ -259,7 +259,7 @@
 			{#each sent as s (s.invite_url)}
 				<li>
 					<strong>{s.invited}</strong>
-					<span class="muted small">until {date(s.expires_at_ms)}</span>
+					<span class="when">until {date(s.expires_at_ms)}</span>
 				</li>
 			{/each}
 		</ul>
@@ -301,27 +301,29 @@
 
 <style>
 	.pick {
-		border: none;
-		padding: 0;
-		margin: 0 0 1rem;
+		margin: 0 0 1.1rem;
 	}
 
-	.pick legend {
-		font-weight: 600;
-		margin-bottom: 0.4rem;
-		padding: 0;
+	.pick .check,
+	.results .check {
+		margin: 0;
+		padding: 0.2rem 0;
 	}
 
 	.results {
 		list-style: none;
-		padding: 0;
+		padding: 0.25rem 0.75rem;
 		margin: 0.5rem 0 0;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--surface);
 	}
 
 	.sent {
 		list-style: none;
 		padding: 0;
-		margin: 0.5rem 0 0;
+		margin: 1rem 0 0;
+		border-top: 1px solid var(--border);
 	}
 
 	.sent li {
@@ -329,5 +331,21 @@
 		flex-wrap: wrap;
 		gap: 0.25rem 0.75rem;
 		align-items: baseline;
+		padding: 0.45rem 0;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.sent strong {
+		font-family: var(--mono);
+		font-size: 0.86rem;
+		font-weight: 500;
+		overflow-wrap: anywhere;
+	}
+
+	.when {
+		font-family: var(--mono);
+		font-size: 0.75rem;
+		color: var(--muted);
+		font-variant-numeric: tabular-nums;
 	}
 </style>

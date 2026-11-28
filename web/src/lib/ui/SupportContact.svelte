@@ -21,4 +21,10 @@
 	.support {
 		overflow-wrap: anywhere;
 	}
+
+	/* An address or a link: shown in the code face, as typed. */
+	.support a {
+		font-family: var(--mono);
+		font-size: var(--mono-size);
+	}
 </style>

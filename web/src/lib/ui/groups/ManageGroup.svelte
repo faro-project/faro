@@ -8,6 +8,7 @@
 	import { GROUP_LIMITS } from '#lib/groups.ts';
 	import { groupError } from '#lib/groups-api.ts';
 	import type { GroupPatch, GroupView, RosterEntry, WhoCanInvite } from '#lib/types.ts';
+	import Icon from '#lib/ui/Icon.svelte';
 	import InvitePeople from './InvitePeople.svelte';
 	import JoinRequests from './JoinRequests.svelte';
 	import ListingSettings from './ListingSettings.svelte';
@@ -193,7 +194,7 @@
 		<button class="primary" type="submit" disabled={detailsBusy}>
 			{detailsBusy ? 'Saving…' : 'Save details'}
 		</button>
-		{#if detailsSaved}<span class="saved" role="status">✓ Saved</span>{/if}
+		{#if detailsSaved}<span class="saved" role="status"><Icon name="check" /> Saved</span>{/if}
 	</div>
 </form>
 
@@ -299,12 +300,11 @@
 </dialog>
 
 <style>
-	.saved {
-		color: var(--ok);
-		font-weight: 600;
+	.danger-zone {
+		border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
 	}
 
-	.danger-zone {
-		border-color: color-mix(in srgb, var(--danger, #b3261e) 40%, var(--border));
+	.danger-zone h2 {
+		color: var(--danger);
 	}
 </style>

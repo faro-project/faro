@@ -44,7 +44,7 @@
 		{#if group.next_meeting_at_ms}
 			<p class="next"><strong>Next: {nextMeetingText(group.next_meeting_at_ms)}</strong></p>
 		{/if}
-		<p class="muted">
+		<p class="muted schedule">
 			{describeSchedule(group.meeting)}
 			{#if group.meeting.place}· {group.meeting.place}{/if}
 		</p>
@@ -93,13 +93,33 @@
 	}
 
 	.next {
-		font-size: 1.15rem;
-		margin: 0 0 0.25rem;
+		margin: 0 0 0.2rem;
+	}
+
+	.next strong {
+		font-family: var(--mono);
+		font-size: 1rem;
+		font-weight: 500;
+		letter-spacing: -0.02em;
+	}
+
+	.schedule {
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		margin: 0;
 	}
 
 	.reminders {
-		border: none;
-		padding: 0;
 		margin: 1rem 0 0;
+		padding-top: 0.9rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.reminders .check {
+		margin-bottom: 0.5rem;
+	}
+
+	.reminders p:last-child {
+		margin-bottom: 0;
 	}
 </style>

@@ -60,16 +60,12 @@
 </section>
 
 <style>
+	/* A long text in the code face, in its own scrolling box. */
 	.notices {
 		max-height: 32rem;
 		overflow: auto;
-		white-space: pre-wrap;
-		overflow-wrap: anywhere;
-		font-size: 0.8rem;
+		font-size: 0.75rem;
+		line-height: 1.6;
 		margin: 0.75rem 0 0;
-		padding: 0.75rem;
-		border: 1px solid var(--border);
-		border-radius: var(--radius-sm);
-		background: var(--bg);
 	}
 </style>

@@ -120,11 +120,3 @@
 		{/if}
 	{/if}
 </section>
-
-<style>
-	.row-actions {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
-</style>

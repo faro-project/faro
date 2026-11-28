@@ -188,13 +188,13 @@
 				<blockquote class="description">{info.group_description}</blockquote>
 			{/if}
 			{#if info.facilitators.length}
-				<p>
+				<p class="fact">
 					<strong>Facilitated by</strong>
 					{joinNames(info.facilitators)}
 				</p>
 			{/if}
 			{#if info.meeting}
-				<p>
+				<p class="fact">
 					<strong>Meets</strong>
 					{describeSchedule(info.meeting)}{#if info.meeting.place}, {info.meeting.place}{/if}
 				</p>
@@ -265,9 +265,29 @@
 <style>
 	.description {
 		margin: 1rem 0;
-		padding: 0.5rem 1rem;
-		border-left: 3px solid var(--border-strong);
+		padding: 0.3rem 0 0.3rem 0.9rem;
+		border-left: 2px solid var(--border-strong);
 		color: var(--muted);
+		font-size: 0.95rem;
 		white-space: pre-wrap;
+	}
+
+	/* "Facilitated by", "Meets": a small label before the value. */
+	.fact {
+		margin-bottom: 0.4rem;
+	}
+
+	.fact strong {
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--muted);
+		margin-right: 0.4rem;
+	}
+
+	.fact + :not(.fact) {
+		margin-top: 1rem;
 	}
 </style>

@@ -14,6 +14,7 @@
 		RATING_LABEL
 	} from './describe.ts';
 	import { thumbnailUrl } from './feed.ts';
+	import Icon from '../ui/Icon.svelte';
 
 	let { report }: { report: DailyReport } = $props();
 
@@ -62,7 +63,7 @@
 </script>
 
 <div class="report">
-	<p class="muted small">
+	<p class="muted meta">
 		{report.device_name} · {dateTime(report.period_start_ms)} to {dateTime(report.period_end_ms)}
 	</p>
 
@@ -85,7 +86,7 @@
 					></span>
 				{/each}
 			</div>
-			<div class="axis small muted" aria-hidden="true">
+			<div class="axis muted" aria-hidden="true">
 				<span>{time(report.period_start_ms)}</span><span>{time(report.period_end_ms)}</span>
 			</div>
 			<ul class="legend small">
@@ -107,15 +108,18 @@
 			<ul class="small plain">
 				{#each ios.protection as p, i (i)}
 					<li>
-						{time(p.start_ms)} to {time(p.end_ms)}: Screen Time {protectionWord(p.screen_time)}, web
-						filter {protectionWord(p.filter)}
+						<span class="t">{time(p.start_ms)} to {time(p.end_ms)}</span>: Screen Time {protectionWord(
+							p.screen_time
+						)}, web filter {protectionWord(p.filter)}
 					</li>
 				{/each}
 			</ul>
 		{/if}
 		{#if ios.loosenings?.length}
 			<ul class="small plain">
-				{#each ios.loosenings as l, i (i)}<li>{time(l.ts_ms)}: {l.text}</li>{/each}
+				{#each ios.loosenings as l, i (i)}<li>
+						<span class="t">{time(l.ts_ms)}</span>: {l.text}
+					</li>{/each}
 			</ul>
 		{/if}
 
@@ -125,7 +129,7 @@
 		{:else}
 			{#each ios.blocked as day, i (i)}
 				<p class="small">
-					<strong>{date(day.day_start_ms)}</strong>: {categoryCounts(day.by_category) ||
+					<strong class="t">{date(day.day_start_ms)}</strong>: {categoryCounts(day.by_category) ||
 						'nothing blocked'}
 				</p>
 				{#each hostsByCategory(day.hosts) as g (g.category)}
@@ -149,7 +153,8 @@
 			<ul class="small plain">
 				{#each ios.shields as s, i (i)}
 					<li>
-						{date(s.day_start_ms)}: {s.shown} time{s.shown === 1 ? '' : 's'}, closed {s.closed}.
+						<span class="t">{date(s.day_start_ms)}</span>: {s.shown} time{s.shown === 1 ? '' : 's'},
+						closed {s.closed}.
 					</li>
 				{/each}
 			</ul>
@@ -188,7 +193,7 @@
 							<span class="chip {f.rating === 'high' ? 'urgent' : 'normal'}">
 								{RATING_LABEL[f.rating]}
 							</span>
-							<span class="small">{time(f.ts_ms)}</span>
+							<span class="t">{time(f.ts_ms)}</span>
 						</div>
 						<p class="small">
 							{momentText(f)}
@@ -207,7 +212,7 @@
 					<h4>Most used apps</h4>
 					<ol class="small">
 						{#each report.top_apps as a, i (i)}<li>
-								{a.name} <span class="muted">({a.count})</span>
+								{a.name} <span class="count">({a.count})</span>
 							</li>{/each}
 					</ol>
 				</div>
@@ -217,7 +222,7 @@
 					<h4>Most visited sites</h4>
 					<ol class="small">
 						{#each report.top_domains as d, i (i)}<li>
-								{d.name} <span class="muted">({d.count})</span>
+								{d.name} <span class="count">({d.count})</span>
 							</li>{/each}
 					</ol>
 				</div>
@@ -227,16 +232,18 @@
 
 	<h4>Health</h4>
 	{#if !report.health.tamper.length && !report.health.context.length && !report.health.agent_restarts && !report.health.capture_failures && !report.health.unmonitored_secs}
-		<p class="small"><span class="chip good">✓ No problems</span></p>
+		<p class="small"><span class="chip good"><Icon name="check" /> No problems</span></p>
 	{:else}
 		<ul class="health small">
 			{#each report.health.tamper as t, i (i)}
 				<li class="bad">
-					⚠ {time(t.ts_ms)}: {describeTamper(t.signal)}{accountNote(t)}
+					<Icon name="alert" /> <span class="t">{time(t.ts_ms)}</span>: {describeTamper(
+						t.signal
+					)}{accountNote(t)}
 				</li>
 			{/each}
 			{#each report.health.context as t, i (i)}
-				<li>{time(t.ts_ms)}: {describeTamper(t.signal)}</li>
+				<li><span class="t">{time(t.ts_ms)}</span>: {describeTamper(t.signal)}</li>
 			{/each}
 			{#if report.health.agent_restarts}<li>
 					Faro restarted {report.health.agent_restarts === 1
@@ -254,9 +261,38 @@
 </div>
 
 <style>
+	.report {
+		margin-top: 0.5rem;
+	}
+
+	.meta {
+		font-family: var(--mono);
+		font-size: 0.76rem;
+		margin: 0;
+	}
+
+	/* Section labels inside a report: small, letter-spaced, like .eyebrow. */
 	.report h4 {
-		font-size: 0.92rem;
-		margin: 1.1rem 0 0.4rem;
+		font-size: 0.68rem;
+		font-weight: 500;
+		text-transform: uppercase;
+		letter-spacing: 0.09em;
+		color: var(--muted);
+		margin: 1.1rem 0 0.45rem;
+	}
+
+	/* Times, dates and counts in the code face. */
+	.t,
+	.count {
+		font-family: var(--mono);
+		font-size: 0.92em;
+		font-weight: 500;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.count {
+		color: var(--muted);
+		font-weight: 400;
 	}
 
 	.plain {
@@ -271,9 +307,10 @@
 
 	.timeline {
 		position: relative;
-		height: 14px;
+		height: 10px;
 		background: var(--surface-2);
-		border-radius: 4px;
+		border: 1px solid var(--border);
+		border-radius: 3px;
 		overflow: hidden;
 	}
 
@@ -308,7 +345,10 @@
 	.axis {
 		display: flex;
 		justify-content: space-between;
-		margin-top: 0.2rem;
+		margin-top: 0.25rem;
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		font-variant-numeric: tabular-nums;
 	}
 
 	.legend {
@@ -327,9 +367,9 @@
 	}
 
 	.swatch {
-		width: 0.75rem;
-		height: 0.75rem;
-		border-radius: 3px;
+		width: 0.65rem;
+		height: 0.65rem;
+		border-radius: 2px;
 		display: inline-block;
 	}
 
@@ -337,19 +377,26 @@
 		list-style: none;
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.4rem 1.2rem;
+		gap: 0.4rem 1.5rem;
 		padding: 0;
 		margin: 0;
+		font-family: var(--mono);
+		font-size: 0.76rem;
+		color: var(--muted);
 	}
 
 	.counts .n {
-		font-weight: 700;
+		color: var(--text);
+		font-size: 1.15rem;
+		font-weight: 500;
+		letter-spacing: -0.03em;
 		font-variant-numeric: tabular-nums;
+		margin-right: 0.2rem;
 	}
 
-	.counts .flag {
+	.counts .flag,
+	.counts .flag .n {
 		color: var(--danger);
-		font-weight: 600;
 	}
 
 	.flagged {
@@ -370,6 +417,11 @@
 		border-top: none;
 	}
 
+	.flagged .t {
+		color: var(--muted);
+		font-size: 0.78rem;
+	}
+
 	.flagged p {
 		margin: 0.25rem 0 0;
 	}
@@ -377,7 +429,7 @@
 	.thumb {
 		width: 112px;
 		height: auto;
-		border-radius: 6px;
+		border-radius: var(--radius-sm);
 		border: 1px solid var(--border);
 		flex: none;
 	}

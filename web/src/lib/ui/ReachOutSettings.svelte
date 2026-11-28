@@ -81,7 +81,7 @@
 				<div class="row-main">
 					<div class="row-title"><strong>{r.display_name}</strong></div>
 					<div class="controls">
-						<label>
+						<label class="check">
 							<input
 								type="checkbox"
 								checked={r.quiet_hours_bypass}
@@ -117,7 +117,16 @@
 	.controls {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.5rem 1rem;
+		gap: 0.5rem 1.25rem;
 		align-items: center;
+	}
+
+	.controls label {
+		margin: 0;
+	}
+
+	.controls .check {
+		font-size: 0.9rem;
+		color: var(--muted);
 	}
 </style>
