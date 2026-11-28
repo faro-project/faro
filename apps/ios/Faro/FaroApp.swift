@@ -13,6 +13,7 @@ struct FaroApp: App {
         // Must happen before the app finishes launching.
         DomainUpdates.register(group: updateGroup)
         BackgroundUpload.register(group: updateGroup)
+        Theme.applyAppearance()
     }
 
     var body: some Scene {
@@ -54,6 +55,8 @@ struct RootView: View {
             Group {
                 if !model.loaded {
                     ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Theme.bg)
                 } else if let leave = model.leave {
                     LeaveView(flow: leave)
                 } else if model.flow.step == .done {
@@ -64,5 +67,6 @@ struct RootView: View {
             }
             .navigationDestination(isPresented: $model.showingNotice) { NoticeView() }
         }
+        .tint(Theme.accent)
     }
 }

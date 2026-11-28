@@ -23,6 +23,7 @@ struct LeaveView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(20)
         }
+        .background(Theme.bg)
         .navigationTitle("Leave Faro")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
@@ -30,34 +31,36 @@ struct LeaveView: View {
 
     private var confirm: some View {
         Group {
-            Text("Leave Faro?").font(.largeTitle.bold())
+            Title("Leave Faro?")
             Text("You can leave at any time. Your allies are told first: they get a message that Faro was removed from this phone.")
             Text("Then Faro turns everything off. Apps can be deleted again, its Screen Time settings are cleared, and its VPN is removed. After that you can delete the Faro app.")
             Text("If this phone is offline, nothing changes until it can reach your instance.")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.muted)
             Button(role: .destructive) {
                 Task { await model.confirmLeave() }
             } label: {
-                Text("Tell my allies and leave").frame(maxWidth: .infinity)
+                Text("Tell my allies and leave")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.faroDanger)
+            .padding(.top, 8)
             Button("Stay") { model.cancelLeave() }
+                .buttonStyle(.faroLink)
                 .frame(maxWidth: .infinity)
         }
     }
 
     private func working(_ title: String, _ text: String) -> some View {
         Group {
-            Text(title).font(.largeTitle.bold())
+            Title(title)
             Text(text)
-            ProgressView().frame(maxWidth: .infinity)
+            ProgressView().frame(maxWidth: .infinity).padding(.top, 8)
         }
     }
 
     private func notDelivered(_ message: String, written: Bool) -> some View {
         Group {
-            Text("Your allies haven't been told yet").font(.largeTitle.bold())
-            Text(message).foregroundStyle(.red)
+            Title("Your allies haven't been told yet")
+            Notice(kind: .error, text: message)
             if written {
                 Text("Faro is still on, and has stopped reporting anything else. It leaves as soon as your instance has the goodbye.")
             } else {
@@ -66,11 +69,13 @@ struct LeaveView: View {
             Button {
                 Task { await model.retryLeave() }
             } label: {
-                Text("Try again").frame(maxWidth: .infinity)
+                Text("Try again")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.faroPrimary)
+            .padding(.top, 8)
             if flow.canCancel {
                 Button("Stay") { model.cancelLeave() }
+                    .buttonStyle(.faroLink)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -78,10 +83,25 @@ struct LeaveView: View {
 
     private func done(_ leftovers: [String]) -> some View {
         Group {
-            Text("You've left Faro").font(.largeTitle.bold())
+            Title("You've left Faro")
             Text("Your allies were told, and Faro's protection is off on this phone.")
-            ForEach(leftovers, id: \.self) { Text($0).foregroundStyle(.orange) }
+            ForEach(leftovers, id: \.self) { Notice(kind: .warn, text: $0) }
             Text("You can delete the Faro app now: touch and hold its icon, then choose Remove App.")
         }
+    }
+}
+
+/// A page title in the code face.
+private struct Title: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.mono(28, .semibold, relativeTo: .largeTitle))
+            .tracking(-0.8)
+            .foregroundStyle(Theme.text)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityAddTraits(.isHeader)
     }
 }
