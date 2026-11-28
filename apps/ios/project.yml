@@ -102,6 +102,12 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
+        # Fira Code, the interface face (Faro/Theme.swift; licence in
+        # Faro/Fonts/FiraCode-OFL.txt, shown on the Licences screen).
+        UIAppFonts:
+          - FiraCode-Regular.ttf
+          - FiraCode-Medium.ttf
+          - FiraCode-SemiBold.ttf
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
